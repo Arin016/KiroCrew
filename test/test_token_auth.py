@@ -1762,9 +1762,9 @@ async def test_index_serves_guidance_when_bundle_missing(tmp_path, monkeypatch) 
     """
     import kiro_claw.dashboard.handlers.core as core
 
-    # Point both the React build dir and the dashboard.html path at
+    # Point both the React build index and the dashboard.html path at
     # non-existent locations so index() falls into the FileNotFoundError branch.
-    monkeypatch.setattr(core, "_DIST_DIR", tmp_path / "no-dist")
+    monkeypatch.setattr(core, "_DIST_INDEX", tmp_path / "no-dist" / "index.html")
     monkeypatch.setattr(core, "_HTML_PATH", tmp_path / "no-dashboard.html")
 
     anon = _make_request(path="/", remote="10.0.0.1")

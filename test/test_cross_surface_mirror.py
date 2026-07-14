@@ -21,8 +21,8 @@ from kiro_claw.dashboard.chat_runner import (
     _deliver_cross_surface_user_message,
 )
 from kiro_claw.messaging.link import ChannelLink
+from kiro_claw.platform import redact_via_context
 from kiro_claw.security import (
-    redact_and_truncate,
     redact_credentials,
     redact_exfiltration_urls,
 )
@@ -254,7 +254,11 @@ class TestDeliverCrossSurfaceUserMessage:
         raw = "tok AKIAIOSFODNN7EXAMPLE " + "x" * 800
         await _deliver_cross_surface_user_message(state, "k", raw)
         sent = tp.send_message.await_args.args[1]
-        assert sent == "💬 " + redact_and_truncate(raw, max_chars=500)
+        # _prepare_mirror_msg truncates to 500 THEN redacts (redact_via_context),
+        # matching the Slack echo. Distinct from security.redact_and_truncate,
+        # which redacts-then-truncates (Talos e27617c6) — the mirror echo keeps
+        # the truncate-first order so the 500-char budget is measured pre-redaction.
+        assert sent == "💬 " + redact_via_context(raw[:500])
 
     @pytest.mark.asyncio
     async def test_send_failure_is_swallowed(self, tmp_path):

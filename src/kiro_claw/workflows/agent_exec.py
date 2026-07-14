@@ -28,12 +28,20 @@ as ``agent_fn``.
 from __future__ import annotations
 
 import itertools
+import logging
 from typing import Any, Callable, Optional
 
 from kiro_claw.llm_helpers import ToolApprovalPolicy, stream_and_collect
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+
+logger = logging.getLogger(__name__)
 
 # Signature the runner expects: async (prompt, opts) -> result.
 AgentFn = Callable[[str, dict], Any]
+
+# Per-step tool-call ceiling. Generous enough for any realistic agent step,
+# but prevents infinite tool loops from prompt injection (Issue #4).
+_MAX_TURNS_PER_STEP = 200
 
 
 def build_agent_fn(
@@ -72,7 +80,12 @@ def build_agent_fn(
                 provider,
                 prompt,
                 approval_policy=ToolApprovalPolicy.AUTO_APPROVE,
+                max_turns=_MAX_TURNS_PER_STEP,
             )
+            # Issue #2: Apply output redaction to prevent credential leakage
+            # in workflow results stored in history or injected into parent chat.
+            text, _ = redact_credentials(text)
+            text, _ = redact_exfiltration_urls(text)
             return text
         finally:
             # Ephemeral per-call sessions are torn down; named sessions persist so

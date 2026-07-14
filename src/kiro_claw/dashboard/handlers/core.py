@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
+_DIST_INDEX = _DIST_DIR / "index.html"
 _HTML_PATH = _STATIC_DIR / "dashboard.html"
 _SSE_INTERVAL_SECS = 5
 
@@ -82,8 +83,13 @@ def _masked_config_dict(cfg: KiroClawConfig) -> dict:
 # first-run). MUST stay static and secret-free -- index() serves it
 # UNAUTHENTICATED on the cold-start path (see the SECURITY CONTRACT on index());
 # no server/user/session state may be injected.
+#
+# Marker phrase embedded in the fallback body. Exported so out-of-process
+# probes (e.g. `kiroclaw token`'s stale-dashboard warning) can detect that
+# the gateway is serving the fallback without duplicating the wording.
+DASHBOARD_HTML_NOT_FOUND_MARKER = "Dashboard HTML not found"
 _DASHBOARD_HTML_NOT_FOUND = (
-    "<h1>Dashboard HTML not found</h1>"
+    f"<h1>{DASHBOARD_HTML_NOT_FOUND_MARKER}</h1>"
     "<p>The gateway is running but could not read the dashboard's"
     " static files.</p>"
     "<p>This most commonly happens after an update leaves a stale install:"
@@ -122,8 +128,7 @@ async def index(request: web.Request) -> web.Response:
     would leak it across the auth boundary. Keep dynamic data behind gated
     ``/api/*`` routes. Pinned by test_served_shell_is_auth_independent.
     """
-    react_index = _DIST_DIR / "index.html"
-    path = react_index if react_index.is_file() else _HTML_PATH
+    path = _DIST_INDEX if _DIST_INDEX.is_file() else _HTML_PATH
     try:
         html = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -940,6 +945,7 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     "session.pool_ttl_secs": {"type": "int", "min": 0, "max": 7200},
     "auto_update": {"type": "bool"},
     "dashboard.mcp_probe_timeout_secs": {"type": "int", "min": 5, "max": 120},
+    "dashboard.recent_tint_count": {"type": "int", "min": 0, "max": 10},
     # Instances (multi-instance management). Toggling enabled needs a gateway
     # restart to take effect (the SSH manager + CSP relaxation init at startup),
     # so the Instances settings panel surfaces a "restart required" hint.

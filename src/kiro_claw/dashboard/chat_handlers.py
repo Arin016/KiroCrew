@@ -1335,6 +1335,95 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "model": model_name})
 
 
+async def api_chat_slots_model(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/model — set the model for ALL chat slots (bulk).
+
+    Body: {"model": "<name>" | "", "skip_running": bool (default True)}.
+    "" selects the provider/auto default. Applies the model to every slot
+    whose model differs, resetting each affected slot's session — a model
+    switch always resets, same as ``api_chat_slot_model``. Slots mid-turn are
+    skipped when ``skip_running`` is true to avoid the model-switch-mid-stream
+    duplicate-content bug (Mesh-1080); pass ``skip_running: false`` to force
+    every slot. Returns the slot keys that were switched / skipped / unchanged /
+    failed; a per-slot reset failure is isolated (that slot is reported in
+    ``failed`` and keeps its old model) rather than aborting the whole switch.
+    """
+    state: DashboardState = request.app["state"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    model_name = _normalize_model(body.get("model", ""))
+    skip_running = body.get("skip_running", True)
+    if not isinstance(skip_running, bool):
+        return web.json_response({"error": "skip_running must be a boolean"}, status=400)
+    # Deny-by-default (security-controls): the auth middleware always sets
+    # request["app"] on every authenticated path (empty string for dashboard
+    # users, app name for app tokens). An ABSENT key means the middleware did
+    # not run -- refuse rather than fall through to all-slot access.
+    if "app" not in request:
+        return web.json_response({"error": "unauthorized"}, status=403)
+    request_app = request["app"]
+    # Dashboard users are identified by the middleware's EXPLICIT "" assignment.
+    # Compare with == "" (not truthiness) so an unexpected falsy value (None, 0)
+    # fails closed into the per-slot ownership check instead of bypassing it.
+    is_dashboard_user = request_app == ""
+
+    switched: list[str] = []
+    skipped_running: list[str] = []
+    unchanged: list[str] = []
+    failed: list[str] = []
+    # Snapshot the slot keys up front: sessions.reset awaits, so iterating the
+    # live dict directly would risk a concurrent-modification surprise.
+    for name, slot in list(state._slots.items()):
+        # App Kit ownership isolation: app callers can only switch their own
+        # slots (mirrors api_chat_slots_cleanup). Only an explicit dashboard
+        # user bypasses the ownership check.
+        if not is_dashboard_user and slot._app != request_app:
+            continue
+        if slot.model == model_name:
+            unchanged.append(name)
+            continue
+        if skip_running and slot.running:
+            skipped_running.append(name)
+            continue
+        # Reset before flipping the model and isolate per-slot failures: if the
+        # reset raises, leave slot.model untouched so the slot is never left on
+        # the new model with stale history (the Mesh-1080 inconsistency), and a
+        # single failure doesn't abort the whole bulk switch.
+        try:
+            await state.sessions.reset(_history_key_for(name))
+        except Exception:
+            logger.error("Bulk model switch: session reset failed for %s", name, exc_info=True)
+            failed.append(name)
+            continue
+        slot.model = model_name
+        switched.append(name)
+
+    if switched:
+        logger.info(
+            "Bulk model switch to %r: %d switched, %d skipped-running, %d unchanged, %d failed",
+            model_name or "auto",
+            len(switched),
+            len(skipped_running),
+            len(unchanged),
+            len(failed),
+        )
+        # Guard the push on real progress so partial switches still broadcast
+        # even when a later slot's reset failed.
+        state.push_slots_update()
+    return web.json_response(
+        {
+            "ok": True,
+            "model": model_name,
+            "switched": switched,
+            "skipped_running": skipped_running,
+            "unchanged": unchanged,
+            "failed": failed,
+        }
+    )
+
+
 async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
     """POST /api/chat/slots/{slot}/reasoning-effort — set reasoning effort.
 

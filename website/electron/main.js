@@ -550,12 +550,18 @@ function createWindow() {
     tabbingIdentifier: "kiroclaw",
     titleBarStyle: "hidden",
     backgroundColor: "#0f1117",
-    // Come up already fullscreen when we left fullscreen, so the window fills
-    // its Space and updateViewBounds() (fired on show/enter-full-screen) sizes
-    // the WebContentsView with offset 0 — no black gap, no tiny window. The
-    // width/height above become the normal frame to return to on exit.
-    fullscreen: state.fullScreen,
   };
+  // Only include `fullscreen` when we actually want fullscreen. On macOS with
+  // `tabbingIdentifier` set, passing `fullscreen: false` explicitly to
+  // BaseWindow shifts NSWindow.tabbingMode into NSWindowTabbingModePreferred,
+  // which turns the green traffic-light button into an add-tab button (+) and
+  // blocks native fullscreen (Cmd+Ctrl+F and View → Enter Full Screen do
+  // nothing). Setting the flag only when true preserves the fullscreen-restore
+  // intent — the window still comes up already fullscreen when we quit in
+  // fullscreen, so updateViewBounds() (fired on show/enter-full-screen) sizes
+  // the WebContentsView with offset 0 (no black gap, no tiny window). The
+  // width/height above become the normal frame to return to on exit.
+  if (state.fullScreen) opts.fullscreen = true;
   if (typeof state.x === "number" && typeof state.y === "number") {
     opts.x = state.x;
     opts.y = state.y;

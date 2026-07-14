@@ -2,6 +2,7 @@ import { memo, useState, useMemo, useEffect, useRef } from 'react'
 import { Copy, Check, Columns2, Rows2 } from 'lucide-react'
 import { copyToClipboard } from '../utils/clipboard'
 import { fileReadUrl } from '../utils/fileReadUrl'
+import { isSafePath } from '../utils/safePath'
 import { parseDiffLines, DIFF_BG, DIFF_FG, type DiffLine } from '../utils/diffUtils'
 
 const SIGN: Record<string, string> = { add: '+', del: '-', hunk: '', meta: '', context: ' ' }
@@ -100,14 +101,6 @@ function extractFilePath(lines: DiffLine[]): string | null {
     }
   }
   return plusFallback ?? minusGit ?? minusPlain ?? gitFallback
-}
-
-/** Reject paths with traversals or sensitive credential directories/files. */
-function isSafePath(p: string): boolean {
-  const segments = p.toLowerCase().split('/')
-  if (segments.some(seg => seg === '..')) return false
-  const sensitive = ['.aws', '.ssh', '.env', '.git', '.midway', '.gnupg', '.docker', '.kube', '.npmrc', '.pypirc', '.netrc', '.git-credentials']
-  return !segments.some(seg => sensitive.some(s => seg === s || seg.startsWith(s + '.')))
 }
 
 export default memo(function DiffBlock({ code, complete, onFileOpen, pathHint, streaming }: { code: string; complete: boolean; onFileOpen?: (path: string) => void; pathHint?: string; streaming?: boolean }) {

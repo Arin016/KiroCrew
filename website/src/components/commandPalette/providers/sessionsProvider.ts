@@ -1,12 +1,13 @@
 import { createElement } from 'react'
 import { MessageSquare } from 'lucide-react'
 import { useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../../../api/client'
 import { useAppDispatch } from '../../../store'
 import { resumeFromHistory } from '../../../store/chatSlice'
-import { fuzzyMatch, makeScoreThenNameComparator } from '../../../utils/fuzzyMatch'
+import { fuzzyMatch, makeScoreThenNameComparator, substringIndices } from '../../../utils/fuzzyMatch'
 import type { Result, ResourceProvider } from '../types'
 
 /**
@@ -47,6 +48,10 @@ export interface SessionSearchItem {
   created?: string
   modified?: number
   agent?: string
+  /** Match-centered content snippet, present when the hit was in the body. */
+  snippet?: string
+  /** Folder the session is filed under, when any (maps to a chip in the row). */
+  folder_id?: string
   memory_mode?: 'persistent' | 'incognito' | 'temporary'
   clean_mode?: boolean
 }
@@ -71,6 +76,9 @@ export interface SessionRef {
 export interface SessionsProviderDeps {
   /** Fetch search hits for a query (React-Query-cached in the hook). */
   fetchSessions: (query: string) => Promise<SessionSearchResponse>
+  /** Fetch chat folders for folder-chip labels. Optional (rows just omit the
+   * chip when absent) so pure tests don't have to stub it. */
+  fetchFolders?: () => Promise<{ id: string; name: string }[]>
   /** Open / switch to a session (Enter). */
   openSession: (ref: SessionRef) => void
   /** Open a session in a split pane / Session Grid (⌘Enter). Optional. */
@@ -86,7 +94,7 @@ function sessionIcon() {
  * Pure (no hooks) so it can be exercised directly in tests.
  */
 export function createSessionsProvider(deps: SessionsProviderDeps): ResourceProvider {
-  const { fetchSessions, openSession, openInSplit } = deps
+  const { fetchSessions, fetchFolders, openSession, openInSplit } = deps
 
   return {
     id: PROVIDER_ID,
@@ -94,7 +102,14 @@ export function createSessionsProvider(deps: SessionsProviderDeps): ResourceProv
     icon: sessionIcon(),
     async search(query: string): Promise<Result[]> {
       const q = query.trim()
-      const data = await fetchSessions(q)
+      // Folders resolve in parallel with the search; a folders failure only
+      // costs the chips, never the results.
+      const [data, folders] = await Promise.all([
+        fetchSessions(q),
+        fetchFolders ? fetchFolders().catch(() => []) : Promise.resolve([]),
+      ])
+      const folderName = (fid?: string): string | undefined =>
+        fid ? folders.find((f) => f.id === fid)?.name : undefined
       const sessions = data?.sessions ?? []
 
       const results: Result[] = sessions.map((s) => {
@@ -102,11 +117,17 @@ export function createSessionsProvider(deps: SessionsProviderDeps): ResourceProv
         // Highlight + client-side rank bias; never used to drop backend hits.
         const match = fuzzyMatch(q, title)
         const ref: SessionRef = { key: s.key, title }
+        // Body match: show the snippet (why it surfaced) with the query
+        // highlighted; else fall back to the agent name.
+        const snippet = s.snippet?.trim()
+        const subIdx = snippet ? substringIndices(q, snippet) : undefined
         return {
           id: `${PROVIDER_ID}:${s.key}`,
           providerId: PROVIDER_ID,
           title,
-          subtitle: s.agent || undefined,
+          subtitle: snippet || s.agent || undefined,
+          subtitleIndices: subIdx && subIdx.length ? subIdx : undefined,
+          folder: folderName(s.folder_id),
           icon: sessionIcon(),
           score: match ? match.score : 0,
           indices: match ? match.indices : [],
@@ -151,6 +172,7 @@ export function useSessionsProvider(opts?: {
   openInSplit?: (ref: SessionRef) => void
 }): ResourceProvider {
   const dispatch = useAppDispatch()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const openInSplit = opts?.openInSplit
 
@@ -163,11 +185,23 @@ export function useSessionsProvider(opts?: {
             queryFn: () => api.sessionsSearch(q),
             staleTime: SESSIONS_STALE_MS,
           }),
+        // Shared ['chat-folders'] cache (sidebar + recents use the same key),
+        // so the chip lookup is usually a cache hit.
+        fetchFolders: () =>
+          queryClient.fetchQuery<{ id: string; name: string }[]>({
+            queryKey: ['chat-folders'],
+            queryFn: () => api.chatFolders(),
+            staleTime: SESSIONS_STALE_MS,
+          }),
         openSession: (ref) => {
-          dispatch(resumeFromHistory(ref))
+          void dispatch(resumeFromHistory(ref))
+          // The palette can be opened from ANY page (artifacts, settings, …);
+          // resumeFromHistory only activates the slot in the store, so land
+          // the user on the chat surface where that slot renders.
+          navigate('/chat')
         },
         openInSplit,
       }),
-    [dispatch, queryClient, openInSplit],
+    [dispatch, navigate, queryClient, openInSplit],
   )
 }

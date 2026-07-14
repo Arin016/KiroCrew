@@ -12,6 +12,7 @@ import { CommentPopover, CommentList, formatCommentsMessage, type InlineComment 
 import SelectionToolbar, { type SelectionAction } from './SelectionToolbar'
 import MarkdownOutlineRail from './MarkdownToc'
 import { useFileWatch } from '../hooks/useFileWatch'
+import { findBestOccurrence } from '../hooks/useMarkdownCommentHighlights'
 import { detectFileType } from './FileRenderers'
 import { ContentRenderer, MD_EXTS, extOf, langFor, wrapCode } from './ContentRenderer'
 import { api } from '../api/client'
@@ -550,7 +551,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     prevFilePathRef.current = filePath
     setComments(draftsRef.current[filePath] ?? [])
   }
-  const [popover, setPopover] = useState<{ x: number; y: number; anchor: string; line?: number; column?: number } | null>(null)
+  const [popover, setPopover] = useState<{ x: number; y: number; anchor: string; line?: number; column?: number; startOffset?: number } | null>(null)
   const highlightMarksRef = useRef<HTMLElement[]>([])
 
   const clearHighlightMarks = useCallback(() => {
@@ -852,7 +853,16 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
           const coords = isMarkdown
             ? (resolveSourcePos(range, root, displayContent) ?? findCoords(displayContent, raw) ?? findCoords(displayContent, anchor))
             : (findCoords(content, raw) ?? findCoords(content, anchor))
-          return { anchor, rect, range: range.cloneRange(), line: coords?.line, column: coords?.column }
+          // Compute the rendered-text character offset so repeated occurrences
+          // of the same anchor text can be disambiguated at highlight time.
+          let startOffset: number | undefined
+          try {
+            const preRange = document.createRange()
+            preRange.setStart(root, 0)
+            preRange.setEnd(range.startContainer, range.startOffset)
+            startOffset = preRange.toString().length + (raw.length - raw.trimStart().length)
+          } catch { /* leave undefined */ }
+          return { anchor, rect, range: range.cloneRange(), line: coords?.line, column: coords?.column, startOffset }
         }
       }
     }
@@ -869,7 +879,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     if (info) {
       if (info.range) applyHighlightMarks(info.range)
       const popRect = info.rect.width > 0 ? info.rect : rect
-      setPopover({ x: popRect.left, y: popRect.bottom, anchor: info.anchor, line: info.line, column: info.column })
+      setPopover({ x: popRect.left, y: popRect.bottom, anchor: info.anchor, line: info.line, column: info.column, startOffset: info.startOffset })
     } else {
       // Monaco path — no DOM selection available, use rect directly
       setPopover({ x: rect.left, y: rect.top, anchor: text, line: undefined, column: undefined })
@@ -891,7 +901,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
 
   const addComment = useCallback((text: string) => {
     if (!popover) return
-    const newComment = { id: Math.random().toString(36).substring(2), anchor: popover.anchor, text, line: popover.line, column: popover.column }
+    const newComment: InlineComment = { id: Math.random().toString(36).substring(2), anchor: popover.anchor, text, line: popover.line, column: popover.column, startOffset: popover.startOffset }
     setComments(prev => [...prev, newComment])
     setPopover(null)
     clearHighlightMarks()
@@ -1009,10 +1019,10 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
       const hits: { range: Range; comment: InlineComment }[] = []
       for (const comment of comments) {
         if (!comment.anchor) continue
-        const idx = fullText.indexOf(comment.anchor)
-        if (idx < 0) continue
-        const s = locate(idx)
-        const e = locate(idx + comment.anchor.length)
+        const bestIdx = findBestOccurrence(fullText, comment.anchor, comment.startOffset)
+        if (bestIdx < 0) continue
+        const s = locate(bestIdx)
+        const e = locate(bestIdx + comment.anchor.length)
         if (!s || !e) continue
         try {
           const r = document.createRange()

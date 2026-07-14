@@ -43,6 +43,7 @@ from urllib.parse import urlencode, urlparse
 from kiro_claw.aim_agents import list_agents
 from kiro_claw.artifacts import _infer_kind
 from kiro_claw.config.loader import KiroClawConfig, config_dir, outbox_dir
+from kiro_claw.context_management import COMPLETION_KEEP_DEFAULT_CHARS, summarize_result
 from kiro_claw.dashboard.origin import parse_dashboard_url
 from kiro_claw.history import ConversationLog
 from kiro_claw.hooks import FileTooLargeError, safe_read_file_bytes
@@ -59,6 +60,7 @@ from kiro_claw.security import (
 )
 from kiro_claw.sel import sel
 from kiro_claw.skills import SkillsLoader
+from kiro_claw.subagent_persistence import _agent_dir
 from kiro_claw.validation import (
     _SLACK_TS_RE,
     ARTIFACT_DELETE_SCHEMA,
@@ -2330,6 +2332,20 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             else:
                 completed += 1
                 result_text = _redact_sa(sa_st.get("result", ""))
+                # Apply the same summarize_result treatment as spawn_run:
+                # when results exceed completion_keep threshold, return a
+                # summary + disk path instead of the full transcript. This
+                # prevents massive tool_results from filling the model's
+                # context window and causing attention degradation.
+                if len(result_text) > COMPLETION_KEEP_DEFAULT_CHARS:
+                    try:
+                        result_path = str(_agent_dir(aid) / "result.txt")
+                    except (ValueError, OSError):
+                        result_path = ""
+                    if result_path:
+                        result_text = summarize_result(
+                            result_text, result_path
+                        )
                 sa_results.append(
                     json.dumps({
                         "agent": label, "status": "completed", "text": result_text,

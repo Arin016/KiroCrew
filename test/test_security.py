@@ -1267,6 +1267,23 @@ class TestRedactAndTruncate:
     def test_handles_none(self) -> None:
         assert redact_and_truncate(None) == ""
 
+    def test_credential_straddling_boundary_not_leaked(self) -> None:
+        """A secret spanning the max_chars cut must not leak a partial (Talos e27617c6).
+
+        Redaction runs over the full text before truncation. Truncating first
+        would slice AKIA...EXAMPLE in half, leaving an unredactable prefix that
+        no longer matches the credential regex and would leak on the wire.
+        """
+        prefix = "prefix "  # 7 chars
+        secret = "AKIAIOSFODNN7EXAMPLE"  # 20-char AWS access key ID
+        text = prefix + secret + " trailing"
+        # Boundary lands 8 chars into the 20-char key.
+        max_chars = len(prefix) + 8
+        result = redact_and_truncate(text, max_chars=max_chars)
+        assert len(result) <= max_chars
+        # No fragment of the access key ID (which starts with "AKIA") survives.
+        assert "AKIA" not in result
+
 
 class TestScanHistory:
     """Tests for scan_history()."""

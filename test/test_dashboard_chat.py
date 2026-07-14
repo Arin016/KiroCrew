@@ -1058,20 +1058,28 @@ class TestResumeDedupe:
 class TestHistoryKeyPrefix:
     @pytest.mark.asyncio
     async def test_no_double_dashboard_prefix(self, tmp_path, monkeypatch):
-        """Slot key starting with 'dashboard:' should not get double-prefixed."""
+        """Slot key starting with 'dashboard:' should not get double-prefixed.
+
+        get_or_create_slot canonicalizes slot names (strips the transport
+        prefix, folds to the filename charset), so resuming a full session key
+        registers the slot under the bare canonical key — the API response's
+        ``key`` field is authoritative for follow-up calls.
+        """
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
         log = state.conversation_log
         log.append("dashboard:chat-1", "user", "hello")
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            await client.post(
+            resp = await client.post(
                 "/api/chat/slots/dashboard:chat-1/resume",
                 json={"key": "dashboard:chat-1"},
             )
-            state._slots["dashboard:chat-1"].append("user", "new msg")
-            state._slots["dashboard:chat-1"].drain()
-            await client.delete("/api/chat/slots/dashboard:chat-1")
+            slot_key = (await resp.json())["key"]
+            assert slot_key == "chat-1"  # canonical: prefix stripped, no fold needed
+            state._slots[slot_key].append("user", "new msg")
+            state._slots[slot_key].drain()
+            await client.delete(f"/api/chat/slots/{slot_key}")
 
         # Should be saved under dashboard:chat-1, not dashboard:dashboard:chat-1
         msgs = log.read_messages("dashboard:chat-1")
@@ -9650,3 +9658,246 @@ class TestAgentDetailProjectPathFirst:
             assert data.get("description") == "PROJECT-dev", (
                 f"project_path query param must take priority; got: {data.get('description')}"
             )
+
+
+# ── Bulk model switch (api_chat_slots_model) ──
+
+
+class TestBulkModelSwitch:
+    """POST /api/chat/slots/model — switch every live slot to one model."""
+
+    @staticmethod
+    def _app(state: DashboardState) -> web.Application:
+        from kiro_claw.dashboard.chat import api_chat_slots_model
+
+        # Mirror production: token_auth middleware sets request["app"] on
+        # every authenticated path ("" = dashboard user). Tests that model an
+        # app-token caller insert their own middleware at index 0, which runs
+        # first; this default only fills in the marker when absent.
+        @web.middleware
+        async def dashboard_auth_marker(request, handler):
+            if "app" not in request:
+                request["app"] = ""
+            return await handler(request)
+
+        app = web.Application(middlewares=[dashboard_auth_marker])
+        app["state"] = state
+        app.router.add_post("/api/chat/slots/model", api_chat_slots_model)
+        return app
+
+    @staticmethod
+    def _mark_running(slot: _ChatSlot) -> None:
+        """Give the slot a live task so the ``running`` property is True."""
+        task = MagicMock()
+        task.done.return_value = False
+        slot.task = task
+
+    @pytest.mark.asyncio
+    async def test_switches_all_differing_slots_and_resets_each(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+        state.get_or_create_slot("b", model="claude-sonnet-4.6")
+        state.push_slots_update = MagicMock()  # mock after creation: get_or_create_slot pushes
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert sorted(data["switched"]) == ["a", "b"]
+        assert data["skipped_running"] == []
+        assert state._slots["a"].model == "claude-opus-4.8"
+        assert state._slots["b"].model == "claude-opus-4.8"
+        assert state.sessions.reset.await_count == 2
+        state.push_slots_update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_running_slot_by_default(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.push_slots_update = MagicMock()
+        idle = state.get_or_create_slot("idle", model="claude-opus-4.6")
+        busy = state.get_or_create_slot("busy", model="claude-opus-4.6")
+        self._mark_running(busy)
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert data["switched"] == ["idle"]
+        assert data["skipped_running"] == ["busy"]
+        assert idle.model == "claude-opus-4.8"
+        assert busy.model == "claude-opus-4.6"  # untouched mid-turn (Mesh-1080)
+        assert state.sessions.reset.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_skip_running_false_forces_running_slot(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.push_slots_update = MagicMock()
+        busy = state.get_or_create_slot("busy", model="claude-opus-4.6")
+        self._mark_running(busy)
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/model",
+                json={"model": "claude-opus-4.8", "skip_running": False},
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert data["switched"] == ["busy"]
+        assert data["skipped_running"] == []
+        assert busy.model == "claude-opus-4.8"
+        assert state.sessions.reset.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_already_on_target_is_unchanged_not_reset(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.get_or_create_slot("a", model="claude-opus-4.8")
+        state.push_slots_update = MagicMock()  # mock after creation: get_or_create_slot pushes
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert data["unchanged"] == ["a"]
+        assert data["switched"] == []
+        state.sessions.reset.assert_not_awaited()
+        state.push_slots_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reset_failure_is_isolated_and_reported(self, tmp_path):
+        state = _make_state(tmp_path)
+        # First reset (slot "a") succeeds, second ("b") raises. The failure must
+        # be isolated: "a" still switches, "b" lands in `failed` with its old
+        # model intact, and partial progress is still broadcast.
+        state.sessions.reset = AsyncMock(side_effect=[None, RuntimeError("boom")])
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+        state.get_or_create_slot("b", model="claude-opus-4.6")
+        state.push_slots_update = MagicMock()  # mock after creation: get_or_create_slot pushes
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert data["switched"] == ["a"]
+        assert data["failed"] == ["b"]
+        assert state._slots["a"].model == "claude-opus-4.8"
+        assert state._slots["b"].model == "claude-opus-4.6"  # untouched on reset failure
+        state.push_slots_update.assert_called_once()  # partial progress still broadcast
+
+    @pytest.mark.asyncio
+    async def test_app_caller_only_switches_own_slots(self, tmp_path):
+        """App Kit ownership isolation: an app token can only bulk-switch its
+        own slots -- other apps' and the dashboard user's slots are untouched
+        (mirrors api_chat_slots_cleanup)."""
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.get_or_create_slot("mine", model="claude-opus-4.6", app="app-A")
+        state.get_or_create_slot("theirs", model="claude-opus-4.6", app="app-B")
+        state.get_or_create_slot("dashboard", model="claude-opus-4.6")
+        state.push_slots_update = MagicMock()  # mock after creation: get_or_create_slot pushes
+
+        @web.middleware
+        async def inject_app(request, handler):
+            request["app"] = "app-A"
+            return await handler(request)
+
+        app_obj = self._app(state)
+        app_obj.middlewares.insert(0, inject_app)
+
+        async with TestClient(TestServer(app_obj)) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert data["switched"] == ["mine"]
+        assert state._slots["mine"].model == "claude-opus-4.8"
+        # Non-owned slots: not switched, not reset, not even reported.
+        assert state._slots["theirs"].model == "claude-opus-4.6"
+        assert state._slots["dashboard"].model == "claude-opus-4.6"
+        assert "theirs" not in data["unchanged"] + data["skipped_running"] + data["failed"]
+        assert state.sessions.reset.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_auth_marker_is_denied(self, tmp_path):
+        """Deny-by-default: if the auth middleware never ran (request["app"]
+        absent), the endpoint refuses instead of granting all-slot access."""
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+
+        from kiro_claw.dashboard.chat import api_chat_slots_model
+
+        bare_app = web.Application()  # deliberately NO auth-marker middleware
+        bare_app["state"] = state
+        bare_app.router.add_post("/api/chat/slots/model", api_chat_slots_model)
+
+        async with TestClient(TestServer(bare_app)) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+
+        assert resp.status == 403
+        assert state._slots["a"].model == "claude-opus-4.6"
+        state.sessions.reset.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_falsy_non_string_marker_fails_closed(self, tmp_path):
+        """A buggy middleware setting request["app"] to a falsy non-string
+        (None) must NOT be treated as a dashboard user -- the ownership check
+        applies and no slot matches, so nothing is switched."""
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+
+        from kiro_claw.dashboard.chat import api_chat_slots_model
+
+        @web.middleware
+        async def buggy_auth_marker(request, handler):
+            request["app"] = None  # falsy, but NOT the explicit "" dashboard marker
+            return await handler(request)
+
+        app_obj = web.Application(middlewares=[buggy_auth_marker])
+        app_obj["state"] = state
+        app_obj.router.add_post("/api/chat/slots/model", api_chat_slots_model)
+
+        async with TestClient(TestServer(app_obj)) as client:
+            resp = await client.post(
+                "/api/chat/slots/model", json={"model": "claude-opus-4.8"}
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        assert data["switched"] == []
+        assert state._slots["a"].model == "claude-opus-4.6"
+        state.sessions.reset.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_boolean_skip_running_is_rejected(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post(
+                "/api/chat/slots/model",
+                json={"model": "claude-opus-4.8", "skip_running": "yes"},
+            )
+
+        assert resp.status == 400

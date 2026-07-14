@@ -273,3 +273,78 @@ describe('ToolCallLine inline expansion', () => {
     expect(btn.className).toContain('cursor-default')
   })
 })
+
+describe('ToolCallLine file-open icon', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200 })) as any
+  })
+
+  function fileMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
+    return { role: 'tool', content: '🔧 Read /etc/hosts', cls: '', meta: { tool_call_id: 'tc_file', purpose: 'Read a file' }, ...overrides }
+  }
+
+  function fileStore(input: string) {
+    return createTestStore({
+      chat: {
+        messages: [fileMsg()],
+        toolLog: [{ type: 'tool', text: 'Read /etc/hosts', purpose: 'Read a file', tool_call_id: 'tc_file', input, output: 'ok', ts: 1 }],
+        slotRunning: false,
+      } as any,
+    })
+  }
+
+  it('renders the open-in-side-panel icon for a file-read tool when onFileOpen is provided and file exists', async () => {
+    const store = fileStore('{"path":"/etc/hosts"}')
+    renderWithProviders(<ToolCallLine message={fileMsg()} running={false} onFileOpen={vi.fn()} />, { store })
+    await waitFor(() => expect(screen.getByTitle('Open /etc/hosts in side panel')).toBeTruthy())
+  })
+
+  it('shows the basename chip and strips the redundant raw path from the label', async () => {
+    const store = fileStore('{"path":"/etc/hosts"}')
+    renderWithProviders(<ToolCallLine message={fileMsg()} running={false} onFileOpen={vi.fn()} />, { store })
+    // The chip (inside the open button) carries the basename.
+    const openBtn = await screen.findByTitle('Open /etc/hosts in side panel')
+    expect(openBtn.textContent).toContain('hosts')
+    // The pill label is stripped down to the action word — the full path is no
+    // longer duplicated inline (it lives in the chip tooltip + details).
+    const pill = screen.getByRole('button', { name: /Show details/i })
+    expect(pill.textContent).toContain('Read')
+    expect(pill.textContent).not.toContain('/etc/hosts')
+  })
+
+  it('clicking the icon calls onFileOpen with the path and does NOT toggle expand', async () => {
+    const onFileOpen = vi.fn()
+    const store = fileStore('{"path":"/etc/hosts"}')
+    renderWithProviders(<ToolCallLine message={fileMsg()} running={false} onFileOpen={onFileOpen} />, { store })
+    const pill = screen.getByRole('button', { name: /Show details/i })
+    expect(pill.getAttribute('aria-expanded')).toBe('false')
+    const icon = await screen.findByTitle('Open /etc/hosts in side panel')
+    fireEvent.click(icon)
+    expect(onFileOpen).toHaveBeenCalledWith('/etc/hosts')
+    // Icon is a sibling hit target — it must not expand the pill.
+    expect(pill.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('does not render the icon for a non-file tool (bash)', async () => {
+    const store = fileStore('{"command":"echo hi"}')
+    renderWithProviders(<ToolCallLine message={fileMsg()} running={false} onFileOpen={vi.fn()} />, { store })
+    // Give the (short-circuited) probe effect a chance to run.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Show details/i })).toBeTruthy())
+    expect(screen.queryByTitle(/in side panel$/)).toBeNull()
+  })
+
+  it('does not render the icon when onFileOpen is absent', async () => {
+    const store = fileStore('{"path":"/etc/hosts"}')
+    renderWithProviders(<ToolCallLine message={fileMsg()} running={false} />, { store })
+    await waitFor(() => expect(screen.getByRole('button', { name: /Show details/i })).toBeTruthy())
+    expect(screen.queryByTitle(/in side panel$/)).toBeNull()
+  })
+
+  it('does not render the icon when the file does not exist (HEAD 404)', async () => {
+    globalThis.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 404 })) as any
+    const store = fileStore('{"path":"/etc/hosts"}')
+    renderWithProviders(<ToolCallLine message={fileMsg()} running={false} onFileOpen={vi.fn()} />, { store })
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
+    expect(screen.queryByTitle(/in side panel$/)).toBeNull()
+  })
+})

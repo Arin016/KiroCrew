@@ -363,6 +363,7 @@ class TestConfigLoaderProperties:
         # Compare dashboard
         assert loaded.dashboard.url == config.dashboard.url
         assert loaded.dashboard.widget_density == config.dashboard.widget_density
+        assert loaded.dashboard.recent_tint_count == config.dashboard.recent_tint_count
 
         # Compare secretary
         assert loaded.secretary.enabled == config.secretary.enabled
@@ -1357,6 +1358,16 @@ class TestEdgeCases:
         }
         cfg = _load_from_dict(raw_config)
         assert cfg.memory.embedding_runtime == "docker"
+
+    def test_recent_tint_count_loaded_from_config(self) -> None:
+        """recent_tint_count from config.json is used instead of default 0."""
+        cfg = _load_from_dict({"dashboard": {"recent_tint_count": 8}})
+        assert cfg.dashboard.recent_tint_count == 8
+
+    def test_recent_tint_count_defaults_to_0(self) -> None:
+        """recent_tint_count defaults to 0 (off) when not in config."""
+        cfg = _load_from_dict({})
+        assert cfg.dashboard.recent_tint_count == 0
 
     def test_embedding_runtime_defaults_to_native(self) -> None:
         """embedding_runtime defaults to 'native' when not in config."""

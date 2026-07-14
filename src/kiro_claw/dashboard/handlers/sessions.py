@@ -16,6 +16,11 @@ if TYPE_CHECKING:
 
 from aiohttp import web
 
+# circular import: handlers/__init__.py re-exports this module's handlers, so
+# a `from ... import` of individual names would fail mid-cycle. `import ... as`
+# binds via sys.modules and defers attribute access to call time, which also
+# keeps tests' monkeypatching of handlers.redact_* effective (late binding).
+import kiro_claw.dashboard.handlers as _h
 from kiro_claw.acp.client import _resolve_kiro_bin
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.history import SEARCH_MIN_CHARS, _archive_dir
@@ -135,8 +140,43 @@ def _parse_usage(raw: str) -> dict[str, object]:
         if "billed at" in line and "overage_rate" not in result:
             m = re.search(r"\$([\d.]+)\s+per", line)
             if m:
-                result["overage_rate"] = m.group(1)
+                # Coerce to float so both sources emit one type for the
+                # canonical shape and consumers never branch on source.
+                rate = _safe_float(m.group(1))
+                if rate is not None:
+                    result["overage_rate"] = rate
     return result
+
+
+def _normalize_text_usage(parsed: dict[str, object]) -> dict[str, object]:
+    """Convert the text-scrape parse result to the canonical usage shape.
+
+    Emits the canonical usage shape the dashboard consumes so it never branches
+    on source:
+      credits_used = TOTAL used, credits_overage = overage above plan,
+      credits_covered = in-plan portion, credits_plan = limit, percentage.
+
+    In the raw text, "Credits used:" is the OVERAGE field (0 for org accounts,
+    and absent entirely on kiro-cli 2.11.x), while "(X of Y covered in plan)" is
+    the in-plan covered/limit. Total = covered + overage. Post-regression the
+    text carries no overage, so this honestly reports covered==total.
+    """
+    covered = parsed.get("credits_covered")
+    plan = parsed.get("credits_plan")
+    if not isinstance(covered, (int, float)) or not isinstance(plan, (int, float)):
+        # No usable credit plan — preserve whatever parsed (e.g. just {"raw": ...}).
+        return dict(parsed)
+    raw_used = parsed.get("credits_used")
+    overage = float(raw_used) if isinstance(raw_used, (int, float)) else 0.0
+    total = float(covered) + overage
+    out: dict[str, object] = dict(parsed)
+    out["credits_used"] = total
+    out["credits_overage"] = overage
+    out["credits_covered"] = float(covered)
+    out["credits_plan"] = float(plan)
+    out["percentage"] = round(total / plan * 100, 1) if plan else 0.0
+    out["source"] = "text"
+    return out
 
 
 def _redact_strings(value: object) -> object:
@@ -187,12 +227,18 @@ async def _fetch_usage_bg() -> None:
         raw = (out or err or b"").decode(errors="replace")
         parsed = _parse_usage(raw)
         if parsed.get("credits_plan") is not None:
-            # kiro-cli output is untrusted: redact credentials / exfil URLs from
-            # every string leaf before the dict is cached and served.
+            # Converge on the canonical shape (credits_used = total, explicit
+            # credits_overage) so the dashboard never branches on source, then
+            # redact credentials / exfil URLs from every string leaf before the
+            # dict is cached and served (kiro-cli output is untrusted).
+            parsed = _normalize_text_usage(parsed)
             parsed = {k: _redact_strings(v) for k, v in parsed.items()}
             _usage_cache = parsed
             _usage_cache_ts = time.time()
-            logger.info("Kiro usage refreshed: %s credits used", parsed.get("credits_used", "?"))
+            logger.info(
+                "Kiro usage refreshed (text): %s credits used",
+                parsed.get("credits_used", "?"),
+            )
         else:
             # No parseable credit plan (a Kiro build whose /usage output this
             # parser doesn't recognize): hide the pill instead of spinning.
@@ -247,6 +293,9 @@ async def api_sessions(request: web.Request) -> web.Response:
     Query params:
       - ``limit``: max sessions to return (default 50, max 200)
       - ``offset``: skip first N sessions (default 0)
+      - ``preview``: when truthy, attach a redacted last-message ``preview``
+        to each returned session (bounded tail read; page-scoped so the
+        default list stays a cheap metadata scan)
 
     Returns ``{sessions, total, has_more}`` for pagination.
     """
@@ -261,9 +310,23 @@ async def api_sessions(request: web.Request) -> web.Response:
         offset = int(request.query.get("offset", "0"))
     except (TypeError, ValueError):
         offset = 0
+    want_preview = (request.query.get("preview") or "").lower() in ("1", "true", "yes")
     all_sessions = state.conversation_log.list_sessions()
     total = len(all_sessions)
     page = all_sessions[offset : offset + limit]
+    if want_preview:
+        log = state.conversation_log
+
+        def _attach_previews(sessions: list[dict]) -> None:
+            for s in sessions:
+                preview = log.last_message_preview(s.get("key", ""))
+                if preview:
+                    preview, _ = _h.redact_exfiltration_urls(preview)
+                    preview, _ = _h.redact_credentials(preview)
+                    s["preview"] = preview
+
+        # Tail reads are sync file IO — keep them off the event loop.
+        await asyncio.get_running_loop().run_in_executor(None, _attach_previews, page)
     return web.json_response(
         {
             "sessions": page,
@@ -286,7 +349,7 @@ async def api_sessions_search(request: web.Request) -> web.Response:
     state: DashboardState = request.app["state"]
     if not state.conversation_log:
         return web.json_response({"sessions": []})
-    q = sanitize_string(request.query.get("q", "")).strip()
+    q = sanitize_string(request.query.get("q", "")).strip()[:256]
     if len(q) < SEARCH_MIN_CHARS:
         return web.json_response({"sessions": []})
     try:
@@ -299,11 +362,14 @@ async def api_sessions_search(request: web.Request) -> web.Response:
     for s in sessions:
         title = s.get("title")
         if title:
-            import kiro_claw.dashboard.handlers as _h  # noqa: F811
-
             title, _ = _h.redact_exfiltration_urls(title)
             title, _ = _h.redact_credentials(title)
             s["title"] = title
+        snip = s.get("snippet")
+        if snip:
+            snip, _ = _h.redact_exfiltration_urls(snip)
+            snip, _ = _h.redact_credentials(snip)
+            s["snippet"] = snip
     return web.json_response({"sessions": sessions})
 
 

@@ -2453,7 +2453,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
       if (!m.content.startsWith('🔧')) return null
       // Animate tools in the trailing group (after last assistant/streaming text)
       const isInTrailingGroup = slotState === 'tool_running' && i > lastTextIdx
-      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} />
+      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} onFileOpen={handleFileOpen} />
     }
     if (m.role === 'file') {
       try {

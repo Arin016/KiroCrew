@@ -1124,6 +1124,14 @@ class DashboardConfig:
             "Empty = unset (frontend falls back to localStorage or 'kiro').",
         ),
     )
+    recent_tint_count: int = field(
+        default=0,
+        metadata=_meta(
+            "Recent Session Tint Count",
+            "Number of most-recently-active sessions to highlight in the sidebar with a "
+            "graded accent stripe (0-10; 0 = off).",
+        ),
+    )
     onboarded: bool = field(
         default=False,
         metadata=_meta(
@@ -2888,6 +2896,7 @@ class KiroClawConfig:
                 default_project=dashboard_data.get("default_project", ""),
                 theme_mode=dashboard_data.get("theme_mode", ""),
                 theme_color=dashboard_data.get("theme_color", ""),
+                recent_tint_count=_safe_int(dashboard_data.get("recent_tint_count", 0), 0),
                 onboarded=bool(dashboard_data.get("onboarded", False)),
             ),
             tunnel=TunnelConfig(

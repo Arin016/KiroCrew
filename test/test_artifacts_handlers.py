@@ -105,6 +105,79 @@ class TestList:
         assert "content" not in body["artifacts"][0]
 
     @pytest.mark.asyncio
+    async def test_no_snippet_by_default(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(name="a", content="<p>hello world</p>")
+        resp = await api_artifacts_list(_request())
+        assert "snippet" not in _json_body(resp)["artifacts"][0]
+
+    @pytest.mark.asyncio
+    async def test_snippet_when_requested(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(name="a", content="<p>hello   <b>world</b></p>")
+        resp = await api_artifacts_list(_request(query={"snippet": "1"}))
+        art = _json_body(resp)["artifacts"][0]
+        # Tags stripped, whitespace collapsed.
+        assert art["snippet"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_snippet_truncated_and_bounded(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(name="a", content="word " * 200)
+        resp = await api_artifacts_list(_request(query={"snippet": "1"}))
+        snippet = _json_body(resp)["artifacts"][0]["snippet"]
+        assert 0 < len(snippet) <= 160
+
+    @pytest.mark.asyncio
+    async def test_snippet_strips_markdown(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(
+            name="Doc",
+            kind="markdown",
+            content="# Title\n\n**Bold** and _italic_ and `code` and [link](http://x)\n- item",
+        )
+        resp = await api_artifacts_list(_request(query={"snippet": "1"}))
+        snip = _json_body(resp)["artifacts"][0]["snippet"]
+        assert not any(ch in snip for ch in "#*_`")
+        for word in ("Title", "Bold", "italic", "code", "link", "item"):
+            assert word in snip
+
+    @pytest.mark.asyncio
+    async def test_content_match_finds_by_content(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(name="Alpha", content="the quick brown fox")
+        isolated_store.create(name="Beta", content="nothing here")
+        resp = await api_artifacts_list(_request(query={"q": "brown", "content": "1"}))
+        assert [a["slug"] for a in _json_body(resp)["artifacts"]] == ["alpha"]
+
+    @pytest.mark.asyncio
+    async def test_content_snippet_is_match_centered(self, isolated_store, patch_restricted) -> None:
+        content = "line one\nline two\nHERE is the MATCH keyword\nline four\nline five\nline six"
+        isolated_store.create(name="Doc", content=content, kind="markdown")
+        resp = await api_artifacts_list(_request(query={"q": "match", "content": "1", "snippet": "1"}))
+        snip = _json_body(resp)["artifacts"][0]["snippet"]
+        lines = snip.split("\n")
+        assert len(lines) <= 5
+        assert "match" in snip.lower()  # matched term present (frontend highlights it)
+        assert "line two" in snip and "line four" in snip  # a line before and after
+
+    @pytest.mark.asyncio
+    async def test_content_match_finds_by_tag(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(name="Alpha", content="x", tags=["ops"])
+        isolated_store.create(name="Beta", content="x")
+        resp = await api_artifacts_list(_request(query={"q": "ops", "content": "1"}))
+        assert [a["slug"] for a in _json_body(resp)["artifacts"]] == ["alpha"]
+
+    @pytest.mark.asyncio
+    async def test_content_match_finds_by_description(self, isolated_store, patch_restricted) -> None:
+        isolated_store.create(name="Alpha", content="x", description="review dashboard")
+        isolated_store.create(name="Beta", content="x")
+        resp = await api_artifacts_list(_request(query={"q": "dashboard", "content": "1"}))
+        assert [a["slug"] for a in _json_body(resp)["artifacts"]] == ["alpha"]
+
+    @pytest.mark.asyncio
+    async def test_q_without_content_flag_is_name_only(self, isolated_store, patch_restricted) -> None:
+        # A content hit must NOT match unless ?content=1 is set.
+        isolated_store.create(name="Alpha", content="the quick brown fox")
+        resp = await api_artifacts_list(_request(query={"q": "brown"}))
+        assert _json_body(resp)["artifacts"] == []
+
+    @pytest.mark.asyncio
     async def test_filter_by_tag(self, isolated_store, patch_restricted) -> None:
         isolated_store.create(name="a", content="x")
         isolated_store.create(name="b", content="x", tags=["op"])

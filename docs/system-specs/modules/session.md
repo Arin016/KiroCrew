@@ -197,6 +197,22 @@ the filename stem (`dashboard_chat-1-xxx`), producing session key
 back to the canonical form (`dashboard:chat-1-xxx`) when the direct lookup
 fails.
 
+**Slot-key filename normalization:** `get_or_create_slot()` folds every
+caller-provided slot name to the `_safe_key()` filename charset
+(`[A-Za-z0-9_\-.]`, via `_normalize_slot_key()` — `dashboard:`/`dashboard_`
+transport-prefix strip mirroring `_history_key_for()`, then ASCII fold, then
+filename fold), so a slot key always equals its persisted filename stem. Without this,
+display-style slot names (e.g. `Artifact: My Doc` from the artifact iterate
+flow) diverged from their sanitized filename: after a gateway restart,
+`restore_open_slots()` rehydrated the raw key from `open_slots.json` while
+`restore_recent_sessions()` derived a second slot from the filename stem,
+producing duplicate sidebar sessions backed by one transcript.
+`restore_open_slots()` and `_rehydrate_slot_from_history()` apply the same
+fold on read so pre-fix snapshots carrying both key forms self-heal (the
+second form hits the dedup guard). When normalization changes the name, the
+original pretty form is preserved as the slot's initial title
+(redaction-scrubbed, non-pinned so auto-title can still override).
+
 ## Slack Thread Linking
 
 Sessions can be linked to Slack threads via `SessionMap` fields

@@ -195,6 +195,7 @@ async def handle_message_transport(
         subagent_manager=subagent_manager,
         task_runner=task_runner,
         cron_service=cron_service,
+        channel_agent=agent_override,
     ):
         return
 

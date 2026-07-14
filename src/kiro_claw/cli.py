@@ -369,8 +369,21 @@ def _install_child_watcher() -> None:
     So a bare ``PidfdChildWatcher()`` succeeds on a < 5.3 kernel, gets
     installed, and then the FIRST ``create_subprocess_exec`` raises
     ``OSError(ENOSYS)`` -- breaking all subprocess management instead of falling
-    back.  Probe ``os.pidfd_open`` explicitly here and only install the watcher
-    when the syscall works.
+    back.  Probe ``os.pidfd_open`` explicitly here and only install
+    PidfdChildWatcher when the syscall works.
+
+    Pidfd-unavailable (Linux): the probe raises ``OSError`` on a < 5.3 kernel,
+    and ``AttributeError`` when the interpreter's build omits the
+    ``os.pidfd_open`` wrapper entirely -- observed on a uv-managed / Clang-built
+    CPython 3.12 aarch64 venv even though the running kernel supports pidfd.
+    In BOTH cases we must NOT install PidfdChildWatcher (it would ENOSYS on the
+    first spawn), but we must ALSO NOT fall back to the default
+    ThreadedChildWatcher -- its thread-per-child ``os.waitpid`` reaper storm is
+    the exact wedge this function exists to prevent (2026-07-10: 8 ``_do_waitpid``
+    threads starving the loop past the watchdog's ``exit_after``, killing the
+    gateway seconds after startup under a throttling model backend). Instead
+    fall through to the SIGCHLD-based SafeChildWatcher, the same watcher the
+    macOS path uses.
     """
     if sys.platform == "linux":
         try:
@@ -381,15 +394,29 @@ def _install_child_watcher() -> None:
             os.close(fd)
         except (OSError, AttributeError):
             # Kernel too old for pidfd_open (< 5.3), or os.pidfd_open unavailable
-            # -- leave the default ThreadedChildWatcher in place.
+            # (e.g. a uv-managed / Clang-built CPython whose build omits the
+            # os.pidfd_open wrapper even on a pidfd-capable kernel -- observed on
+            # the aarch64 3.12.13 venv interpreter, which raises AttributeError
+            # here). Falling through to `return` would leave the default
+            # ThreadedChildWatcher in place -- the exact thread-per-child watcher
+            # this function exists to avoid. Under a throttling model backend the
+            # gateway spawns and reaps kiro-cli/MCP children in bursts, and 8+
+            # simultaneous os.waitpid() reaper threads then starve the single
+            # event-loop thread past the loop-stall watchdog's exit_after budget,
+            # so the gateway is killed seconds after it starts serving. Fall back
+            # to the SIGCHLD-based SafeChildWatcher (same mitigation as the macOS
+            # path below) instead of returning, so the thread storm cannot recur.
+            pass
+        else:
+            asyncio.set_child_watcher(asyncio.PidfdChildWatcher())
             return
-        asyncio.set_child_watcher(asyncio.PidfdChildWatcher())
-        return
-    # macOS / other non-Linux Unix: no pidfd syscall.  Replace the default
-    # thread-per-child ThreadedChildWatcher with the SIGCHLD-based
-    # SafeChildWatcher so a burst of simultaneously-dying kiro-cli/MCP children
-    # cannot spawn a thread storm that starves the event loop (the documented
-    # macOS wedge, captured 2026-06-27 as multiple _do_waitpid frames).
+    # Reached on macOS / other non-Linux Unix (no pidfd syscall), AND on Linux
+    # when os.pidfd_open is unavailable (see the AttributeError fall-through
+    # above).  Replace the default thread-per-child ThreadedChildWatcher with the
+    # SIGCHLD-based SafeChildWatcher so a burst of simultaneously-dying
+    # kiro-cli/MCP children cannot spawn a thread storm that starves the event
+    # loop (the documented wedge, captured 2026-06-27 as multiple _do_waitpid
+    # frames on macOS and 2026-07-10 on the aarch64 3.12 venv interpreter).
     # SafeChildWatcher reaps only its own tracked children (unlike
     # FastChildWatcher, which reaps every child and would clobber the manual
     # killpg/_kill_escaped_children path) and attaches its SIGCHLD handler when
@@ -405,10 +432,10 @@ def _install_child_watcher() -> None:
         # Falling back here keeps the thread-per-child ThreadedChildWatcher —
         # the exact thread-storm watcher this function exists to replace — so a
         # silent revert must be visible in gateway.log to explain a recurring
-        # macOS wedge.
+        # loop-stall wedge.
         logger.warning(
             "Could not install SafeChildWatcher; falling back to the default "
-            "ThreadedChildWatcher (macOS thread-storm wedge mitigation inactive)",
+            "ThreadedChildWatcher (thread-storm wedge mitigation inactive)",
             exc_info=True,
         )
         return

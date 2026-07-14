@@ -287,6 +287,141 @@ class TestSpawnSubAgents:
             body = mock_post.call_args[0][1]
             assert len(body["agent"]) < 5000  # truncated to MAX_SHORT_STRING
 
+
+class TestSpawnSubAgentsSummarization:
+    """Tests for the result summarization when results exceed COMPLETION_KEEP_DEFAULT_CHARS."""
+
+    def test_short_result_inlined_verbatim(self):
+        """Results under the threshold are returned as-is without summarization."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            short_result = "This is a short result under 3K chars."
+            mock_get.return_value = {"done": True, "agent": "w", "result": short_result}
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            assert short_result in result
+            assert "Full transcript:" not in result
+
+    def test_large_result_summarized_with_path(self):
+        """Results exceeding the threshold are summarized with first+last words and a disk path."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch("kiro_claw.mcp_core.summarize_result") as mock_summarize, \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "agent123"}
+            # Generate a result that exceeds 3000 chars
+            large_result = "word " * 1000  # ~5000 chars, well over 3K
+            mock_get.return_value = {"done": True, "agent": "w", "result": large_result}
+            mock_summarize.return_value = (
+                "Full transcript: /home/user/.kiroclaw/subagents/agent123/result.txt\n"
+                "Preview (first+last 100 words):\nword word word...\n\n"
+                "The full result is on disk."
+            )
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            # summarize_result should have been called
+            mock_summarize.assert_called_once()
+            assert "Full transcript:" in result
+            assert "on disk" in result
+
+    def test_large_result_uses_summarize_result_with_correct_path(self):
+        """Verify summarize_result is called with the agent's result.txt path."""
+        from kiro_claw.context_management import COMPLETION_KEEP_DEFAULT_CHARS
+
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch("kiro_claw.mcp_core.summarize_result") as mock_summarize, \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "abc123"}
+            large_result = "x " * 2000  # ~4000 chars, over 3K threshold
+            mock_get.return_value = {"done": True, "agent": "w", "result": large_result}
+            mock_summarize.return_value = "summarized content"
+
+            _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            # summarize_result must have been called with the result text and a path
+            # containing the agent id
+            assert mock_summarize.called
+            call_args = mock_summarize.call_args
+            assert len(call_args[0][0]) > COMPLETION_KEEP_DEFAULT_CHARS
+            assert "abc123" in call_args[0][1]
+            assert "result.txt" in call_args[0][1]
+
+    def test_agent_dir_failure_falls_back_to_full_result(self):
+        """If _agent_dir raises, the full result is inlined (graceful fallback)."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "../bad-id"}
+            large_result = "fallback " * 600  # over 3K
+            mock_get.return_value = {"done": True, "agent": "w", "result": large_result}
+
+            # _agent_dir will raise ValueError for "../bad-id" due to path traversal check
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            # Should still complete without error — falls back to full text
+            assert '"completed"' in result
+            # The result should contain the original text (not summarized)
+            # because _agent_dir raised and result_path is empty
+            assert "Full transcript:" not in result
+
+    def test_mixed_short_and_large_results(self):
+        """When multiple agents return, only large results get summarized."""
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch("kiro_claw.mcp_core.summarize_result") as mock_summarize, \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.side_effect = [{"id": "short1"}, {"id": "long1"}]
+            short_result = "brief answer"
+            large_result = "detailed " * 600  # over 3K
+
+            def _get_side(url):
+                if "short1" in url:
+                    return {"done": True, "agent": "fast", "result": short_result}
+                return {"done": True, "agent": "thorough", "result": large_result}
+
+            mock_get.side_effect = _get_side
+            mock_summarize.return_value = "summarized long result"
+
+            result = _call_tool("spawn_sub_agents", {
+                "agents": [{"prompt": "quick"}, {"prompt": "deep dive"}],
+            })
+
+            # Short result inlined verbatim
+            assert "brief answer" in result
+            # Long result was summarized
+            assert mock_summarize.call_count == 1
+            assert "summarized long result" in result
+
+    def test_result_exactly_at_threshold_not_summarized(self):
+        """A result exactly at COMPLETION_KEEP_DEFAULT_CHARS is NOT summarized."""
+        from kiro_claw.context_management import COMPLETION_KEEP_DEFAULT_CHARS
+
+        with patch("kiro_claw.mcp_core._post") as mock_post, \
+             patch("kiro_claw.mcp_core._get") as mock_get, \
+             patch("kiro_claw.mcp_core.sel"), \
+             patch("kiro_claw.mcp_core.summarize_result") as mock_summarize, \
+             patch.dict("os.environ", {"KIROCLAW_SESSION_KEY": "s"}):
+            mock_post.return_value = {"id": "a1"}
+            # Exactly at the threshold (not over)
+            exact_result = "x" * COMPLETION_KEEP_DEFAULT_CHARS
+            mock_get.return_value = {"done": True, "agent": "w", "result": exact_result}
+
+            result = _call_tool("spawn_sub_agents", {"agents": [{"prompt": "task"}]})
+
+            # Should NOT summarize — threshold is >, not >=
+            mock_summarize.assert_not_called()
+            assert '"completed"' in result
+
     def test_invalid_max_wait_env_falls_back(self):
         with patch("kiro_claw.mcp_core._post") as mock_post, \
              patch("kiro_claw.mcp_core._get") as mock_get, \

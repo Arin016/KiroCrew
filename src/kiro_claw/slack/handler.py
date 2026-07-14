@@ -2223,6 +2223,7 @@ async def maybe_handle_keyword_command(
     task_runner: TaskRunner | None = None,
     cron_service: CronService | None = None,
     handle_sessions: bool = True,
+    channel_agent: str | None = None,
 ) -> bool:
     """Intercept the path-independent keyword commands.
 
@@ -2247,6 +2248,10 @@ async def maybe_handle_keyword_command(
     message into a bare ``sessions`` match). The transport path has no such
     modifier machinery, so it uses the default and handles all four commands.
     """
+    # Resolve the agent so the command-intercept persists record the real agent
+    # name in session metadata (thread override, then channel override, then
+    # global default), matching handle_message's main path.
+    _agent = _thread_agents.get(session_key) or channel_agent or _get_default_agent() or None
     # ── Sessions keyword: list recent sessions (owner/allowed only) ──
     if handle_sessions and text.strip().lower() == "sessions":
         if is_owner(user_id) or is_allowed_user(user_id):
@@ -2295,6 +2300,7 @@ async def maybe_handle_keyword_command(
                     spawn_reply,
                     source_thread=session_key,
                     source_user=user_id,
+                    agent=_agent,
                 )
             return True
 
@@ -2311,6 +2317,7 @@ async def maybe_handle_keyword_command(
                     run_reply,
                     source_thread=session_key,
                     source_user=user_id,
+                    agent=_agent,
                 )
             return True
 
@@ -2327,6 +2334,7 @@ async def maybe_handle_keyword_command(
                     cron_reply,
                     source_thread=session_key,
                     source_user=user_id,
+                    agent=_agent,
                 )
             return True
 
@@ -2467,6 +2475,10 @@ async def handle_message(
     _hydrate_thread_overrides(session_key, conversation_log)
     _hydrate_conv_flags(sessions, session_key)
 
+    # Resolve agent early so ALL persist paths (hook auto-reply, command
+    # intercepts, review-mode drafts, main LLM path) can forward it.
+    _agent = _thread_agents.get(session_key) or channel_agent or _get_default_agent() or None
+
     # ── Linked thread intercept: route to dashboard slot if linked ──
     if await maybe_route_linked_thread(text, session_key, user_id, channel, slack, reply_ts):
         return
@@ -2491,6 +2503,7 @@ async def handle_message(
                     hook_result.text,
                     source_thread=session_key,
                     source_user=user_id,
+                    agent=_agent,
                 )
             return
 
@@ -2651,6 +2664,7 @@ async def handle_message(
         task_runner=task_runner,
         cron_service=cron_service,
         handle_sessions=False,
+        channel_agent=channel_agent,
     ):
         return
 
@@ -2857,6 +2871,8 @@ async def handle_message(
     client: LLMProvider | None = None
     try:
         task.start()
+        # Re-resolve _agent against (possibly linked) session_key for the main
+        # LLM path — linked dashboard sessions may carry a different thread agent.
         _agent = _thread_agents.get(session_key) or channel_agent or _get_default_agent() or None
         client, is_new, resumed = await sessions.get_or_create(
             session_key, agent=_agent, channel_id=channel
@@ -3421,6 +3437,7 @@ async def handle_message(
                 "[suppressed: trusted bot error]",
                 source_thread=session_key,
                 source_user=user_id,
+                agent=_agent,
             )
         return
 
@@ -3476,13 +3493,15 @@ async def handle_message(
         _review_drafts_set(draft_key, draft, user_id)
         logger.info("Review mode: ephemeral draft sent to %s in %s", user_id, channel)
         # Persist conversation (draft counts as a turn)
-        if conversation_log:
+        if conversation_log and not _is_slack_restricted(session_key):
             save_conversation_turn(
                 conversation_log,
                 session_key,
                 text,
                 accumulated,
                 source_thread=session_key,
+                source_user=user_id,
+                agent=_agent,
             )
         return
 
@@ -3639,6 +3658,7 @@ async def handle_message(
             accumulated,
             source_thread=session_key,
             source_user=user_id,
+            agent=_agent,
         )
         if consolidator and _stop_reason != STOP_REASON_CANCELLED:
             consolidator.maybe_consolidate(session_key)

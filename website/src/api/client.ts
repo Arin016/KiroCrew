@@ -365,6 +365,8 @@ export const api = {
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent, ...(projectPath ? { project_path: projectPath } : {}) }).then(j),
   chatSlotModel: (slot: string, model: string) =>
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/model', { model }).then(j),
+  chatSlotsModel: (model: string, skip_running: boolean) =>
+    post('/api/chat/slots/model', { model, skip_running }).then(j) as Promise<{ ok: boolean; model: string; switched: string[]; skipped_running: string[]; unchanged: string[]; failed: string[] }>,
   chatSlotReasoningEffort: (slot: string, reasoning_effort: string) =>
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/reasoning-effort', { reasoning_effort }).then(j),
   chatSlotWorkspace: (slot: string, workspace: string) =>
@@ -569,7 +571,7 @@ export const api = {
   handoffChannels: () => fetch('/api/handoff-channels').then(j) as Promise<Record<string, string> | null>,
   handoffSlot: (slot: string, channel?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/handoff', channel ? { channel } : undefined).then(j),
   // Sessions (history)
-  sessions: (limit = 30, offset = 0) => fetch('/api/sessions?limit=' + limit + '&offset=' + offset).then(j),
+  sessions: (limit = 30, offset = 0, preview = false) => fetch('/api/sessions?limit=' + limit + '&offset=' + offset + (preview ? '&preview=1' : '')).then(j),
   sessionsSearch: (q: string, limit = 50) => fetch('/api/sessions/search?q=' + encodeURIComponent(q) + '&limit=' + limit).then(j),
   sessionDetail: (key: string) => fetch('/api/sessions/' + encodeURIComponent(key)).then(j),
   deleteSession: (key: string) => del('/api/sessions/' + encodeURIComponent(key)).then(j),
@@ -770,12 +772,14 @@ export const api = {
   registerApp: (body: object) => post('/api/apps/register', body).then(j),
 
   // Artifacts
-  artifacts: (filters?: { tag?: string; kind?: string; q?: string; source_path?: string }) => {
+  artifacts: (filters?: { tag?: string; kind?: string; q?: string; source_path?: string; snippet?: boolean; contentMatch?: boolean }) => {
     const params = new URLSearchParams()
     if (filters?.tag) params.set('tag', filters.tag)
     if (filters?.kind) params.set('kind', filters.kind)
     if (filters?.q) params.set('q', filters.q)
     if (filters?.source_path) params.set('source_path', filters.source_path)
+    if (filters?.snippet) params.set('snippet', '1')
+    if (filters?.contentMatch) params.set('content', '1')
     const s = params.toString()
     return get(`/api/artifacts${s ? `?${s}` : ''}`).then(j)
   },

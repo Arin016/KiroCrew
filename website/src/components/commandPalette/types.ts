@@ -18,6 +18,9 @@ export interface Result {
   title: string
   /** Optional secondary line (path, snippet, or metadata). */
   subtitle?: string
+  /** Indices into `subtitle` that matched the query (for highlighting a
+   * content-match snippet, e.g. a session body hit). */
+  subtitleIndices?: number[]
   /**
    * Rendered icon node. By convention a `lucide-react` element with
    * `className="lucide-inline"` (AUTOSDE `use-lucide-icons`); never inline
@@ -28,6 +31,39 @@ export interface Result {
   score: number
   /** Indices into `title` that matched the query, for highlight rendering. */
   indices: number[]
+  /**
+   * Command-palette recents grouping (Current / Planned / Older day-buckets).
+   * When set, the palette's default (empty-query) view inserts a section
+   * header whenever this value changes between consecutive results. Ignored by
+   * the search views.
+   */
+  groupLabel?: string
+  /** De-emphasize the row (archived / older sessions in the recents view). */
+  faded?: boolean
+  /** Live status indicator dot for the current-sessions group.
+   * `colorVar` is a CSS custom property name (e.g. "--warn"). */
+  statusDot?: { colorVar: string; pulse?: boolean }
+  /** Inline status line. `statusStyle` picks the treatment:
+   *  - 'pill' → a filled pill (bg = statusColorVar, light text) + muted detail
+   *    (e.g. "Needs input" / "Approve").
+   *  - 'dot' → a colored dot + colored label + muted detail (e.g. "Thinking…"),
+   *    matching the chat sidebar.
+   * `statusColorVar` is a CSS var name (e.g. "--warn", "--accent", "--info"). */
+  statusStyle?: 'pill' | 'dot'
+  statusColorVar?: string
+  statusPulse?: boolean
+  statusLabel?: string
+  statusDetail?: string
+  /** Right-aligned relative timestamp (recents view), e.g. "09:46" or
+   * "Yesterday 21:12". Mirrors the sidebar's time column. */
+  timestamp?: string
+  /** True when the session is pinned (recents view) — pins sort first and get
+   * a marker, matching the sidebar. */
+  pinned?: boolean
+  /** Folder name the session is filed under (recents view), shown as a chip. */
+  folder?: string
+  /** True for a new/empty session row — rendered with a "+" marker. */
+  isNew?: boolean
   /**
    * Declarative description of what Enter / ⌘Enter / ⌥Enter should do for this
    * result, per the §2 Enter matrix (Mesh-2151). This is the typed contract a

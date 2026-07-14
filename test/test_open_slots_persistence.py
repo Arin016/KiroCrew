@@ -514,3 +514,74 @@ def test_restore_open_slots_rollback_also_discards_restricted_keys(tmp_path, mon
         "a later persistent get_or_create_slot would silently inherit "
         "restricted status, blocking consolidation/lessons."
     )
+
+
+# ── Slot-key filename round-trip (duplicate sidebar sessions) ────────────────
+#
+# Display-style slot names (e.g. "Artifact: My Doc" from the artifact iterate
+# flow) used to survive as raw slot keys while their JSONL filename got the
+# lossy _safe_key() fold. After a restart, restore_open_slots rehydrated the
+# raw key from open_slots.json while restore_recent_sessions derived a SECOND
+# slot from the filename stem — two identical sidebar sessions backed by one
+# transcript. get_or_create_slot now folds keys to the filename charset, and
+# the restore paths apply the same fold so pre-fix snapshots self-heal.
+
+RAW_KEY = "Artifact: 2026 Code Activity Benchmark - nrb vs Dan Lloyd Org"
+FOLDED_KEY = "Artifact__2026_Code_Activity_Benchmark_-_nrb_vs_Dan_Lloyd_Org"
+
+
+def test_restore_open_slots_folds_legacy_raw_keys(tmp_path, monkeypatch):
+    """A pre-fix snapshot key restores under the canonical folded key."""
+    monkeypatch.setenv("KIROCLAW_HOME", str(tmp_path))
+    state = _make_state(tmp_path / "sessions")
+    _seed_session(state, FOLDED_KEY)  # on-disk file is always the folded form
+    (tmp_path / "open_slots.json").write_text(json.dumps({"keys": [RAW_KEY], "ts": 0.0}))
+
+    state2 = _make_state(tmp_path / "sessions")
+    restored = restore_open_slots(state2)
+
+    assert restored == 1
+    assert FOLDED_KEY in state2._slots
+    assert RAW_KEY not in state2._slots
+
+
+def test_restore_open_slots_dedupes_raw_and_folded_snapshot_twins(tmp_path, monkeypatch):
+    """A polluted snapshot carrying BOTH key forms restores exactly one slot."""
+    monkeypatch.setenv("KIROCLAW_HOME", str(tmp_path))
+    state = _make_state(tmp_path / "sessions")
+    _seed_session(state, FOLDED_KEY)
+    (tmp_path / "open_slots.json").write_text(
+        json.dumps({"keys": [RAW_KEY, FOLDED_KEY], "ts": 0.0})
+    )
+
+    state2 = _make_state(tmp_path / "sessions")
+    restored = restore_open_slots(state2)
+
+    assert restored == 1
+    assert list(state2._slots) == [FOLDED_KEY]
+
+
+def test_restart_restore_paths_converge_on_one_slot(tmp_path, monkeypatch):
+    """End-to-end regression: open_slots replay + filename-stem walk = 1 slot.
+
+    This is the exact user-visible bug: a raw display-style key in
+    open_slots.json plus the mtime-based restore_recent_sessions walk used to
+    produce two identical sidebar sessions after a gateway restart.
+    """
+    from kiro_claw.dashboard.chat_persistence import restore_recent_sessions
+
+    monkeypatch.setenv("KIROCLAW_HOME", str(tmp_path))
+    state = _make_state(tmp_path / "sessions")
+    _seed_session(state, FOLDED_KEY)
+    (tmp_path / "open_slots.json").write_text(json.dumps({"keys": [RAW_KEY], "ts": 0.0}))
+
+    state2 = _make_state(tmp_path / "sessions")
+    # Startup order matches server.py: snapshot replay first, mtime walk second.
+    restore_open_slots(state2)
+    restore_recent_sessions(state2, window_minutes=0)  # 0 = no cutoff, restore all
+
+    matching = [k for k in state2._slots if "Benchmark" in k]
+    assert matching == [FOLDED_KEY], (
+        f"expected exactly one slot for the session, got {matching!r} — "
+        "duplicate sidebar sessions regression"
+    )

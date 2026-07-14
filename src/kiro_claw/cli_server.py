@@ -27,6 +27,7 @@ from kiro_claw.config.loader import (
 )
 from kiro_claw.constants import DATA_WARNING
 from kiro_claw.context import ContextBuilder
+from kiro_claw.dashboard.handlers.core import DASHBOARD_HTML_NOT_FOUND_MARKER
 from kiro_claw.dashboard.origin import (
     dashboard_origin,
     parse_dashboard_url,
@@ -93,6 +94,30 @@ def resolve_client_port(cli_port: int | None) -> int:
     return _DEFAULT_PORT
 
 
+def _probe_dashboard_health(port: int) -> None:
+    """Warn on stderr if the gateway is serving a stale dashboard.
+
+    Best-effort: a cookieless GET / checks the response body for the
+    "Dashboard HTML not found" marker that a stale gateway serves when its
+    static assets have been pruned (e.g. by an update). If detected, a warning
+    is printed to stderr so callers know the token won't yield a working
+    dashboard. Network errors are silently ignored.
+    """
+    try:
+        req = urllib.request.Request(f"http://localhost:{port}/", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:  # nosemgrep
+            body = resp.read(8192).decode("utf-8", errors="replace")
+            if DASHBOARD_HTML_NOT_FOUND_MARKER.lower() in body.lower():
+                print(
+                    "⚠️  Warning: gateway is serving a stale dashboard "
+                    "(assets missing — likely an update pruned the "
+                    "running install). Restart the gateway to fix.",
+                    file=sys.stderr,
+                )
+    except Exception:
+        pass
+
+
 def _token(args: argparse.Namespace) -> None:
     """Print a dashboard URL with a fresh auth token."""
     ttl = parse_duration(args.ttl)
@@ -121,6 +146,8 @@ def _token(args: argparse.Namespace) -> None:
     if not token:
         print("❌ Gateway returned empty token")
         sys.exit(1)
+    _probe_dashboard_health(port)
+
     # Print the SAME canonical loopback host the gateway uses for its auto-open
     # and !dashboard links. resolve_dashboard_host() returns "localhost" for the
     # loopback case — it resolves in every browser and through SSH tunnels (unlike

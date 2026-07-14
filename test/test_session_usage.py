@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import kiro_claw.dashboard.handlers.sessions as sessions_mod
-from kiro_claw.dashboard.handlers.sessions import _parse_usage, _redact_strings
+from kiro_claw.dashboard.handlers.sessions import (
+    _normalize_text_usage,
+    _parse_usage,
+    _redact_strings,
+)
 
 SAMPLE_USAGE = (
     "Some preamble line\n"
@@ -32,7 +36,7 @@ class TestParseUsage:
         assert r["resets"] == "2026-07-01"
         assert r["plan"] == "KIRO POWER"
         assert r["cost_usd"] == 1.50
-        assert r["overage_rate"] == "0.04"
+        assert r["overage_rate"] == 0.04  # float on both sources (canonical shape)
         assert "Estimated Usage" in str(r["raw"])
 
     def test_strips_ansi_escapes(self):
@@ -163,3 +167,28 @@ class TestFetchUsageBg:
         assert sessions_mod._usage_cache == {"available": False}
         proc.kill.assert_called_once()
         proc.wait.assert_awaited_once()  # reaped (FDs closed) on the error path
+
+
+class TestNormalizeTextUsage:
+    def test_maps_overage_and_total(self):
+        # Text parse: credits_used is the OVERAGE field, covered/plan the in-plan.
+        parsed = {"credits_used": 120.0, "credits_covered": 3044.0,
+                  "credits_plan": 10000.0, "plan": "KIRO POWER", "raw": "x"}
+        out = _normalize_text_usage(parsed)
+        assert out["credits_used"] == 3164.0        # total = covered + overage
+        assert out["credits_overage"] == 120.0
+        assert out["credits_covered"] == 3044.0
+        assert out["credits_plan"] == 10000.0
+        assert out["percentage"] == round(3164.0 / 10000.0 * 100, 1)
+        assert out["source"] == "text"
+        assert out["plan"] == "KIRO POWER"
+
+    def test_no_overage_line_reports_covered_as_total(self):
+        # Post-2.11.x: no "Credits used:" line -> overage defaults to 0.
+        parsed = {"credits_covered": 10000.0, "credits_plan": 10000.0}
+        out = _normalize_text_usage(parsed)
+        assert out["credits_used"] == 10000.0
+        assert out["credits_overage"] == 0.0
+
+    def test_no_plan_preserved_untouched(self):
+        assert _normalize_text_usage({"raw": ""}) == {"raw": ""}

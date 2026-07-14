@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, X } from 'lucide-react'
+import { Search, X, Pin, MessageSquare, Clock, Plus } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 
+import { useAppSelector } from '../store'
 import { useListKeyboardNav } from '../hooks/useListKeyboardNav'
 import type { Result, ResourceProvider } from './commandPalette/types'
 import { registerProvider } from './commandPalette/providers'
@@ -17,6 +18,8 @@ import { useKnowledgeProvider } from './commandPalette/providers/knowledgeProvid
 import type { KnowledgeRef } from './commandPalette/providers/knowledgeProvider'
 import { useSkillsProvider } from './commandPalette/providers/skillsProvider'
 import { usePromptsProvider } from './commandPalette/providers/promptsProvider'
+import { useArtifactsProvider } from './commandPalette/providers/artifactsProvider'
+import { useRecentsProvider } from './commandPalette/providers/recentsProvider'
 
 /**
  * Search Everywhere command palette (Mesh-2151).
@@ -82,6 +85,12 @@ export interface CommandPaletteProps {
 /** Stable no-op so `useActionsProvider` always gets a defined callback. */
 const NOOP = () => {}
 
+/** Composer-style sigil scopes: typing a leading sigil instantly scopes the
+ * palette, mirroring the chat composer's `$skill` / `/command` muscle memory.
+ * `@` is mapped to Artifacts here (the palette's `@` destination). Value =
+ * provider (tab) id. */
+const SIGIL_SCOPE: Record<string, string> = { $: 'skills', '@': 'artifacts', '/': 'actions' }
+
 /**
  * Render `text` with the characters at `indices` emphasised. Each character is
  * its own span/strong node keyed by position — safe (no HTML string building)
@@ -126,7 +135,7 @@ export default function CommandPalette({
   // submit (BSC1) — the palette only ever emits a plain `$skill` / `@prompt` /
   // `@knowledge` string. Used by the `insert-token` + `open-knowledge` branches
   // of {@link dispatchEnter}.
-  const { enterInsertOrNewSession, newSessionWithToken } = usePaletteActions()
+  const { enterInsertOrNewSession, newSessionWithToken, navigate } = usePaletteActions()
 
   // ⌘Enter on a Knowledge row attaches the entry as context to the active chat
   // (Mesh-2151 §2 / task 26). There is no global attach-by-id API — the shipped
@@ -146,35 +155,74 @@ export default function CommandPalette({
   const knowledge = useKnowledgeProvider({ attachAsContext: attachKnowledgeAsContext })
   const skills = useSkillsProvider()
   const prompts = usePromptsProvider()
+  // Artifacts tab — content-search over the artifact library with a
+  // match-centered preview (wraps GET /api/artifacts?content=1&snippet=1).
+  const artifacts = useArtifactsProvider()
+  // Recent-sessions quick-switcher for the unscoped empty state (not a tab).
+  const recents = useRecentsProvider()
 
   // Tab strip order (Mesh-2151 §1): All · Sessions · Knowledge · Skills ·
-  // Prompts, with Pages + Actions riding along after the v1 corpus.
+  // Prompts, with Artifacts + Pages + Actions riding along after the v1 corpus.
   const tabs = useMemo<ResourceProvider[]>(
-    () => [all, sessions, knowledge, skills, prompts, pages, actions],
-    [all, sessions, knowledge, skills, prompts, pages, actions],
+    () => [all, sessions, knowledge, skills, prompts, artifacts, pages, actions],
+    [all, sessions, knowledge, skills, prompts, artifacts, pages, actions],
   )
 
   // Make the per-category providers discoverable by the All aggregator, which
-  // fans the query out to everything in the registry (so the P1 providers are
-  // interleaved into the All blend purely by being registered here).
-  // Re-registration is idempotent (keyed by provider id).
+  // fans the query out to everything in the registry. Skills and Knowledge are
+  // deliberately NOT registered here — skills are noisy in the global blend,
+  // and knowledge search embeds the query through a local Ollama model
+  // (~90ms warm, ~1.7s when the model has been unloaded), which stalls the
+  // Promise.all fan-out and drags every other provider's results with it.
+  // Both surface only when scoped (sigil or prefix+Tab), reached directly via
+  // the tabs list rather than the aggregator. Re-registration is idempotent.
   useEffect(() => {
     registerProvider(sessions)
-    registerProvider(knowledge)
-    registerProvider(skills)
     registerProvider(prompts)
+    registerProvider(artifacts)
     registerProvider(pages)
     registerProvider(actions)
-  }, [sessions, knowledge, skills, prompts, pages, actions])
+  }, [sessions, prompts, artifacts, pages, actions])
 
   const [query, setQuery] = useState('')
-  const [activeTab, setActiveTab] = useState(0)
+  const [scope, setScope] = useState<string | null>(null)
+  // Debounced query drives the actual fetch so we don't hit the network (and,
+  // for artifacts/sessions, re-scan content server-side) on every keystroke.
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const resultsRef = useRef<Result[]>([])
-  const tabCountRef = useRef(tabs.length)
-  tabCountRef.current = tabs.length
 
   const inputRef = useRef<HTMLInputElement | null>(null)
-  const activeProvider = tabs[activeTab] ?? tabs[0]
+  const q = query.trim()
+  const providerById = useMemo(
+    () => Object.fromEntries(tabs.map((t) => [t.id, t])),
+    [tabs],
+  )
+  // Prefix + Tab scoping (blended from our palette): when unscoped and the
+  // query uniquely prefixes one category's label/id (excluding "all"), Tab
+  // adopts that scope. Ambiguous prefixes show no hint until unique.
+  const scopeHint = useMemo(() => {
+    if (scope || !q) return null
+    const ql = q.toLowerCase()
+    const hits = tabs.filter(
+      (t) =>
+        t.id !== 'all' &&
+        (t.label.toLowerCase().startsWith(ql) || t.id.toLowerCase().startsWith(ql)),
+    )
+    return hits.length === 1 ? hits[0] : null
+  }, [scope, q, tabs])
+  const scopeProvider = scope ? providerById[scope] : undefined
+  const scopeLabel = scopeProvider?.label
+  // Default (unscoped + empty) opens onto recent sessions — a quick switcher.
+  // Unscoped typing searches everything (All aggregator). A scope narrows to
+  // that one category.
+  const activeProvider = scopeProvider ?? (q === '' ? recents : all)
+  // Stable refs so the window key handler doesn't re-subscribe per keystroke.
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
+  const scopeHintRef = useRef(scopeHint)
+  scopeHintRef.current = scopeHint
+  const queryRef = useRef(query)
+  queryRef.current = query
 
   /**
    * Central Enter dispatcher (Mesh-2151 §2, {@link OnEnter}). Switches on the
@@ -194,6 +242,14 @@ export default function CommandPalette({
    */
   const dispatchEnter = useCallback(
     (result: Result, withModifier: boolean) => {
+      // Skills are a navigation target in the palette: Enter opens the skills
+      // catalog (to view/edit them) rather than inserting a $skill token —
+      // there's no per-skill deep link yet, so all skill rows go to the catalog.
+      if (result.providerId === 'skills') {
+        navigate('/capabilities')
+        onClose()
+        return
+      }
       const action = result.enter
       if (action) {
         switch (action.kind) {
@@ -267,19 +323,51 @@ export default function CommandPalette({
       }
       onClose()
     },
-    [onClose, enterInsertOrNewSession, newSessionWithToken],
+    [onClose, enterInsertOrNewSession, newSessionWithToken, navigate],
   )
 
   // Enter / ⌘Enter from the shared hook: look up the chosen row and dispatch,
   // threading the modifier flag through to {@link dispatchEnter}.
   // Search via React Query — handles caching, cancellation, dedup automatically.
+  // The recents quick-switcher renders LIVE redux state (running / approval /
+  // unread / pin / recency), but React Query only re-invokes search() on a KEY
+  // change — a re-memoized provider identity alone does nothing. Fold a
+  // fingerprint of that live state into the key so status dots and MRU order
+  // update while the palette is open instead of freezing at open-time.
+  const slots = useAppSelector((s) => s.dashboard.slots)
+  const unreadSlots = useAppSelector((s) => s.dashboard.unreadSlots)
+  const liveFingerprint = useMemo(
+    () =>
+      activeProvider.id === 'recents'
+        ? slots
+            .map(
+              (s) =>
+                `${s.key}:${s.running ? 1 : 0}${s.pending_approval ? 1 : 0}${
+                  s.pinned ? 1 : 0
+                }:${s.last_activity_ts ?? s.last_ts ?? ''}`,
+            )
+            .join('|') + `#${unreadSlots.join(',')}`
+        : '',
+    [activeProvider.id, slots, unreadSlots],
+  )
   const { data: results = [], isLoading: loading } = useQuery({
-    queryKey: ['palette', 'search', activeProvider.id, query],
-    queryFn: () => Promise.resolve(activeProvider.search(query)),
+    queryKey: ['palette', 'search', activeProvider.id, debouncedQuery, liveFingerprint],
+    queryFn: () => Promise.resolve(activeProvider.search(debouncedQuery)),
     enabled: open,
     placeholderData: (prev) => prev ?? [],
     staleTime: 10_000,
   })
+
+  // Debounce the query into debouncedQuery (empty resets immediately so the
+  // recents/quick-switcher shows without lag on open or clear).
+  useEffect(() => {
+    if (query === '') {
+      setDebouncedQuery('')
+      return
+    }
+    const t = setTimeout(() => setDebouncedQuery(query), 150)
+    return () => clearTimeout(t)
+  }, [query])
 
   // Keep resultsRef in sync for imperative reads (Enter handler).
   useEffect(() => {
@@ -307,11 +395,12 @@ export default function CommandPalette({
   // Reset selection to top when results change (new query or tab switch).
   useEffect(() => { setSelected(0) }, [results, setSelected])
 
-  // Reset query + active tab each time the palette (re)opens, and focus input.
+  // Reset query + scope each time the palette (re)opens, and focus input.
   useEffect(() => {
     if (!open) return
     setQuery('')
-    setActiveTab(0)
+    setScope(null)
+    setDebouncedQuery('')
     const id = requestAnimationFrame(() => inputRef.current?.focus())
     return () => cancelAnimationFrame(id)
   }, [open])
@@ -326,9 +415,19 @@ export default function CommandPalette({
       if (e.key === 'Tab') {
         e.preventDefault()
         e.stopImmediatePropagation()
-        const n = tabCountRef.current
-        const dir = e.shiftKey ? -1 : 1
-        setActiveTab((prev) => (prev + dir + n) % n)
+        // Prefix + Tab adopts the hinted scope (clearing the query); Shift+Tab
+        // while scoped pops it. Replaces the old tab-cycle behavior.
+        if (!scopeRef.current && scopeHintRef.current) {
+          setScope(scopeHintRef.current.id)
+          setQuery('')
+        } else if (scopeRef.current && e.shiftKey) {
+          setScope(null)
+        }
+      } else if (e.key === 'Backspace' && scopeRef.current && queryRef.current === '') {
+        // Backspace on an empty query pops the active scope (like a chip).
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        setScope(null)
       } else if (e.key === 'Enter' && e.altKey && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
         e.stopImmediatePropagation()
@@ -348,7 +447,11 @@ export default function CommandPalette({
     <div className="px-3 py-6 text-center text-[12px] text-muted">Searching…</div>
   ) : (
     <div className="px-3 py-6 text-center text-[12px] text-muted">
-      {query.trim() ? 'No matches' : 'Type to search'}
+      {query.trim()
+        ? 'No matches'
+        : scopeLabel
+          ? `No ${scopeLabel.toLowerCase()}`
+          : 'No recent sessions'}
     </div>
   )
 
@@ -365,16 +468,51 @@ export default function CommandPalette({
         onMouseDown={(e) => e.stopPropagation()}
       >
         {/* Search input */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
           <Search size={16} className="shrink-0 text-muted lucide-inline" />
+          {scopeLabel && (
+            <span className="shrink-0 flex items-center gap-1 rounded-md bg-accent-subtle px-2 py-0.5 text-[12px] font-medium text-text">
+              {scopeLabel}
+              <button
+                type="button"
+                aria-label="Clear filter"
+                className="text-muted hover:text-text bg-transparent border-none cursor-pointer p-0 flex items-center"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  setScope(null)
+                  inputRef.current?.focus()
+                }}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          )}
           <input
             ref={inputRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search sessions, knowledge, skills, prompts…"
+            onChange={(e) => {
+              const v = e.target.value
+              // Leading sigil ($/@//) instantly adopts the matching scope and
+              // strips the sigil — mirrors the composer's $skill/@prompt/
+              // /command tokens. Only fires when unscoped and the sigil maps to
+              // a real provider.
+              const sigil = !scope && v.length ? SIGIL_SCOPE[v[0]] : undefined
+              if (sigil && providerById[sigil]) {
+                setScope(sigil)
+                setQuery(v.slice(1))
+              } else {
+                setQuery(v)
+              }
+            }}
+            placeholder={scopeLabel ? `Search ${scopeLabel.toLowerCase()}…` : 'Search for anything'}
             aria-label="Search everywhere"
             className="flex-1 bg-transparent border-none outline-none text-[14px] text-text placeholder:text-muted"
           />
+          {scopeHint && (
+            <span className="shrink-0 flex items-center gap-1 text-[11px] text-muted">
+              <kbd className="font-mono px-1 rounded bg-bg border border-border">tab</kbd> {scopeHint.label}
+            </span>
+          )}
           <button
             type="button"
             className="text-muted cursor-pointer hover:text-text bg-transparent border-none"
@@ -385,75 +523,175 @@ export default function CommandPalette({
           </button>
         </div>
 
-        {/* Tab strip */}
-        <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border overflow-x-auto scrollbar-thin" role="tablist">
-          {tabs.map((t, i) => (
-            <button
-              type="button"
-              key={t.id}
-              role="tab"
-              aria-selected={i === activeTab}
-              onClick={() => setActiveTab(i)}
-              className={`flex shrink-0 items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium whitespace-nowrap cursor-pointer transition-colors ${
-                i === activeTab
-                  ? 'bg-accent-subtle text-text'
-                  : 'text-muted hover:bg-bg-hover hover:text-text'
-              }`}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </div>
-
         {/* Result list */}
         <div className="overflow-y-auto py-1" role="listbox">
-          {/* Recents-on-empty-query: when nothing is typed yet the palette
-              opens onto recents (the All aggregator returns recent sessions,
-              and each per-category tab shows its full/recent list). Label the
-              section so it reads as "recents", not a search result set. */}
-          {query.trim() === '' && results.length > 0 && (
-            <div
-              role="presentation"
-              className="px-4 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted"
-            >
-              Recent
-            </div>
-          )}
           {results.length === 0
             ? emptyState
-            : results.map((r, i) => (
-                <div
-                  role="option"
-                  aria-selected={i === selected}
-                  tabIndex={-1}
-                  key={r.id}
-                  ref={(el) => {
-                    itemRefs.current[i] = el
-                  }}
-                  className={`w-full text-left px-4 py-2 flex items-center gap-3 cursor-pointer transition-colors ${
-                    i === selected
-                      ? 'bg-accent-subtle text-text'
-                      : 'text-muted hover:bg-bg-hover hover:text-text'
-                  }`}
-                  title={r.subtitle || r.title}
-                  onMouseEnter={() => setSelected(i)}
-                  onMouseDown={(e) => {
-                    e.preventDefault()
-                    dispatchEnter(r, e.metaKey || e.ctrlKey)
-                  }}
-                >
-                  <span className="shrink-0 flex items-center">{r.icon}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[13px] truncate">
-                      <Highlighted text={r.title} indices={r.indices} />
-                    </div>
-                    {r.subtitle && (
-                      <div className="text-[11px] text-muted truncate">{r.subtitle}</div>
+            : results.map((r, i) => {
+                // Section header whenever the group changes — the recents view
+                // sets groupLabel (Current / Planned / Today / Yesterday /
+                // Earlier); search views leave it unset, so no headers render.
+                const showHeader =
+                  !!r.groupLabel && r.groupLabel !== results[i - 1]?.groupLabel
+                // Recents rows (groupLabel set) render as sidebar-style cards:
+                // agent + time on the top metadata line, bold title below, a
+                // status/last-message line, and no leading icon. Search rows
+                // keep the compact icon + title + subtitle layout.
+                const isRecents = !!r.groupLabel
+                return (
+                  <Fragment key={r.id}>
+                    {showHeader && (
+                      <div
+                        role="presentation"
+                        className="px-4 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted flex items-center gap-1.5"
+                      >
+                        {r.groupLabel === 'Scheduled' ? (
+                          <Clock size={11} className="lucide-inline" />
+                        ) : (
+                          <MessageSquare size={11} className="lucide-inline" />
+                        )}
+                        {r.groupLabel}
+                      </div>
                     )}
-                  </div>
-                </div>
-              ))}
+                    <div
+                      role="option"
+                      aria-selected={i === selected}
+                      tabIndex={-1}
+                      ref={(el) => {
+                        itemRefs.current[i] = el
+                      }}
+                      className={`relative w-full text-left px-4 py-2 cursor-pointer transition-colors ${
+                        i === selected
+                          ? 'bg-accent-subtle text-text'
+                          : 'text-muted hover:bg-bg-hover hover:text-text'
+                      } ${r.faded ? 'opacity-60' : ''} ${
+                        isRecents ? '' : 'flex items-start gap-3'
+                      }`}
+                      title={r.subtitle || r.title}
+                      onMouseEnter={() => setSelected(i)}
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        dispatchEnter(r, e.metaKey || e.ctrlKey)
+                      }}
+                    >
+                      {isRecents ? (
+                        <>
+                          <div className="min-w-0">
+                            {/* Line 1 — pin + bold title + folder chip, with the
+                                timestamp and status dot right-aligned on the SAME row. */}
+                            <div className="text-[13px] font-semibold leading-snug text-text flex items-center gap-1.5 min-w-0">
+                              {r.pinned && (
+                                <Pin
+                                  size={10}
+                                  className="text-accent shrink-0 lucide-inline"
+                                  aria-label="Pinned"
+                                />
+                              )}
+                              {r.isNew && (
+                                <Plus
+                                  size={14}
+                                  className="text-accent shrink-0 lucide-inline"
+                                />
+                              )}
+                              <span className="truncate">
+                                <Highlighted text={r.title} indices={r.indices} />
+                              </span>
+                              {r.folder && (
+                                <span className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-normal text-muted bg-bg-hover">
+                                  {r.folder}
+                                </span>
+                              )}
+                              {(r.timestamp || r.statusDot) && (
+                                <span className="ml-auto flex items-center gap-1.5 shrink-0 text-[11px] font-normal text-muted">
+                                  {r.timestamp && <span>{r.timestamp}</span>}
+                                  {r.statusDot && (
+                                    <span
+                                      className={`w-2 h-2 rounded-full pointer-events-none ${
+                                        r.statusDot.pulse ? 'animate-pulse' : ''
+                                      }`}
+                                      style={{ background: `var(${r.statusDot.colorVar})` }}
+                                      aria-hidden="true"
+                                    />
+                                  )}
+                                </span>
+                              )}
+                            </div>
+                            {/* Line 3 — status accent or last-message preview. */}
+                            {r.statusColorVar ? (
+                              r.statusStyle === 'pill' ? (
+                                <div className="text-[12px] leading-snug truncate mt-0.5 flex items-center gap-1.5 min-w-0">
+                                  <span
+                                    className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold text-white"
+                                    style={{ backgroundColor: `var(${r.statusColorVar})` }}
+                                  >
+                                    {r.statusLabel}
+                                  </span>
+                                  {r.statusDetail ? (
+                                    <span className="text-muted truncate">{r.statusDetail}</span>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <div className="text-[12px] leading-snug truncate mt-0.5 flex items-center gap-1.5 min-w-0">
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                      r.statusPulse ? 'animate-pulse' : ''
+                                    }`}
+                                    style={{ backgroundColor: `var(${r.statusColorVar})` }}
+                                  />
+                                  <span className="truncate">
+                                    <span
+                                      className="font-medium"
+                                      style={{ color: `var(${r.statusColorVar})` }}
+                                    >
+                                      {r.statusLabel}
+                                    </span>
+                                    {r.statusDetail ? (
+                                      <span className="text-muted"> · {r.statusDetail}</span>
+                                    ) : null}
+                                  </span>
+                                </div>
+                              )
+                            ) : r.subtitle ? (
+                              <div className="text-[12px] text-muted leading-snug truncate mt-0.5">
+                                {r.subtitleIndices ? (
+                                  <Highlighted text={r.subtitle} indices={r.subtitleIndices} />
+                                ) : (
+                                  r.subtitle
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <span className="shrink-0 flex items-center mt-[1px]">{r.icon}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[13px] flex items-center gap-1.5 min-w-0">
+                              <span className="truncate">
+                                <Highlighted text={r.title} indices={r.indices} />
+                              </span>
+                              {r.folder && (
+                                <span className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-normal text-muted bg-bg-hover">
+                                  {r.folder}
+                                </span>
+                              )}
+                            </div>
+                            {r.subtitle ? (
+                              <div className="text-[11px] text-muted truncate mt-0.5">
+                                {r.subtitleIndices ? (
+                                  <Highlighted text={r.subtitle} indices={r.subtitleIndices} />
+                                ) : (
+                                  r.subtitle
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </Fragment>
+                )
+              })}
         </div>
       </div>
     </div>,

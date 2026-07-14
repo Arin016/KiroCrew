@@ -2,9 +2,22 @@
 // most-recently-active sessions. Kept out of the component so they're unit-testable and
 // so the tinted-session count stays a single configurable value.
 
-// Number of most-recently-active sessions to tint in the sidebar. Constant for now;
-// a follow-up will wire this to a user setting (session-colors config).
-export const RECENT_TINT_COUNT = 5
+// Default number of most-recently-active sessions to tint in the sidebar. Overridable via
+// the server-side `dashboard.recent_tint_count` config (Display settings); 0 disables it.
+export const RECENT_TINT_COUNT = 0
+
+// Upper bound for the configurable tint count. The graded stripe hard-caps width/opacity at
+// 7px/100%, so counts beyond ~5 plateau the most-recent tints — 10 is a sane ceiling.
+export const MAX_RECENT_TINT_COUNT = 10
+
+// Coerce a raw config value (possibly missing / non-numeric / out-of-range) into a valid
+// tint count: rounds, clamps to [0, MAX_RECENT_TINT_COUNT], and falls back to the default.
+export function clampTintCount(n: unknown): number {
+  if (n == null) return RECENT_TINT_COUNT
+  const v = typeof n === 'number' ? n : Number(n)
+  if (!Number.isFinite(v)) return RECENT_TINT_COUNT
+  return Math.min(MAX_RECENT_TINT_COUNT, Math.max(0, Math.round(v)))
+}
 
 /**
  * Rank the up-to-`count` most-recently-active sessions by `last_ts` (descending),

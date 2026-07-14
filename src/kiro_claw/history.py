@@ -587,8 +587,27 @@ class ConversationLog:
                 continue
             length_norm = math.sqrt(1 + doc_chars / 1024)
             score = title_hits * _TITLE_BOOST + content_hits / length_norm
+            # Match-centered content snippet (why the session surfaced when the
+            # title doesn't contain the query). Best-effort, display-only.
+            snippet = ""
+            if content_hits and texts:
+                joined = " ".join(texts)
+                # casefold() to match the hit detection above — .lower() misses
+                # matches casefold finds (ß→ss, İ), yielding an empty snippet
+                # despite content_hits > 0. casefold can shift offsets slightly
+                # (length changes); acceptable for a display-only best-effort
+                # window.
+                pos = joined.casefold().find(query.casefold())
+                if pos >= 0:
+                    start = max(0, pos - 40)
+                    end = min(len(joined), pos + len(query) + 100)
+                    frag = " ".join(joined[start:end].split())
+                    snippet = (
+                        ("…" if start > 0 else "") + frag + ("…" if end < len(joined) else "")
+                    )[:200]
+            out_meta = {**meta, "snippet": snippet} if snippet else meta
             # Negate rank so a smaller (newer) rank wins ties after score desc sort.
-            scored.append((score, -rank, meta))
+            scored.append((score, -rank, out_meta))
         scored.sort(reverse=True)
         return [meta for _, _, meta in scored[:limit]]
 
@@ -818,6 +837,81 @@ class ConversationLog:
         """Invalidate caches for a key after a write operation."""
         self._msg_cache.pop(key, None)
         self._meta_cache.pop(key, None)
+
+    #: Bytes read from the end of a session file for the last-message preview.
+    #: One tail block comfortably covers several trailing JSONL lines without
+    #: paying a full-file parse on large sessions.
+    _PREVIEW_TAIL_BYTES = 16_384
+    #: Max characters returned in a last-message preview.
+    _PREVIEW_MAX_CHARS = 120
+
+    def last_message_preview(self, key: str) -> str:
+        """Return a short preview of the session's last message ('' if none).
+
+        Reads only the tail of the JSONL file (bounded), scanning backwards
+        for the newest parseable message line — cheap even on large sessions.
+        Handles both plain-string ``content`` and structured list-form content
+        blocks (text extracted from ``{"type": "text"}`` / ``text`` fields).
+        If the initial tail window yields nothing parseable (a single trailing
+        line larger than the window), retries once with a 16× window before
+        giving up.
+        """
+        path = self._path(key)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return ""
+        for window in (self._PREVIEW_TAIL_BYTES, self._PREVIEW_TAIL_BYTES * 16):
+            try:
+                with open(path, "rb") as f:
+                    if size > window:
+                        f.seek(size - window)
+                        f.readline()  # discard the (likely partial) first line
+                    tail = f.read().decode("utf-8", errors="replace")
+            except OSError:
+                return ""
+            for line in reversed(tail.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("_type") == "metadata":
+                    continue
+                text = self._content_text(data.get("content"))
+                if not text:
+                    continue
+                preview = " ".join(text.split())
+                if len(preview) > self._PREVIEW_MAX_CHARS:
+                    preview = preview[: self._PREVIEW_MAX_CHARS].rstrip() + "…"
+                return preview
+            if size <= window:
+                break  # the window already covered the whole file — no retry
+        return ""
+
+    @staticmethod
+    def _content_text(content: object) -> str:
+        """Best-effort plain text from a message ``content`` field.
+
+        Plain strings pass through; list-form content blocks (the structured
+        shape newer turns use) contribute their ``text`` fields in order.
+        Anything else yields ''.
+        """
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    t = block.get("text")
+                    if isinstance(t, str) and t.strip():
+                        parts.append(t)
+            return " ".join(p.strip() for p in parts if p.strip())
+        return ""
 
     def get_metadata(self, key: str) -> dict:
         """Return session metadata for *key*."""

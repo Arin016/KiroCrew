@@ -79,6 +79,7 @@ from kiro_claw.dashboard.origin import (
     parse_dashboard_url,
     resolve_dashboard_host,
 )
+from kiro_claw.dashboard.stale_asset_watchdog import run_stale_asset_watchdog
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
 from kiro_claw.embeddings import OllamaManager, _validate_url, make_sync_embed_fn
@@ -125,7 +126,12 @@ from kiro_claw.slack.format import (
     split_message,
     to_slack_mrkdwn,
 )
-from kiro_claw.slack.handler import build_timing_footer, is_thread_incognito, is_thread_temporary
+from kiro_claw.slack.handler import (
+    _get_agent_for_session,
+    build_timing_footer,
+    is_thread_incognito,
+    is_thread_temporary,
+)
 from kiro_claw.subagent import (
     INJECTION_TIMEOUT,
     SubagentInfo,
@@ -2811,6 +2817,7 @@ class GatewayOrchestrator:
                                     safe_response,
                                     source_thread=parent_key,
                                     source_user="subagent",
+                                    agent=_get_agent_for_session(parent_key),
                                 )
                             except Exception:
                                 logger.warning(
@@ -3967,6 +3974,14 @@ class GatewayOrchestrator:
                     webbrowser.open(dashboard_url)
 
         asyncio.create_task(_start_bg_session())
+
+        # Stale-asset watchdog: detects when an update prunes the running
+        # install's static assets and triggers graceful shutdown so the
+        # supervisor can restart a fresh process. (Mesh-2690)
+        _watchdog = asyncio.create_task(run_stale_asset_watchdog(shutdown_event))
+        self._background_tasks.add(_watchdog)
+        _watchdog.add_done_callback(self._background_tasks.discard)
+
         print("🐾 KiroClaw gateway starting…")
         print(f"\n{DATA_WARNING}\n")
 

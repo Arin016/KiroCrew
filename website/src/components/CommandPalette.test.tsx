@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, act, cleanup, renderHook } from '@testing-library/react'
+import { render, screen, fireEvent, act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
@@ -28,6 +28,8 @@ const H = vi.hoisted(() => {
   // (`newSessionWithToken`) calls are assertable across re-renders.
   const enterInsertOrNewSession = vi.fn()
   const newSessionWithToken = vi.fn()
+  const navigate = vi.fn()
+  const onActivateRecent = vi.fn()
   const allResult = {
     id: 'all:1',
     providerId: 'all',
@@ -48,6 +50,17 @@ const H = vi.hoisted(() => {
     indices: [] as number[],
     onActivate: onActivateSess,
   }
+  const recentResult = {
+    id: 'recents:cur:chat-1',
+    providerId: 'recents',
+    title: 'Recent Session',
+    subtitle: 'last message preview',
+    icon: null,
+    score: 0,
+    indices: [] as number[],
+    groupLabel: 'Current',
+    onActivate: onActivateRecent,
+  }
   const allProvider = { id: 'all', label: 'All', icon: null, search: vi.fn(async () => [allResult]) }
   const sessionsProvider = {
     id: 'sessions',
@@ -63,6 +76,8 @@ const H = vi.hoisted(() => {
   const knowledgeProvider = { id: 'knowledge', label: 'Knowledge', icon: null, search: vi.fn(() => []) }
   const skillsProvider = { id: 'skills', label: 'Skills', icon: null, search: vi.fn(() => []) }
   const promptsProvider = { id: 'prompts', label: 'Prompts', icon: null, search: vi.fn(() => []) }
+  const artifactsProvider = { id: 'artifacts', label: 'Artifacts', icon: null, search: vi.fn(() => []) }
+  const recentsProvider = { id: 'recents', label: 'Recent', icon: null, search: vi.fn(async () => [recentResult]) }
   // Stable return for the mocked keyboard-nav hook (constant identities avoid
   // re-render loops in the palette's effects).
   const navReturn = {
@@ -81,6 +96,9 @@ const H = vi.hoisted(() => {
   return {
     onActivateAll,
     onActivateSess,
+    onActivateRecent,
+    navigate,
+    recentResult,
     enterInsertOrNewSession,
     newSessionWithToken,
     allResult,
@@ -92,6 +110,8 @@ const H = vi.hoisted(() => {
     knowledgeProvider,
     skillsProvider,
     promptsProvider,
+    artifactsProvider,
+    recentsProvider,
     navReturn,
     nav,
   }
@@ -130,6 +150,12 @@ vi.mock('./commandPalette/providers/skillsProvider', () => ({
 vi.mock('./commandPalette/providers/promptsProvider', () => ({
   usePromptsProvider: () => H.promptsProvider,
 }))
+vi.mock('./commandPalette/providers/artifactsProvider', () => ({
+  useArtifactsProvider: () => H.artifactsProvider,
+}))
+vi.mock('./commandPalette/providers/recentsProvider', () => ({
+  useRecentsProvider: () => H.recentsProvider,
+}))
 // usePaletteActions backs the §2 Enter matrix (composer-insert + new-session).
 // Return the STABLE hoisted spies CommandPalette consumes so the insert-token
 // branch of dispatchEnter is assertable (which sink, with which token); the
@@ -138,7 +164,16 @@ vi.mock('./commandPalette/paletteActions', () => ({
   usePaletteActions: () => ({
     enterInsertOrNewSession: H.enterInsertOrNewSession,
     newSessionWithToken: H.newSessionWithToken,
+    navigate: H.navigate,
   }),
+}))
+
+// The palette reads live slot state (running/approval/pin/unread) to key the
+// recents search query. Mock the typed selector hook with a minimal dashboard
+// slice so the component renders without the real Redux store.
+vi.mock('../store', () => ({
+  useAppSelector: (sel: (s: unknown) => unknown) =>
+    sel({ dashboard: { slots: [], unreadSlots: [] } }),
 }))
 
 import CommandPalette from './CommandPalette'
@@ -203,13 +238,26 @@ describe('useCommandPalette — global trigger', () => {
 })
 
 describe('CommandPalette — render', () => {
-  it('renders the active (All) provider results and the full tab strip when open', async () => {
+  it('opens onto the recents quick-switcher (no tab strip) with grouped rows', async () => {
     render(<CommandPalette open onClose={vi.fn()} />, { wrapper })
-    expect(await screen.findByText('All Result')).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Sessions' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Pages' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Actions' })).toBeInTheDocument()
+    // Empty query -> recents provider (quick switcher), NOT the All aggregator.
+    expect(await screen.findByText('Recent Session')).toBeInTheDocument()
+    expect(screen.getByText('Current')).toBeInTheDocument() // group header
+    expect(screen.queryByText('All Result')).toBeNull()
+    // The visible tab strip is gone — scoping is prefix+Tab / sigil driven.
+    expect(screen.queryByRole('tab')).toBeNull()
+    expect(screen.getByPlaceholderText('Search for anything')).toBeInTheDocument()
+  })
+
+  it('typing a query switches from recents to the All aggregator', async () => {
+    render(<CommandPalette open onClose={vi.fn()} />, { wrapper })
+    await screen.findByText('Recent Session')
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search everywhere' }), { target: { value: 'alice' } })
+    // Debounced 150ms before the All search fires.
+    expect(await screen.findByText('All Result', {}, { timeout: 2000 })).toBeInTheDocument()
+    // The provider switches to All immediately (a transient search('') fires);
+    // the typed query lands after the 150ms debounce.
+    await waitFor(() => expect(H.allProvider.search).toHaveBeenCalledWith('alice'))
   })
 
   it('renders nothing when closed', () => {
@@ -219,35 +267,64 @@ describe('CommandPalette — render', () => {
 })
 
 describe('CommandPalette — keyboard & activation', () => {
-  it('Tab cycles the active tab and scopes results to that provider', async () => {
+  it('prefix + Tab adopts the hinted scope and narrows to that provider', async () => {
     render(<CommandPalette open onClose={vi.fn()} />, { wrapper })
-    await screen.findByText('All Result')
+    await screen.findByText('Recent Session')
+
+    // "sess" uniquely prefixes Sessions -> the tab hint appears.
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search everywhere' }), { target: { value: 'sess' } })
+    expect(await screen.findByText('Sessions')).toBeInTheDocument() // the hint label
 
     act(() => {
       fireEvent.keyDown(window, { key: 'Tab' })
     })
 
+    // Scope chip adopted: placeholder narrows and the sessions provider serves.
+    expect(await screen.findByPlaceholderText('Search sessions…')).toBeInTheDocument()
     expect(await screen.findByText('Session Result')).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Sessions' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('a leading sigil ($) instantly scopes to Skills and strips the sigil', async () => {
+    render(<CommandPalette open onClose={vi.fn()} />, { wrapper })
+    await screen.findByText('Recent Session')
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search everywhere' }), { target: { value: '$sla' } })
+
+    expect(await screen.findByPlaceholderText('Search skills…')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Search everywhere' })).toHaveValue('sla')
+  })
+
+  it('Backspace on an empty scoped query pops the scope chip', async () => {
+    render(<CommandPalette open onClose={vi.fn()} />, { wrapper })
+    await screen.findByText('Recent Session')
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search everywhere' }), { target: { value: '$' } })
+    await screen.findByPlaceholderText('Search skills…')
+
+    act(() => {
+      fireEvent.keyDown(window, { key: 'Backspace' })
+    })
+
+    expect(await screen.findByPlaceholderText('Search for anything')).toBeInTheDocument()
   })
 
   it('Enter (hook onChoose) activates the selected result and closes', async () => {
     const onClose = vi.fn()
     render(<CommandPalette open onClose={onClose} />, { wrapper })
-    await screen.findByText('All Result')
+    await screen.findByText('Recent Session')
 
     act(() => {
       H.nav.current?.onChoose?.(0)
     })
 
-    expect(H.onActivateAll).toHaveBeenCalledTimes(1)
+    expect(H.onActivateRecent).toHaveBeenCalledTimes(1)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('wires Escape (hook onClose) and the close button to the onClose prop', async () => {
     const onClose = vi.fn()
     render(<CommandPalette open onClose={onClose} />, { wrapper })
-    await screen.findByText('All Result')
+    await screen.findByText('Recent Session')
 
     // Escape is handled inside useListKeyboardNav — assert the same onClose was
     // threaded into the hook so Escape closes the palette.
@@ -260,11 +337,11 @@ describe('CommandPalette — keyboard & activation', () => {
   it('clicking a result row activates it and closes', async () => {
     const onClose = vi.fn()
     render(<CommandPalette open onClose={onClose} />, { wrapper })
-    const row = await screen.findByText('All Result')
+    const row = await screen.findByText('Recent Session')
 
     fireEvent.mouseDown(row)
 
-    expect(H.onActivateAll).toHaveBeenCalledTimes(1)
+    expect(H.onActivateRecent).toHaveBeenCalledTimes(1)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
@@ -302,10 +379,13 @@ describe('CommandPalette — per-type Enter matrix (dispatchEnter routing)', () 
 
   async function mountWith(result: Result): Promise<{ onClose: ReturnType<typeof vi.fn> }> {
     const onClose = vi.fn()
-    // Active tab on open is "All" — drive it to surface the single fixture.
+    // Empty query opens on recents; type a query so the All aggregator serves
+    // the single fixture (unscoped typing searches everything).
     H.allProvider.search.mockResolvedValue([result])
     render(<CommandPalette open onClose={onClose} />, { wrapper })
-    await screen.findByText(result.title)
+    await screen.findByText('Recent Session')
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search everywhere' }), { target: { value: 'fixture' } })
+    await screen.findByText(result.title, {}, { timeout: 2000 })
     return { onClose }
   }
 
@@ -353,7 +433,10 @@ describe('CommandPalette — per-type Enter matrix (dispatchEnter routing)', () 
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('Skills (insert-token): Enter inserts the $token into the active composer', async () => {
+  it('Skills: Enter navigates to the skills catalog (palette-as-nav) and closes', async () => {
+    // Skills rows are a NAVIGATION target now — Enter opens /capabilities to
+    // view/edit the skill rather than inserting a $token (there is no
+    // per-skill deep link yet). Supersedes the old insert-token contract.
     const { onClose } = await mountWith(
       fixture({
         title: 'Skill Row',
@@ -362,12 +445,13 @@ describe('CommandPalette — per-type Enter matrix (dispatchEnter routing)', () 
       }),
     )
     choose(false)
-    expect(H.enterInsertOrNewSession).toHaveBeenCalledWith('$brazil')
+    expect(H.navigate).toHaveBeenCalledWith('/capabilities')
+    expect(H.enterInsertOrNewSession).not.toHaveBeenCalled()
     expect(H.newSessionWithToken).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('Skills (insert-token): ⌘Enter opens a new session seeded with the $token', async () => {
+  it('Skills: ⌘Enter also navigates (no distinct modifier action)', async () => {
     const { onClose } = await mountWith(
       fixture({
         title: 'Skill Row',
@@ -376,8 +460,8 @@ describe('CommandPalette — per-type Enter matrix (dispatchEnter routing)', () 
       }),
     )
     choose(true)
-    expect(H.newSessionWithToken).toHaveBeenCalledWith('$brazil')
-    expect(H.enterInsertOrNewSession).not.toHaveBeenCalled()
+    expect(H.navigate).toHaveBeenCalledWith('/capabilities')
+    expect(H.newSessionWithToken).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 

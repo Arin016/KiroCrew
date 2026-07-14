@@ -576,6 +576,8 @@ async def api_kiro_usage(request: web.Request) -> web.Response:
             billing = {
                 "credits_used": usage.get("credits_used"),
                 "credits_plan": usage.get("credits_plan"),
+                "credits_overage": usage.get("credits_overage"),
+                "percentage": usage.get("percentage"),
                 "cost_usd": usage.get("cost_usd"),
                 "resets": usage.get("resets"),
                 "plan": usage.get("plan"),

@@ -521,6 +521,45 @@ def _ascii_slot_key(name: str) -> str:
     return re.sub(r"[^\x20-\x7e]", "-", name)
 
 
+# Characters that survive the history layer's ``_safe_key()`` filename fold
+# (``re.sub(r"[^\w\-.]", "_", key)``). ``re.ASCII`` pins ``\w`` to
+# ``[a-zA-Z0-9_]`` — the input is already ASCII-folded, so this matches what
+# ``_safe_key`` produces byte-for-byte.
+_SLOT_KEY_FILENAME_UNSAFE_RE = re.compile(r"[^\w\-.]", flags=re.ASCII)
+
+
+def _normalize_slot_key(name: str) -> str:
+    """Return *name* folded to the exact charset of a persisted session filename.
+
+    Guarantees the invariant a restart depends on: for any input,
+    ``_safe_key(_history_key_for(key))`` == ``f"dashboard_{key}"`` — i.e. the
+    slot key equals its JSONL filename stem minus the ``dashboard_`` prefix.
+
+    Three steps compose: strip a ``dashboard:``/``dashboard_`` transport
+    prefix (a full session key or filename stem sometimes reaches slot-name
+    positions; ``_history_key_for`` strips the same prefixes when building the
+    history key, so such names already share one transcript with their bare
+    form and must share one slot), then :func:`_ascii_slot_key` (header
+    safety, Mesh-2435), then a filename fold using the same character class as
+    ``history._safe_key``.
+
+    Without the filename fold, a display-style slot name (e.g.
+    ``Artifact: My Doc`` from the artifact iterate flow) diverges from its
+    sanitized filename stem. After a gateway restart, ``restore_open_slots``
+    rehydrates the raw key from ``open_slots.json`` while
+    ``restore_recent_sessions`` derives a second slot from the filename stem —
+    the dedup guards compare mismatched strings, so the user sees two
+    identical sidebar sessions backed by one transcript, and the next
+    ``_persist_open_slots`` flush cements both keys. Idempotent;
+    auto-generated ``chat-N-<ts>`` keys are returned unchanged.
+    """
+    if name.startswith("dashboard:"):
+        name = name[len("dashboard:"):]
+    while name.startswith("dashboard_"):
+        name = name[len("dashboard_"):]
+    return _SLOT_KEY_FILENAME_UNSAFE_RE.sub("_", _ascii_slot_key(name))
+
+
 class _ChatSlot:
     """Independent chat session that runs server-side."""
 
@@ -1701,15 +1740,23 @@ class DashboardState:
         app: str = "",
     ) -> _ChatSlot:
         """Return existing slot or create a new one."""
+        requested_name = ""
         if name:
             # Slot keys flow into the session key (``dashboard:{slot.key}``)
-            # that kiroclaw-core sends as the ``X-Session-Key`` HTTP header on
-            # every gateway call. Header values are latin-1 (RFC 7230), so a
-            # non-latin-1 char in a name/title-derived key would abort every
-            # tool call (Mesh-2435). Normalize to ASCII *before* the lookup so
-            # the key is header-, filesystem-, and match-safe, and repeat calls
-            # with the same name resolve to the same slot.
-            name = _ascii_slot_key(name)
+            # that kiroclaw-core sends as the ``X-Session-Key`` HTTP header
+            # (latin-1 per RFC 7230, Mesh-2435) AND into the persisted JSONL
+            # filename via the history layer's lossy ``_safe_key()`` fold.
+            # Normalize to the filename charset *before* the lookup so the key
+            # is header-, filesystem-, and restore-round-trip-safe: the key now
+            # equals its filename stem, so the two restart restore paths
+            # (open_slots.json replay vs filename-stem walk) converge on one
+            # slot instead of duplicating the session in the sidebar.
+            requested_name = name
+            name = _normalize_slot_key(name)
+            if not name:
+                # Degenerate input (e.g. a bare "dashboard:" prefix) — fall
+                # through to an auto-generated key without title seeding.
+                requested_name = ""
         if name and name in self._slots:
             existing = self._slots[name]
             if memory_mode is not None and memory_mode != existing.memory_mode:
@@ -1722,6 +1769,16 @@ class DashboardState:
             ts = int(time.time())
             name = f"chat-{self._slot_counter}-{ts}"
         slot = _ChatSlot(name, agent=agent, workspace=workspace, model=model, mode=mode, memory_mode=memory_mode or "persistent")
+        if requested_name and requested_name != name:
+            # The caller asked for a human-readable name (e.g. "Artifact: My
+            # Doc"); the key had to be folded, but the pretty form makes a
+            # better initial title than the "New session" placeholder. Titles
+            # are dashboard-surfaced, so apply the same redaction as explicit
+            # title pinning in api_chat_slot_create. ``_titled`` stays False —
+            # auto-title and explicit pinning can still override.
+            pretty_title, _ = redact_exfiltration_urls(requested_name)
+            pretty_title, _ = redact_credentials(pretty_title)
+            slot.title = pretty_title
         slot._tab_id = uuid.uuid4().hex[:12]
         slot._on_message = self._broadcast_chat_message
         slot._app = app

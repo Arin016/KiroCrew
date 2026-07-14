@@ -26,8 +26,7 @@ import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
 import { gcOrphanedStorage } from './utils/storageGc'
-import { codeBrowserBranchUrl, codeBrowserCommitUrl } from './lib/codeBrowser'
-import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Settings, Code, RefreshCw, Palette, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins, Contact, GitBranch, GitCommitHorizontal } from 'lucide-react'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Code, RefreshCw, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, KanbanSquare, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, ChevronUp, MoreHorizontal, Coins, Contact } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSensors, DragOverlay, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
@@ -643,8 +642,6 @@ export default function App() {
   const { connected, updateProgress } = useAppSelector(s => s.dashboard)
   const updateAvailable = useAppSelector(s => s.dashboard.status?.update_available)
   const version = useAppSelector(s => s.dashboard.status?.version) || '—'
-  const buildBranch = useAppSelector(s => s.dashboard.status?.branch) || ''
-  const buildCommit = useAppSelector(s => s.dashboard.status?.commit) || ''
   // Track whether the session-expired auth banner is currently injected by
   // api/client.ts. When auth is the real reason the gateway is unreachable,
   // the red top-banner already tells the user what to do (paste a fresh
@@ -712,7 +709,7 @@ export default function App() {
     )
   }, [isPopout, isEmbed, navigate, dispatch])
 
-  const { colorTheme, setColorTheme, allThemes, preference: modePref, cycle: cycleMode, setTheme: setModePref, onboarded, markOnboarded } = useTheme()
+  const { colorTheme, setColorTheme, allThemes, preference: modePref, setTheme: setModePref, onboarded, markOnboarded } = useTheme()
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('mc-onboarded'))
   // Dismiss onboarding when server reports user is already onboarded
   // (handles the race: boot fetch completes after useState initializer ran).
@@ -886,14 +883,12 @@ export default function App() {
   const [showUpdateModal, setShowUpdateModal] = useState(false)
   const [kiroUsageOpen, setKiroUsageOpen] = useState(false)
   const [changes, setChanges] = useState('')
-  const [checking, setChecking] = useState(false)
   const [showChangelog, setShowChangelog] = useState(false)
   const [autoUpdate, setAutoUpdate] = useState(true)
   const [fullChangelog, setFullChangelog] = useState('')
   const [showFull, setShowFull] = useState(false)
   const [devMode, setDevMode] = useState(() => localStorage.getItem('mc-dev-mode') === '1')
   const [devPageSeen, setDevPageSeen] = useState(true)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const toggleShortcutsModal = useCallback(() => setShortcutsOpen(p => !p), [])
   // Search Everywhere command palette (Mesh-2151) — global double-Shift / ⌘K
@@ -994,14 +989,6 @@ export default function App() {
       api.chatSlotModel(activeSlot, models[prevIdx].name)
     },
   })
-  const settingsMenuRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!settingsOpen) return
-    const onClick = (e: MouseEvent) => { if (settingsMenuRef.current && !settingsMenuRef.current.contains(e.target as Node)) setSettingsOpen(false) }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSettingsOpen(false) }
-    const t = setTimeout(() => { document.addEventListener('click', onClick); document.addEventListener('keydown', onKey) }, 0)
-    return () => { clearTimeout(t); document.removeEventListener('click', onClick); document.removeEventListener('keydown', onKey) }
-  }, [settingsOpen])
 
   // Kiro CLI monthly credit usage. /api/sessions/usage TRIGGERS the background
   // `kiro-cli /usage` fetch AND returns the cached result, so the pill is
@@ -1122,17 +1109,6 @@ export default function App() {
 
   // Browser push notification on new notification — see src/hooks/useNativeNotification.ts
   useNativeNotification(botName, avatar)
-
-  const checkForUpdate = useCallback(async () => {
-    setChecking(true)
-    try {
-      const info = await api.checkUpdate()
-      if (info.auto_update !== undefined) setAutoUpdate(info.auto_update)
-      setChanges(info.changes || '')
-      setShowChangelog(true)
-    } catch { /* ignore */ }
-    setChecking(false)
-  }, [])
 
   const [updateError, setUpdateError] = useState('')
 
@@ -1320,32 +1296,6 @@ export default function App() {
           >
             <TerminalSquare size={13} /> {!isMobile && 'Terminal'}
           </button>}
-          <button className="top-bar-pill bg-card hover:text-text" onClick={() => setSettingsOpen(!settingsOpen)}>
-            {updateProgress ? <><Loader2 size={12} className="animate-spin" />{!isMobile && <span className="font-mono text-[13px]">Updating…</span>}</> : updateAvailable ? <span className="font-mono text-[13px] text-accent">{isMobile ? '↑' : `v${version} ↑`}</span> : !isMobile ? <span className="font-mono text-[13px]">v{version}</span> : <Settings size={13} />}
-          </button>
-          {settingsOpen && (
-            <div ref={settingsMenuRef} className="absolute right-0 top-full mt-1 z-[9999] bg-bg-elevated border border-border rounded-xl shadow-lg min-w-[200px] p-0.5 gap-0.5 flex flex-col animate-slide-up">
-              {(buildBranch || buildCommit) && (
-                <div className="px-3 py-2 border-b border-border mb-0.5">
-                  <div className="text-[12px] font-mono text-text" title="Running build version">v{version}</div>
-                  {buildBranch && <a href={codeBrowserBranchUrl(buildBranch)} target="_blank" rel="noopener noreferrer" className="text-[11px] font-mono text-muted hover:text-text no-underline hover:underline flex items-center gap-1.5 mt-1" title="Browse this branch on GitHub"><GitBranch size={11} className="shrink-0" /> <span className="truncate">{buildBranch}</span></a>}
-                  {buildCommit && <a href={codeBrowserCommitUrl(buildCommit)} target="_blank" rel="noopener noreferrer" className="text-[11px] font-mono text-muted hover:text-text no-underline hover:underline flex items-center gap-1.5 mt-0.5" title="View this commit on GitHub"><GitCommitHorizontal size={11} className="shrink-0" /> {buildCommit}</a>}
-                </div>
-              )}
-              <button className="w-full text-left px-3 py-2 rounded-md text-[12px] font-medium text-muted hover:text-text hover:bg-bg-hover cursor-pointer transition-colors border-none bg-transparent flex items-center gap-2" onClick={() => { setSettingsOpen(false); checkForUpdate() }}>{checking ? <><Loader2 size={13} className="animate-spin" /> Checking…</> : updateAvailable ? <><Package size={13} /> Update Available</> : <><RefreshCw size={13} /> Check for Updates</>}</button>
-              <div className="px-3 py-2">
-                <div className="text-[12px] font-medium text-muted flex items-center gap-1.5 mb-1.5"><Palette size={13} /> Theme</div>
-                <div className="flex items-center gap-2 pl-1">
-                  <select className="flex-1 min-w-0 bg-bg-hover border border-border rounded-md px-2 py-1 text-[12px] text-text cursor-pointer outline-none appearance-none" value={colorTheme} onChange={e => setColorTheme(e.target.value)}>
-                    {allThemes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                  </select>
-                  <button className="shrink-0 w-7 h-7 rounded-md bg-transparent text-muted flex items-center justify-center cursor-pointer hover:text-text transition-all" onClick={e => { e.stopPropagation(); cycleMode() }} title={modePref}>
-                    {modePref === 'dark' ? <Moon size={14} /> : modePref === 'light' ? <Sun size={14} /> : <Monitor size={14} />}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </header>
 
@@ -1625,6 +1575,7 @@ export default function App() {
                 active={activePath === s.path}
                 collapsed={effectiveCollapsed}
                 onClick={closeMobileNav}
+                badge={updateAvailable ? <span title="Update available" className={effectiveCollapsed ? 'absolute top-1 right-1 w-2 h-2 bg-accent rounded-full z-10' : 'absolute top-1/2 -translate-y-1/2 right-2 w-2 h-2 bg-accent rounded-full z-10'} /> : undefined}
               />
             </div>
           )

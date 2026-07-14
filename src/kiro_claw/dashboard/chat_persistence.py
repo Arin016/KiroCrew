@@ -17,7 +17,7 @@ from kiro_claw.dashboard.chat_utils import (
     _normalize_model,
     _sync_dashboard_slots,
 )
-from kiro_claw.dashboard.state import DashboardState, _ChatSlot
+from kiro_claw.dashboard.state import DashboardState, _ChatSlot, _normalize_slot_key
 from kiro_claw.effort import EFFORT_LEVELS, EFFORT_VALUES
 from kiro_claw.history import _archive_lines
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
@@ -218,6 +218,12 @@ def restore_open_slots(state: DashboardState) -> int:
                 "restore_open_slots: rejecting key with path separators: %r", raw
             )
             continue
+        # Fold to the canonical (filename-charset) key. Snapshots written
+        # before slot-key normalization landed may carry a raw display-style
+        # key (e.g. "Artifact: My Doc") alongside its sanitized twin — after
+        # folding, the second form hits the dedup guard below instead of
+        # restoring a duplicate sidebar session backed by the same transcript.
+        raw = _normalize_slot_key(raw)
         if raw in state._slots:
             continue
         try:
@@ -278,6 +284,11 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     """
     if not state.conversation_log:
         return None
+    # Canonicalize to the filename-charset key (idempotent) so callers holding
+    # a stale raw display-style key (e.g. a cron's caller_session recorded
+    # before slot-key normalization) resolve to the same slot the restore
+    # paths create — get_or_create_slot() below applies the same fold.
+    slot_name = _normalize_slot_key(slot_name)
     if slot_name in state._slots:
         return state._slots[slot_name]
     history_key = _history_key_for(slot_name)

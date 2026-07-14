@@ -1,18 +1,22 @@
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { shallowEqual } from 'react-redux'
 import { useAppSelector, useAppDispatch } from '../../store'
 import { clearFocusToolCallId } from '../../store/chatSlice'
 import { useSimplifiedToolNames } from '../../hooks/useSimplifiedToolNames'
-import { LoaderCircle, CircleSlash, CircleDot, Lock } from 'lucide-react'
+import { LoaderCircle, CircleSlash, CircleDot, Lock, PanelRight } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { ChatMessage } from '../../types'
 import { ToolDetails } from './ToolDetails'
 import { registerToolPill } from '../../store/toolPillRegistry'
+import { extractToolFilePath } from '../../utils/toolFilePath'
+import { isSafePath } from '../../utils/safePath'
+import { fileReadUrl } from '../../utils/fileReadUrl'
 
 /** Inline tool call pill. Click toggles an expanded panel below the pill that
  *  shows purpose / input / output (the same details that previously lived in
  *  the Activity sidebar's deprecated "Tools" tab). */
-export default memo(function ToolCallLine({ message, running: _running, slot }: { message: ChatMessage; running: boolean; slot?: string }) {
+export default memo(function ToolCallLine({ message, running: _running, slot, onFileOpen }: { message: ChatMessage; running: boolean; slot?: string; onFileOpen?: (path: string) => void }) {
   const dispatch = useAppDispatch()
   const label = message.content.replace(/^🔧\s*/, '')
   const toolCallId = message.meta?.tool_call_id as string | undefined
@@ -154,6 +158,27 @@ export default memo(function ToolCallLine({ message, running: _running, slot }: 
     }
   }, [focusToolCallId, effectiveId, dispatch])
 
+  // File-op tool pills (read/edit/write) get a side-panel open affordance.
+  // Extract the fs path from the tool's JSON args; the chip is gated on a
+  // safe path AND an onFileOpen handler AND a successful HEAD probe (the file
+  // still exists on disk).
+  const filePath = useMemo(() => extractToolFilePath(input), [input])
+  const probeEnabled = !!filePath && isSafePath(filePath) && !!onFileOpen
+  // HEAD-probe via React Query (project guideline: no manual useState/useEffect
+  // fetch for server state). Gives request dedup across pills touching the same
+  // file and stale-while-revalidate caching so re-renders don't re-probe —
+  // replacing the manual AbortController + onFileOpenRef + setFileExists dance.
+  const { data: fileExists = false } = useQuery({
+    queryKey: ['tool-pill-file-exists', filePath],
+    queryFn: async ({ signal }) => {
+      const r = await fetch(fileReadUrl(filePath!), { method: 'HEAD', signal })
+      return r.ok
+    },
+    enabled: probeEnabled,
+    staleTime: 30_000,
+  })
+  const showFileOpen = probeEnabled && fileExists
+
   const Icon = isDone
     ? (isRejected ? CircleSlash : CircleDot)
     : hasPendingPerm ? Lock
@@ -172,6 +197,21 @@ export default memo(function ToolCallLine({ message, running: _running, slot }: 
     : hasPendingPerm ? 'var(--warn)' : 'var(--accent)'
   const barStyle = `color-mix(in srgb, ${barColor} 70%, transparent)`
   const toolLabel = (simplified && (purpose || message.meta?.purpose)) ? (purpose || message.meta?.purpose as string) : label
+
+  // Design C: surface the file basename as a chip that hugs the open-in-pane
+  // icon, so the affordance names the file it opens — crucial in simplified /
+  // purpose mode where the label is prose and no path is otherwise shown. The
+  // full path stays in the button tooltip and the expanded details.
+  const basename = useMemo(() => (filePath ? (filePath.split('/').pop() || filePath) : null), [filePath])
+  // When the chip is shown, strip the now-redundant raw path out of the visible
+  // label. Raw mode `Read /a/b/c.ts` → `Read`; purpose-mode prose contains no
+  // path substring → unchanged. Falls back to the full label if stripping
+  // would leave it empty (label was nothing but the path).
+  const displayLabel = useMemo(() => {
+    if (!showFileOpen || !filePath) return toolLabel
+    const stripped = toolLabel.split(filePath).join('').replace(/\s+/g, ' ').trim()
+    return stripped || toolLabel
+  }, [showFileOpen, filePath, toolLabel])
   // Both running and pending-approval pills shimmer — the highlight color
   // tracks the status so pending shimmers warn-yellow (matching the approval
   // bar) and running shimmers accent.
@@ -220,6 +260,7 @@ export default memo(function ToolCallLine({ message, running: _running, slot }: 
 
   return (
     <div ref={containerRef} className="ft-block-reveal">
+      <div className="inline-flex items-start gap-1 group/toolpill">
       <button
         ref={pillButtonRef}
         className={`inline-flex items-start gap-1 text-[13px] font-mono px-2 py-0.5 rounded-md transition-all text-left focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none ${hasPendingPerm ? 'cursor-default' : 'cursor-pointer hover:brightness-110'}`}
@@ -239,11 +280,33 @@ export default memo(function ToolCallLine({ message, running: _running, slot }: 
             }}
             animate={{ backgroundPosition: ['100% 0%', '-50% 0%'] }}
             transition={{ duration: 2.4, repeat: Infinity, ease: 'linear' }}
-          >{toolLabel}</motion.span>
+          >{displayLabel}</motion.span>
         ) : (
-          <span className="break-words min-w-0 text-muted hover:text-text transition-colors">{toolLabel}</span>
+          <span className="break-words min-w-0 text-muted hover:text-text transition-colors">{displayLabel}</span>
         )}
       </button>
+
+      {/* Side-panel open: a basename CHIP hugging the open-in-pane icon, as one
+          clickable unit and a SIBLING of the pill (never nested) — clicking it
+          opens the file in the right-hand MarkdownPanel and must NOT toggle the
+          pill's expand. stopPropagation guards against the click bubbling to any
+          ancestor handler. Unlike the pill label, the chip is always visible: it
+          carries the filename (the whole point in purpose mode) and the full
+          path lives in the tooltip + expanded details. Neutral at rest, accent
+          on hover; the icon inherits the button's currentColor. */}
+      {showFileOpen && filePath && (
+        <button
+          className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[12px] leading-tight bg-bg-hover text-muted hover:text-accent hover:bg-accent/10 cursor-pointer transition-colors focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none"
+          style={{ marginTop: '1px' }}
+          onClick={(e) => { e.stopPropagation(); onFileOpen!(filePath) }}
+          title={`Open ${filePath} in side panel`}
+          aria-label={`Open ${filePath} in side panel`}
+        >
+          <span className="max-w-[240px] truncate">{basename}</span>
+          <PanelRight size={12} className="shrink-0" />
+        </button>
+      )}
+      </div>
 
       <AnimatePresence initial={false}>
         {effectivelyExpanded && (

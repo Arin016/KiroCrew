@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Optional
@@ -29,7 +30,9 @@ from kiro_claw.testing.harness import (
     _resolve_workspace_src,
     _terminate_process_group,
     _wait_for_ready_line,
+    parse_ready_line,
     spawn_feature_gateway,
+    terminate_pgid,
 )
 
 
@@ -167,6 +170,53 @@ def test_ready_line_raises_on_malformed_payload(bad_payload: str) -> None:
     assert "malformed" in msg or "expected dict" in msg or "missing required key" in msg
 
 
+# ── parse_ready_line ────────────────────────────────────────────────────
+
+
+def test_parse_ready_line_valid() -> None:
+    payload = parse_ready_line(
+        f'{READY_PREFIX}{{"port": 42, "token": "tok", "pid": 7, "home": "/h"}}'
+    )
+    assert payload == {"port": 42, "token": "tok", "pid": 7, "home": "/h"}
+
+
+@pytest.mark.parametrize(
+    "bad_payload",
+    [
+        "not-json",              # invalid JSON
+        "[1, 2, 3]",             # valid JSON, not a dict
+        '"scalar"',              # valid JSON, scalar
+        '{"foo": 1}',            # dict, missing both required keys
+        '{"port": 1}',           # dict, missing token
+        '{"token": "t"}',        # dict, missing port
+    ],
+)
+def test_parse_ready_line_rejects_bad_payload(bad_payload: str) -> None:
+    with pytest.raises(GatewaySpawnError) as exc:
+        parse_ready_line(f"{READY_PREFIX}{bad_payload}")
+    msg = str(exc.value)
+    assert "malformed" in msg or "expected dict" in msg or "missing required key" in msg
+
+
+@pytest.mark.parametrize(
+    "non_matching_line",
+    [
+        "Some unrelated log line",
+        '{"port": 1, "token": "t"}',                     # payload without prefix
+        f"  {READY_PREFIX}" + '{"port": 1, "token": "t"}',  # prefix not at col 0
+        "",
+    ],
+)
+def test_parse_ready_line_rejects_missing_prefix(non_matching_line: str) -> None:
+    """The primitive owns the prefix check — a non-matching line raises
+    ``GatewaySpawnError`` instead of json-decoding a blind slice (which would
+    misattribute the failure to protocol drift, or in the pathological case
+    silently accept a wrong payload)."""
+    with pytest.raises(GatewaySpawnError) as exc:
+        parse_ready_line(non_matching_line)
+    assert "does not start with" in str(exc.value)
+
+
 # ── _terminate_process_group ────────────────────────────────────────────
 
 
@@ -221,6 +271,159 @@ def test_terminate_falls_back_to_sigkill() -> None:
         assert proc.poll() is not None
         # On POSIX, SIGKILL is signal 9; returncode is -9 when killed.
         assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+# ── terminate_pgid ──────────────────────────────────────────────────────
+
+
+def test_terminate_pgid_noop_when_pid_gone() -> None:
+    """A pid with no live process is a clean no-op (no exception)."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    proc.wait(timeout=5)
+    # Reaped — getpgid raises ProcessLookupError, terminate_pgid swallows it.
+    terminate_pgid(proc.pid)
+
+
+def test_terminate_pgid_sigkills_after_grace() -> None:
+    """A process ignoring SIGTERM is SIGKILLed after the grace window.
+
+    Mirrors ``test_terminate_falls_back_to_sigkill`` but exercises the
+    pid-based primitive directly (the path an out-of-process supervisor
+    takes). Handshakes on a READY line so the SIG_IGN handler is provably
+    installed before the signal lands, avoiding a cold-host race.
+    """
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time;"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            "print('READY', flush=True);"
+            "time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert proc.stdout is not None
+        ready_line = proc.stdout.readline()
+        assert ready_line == b"READY\n", f"child did not signal ready: {ready_line!r}"
+
+        terminate_pgid(proc.pid, grace=0.5)
+        # terminate_pgid does not reap; the owning Popen does.
+        proc.wait(timeout=2)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_terminate_pgid_graceful_exit_returns_fast() -> None:
+    """A group that exits promptly on SIGTERM returns well under ``grace``.
+
+    Pins the in-loop group-liveness early-return (the graceful path) and
+    guards teardown latency: the poll must detect the exit and return in a
+    fraction of the grace window, not burn it fully.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Reap concurrently so the child doesn't linger as a zombie (a zombie's
+    # GROUP still reads alive to killpg(pgid, 0) until reaped) — models the
+    # out-of-process case where init reaps the reparented child promptly.
+    import threading
+
+    reaper = threading.Thread(target=proc.wait, daemon=True)
+    reaper.start()
+    try:
+        start = time.monotonic()
+        terminate_pgid(proc.pid, grace=5.0)
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.5, f"graceful teardown burned the grace window: {elapsed:.2f}s"
+        reaper.join(timeout=2)
+        assert proc.returncode == -signal.SIGTERM
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_terminate_pgid_grace_default_resolved_at_call_time() -> None:
+    """Patching ``TERMINATE_GRACE_SECONDS`` affects the default grace.
+
+    The default is a ``None`` sentinel resolved inside the call, so tests
+    (and out-of-process callers) that patch the module constant are honored —
+    matching the behavior documented on ``_terminate_process_group``.
+    """
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time;"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            "print('READY', flush=True);"
+            "time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline() == b"READY\n"
+        start = time.monotonic()
+        with patch("kiro_claw.testing.harness.TERMINATE_GRACE_SECONDS", 0.5):
+            terminate_pgid(proc.pid)  # default grace — must pick up the patch
+        elapsed = time.monotonic() - start
+        assert elapsed < 3.0, f"patched grace ignored, took {elapsed:.2f}s"
+        proc.wait(timeout=2)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_terminate_pgid_wait_hook_used_for_exit_detection() -> None:
+    """A supplied ``wait`` hook replaces the pid poll for exit detection.
+
+    The Popen-owning caller passes ``proc.wait`` so a graceful exit is seen
+    immediately (even as an unreaped zombie). The hook returning without
+    ``TimeoutExpired`` must mean no SIGKILL is sent to the (gone) group.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    calls: list[float] = []
+
+    def hook(timeout: float) -> None:
+        calls.append(timeout)
+        proc.wait(timeout=timeout)  # real handle-based wait — reaps too
+
+    try:
+        start = time.monotonic()
+        terminate_pgid(proc.pid, grace=5.0, wait=hook)
+        elapsed = time.monotonic() - start
+        assert calls == [5.0], "wait hook not invoked with the grace window"
+        assert elapsed < 2.5, f"handle-based teardown burned grace: {elapsed:.2f}s"
+        assert proc.returncode == -signal.SIGTERM  # graceful, not SIGKILL
     finally:
         if proc.poll() is None:
             proc.kill()

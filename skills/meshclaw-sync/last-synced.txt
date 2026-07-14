@@ -16,12 +16,26 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 3b6795152aeca3b9aa01d33e964d336ea02e6017      # 2026-07-14 MeshClaw backend triaged tip (batch-29). 11 backend candidates in the e870fed4..3b679515 window triaged by content; 7 KEEP ported (mcp banner, crash_guard, notification bus, side.py, reaper sweep, event-loop offload, service restart PARTIAL) + 1 RFC doc, 2 ALREADY_PRESENT (38fa6701 accepts_no_extension via PR #61, d2b685f0 acp nits), 0 SKIP.
-frontend-beta 2a70682069b2dc3b96c9fde408789e4502d45619  # 2026-07-14 MeshClawWebsite triaged tip (batch-29). 10 frontend candidates in the 20f18813..2a70682 window triaged by content; 7 ported (popout nav containment, composer-lock revert, placeholder-bubble drop, widget same-origin Tailwind, goal-draft persistence, knowledge-graph viewport, vitest timeout) + 1 accent-fg PARTIAL, 1 ALREADY_PRESENT (3db7ede upload filter via PR #61). The comment-lifecycle pair (be_475146ca + fe_86315dc) was DEFERRED: builds on a persistent ArtifactComment subsystem the fork lacks (fork uses session-only InlineComment).
-mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-14 MeshClaw mainline tip (upstream), unchanged since batch-27. No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
+beta 5a62fdd7930e4d3e6fe9875ad3251388b41ee397      # 2026-07-14 MeshClaw backend triaged tip (batch-30). Candidates in the 3b679515..5a62fdd7 window triaged by content; 12 backend KEEP/PARTIAL ported (credit-usage normalize PARTIAL, spawn summarize, recency-tint field, slot-key normalize, artifacts content search, stale-asset watchdog, bulk-model endpoint PARTIAL, redact-before-truncate, SafeChildWatcher fallback PARTIAL, harness primitives, workflow deny/redact/max_turns, slack agent-name persist) + 4 SKIP_INTERNAL (secretary self-alert, ADC/kratos app-registry rows, setup.cfg console_scripts) + 2 SKIP_NONKIROACP (cc agent-skills sync, claude knowledge-worker approval_mode).
+frontend-beta 2bf7ede096556f74930eddd125db3645471fc825  # 2026-07-14 MeshClawWebsite triaged tip (batch-30). Candidates in the 2a70682..2bf7ede window triaged by content; 7 frontend KEEP ported (About/version-pill beautify, recency-tint wiring, electron fullscreen fix, palette artifacts+recents+prefix-Tab, bulk-model sidebar UI, open-in-pane file chip, comment repeated-anchor highlight) + 1 DEFER (4964a3e credit-usage popup — the FE half of the ebad8b6c pair, deferred to a follow-up batch: it reads credits_overage/percentage the backend text-scrape does not yet emit, so porting it alone regresses the pill).
+mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-14 MeshClaw mainline tip (upstream), unchanged since batch-27 (batch-30 re-confirmed). No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.
+
+# --- Batch-30 (dual-repo sync 2026-07-14) ---
+# Branch sync/beta-2026-07-14 off origin/main 6df6dad. Backend window 3b679515..5a62fdd7,
+# frontend window 2a70682..2bf7ede, triaged by content.
+# Tally: 19 keepers PORTED (12 backend + 7 frontend, incl. 3 PARTIAL: ebad8b6c credit-usage,
+#   41dec169 bulk-model, dd1d652b SafeChildWatcher) + 7 left out.
+# LEFT OUT: 4 SKIP_INTERNAL = 21e296f1 (secretary self-alert — secretary absent), 819ffc16 +
+#   3b4858bd (ADC Ops Center + kratos app-registry rows — registry is [] by design, internal
+#   Brazil pkgs), 9471ba1b (setup.cfg->setup.py console_scripts — Brazil CPython310 workaround,
+#   fork uses setuptools>=64). 2 SKIP_NONKIROACP = c143b659 (cc agent-skills sync — mirror.py
+#   absent, claude_code-gated), 2e976a72 (claude knowledge-worker approval_mode — CCWorker path).
+# 1 DEFER = 4964a3e (credit-usage popup FE half of ebad8b6c): reads credits_overage/percentage
+#   the fork's text-scrape backend does not yet emit; porting alone regresses the pill. Port as a
+#   pair once the backend text path emits the canonical shape. Flagged for human review.
 
 # --- Batch-28 (dual-repo sync 2026-07-13) ---
 # Branch sync/beta-2026-07-13 off origin/main 4f942f3. 58 candidates triaged (31 backend in

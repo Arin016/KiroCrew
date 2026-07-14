@@ -24,6 +24,7 @@ from kiro_claw.providers.base import (
     LLMEvent,
     LLMProvider,
 )
+from kiro_claw.security import is_denied, is_sensitive_bash_command, is_sensitive_path
 from kiro_claw.sel import sel as _sel
 
 _PROMPT_BUSY_RETRIES = 2
@@ -144,6 +145,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _extract_tool_input_strings(tool_input: str) -> list[str]:
+    """Extract all string values from a JSON tool_input for security scanning.
+
+    Recursively walks nested dicts and lists to find all string values,
+    ensuring sensitive paths in nested structures like
+    ``{"args": {"path": "~/.aws/credentials"}}`` are not missed.
+
+    Handles dict, list, plain-string, and malformed JSON gracefully. On
+    parse failure, returns the raw string itself as the single candidate.
+    """
+    if not tool_input:
+        return []
+    try:
+        parsed = json.loads(tool_input)
+    except (json.JSONDecodeError, ValueError):
+        # Not JSON — treat the raw string as a path/command candidate
+        return [tool_input]
+    if isinstance(parsed, str):
+        return [parsed]
+
+    results: list[str] = []
+
+    def _collect(obj: object) -> None:
+        if isinstance(obj, str) and obj:
+            results.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                _collect(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _collect(item)
+
+    _collect(parsed)
+    return results
+
+
 # ── Tool Approval Policies ──
 
 
@@ -171,6 +208,7 @@ async def stream_and_collect(
     on_chunk: Callable[[str], None] | None = None,
     on_tool_approval: Callable[[LLMEvent], Awaitable[bool]] | None = None,
     retry_transient: bool = True,
+    max_turns: int | None = None,
 ) -> str:
     """Stream a message through an LLM provider and collect the full response.
 
@@ -188,6 +226,9 @@ async def stream_and_collect(
             retried in-place with bounded backoff. Set False from callers that
             already own an outer transient-retry loop, so the inner arm doesn't
             compound their attempts (retry-layer amplification).
+        max_turns: Optional cap on tool-call iterations per prompt. When reached,
+            the event loop breaks and returns whatever text has been collected.
+            None (default) means no limit.
 
     Returns:
         The complete response text.
@@ -196,6 +237,7 @@ async def stream_and_collect(
     attempt = 0
     while True:
         result_text = ""
+        tool_call_count = 0
         try:
             async for event in provider.stream(message):
                 if event.kind == EVENT_TEXT_CHUNK:
@@ -209,6 +251,21 @@ async def stream_and_collect(
                     if not approved:
                         continue
                 elif event.kind == EVENT_TOOL_CALL:
+                    tool_call_count += 1
+                    if max_turns is not None and tool_call_count > max_turns:
+                        logger.warning(
+                            "max_turns=%d exceeded (%d tool calls), breaking",
+                            max_turns, tool_call_count,
+                        )
+                        _sel().log_tool_invocation(
+                            session_key="",
+                            source="llm_helpers",
+                            tool_name=event.title or "",
+                            tool_kind=event.tool_kind,
+                            outcome="denied_max_turns",
+                            metadata={"max_turns": max_turns, "count": tool_call_count},
+                        )
+                        break
                     # Fire PreToolUse hooks for auto-approved tools (informational only)
                     _sel().log_tool_invocation(
                         session_key="",
@@ -328,6 +385,59 @@ async def _resolve_permission(
         await provider.reject_tool(event.request_id)
         _log("rejected", metadata={"reason": "reject_all_policy"})
         return False
+
+    # ── Always-enforced deny checks (regardless of approval policy) ──
+    # These run even for AUTO_APPROVE callers (workflows, crons, etc.)
+    # to ensure BUILTIN_DENY_PATTERNS and sensitive-path protection cannot
+    # be bypassed by callers that skip HookManager wiring.
+    normalized = event.title or ""
+    if not normalized:
+        await provider.reject_tool(event.request_id)
+        _log("denied", error="Blocked: missing tool title",
+             metadata={"mechanism": "always_deny"})
+        return False
+    if is_sensitive_path(normalized):
+        await provider.reject_tool(event.request_id)
+        _log("denied", error=f"Blocked: sensitive path: {normalized}",
+             metadata={"mechanism": "always_deny"})
+        return False
+    _bash_reason = is_sensitive_bash_command(normalized)
+    if _bash_reason:
+        await provider.reject_tool(event.request_id)
+        _log("denied", error=_bash_reason, metadata={"mechanism": "always_deny"})
+        return False
+    _deny_reason = is_denied(normalized)
+    if _deny_reason:
+        await provider.reject_tool(event.request_id)
+        _log("denied", error=_deny_reason, metadata={"mechanism": "always_deny"})
+        return False
+
+    # Defense-in-depth: also inspect event.tool_input for sensitive paths/commands.
+    # The title usually carries the full path/command (kiro-cli convention), but
+    # tool_input may contain additional arguments or the actual path when the
+    # title is a generic tool name (e.g. "Read", "Bash").
+    _tool_input = event.tool_input or ""
+    if _tool_input:
+        # Extract string values from JSON tool_input for path/command checking.
+        _input_strings = _extract_tool_input_strings(_tool_input)
+        for s in _input_strings:
+            if is_sensitive_path(s):
+                await provider.reject_tool(event.request_id)
+                _log("denied", error=f"Blocked: sensitive path in tool_input: {s}",
+                     metadata={"mechanism": "always_deny_input"})
+                return False
+            _input_bash = is_sensitive_bash_command(s)
+            if _input_bash:
+                await provider.reject_tool(event.request_id)
+                _log("denied", error=_input_bash,
+                     metadata={"mechanism": "always_deny_input"})
+                return False
+            _input_deny = is_denied(s)
+            if _input_deny:
+                await provider.reject_tool(event.request_id)
+                _log("denied", error=_input_deny,
+                     metadata={"mechanism": "always_deny_input"})
+                return False
 
     if policy == ToolApprovalPolicy.HOOK_BASED and hooks:
         tool_result = hooks.on_tool_call(
@@ -454,11 +564,14 @@ def save_conversation_turn(
     assistant_text: str,
     source_thread: str | None = None,
     source_user: str | None = None,
+    agent: str | None = None,
 ) -> None:
     """Save a user+assistant conversation turn to the history log.
 
     Consolidates the repeated pattern of appending user and assistant
-    messages with provenance tracking.
+    messages with provenance tracking.  When *agent* is supplied it is
+    recorded in the session metadata on file creation so that
+    ``/kiroclaw sessions`` displays the correct agent name.
     """
     log.append(
         key,
@@ -466,6 +579,7 @@ def save_conversation_turn(
         user_text,
         source_thread=source_thread,
         source_user=source_user,
+        agent=agent,
     )
     if assistant_text:
         log.append(

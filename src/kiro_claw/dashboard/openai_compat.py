@@ -22,7 +22,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.dashboard.chat_runner import _run_chat
-from kiro_claw.dashboard.state import DashboardState
+from kiro_claw.dashboard.state import DashboardState, _normalize_slot_key
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.validation import _AGENT_NAME_RE
@@ -212,7 +212,10 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
     completion_id = _make_id()
 
     if slot_id:
-        freshly_created = slot_id not in state._slots
+        # Membership must be checked on the canonical (filename-charset) key —
+        # get_or_create_slot folds unsafe chars, so a raw slot_id may map to an
+        # existing slot even when the raw string is absent from _slots.
+        freshly_created = _normalize_slot_key(slot_id) not in state._slots
         slot = state.get_or_create_slot(slot_id)
         # Busy check — prevent concurrent writes to same slot
         if slot.task is not None and not slot.task.done():

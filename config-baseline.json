@@ -2930,6 +2930,7 @@
         "default_project": "",
         "theme_mode": "",
         "theme_color": "",
+        "recent_tint_count": 0,
         "onboarded": false
       }
     },
@@ -3152,6 +3153,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""
+    },
+    {
+      "path": "dashboard.recent_tint_count",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Recent Session Tint Count",
+      "help": "Number of most-recently-active sessions to highlight in the sidebar with a graded accent stripe (0-10; 0 = off).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 0
     },
     {
       "path": "dashboard.onboarded",

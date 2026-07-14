@@ -11,6 +11,9 @@ import { setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, 
 import { useSessionPalette } from '../../hooks/useSessionPalette'
 import { PALETTE_NAMES, INTENSITY_NAMES } from '../../utils/sessionColors'
 import type { DefaultColorSetting, PaletteName, IntensityName, SessionColorMode } from '../../utils/sessionColors'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { api } from '../../api/client'
+import { clampTintCount, RECENT_TINT_COUNT } from '../../utils/recencyTint'
 
 export function DisplayPanel() {
   const { zoom, zoomIn, zoomOut, reset, fontScale, fontScaleUp, fontScaleDown, fontScaleReset, family, setFontFamily } = useZoomCtx()
@@ -21,6 +24,30 @@ export function DisplayPanel() {
   const dispatch = useAppDispatch()
   const { paletteColors: colors, colorMode, paletteName, intensity, boost } = useSessionPalette()
   const defaultColor = useAppSelector(s => s.dashboard.sessionDefaultColor) as DefaultColorSetting
+
+  // Recency-tint count is persisted server-side (dashboard.recent_tint_count) via the shared
+  // kiroclawConfig query, so the choice follows the user across browsers/restarts. Optimistic
+  // cache write makes the sidebar tint (which reads the same query) re-rank instantly.
+  const qc = useQueryClient()
+  const mcQ = useQuery<{ dashboard?: { recent_tint_count?: number } }>({
+    queryKey: ['kiroclawConfig'],
+    queryFn: () => api.kiroclawConfig(),
+  })
+  const recentTintCount = clampTintCount(mcQ.data?.dashboard?.recent_tint_count)
+  const tintMut = useMutation({
+    mutationFn: (value: number) => api.patchConfig('dashboard.recent_tint_count', value),
+    onMutate: async (value: number) => {
+      await qc.cancelQueries({ queryKey: ['kiroclawConfig'] })
+      const prev = qc.getQueryData<{ dashboard?: { recent_tint_count?: number } }>(['kiroclawConfig'])
+      const next = structuredClone(prev ?? {})
+      next.dashboard = { ...(next.dashboard ?? {}), recent_tint_count: value }
+      qc.setQueryData(['kiroclawConfig'], next)
+      return { prev }
+    },
+    onError: (_e, _v, ctx) => { if (ctx?.prev) qc.setQueryData(['kiroclawConfig'], ctx.prev) },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kiroclawConfig'] }),
+  })
+  const setTintCount = (n: number) => tintMut.mutate(clampTintCount(n))
 
   return (
     <>
@@ -113,6 +140,14 @@ export function DisplayPanel() {
             value={colorMode}
             options={[{ value: 'tint', label: 'Solid Tint' }, { value: 'gradient', label: 'Gradient' }]}
             onChange={v => dispatch(setSessionColorsMode(v as SessionColorMode))}
+          />
+          <SettingsStepper
+            label="Highlight recent sessions"
+            description="Highlight the N most-recently-active sessions with a graded accent stripe (0 = off). Saved to your KiroClaw config."
+            value={recentTintCount}
+            onIncrement={() => setTintCount(recentTintCount + 1)}
+            onDecrement={() => setTintCount(recentTintCount - 1)}
+            onReset={() => setTintCount(RECENT_TINT_COUNT)}
           />
           {/* Color swatches use raw buttons — circular color dots don't fit SettingsButtonGroup's text-button pattern */}
           <div className="flex flex-col gap-1.5 py-1.5">

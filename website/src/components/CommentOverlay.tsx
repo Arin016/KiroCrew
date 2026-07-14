@@ -13,6 +13,8 @@ export interface InlineComment {
   line?: number
   /** 1-based column of the first char of the anchor on its source line. */
   column?: number
+  /** Character offset of the anchor in the rendered text (textContent space). Used to disambiguate repeated occurrences of the same anchor text. */
+  startOffset?: number
 }
 
 /** Popover that appears when user selects text and clicks "Comment". */

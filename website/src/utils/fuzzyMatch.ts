@@ -176,3 +176,18 @@ export function makeScoreThenNameComparator<T>(
     return getName(a).localeCompare(getName(b), undefined, { sensitivity: 'base' });
   };
 }
+
+/**
+ * Contiguous indices of the (case-insensitive) *query* within *text*, for
+ * highlighting an exact matched term (e.g. inside a content-search snippet).
+ * Empty when the query is blank or absent from the text. Complements
+ * {@link fuzzyMatch}, which scores scattered subsequence matches — snippet
+ * highlighting wants the literal substring only.
+ */
+export function substringIndices(query: string, text: string): number[] {
+  const q = query.trim()
+  if (!q) return []
+  const i = text.toLowerCase().indexOf(q.toLowerCase())
+  if (i < 0) return []
+  return Array.from({ length: q.length }, (_, k) => i + k)
+}

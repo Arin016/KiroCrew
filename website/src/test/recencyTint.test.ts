@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RECENT_TINT_COUNT, computeRecentRank, recencyTintShadow } from '../utils/recencyTint'
+import { RECENT_TINT_COUNT, MAX_RECENT_TINT_COUNT, clampTintCount, computeRecentRank, recencyTintShadow } from '../utils/recencyTint'
 
 const iso = (min: number) => `2026-07-09T20:${String(min).padStart(2, '0')}:00Z`
 const shadow = (w: number, op: number) => `inset ${w}px 0 0 color-mix(in srgb, var(--accent) ${op}%, transparent)`
@@ -39,8 +39,29 @@ describe('computeRecentRank', () => {
     expect(r.has('d')).toBe(false)
   })
 
-  it('RECENT_TINT_COUNT defaults to 5', () => {
-    expect(RECENT_TINT_COUNT).toBe(5)
+  it('returns an empty map when count is 0 (tint disabled)', () => {
+    expect(computeRecentRank([{ key: 'a', last_ts: iso(10) }], 0).size).toBe(0)
+  })
+
+  it('RECENT_TINT_COUNT defaults to 0 and MAX_RECENT_TINT_COUNT is 10', () => {
+    expect(RECENT_TINT_COUNT).toBe(0)
+    expect(MAX_RECENT_TINT_COUNT).toBe(10)
+  })
+})
+
+describe('clampTintCount', () => {
+  it('rounds and passes through in-range values', () => {
+    expect(clampTintCount(3)).toBe(3)
+    expect(clampTintCount(4.6)).toBe(5)
+  })
+  it('clamps to [0, 10]', () => {
+    expect(clampTintCount(-2)).toBe(0)
+    expect(clampTintCount(99)).toBe(10)
+  })
+  it('falls back to the default for missing / non-numeric values', () => {
+    expect(clampTintCount(undefined)).toBe(RECENT_TINT_COUNT)
+    expect(clampTintCount(null)).toBe(RECENT_TINT_COUNT)
+    expect(clampTintCount('abc')).toBe(RECENT_TINT_COUNT)
   })
 })
 

@@ -1450,5 +1450,12 @@ def should_record_observe_history(
 
 
 def redact_and_truncate(text: str, max_chars: int = 4000) -> str:
-    """Truncate, then redact credentials and exfiltration URLs."""
-    return redact_credentials(redact_exfiltration_urls((text or "")[:max_chars])[0])[0]
+    """Redact credentials and exfiltration URLs, then truncate.
+
+    Redaction runs over the full text BEFORE the ``max_chars`` slice so a
+    credential (or base64/URL blob) straddling the truncation boundary cannot
+    leak as an unredacted partial fragment (Talos e27617c6). Truncating first
+    would cut a secret in half, leaving a prefix that no longer matches the
+    credential regex and therefore escapes redaction.
+    """
+    return redact_credentials(redact_exfiltration_urls(text or "")[0])[0][:max_chars]

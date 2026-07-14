@@ -246,6 +246,10 @@ export interface Artifact {
    * file edits to source_path. Drives the "Snapshot Live" button
    * (Mesh-1654 round 6). */
   live_dirty?: boolean
+  /** Short, markdown-stripped, redacted content preview — only present when the
+   * list was requested with ?snippet=1 (used by the command palette's
+   * Artifacts provider). For a ?content=1 query it is match-centered. */
+  snippet?: string
   /** Library folder this artifact is filed in ("" / absent = unfiled/root).
    * Opaque folder id — resolve names via the artifact-folders list (Mesh-2720). */
   folder_id?: string

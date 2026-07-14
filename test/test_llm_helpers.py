@@ -117,7 +117,9 @@ class TestSaveConversationTurn:
         log = MagicMock()
         save_conversation_turn(log, "key1", "hello", "world")
         assert log.append.call_count == 2
-        log.append.assert_any_call("key1", "user", "hello", source_thread=None, source_user=None)
+        log.append.assert_any_call(
+            "key1", "user", "hello", source_thread=None, source_user=None, agent=None
+        )
         log.append.assert_any_call(
             "key1", "assistant", "world", source_thread=None, source_user=None
         )
@@ -125,7 +127,9 @@ class TestSaveConversationTurn:
     def test_saves_with_provenance(self) -> None:
         log = MagicMock()
         save_conversation_turn(log, "key1", "hello", "world", source_thread="t1", source_user="u1")
-        log.append.assert_any_call("key1", "user", "hello", source_thread="t1", source_user="u1")
+        log.append.assert_any_call(
+            "key1", "user", "hello", source_thread="t1", source_user="u1", agent=None
+        )
         log.append.assert_any_call(
             "key1", "assistant", "world", source_thread="t1", source_user="u1"
         )
@@ -135,7 +139,14 @@ class TestSaveConversationTurn:
         save_conversation_turn(log, "key1", "hello", "")
         assert log.append.call_count == 1
         log.append.assert_called_once_with(
-            "key1", "user", "hello", source_thread=None, source_user=None
+            "key1", "user", "hello", source_thread=None, source_user=None, agent=None
+        )
+
+    def test_saves_with_agent(self) -> None:
+        log = MagicMock()
+        save_conversation_turn(log, "key1", "hello", "world", agent="ops")
+        log.append.assert_any_call(
+            "key1", "user", "hello", source_thread=None, source_user=None, agent="ops"
         )
 
 

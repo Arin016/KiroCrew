@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw, Bot, ExternalLink } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw, Bot, ExternalLink, Cpu } from 'lucide-react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -15,10 +15,13 @@ import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, de
 import { sseSlotTitle } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
-import { RECENT_TINT_COUNT, computeRecentRank, recencyTintShadow } from '../utils/recencyTint'
+import { computeRecentRank, recencyTintShadow, clampTintCount } from '../utils/recencyTint'
 import { computeActiveSubtree, folderIsHidden, folderOffersHide } from '../utils/folderVisibility'
 import { groupHistoryByFolder } from '../utils/groupHistoryByFolder'
 import { SearchInput, Input, Btn, IconButton, IconButtonGroup } from '../components/ui'
+import { useProvider } from '../providers'
+import ModelDropdownList from '../components/ModelDropdownList'
+import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { useMoveSlotToFolder } from '../hooks/useMoveSlotToFolder'
 import { useSessionActions } from '../hooks/useSessionActions'
@@ -123,6 +126,7 @@ interface Slot {
   pending_approval?: boolean
   mode?: string
   agent?: string
+  model?: string  // '' / absent = provider-default ("auto")
   workspace?: string
   created?: string
   last_ts?: string
@@ -655,11 +659,69 @@ function ChatSidebar({
     onError: (e) => setCleanupError(e instanceof Error ? e.message : 'Archive failed'),
   })
 
+  // Bulk model switch — apply one model to every live session at once.
+  const provider = useProvider()
+  const [bulkModelOpen, setBulkModelOpen] = useState(false)
+  const [bulkModel, setBulkModel] = useState('')        // pending pick ('auto' = provider default)
+  const [bulkSkipRunning, setBulkSkipRunning] = useState(true)
+  const [bulkModelError, setBulkModelError] = useState('')
+  const { data: bulkModelOptions = [] } = useQuery({
+    queryKey: ['available-models', provider.id],
+    queryFn: async () => {
+      const models = await provider.fetchAvailableModels()
+      return [{ name: 'auto', description: 'Default' }, ...models.filter(m => m.name && m.name !== 'auto')]
+    },
+    enabled: bulkModelOpen,
+    staleTime: 60_000,
+  })
+  const bulkRunningCount = useMemo(() => slots.filter(s => s.running).length, [slots])
+  // Count only slots that would actually change: model differs from the target
+  // (the backend leaves already-on-target slots as `unchanged`), minus running
+  // slots when skipping. Keeps the "Switch N" label + disable guard honest.
+  const bulkAffectedCount = useMemo(() => {
+    const target = bulkModel === 'auto' ? '' : bulkModel
+    return slots.filter(s => (s.model ?? '') !== target && (!bulkSkipRunning || !s.running)).length
+  }, [slots, bulkModel, bulkSkipRunning])
+  const bulkModelMutation = useMutation({
+    mutationFn: ({ model, skipRunning }: { model: string; skipRunning: boolean }) =>
+      api.chatSlotsModel(model === 'auto' ? '' : model, skipRunning),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ['chat-slots'] })
+      // Partial failure: the endpoint returns 200 with a non-empty `failed`
+      // list when some slots' resets raised. Surface it and keep the panel
+      // open instead of silently closing on a partial success.
+      if (res.failed?.length) {
+        setBulkModelError(`${res.failed.length} session${res.failed.length !== 1 ? 's' : ''} failed to switch`)
+      } else {
+        setBulkModelOpen(false)
+        setBulkModel('')
+        setBulkModelError('')
+      }
+    },
+    onError: (e) => setBulkModelError(e instanceof Error ? e.message : 'Switch failed'),
+  })
+  // Roving-focus keyboard nav for the model list (WAI-ARIA listbox). No filter
+  // input here, so the hook moves focus into the list on open; Escape/Tab close.
+  const bulkListRef = useRef<HTMLDivElement>(null)
+  const bulkInputRef = useRef<HTMLInputElement>(null)
+  const { onListKeyDown: bulkOnListKeyDown } = useListboxKeyboard({
+    open: bulkModelOpen,
+    dropdownRef: bulkListRef,
+    inputRef: bulkInputRef,
+    hasFilterInput: false,
+    filteredCount: bulkModelOptions.length,
+    onEnterSingleMatch: () => {},
+    closeToTrigger: () => { setBulkModelOpen(false); setBulkModel(''); setBulkModelError('') },
+  })
+
   // Pinned: derived from server-persisted slot.pinned
   const pinned = useMemo(() => new Set(slots.filter(s => s.pinned).map(s => s.key)), [slots])
-  // Ranks up to RECENT_TINT_COUNT sessions by recency (last_ts) for the sidebar tint —
-  // see ../utils/recencyTint. Recomputes whenever the slot list changes.
-  const recentRank = useMemo(() => computeRecentRank(slots, RECENT_TINT_COUNT), [slots])
+  // Ranks up to the configured count of sessions by recency (last_ts) for the sidebar tint —
+  // see ../utils/recencyTint. Count = server-side dashboard.recent_tint_count (shared
+  // kiroclawConfig query); recomputes when the slots or the configured count change.
+  const { data: mcCfg } = useQuery({ queryKey: ['kiroclawConfig'], queryFn: () => api.kiroclawConfig() })
+  const recentTintCount = clampTintCount(mcCfg?.dashboard?.recent_tint_count)
+  const recentRank = useMemo(() => computeRecentRank(slots, recentTintCount), [slots, recentTintCount])
 
   // Folder editing state
   const [creatingIn, setCreatingIn] = useState<string | null>(null)
@@ -1293,7 +1355,7 @@ function ChatSidebar({
       boostStyle['--session-color'] = rowColor
       if (boost.mutedColors[ci]) boostStyle['--session-muted'] = boost.mutedColors[ci]
     }
-    if (recent) boostStyle.boxShadow = recencyTintShadow(recent, RECENT_TINT_COUNT)
+    if (recent) boostStyle.boxShadow = recencyTintShadow(recent, recentTintCount)
     // A session that's open in its own window is dimmed here so the main
     // sidebar reads as "handed off" (skipped while active — you may be viewing it).
     if (isOut && !isActive) boostStyle.opacity = '0.6'
@@ -1632,6 +1694,10 @@ function ChatSidebar({
                 <BrushCleaning size={14} className="text-muted" />
                 Clean up sessions
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => { setBulkModelOpen(true); setBulkModel(''); setBulkSkipRunning(true); setBulkModelError('') }}>
+                <Cpu size={14} className="text-muted" />
+                Switch all to model…
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           {/* Split create-button: main segment = one-click New chat; caret
@@ -1759,6 +1825,30 @@ function ChatSidebar({
           </div>
         )
       })()}
+
+      {/* Switch-all-to-model dialog — mirrors the Clean Up panel. Picking a
+       *  model applies it to every live session (each switch resets that
+       *  session); running sessions are skipped by default (Mesh-1080). */}
+      {bulkModelOpen && (
+        <div className="mx-2 mb-2 p-3 rounded-lg bg-bg border border-border shadow-md text-sm animate-rise">
+          <div className="font-medium text-text-strong mb-2"><Cpu size={14} className="lucide-inline" /> Switch All Sessions</div>
+          <div className="text-muted text-[12px] mb-2">Pick a model for every session. Switching a session <span className="text-danger">resets its conversation</span>.</div>
+          <div ref={bulkListRef} role="listbox" aria-label="Model list" tabIndex={-1} onKeyDown={bulkOnListKeyDown} className="max-h-[220px] overflow-y-auto rounded-md border border-border bg-bg-elevated p-1 mb-2 outline-none">
+            <ModelDropdownList models={bulkModelOptions} activeModel={bulkModel} onSelect={setBulkModel} />
+          </div>
+          {bulkRunningCount > 0 && (
+            <label className="flex items-center gap-2 text-[12px] text-muted mb-2 cursor-pointer">
+              <input type="checkbox" checked={bulkSkipRunning} onChange={e => setBulkSkipRunning(e.target.checked)} />
+              Skip {bulkRunningCount} running session{bulkRunningCount !== 1 ? 's' : ''}
+            </label>
+          )}
+          <div className="flex items-center gap-2 justify-end">
+            {bulkModelError && <span className="text-[11px] text-danger flex-1">{bulkModelError}</span>}
+            <Btn className="text-[12px] px-3 py-1" onClick={() => { setBulkModelOpen(false); setBulkModel(''); setBulkModelError('') }}>Cancel</Btn>
+            <Btn className="text-[12px] px-3 py-1 bg-accent text-accent-fg hover:bg-accent-hover" disabled={!bulkModel || bulkAffectedCount === 0 || bulkModelMutation.isPending} onClick={() => { setBulkModelError(''); bulkModelMutation.mutate({ model: bulkModel, skipRunning: bulkSkipRunning }) }}>{bulkModelMutation.isPending ? 'Switching…' : `Switch ${bulkAffectedCount} session${bulkAffectedCount !== 1 ? 's' : ''}`}</Btn>
+          </div>
+        </div>
+      )}
 
       {/* Search with inline sort/filter control */}
       <div className="px-2 pt-2 pb-1">

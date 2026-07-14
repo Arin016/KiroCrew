@@ -3108,7 +3108,7 @@ class TestInstallPidfdChildWatcher:
         assert closed == [4242], "the probe fd must be closed"
         assert called_with == ["fake-pidfd-watcher"]
 
-    def test_graceful_fallback_on_old_kernel(self, monkeypatch) -> None:
+    def test_falls_back_to_safe_watcher_on_old_kernel(self, monkeypatch) -> None:
         import asyncio
 
         from kiro_claw.cli import _install_child_watcher
@@ -3116,8 +3116,11 @@ class TestInstallPidfdChildWatcher:
         monkeypatch.setattr("kiro_claw.cli.sys.platform", "linux")
         # Real 3.10 failure mode: PidfdChildWatcher.__init__ does NOT probe the
         # kernel, so the < 5.3 failure surfaces as os.pidfd_open raising OSError.
-        # The watcher must NEVER be installed (else the first create_subprocess_exec
-        # would raise ENOSYS and break all subprocess management).
+        # PidfdChildWatcher must NEVER be constructed (else the first
+        # create_subprocess_exec would ENOSYS), but we must ALSO NOT leave the
+        # default ThreadedChildWatcher in place -- its thread-per-child reaper
+        # storm is the wedge this installer exists to prevent. So a < 5.3 kernel
+        # falls back to the SIGCHLD-based SafeChildWatcher instead.
 
         def _no_pidfd(_pid):
             raise OSError(38, "Function not implemented")  # ENOSYS
@@ -3125,13 +3128,48 @@ class TestInstallPidfdChildWatcher:
         monkeypatch.setattr("kiro_claw.cli.os.pidfd_open", _no_pidfd, raising=False)
         installed = []
         monkeypatch.setattr(asyncio, "set_child_watcher", lambda w: installed.append(w))
+        monkeypatch.setattr(asyncio, "SafeChildWatcher", lambda: "fake-safe-watcher")
 
         def _ctor_must_not_run() -> object:
             raise AssertionError("PidfdChildWatcher must not be constructed when pidfd_open fails")
 
         monkeypatch.setattr(asyncio, "PidfdChildWatcher", _ctor_must_not_run)
         _install_child_watcher()  # must not raise
-        assert installed == [], "watcher must not be installed on a < 5.3 kernel"
+        assert installed == ["fake-safe-watcher"], (
+            "a < 5.3 kernel must fall back to SafeChildWatcher, not the "
+            "thread-storm ThreadedChildWatcher"
+        )
+
+    def test_falls_back_to_safe_watcher_when_pidfd_open_missing(self, monkeypatch) -> None:
+        import asyncio
+
+        from kiro_claw.cli import _install_child_watcher
+
+        monkeypatch.setattr("kiro_claw.cli.sys.platform", "linux")
+        # Regression for the 2026-07-10 gateway startup kill: a uv-managed /
+        # Clang-built CPython 3.12 whose build omits the os.pidfd_open wrapper
+        # (present on the system python, absent in the venv interpreter). The
+        # probe raises AttributeError, not OSError -- the old code caught it and
+        # RETURNED, leaving the thread-per-child ThreadedChildWatcher, whose
+        # os.waitpid reaper-thread storm starved the loop and got the gateway
+        # killed by the loop-stall watchdog. It must now fall back to
+        # SafeChildWatcher instead.
+        monkeypatch.delattr("kiro_claw.cli.os.pidfd_open", raising=False)
+        installed = []
+        monkeypatch.setattr(asyncio, "set_child_watcher", lambda w: installed.append(w))
+        monkeypatch.setattr(asyncio, "SafeChildWatcher", lambda: "fake-safe-watcher")
+
+        def _ctor_must_not_run() -> object:
+            raise AssertionError(
+                "PidfdChildWatcher must not be constructed when os.pidfd_open is missing"
+            )
+
+        monkeypatch.setattr(asyncio, "PidfdChildWatcher", _ctor_must_not_run)
+        _install_child_watcher()  # must not raise
+        assert installed == ["fake-safe-watcher"], (
+            "a Python build without os.pidfd_open must fall back to "
+            "SafeChildWatcher, not the thread-storm ThreadedChildWatcher"
+        )
 
     @pytest.mark.skipif(sys.platform != "linux", reason="pidfd watcher is Linux-only")
     def test_real_subprocess_works_after_install_on_linux(self) -> None:
