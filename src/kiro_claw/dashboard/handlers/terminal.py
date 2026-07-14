@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -18,6 +17,10 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+# fcntl via flock_compat: POSIX-only, shimmed on Windows so the CLI (and
+# thus `kiroclaw cloud` on Windows) can import this module. This code runs
+# only on the macOS/Linux gateway.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.config.loader import config_path
 from kiro_claw.executors import subprocess_executor
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls

@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -44,6 +43,10 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+# fcntl via flock_compat: POSIX-only, shimmed on Windows so the import
+# graph stays loadable there (this module runs only on the macOS/Linux
+# gateway). Same call surface as fcntl.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.mcp_caller import CallerContext
 from kiro_claw.mcp_gateway import socketsec
 from kiro_claw.mcp_gateway.backend import Backend, BackendGone, spawn_backend

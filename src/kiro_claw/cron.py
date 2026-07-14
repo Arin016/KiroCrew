@@ -22,7 +22,6 @@ Supports three schedule types:
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -36,6 +35,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator
 from zoneinfo import ZoneInfo
+
+# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
+# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
+# gateway/cron machinery that actually locks runs only on macOS/Linux.
+from kiro_claw import flock_compat as fcntl
 
 if TYPE_CHECKING:
     from kiro_claw.session import SessionManager

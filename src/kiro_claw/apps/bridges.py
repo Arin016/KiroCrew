@@ -10,7 +10,6 @@ between apps.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -21,6 +20,10 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlparse, urlunparse
 
+# fcntl via flock_compat: POSIX-only, shimmed on Windows so the CLI (and
+# thus `kiroclaw cloud` on Windows) can import this module. This code runs
+# only on the macOS/Linux gateway.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.apps.cron_sdk import CronSDK
 from kiro_claw.apps.manager import app_dir, get_app, get_app_manifest
 from kiro_claw.apps.manifest import AppManifest

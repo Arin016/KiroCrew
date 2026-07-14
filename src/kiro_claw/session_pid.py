@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import fcntl
 import logging
 import os
 import signal
@@ -24,6 +23,10 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
+# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
+# gateway/cron machinery that actually locks runs only on macOS/Linux.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.config.paths import config_dir
 from kiro_claw.providers.base import LLMProvider
 

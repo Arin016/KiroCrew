@@ -13,7 +13,6 @@ Storage: ``~/.kiroclaw/dependency-ledger.json``
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import time
@@ -22,6 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+# fcntl via flock_compat: POSIX-only, shimmed on Windows so the import
+# graph stays loadable there (this module runs only on the macOS/Linux
+# gateway). Same call surface as fcntl.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
 

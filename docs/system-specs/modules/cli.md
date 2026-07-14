@@ -1,6 +1,6 @@
 # CLI Module
 
-Last Updated: 2026-05-18 (restart subcommand)
+Last Updated: 2026-07-09 (cloud launch resume safety)
 
 ## Overview
 
@@ -45,6 +45,7 @@ This allows `kiroclaw` to find project-level agent config and skills from any di
 | `kiroclaw service status` | Show service status (`systemctl status` or `launchctl list`). No sudo required. |
 | `kiroclaw logs` | Tail gateway logs from the systemd journal, launchd stdout file, or `~/.kiroclaw/gateway.log`. |
 | `kiroclaw logs -f` | Follow logs live (long-running tail). |
+| `kiroclaw cloud launch/list/status/connect/stop/start/destroy/iam-policy/doctor` | Provision, connect to, and manage a KiroClaw EC2 instance in the user's AWS account. |
 | `kiroclaw security events` | Show recent SEL audit events (`-n N` for count) |
 | `kiroclaw security verify` | Verify SEL HMAC chain integrity |
 | `kiroclaw snapshot` | Create a .tar.gz snapshot of all KiroClaw state |
@@ -82,6 +83,66 @@ After credentials, `kiroclaw setup` offers to add `127.0.0.1 kiroclaw.localhost`
 - **macOS/Linux**: Uses `sudo tee -a /etc/hosts` for safe append
 
 Skipped if `kiroclaw.localhost` is already present or user declines.
+
+## Cloud Command
+
+`kiroclaw cloud` is a human installer/control-plane surface for running
+KiroClaw on the user's own AWS EC2 instance. Provisioning and teardown are not
+LLM-facing tools. AWS credentials are resolved by the AWS CLI; KiroClaw stores
+only profile, region, and the most recent instance tag in `cloud.json`.
+
+`kiroclaw cloud launch` runs a six-step wizard: check AWS reachability, explain
+permissions, choose whether to keep an existing deployment or create a new one,
+choose an instance size when creating a new stack, deploy or resume the
+CloudFormation stack, sign in the remote `kiro-cli`, and open the dashboard
+through SSM port forwarding. Launch is resume-safe by default: if `cloud.json`
+contains a `last_tag` whose stack still exists in the same saved profile/region,
+rerunning interactive `launch` offers to keep/resume that stack or create a new
+installation. If `cloud.json` is missing or stale, launch discovers existing
+`kiroclaw-*` CloudFormation stacks with `cloudformation:ListStacks` and offers a
+choice to resume one or create a new installation. `kiroclaw cloud launch --new`
+is the explicit escape hatch for creating a separate new stack. `--yes` keeps a
+single or saved existing stack; if multiple unsaved stacks exist it fails closed
+instead of choosing one arbitrarily. For a new launch, the generated tag is
+written to `cloud.json` before the long CloudFormation deploy starts, so an
+interrupted provisioning run can be found on the next launch attempt.
+
+Launch and connect require the local AWS Session Manager plugin for
+`AWS-StartPortForwardingSession`. If `session-manager-plugin` is missing,
+`cloud launch` prompts to install AWS's official package for the current local
+platform (macOS `.pkg`, Debian/Ubuntu `.deb`, or RPM Linux `.rpm`) before the
+wizard reaches sign-in/dashboard tunneling. `--yes` accepts this installer
+prompt. `cloud connect` performs the same check and installer prompt before
+opening the dashboard tunnel. If installation is declined or fails, the command
+exits non-zero and tells the user to retry after fixing the local prerequisite.
+
+The instance-size picker supports arrow keys in an interactive terminal
+(`↑`/`↓`, `j`/`k`, digit shortcuts, Enter to select) and falls back to the
+numbered prompt for non-TTY input. Ctrl-C must interrupt prompts and long AWS
+subprocesses; unhandled cloud-command interrupts return exit code 130.
+
+Remote Kiro sign-in prefers the device-code flow over SSM. The launcher starts
+`kiro-cli login --use-device-flow` as a background process on the instance,
+captures the URL/code from its log, and leaves that same process alive while the
+wizard polls for completion. It must not kill that process after scraping the
+prompt or start a second hidden device-code flow. If device-code startup does
+not produce an actionable URL, launch falls back to the Google/GitHub callback
+flow automatically: it starts `kiro-cli login` on the instance with FIFO-backed
+stdin, captures the printed loopback callback port, opens an
+`AWS-StartPortForwardingSession` from the same local port to the remote port,
+sends the Enter continuation back to the remote CLI, then opens or prints the
+local browser URL. The temporary callback tunnel is closed after the sign-in
+poll completes. In headless local terminals, browser auto-open is skipped and
+the URL is printed for manual opening.
+
+`kiroclaw cloud connect` mints a dashboard token over SSM, opens an
+`AWS-StartPortForwardingSession`, waits for the local tunnel port to accept TCP
+connections, and opens or prints the local dashboard URL. If the tunnel port
+does not become reachable, the command reports failure, does not present the
+dashboard URL as usable, and does not keep a dead tunnel process open. If final
+dashboard opening fails during `cloud launch`, the instance remains running but
+launch returns non-zero and tells the user to rerun `kiroclaw cloud connect`
+after fixing the local SSM tunnel issue.
 
 ## Config Command
 

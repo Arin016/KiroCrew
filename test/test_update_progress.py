@@ -207,6 +207,7 @@ class TestUpdateEndpoints:
         """Update apply returns 409 when working tree is dirty."""
         monkeypatch.setattr("kiro_claw.dashboard.state.config_dir", lambda: tmp_path)
         monkeypatch.setenv("KIROCLAW_PROJECT_DIR", str(tmp_path))
+        (tmp_path / ".git").mkdir()  # must be a git checkout to reach the dirty check
 
         from kiro_claw.dashboard.handlers import api_update_apply
 

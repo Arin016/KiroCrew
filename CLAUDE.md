@@ -151,9 +151,12 @@ bash CLI commands. `kiroclaw-cron` + `kiroclaw-core` are the managed servers
 
 ## Platform support
 
-macOS + Linux (x86_64 and ARM/Graviton). **Windows is not supported.** Verify
-process management, signal handling, file locking, and system-metrics code on
-both macOS and Linux.
+macOS + Linux (x86_64 and ARM/Graviton). **The KiroClaw backend/gateway is not
+supported on Windows** — verify process management, signal handling, file
+locking, and system-metrics code on both macOS and Linux. (The one Windows
+touchpoint is `install.ps1`, a thin *client-side* bootstrapper for `kiroclaw
+cloud` that installs the `aws` CLI + SSM plugin and hands off to the launcher;
+the gateway itself still runs on the Linux EC2 box, never on Windows.)
 
 ## Git conventions
 

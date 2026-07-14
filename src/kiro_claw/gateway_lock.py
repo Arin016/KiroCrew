@@ -23,10 +23,15 @@ resolve to a different lock file and are unaffected.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 from pathlib import Path
+
+# ``flock_compat`` shims POSIX-only fcntl so this module imports on Windows (the
+# `kiroclaw cloud` thin-client imports the whole CLI, incl. this module; the
+# gateway that actually locks runs only on macOS/Linux). Same call surface as
+# fcntl — ``flock`` is a no-op on Windows.
+from kiro_claw import flock_compat as fcntl
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +48,7 @@ class GatewayLockError(RuntimeError):
             detail = f"another gateway (pid {holder_pid}) already owns {home}"
         else:
             detail = f"another gateway already owns {home}"
-        super().__init__(
-            f"{detail}; stop it first or set KIROCLAW_HOME to an isolated directory"
-        )
+        super().__init__(f"{detail}; stop it first or set KIROCLAW_HOME to an isolated directory")
 
 
 class GatewayLock:

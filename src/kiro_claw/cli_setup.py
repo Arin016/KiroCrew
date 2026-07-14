@@ -160,8 +160,10 @@ def _ensure_prerequisites() -> bool:
     # kiro-cli is the agent backend. Note its absence so the user can install it.
     if not shutil.which(KIRO_CLI_BIN):
         _header()
-        print("  ℹ️  kiro-cli not found on PATH — install it (the agent backend) "
-              "and run 'kiro-cli login'.\n")
+        print(
+            "  ℹ️  kiro-cli not found on PATH — install it (the agent backend) "
+            "and run 'kiro-cli login'.\n"
+        )
 
     return True
 
@@ -205,15 +207,19 @@ def _setup_electron() -> None:
     electron_dir = _find_electron_dir()
     if electron_dir is None:
         print("  ❌ Desktop app sources not found.")
-        print("     The desktop app is built from a source checkout — clone the "
-              "repo and run `make desktop` (or run setup from the checkout).")
+        print(
+            "     The desktop app is built from a source checkout — clone the "
+            "repo and run `make desktop` (or run setup from the checkout)."
+        )
         return
 
     print("  🔨 Building KiroClaw desktop app…")
     npm_install = subprocess.run(
         ["npm", "install", "--no-audit", "--no-fund", "--loglevel=error"],
         cwd=str(electron_dir),
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if npm_install.returncode != 0:
         print(f"  ❌ npm install failed: {npm_install.stderr.strip()[:200]}")
@@ -222,7 +228,9 @@ def _setup_electron() -> None:
     build = subprocess.run(
         ["npx", "electron-builder", "--mac", "--dir"],
         cwd=str(electron_dir),
-        capture_output=True, text=True, timeout=300,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     if build.returncode != 0:
         print(f"  ❌ Electron build failed: {build.stderr.strip()[:200]}")
@@ -371,7 +379,49 @@ def _setup(agent_only: bool = False, electron_only: bool = False, clean: bool = 
         else:
             print("  ⏭  Skipped. Install later: kiroclaw setup --electron-only\n")
 
+    # 7. Cloud (run KiroClaw on the user's own AWS EC2) — optional, delegated.
+    _maybe_setup_cloud()
+
     print("\n🐾 Done! Try: kiroclaw doctor && kiroclaw gateway")
+
+
+def _maybe_setup_cloud() -> None:
+    """Offer to launch KiroClaw on the user's own AWS EC2.
+
+    A thin delegating step — all AWS/CloudFormation/SSM logic lives in the
+    testable ``kiro_claw.cloud`` module. This just asks and hands off to the
+    launcher wizard (``kiroclaw cloud launch``).
+    """
+    print("\n── Run on AWS (optional) ──\n")
+    print("  KiroClaw can run 24/7 on your own AWS EC2 instance (bring your own")
+    print("  AWS account; credentials stay in the aws CLI — never stored here).")
+    try:
+        answer = input("  Launch KiroClaw on AWS now? [y/N]: ").strip().lower()
+    except EOFError:
+        # Piped/non-interactive setup — take the default (skip).
+        answer = ""
+    if answer not in ("y", "yes"):
+        print("  ⏭  Skipped. Launch later: kiroclaw cloud launch\n")
+        return
+    try:
+        import argparse
+
+        from kiro_claw.cli_cloud import handle_cloud
+
+        # hold_tunnel=False: setup still has steps to print after this one, so
+        # the wizard must return instead of blocking on the SSM tunnel.
+        args = argparse.Namespace(
+            cloud_action="launch",
+            profile="",
+            region="",
+            size="",
+            yes=False,
+            hold_tunnel=False,
+        )
+        handle_cloud(args)
+    except Exception as exc:  # pragma: no cover - non-fatal, informative
+        print(f"  Cloud launch could not start: {exc}")
+        print("  Run it directly: kiroclaw cloud launch\n")
 
 
 def _setup_workspace_dir() -> None:
@@ -545,15 +595,24 @@ def _setup_timezone() -> None:
 
     # Validate with retry
     abbrev_to_iana: dict[str, str] = {
-        "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
-        "MST": "America/Denver", "MDT": "America/Denver",
-        "CST": "America/Chicago", "CDT": "America/Chicago",
-        "EST": "America/New_York", "EDT": "America/New_York",
-        "GMT": "Etc/GMT", "BST": "Europe/London",
-        "CET": "Europe/Berlin", "CEST": "Europe/Berlin",
-        "IST": "Asia/Kolkata", "JST": "Asia/Tokyo",
-        "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
-        "NZST": "Pacific/Auckland", "NZDT": "Pacific/Auckland",
+        "PST": "America/Los_Angeles",
+        "PDT": "America/Los_Angeles",
+        "MST": "America/Denver",
+        "MDT": "America/Denver",
+        "CST": "America/Chicago",
+        "CDT": "America/Chicago",
+        "EST": "America/New_York",
+        "EDT": "America/New_York",
+        "GMT": "Etc/GMT",
+        "BST": "Europe/London",
+        "CET": "Europe/Berlin",
+        "CEST": "Europe/Berlin",
+        "IST": "Asia/Kolkata",
+        "JST": "Asia/Tokyo",
+        "AEST": "Australia/Sydney",
+        "AEDT": "Australia/Sydney",
+        "NZST": "Pacific/Auckland",
+        "NZDT": "Pacific/Auckland",
     }
     max_retries = 3
     for attempt in range(max_retries):

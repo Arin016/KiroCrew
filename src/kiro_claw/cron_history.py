@@ -12,7 +12,6 @@ Storage layout:
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -21,6 +20,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
+# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
+# gateway/cron machinery that actually locks runs only on macOS/Linux.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.config.paths import config_dir
 
 logger = logging.getLogger(__name__)

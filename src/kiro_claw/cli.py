@@ -506,8 +506,8 @@ def _knowledge(args) -> None:
     db_path = config_dir() / "workspace" / "knowledge" / "knowledge.db"
     if not db_path.exists():
         sel().log_tool_invocation(
-            session_key="cli", source="cli", tool_name="knowledge_dedup",
-            outcome="not_configured")
+            session_key="cli", source="cli", tool_name="knowledge_dedup", outcome="not_configured"
+        )
         print("Knowledge Library is not configured (no knowledge.db). Ingest documents first.")
         return
     store = KnowledgeStore(str(db_path))
@@ -516,9 +516,12 @@ def _knowledge(args) -> None:
     finally:
         store.db.close()
     sel().log_tool_invocation(
-        session_key="cli", source="cli", tool_name="knowledge_dedup",
+        session_key="cli",
+        source="cli",
+        tool_name="knowledge_dedup",
         outcome="applied" if apply else "preview",
-        metadata={"duplicate_count": len(results), "apply": apply})
+        metadata={"duplicate_count": len(results), "apply": apply},
+    )
     mode = "APPLIED" if apply else "DRY RUN -- no changes; pass --apply to delete"
     if not results:
         print(f"[{mode}] No cross-source duplicate documents found.")
@@ -1046,10 +1049,13 @@ Examples:
     kn_parser = sub.add_parser("knowledge", help="Knowledge Base maintenance")
     kn_sub = kn_parser.add_subparsers(dest="knowledge_action")
     kn_dedup = kn_sub.add_parser(
-        "dedup", help="Collapse cross-source duplicate documents (dry-run unless --apply)")
+        "dedup", help="Collapse cross-source duplicate documents (dry-run unless --apply)"
+    )
     kn_dedup.add_argument(
-        "--apply", action="store_true",
-        help="Apply the deletions (default: dry-run preview that changes nothing)")
+        "--apply",
+        action="store_true",
+        help="Apply the deletions (default: dry-run preview that changes nothing)",
+    )
 
     # pod — isolated, throwaway, full-stack test instances per worktree (kubectl-style)
     pod_parser = sub.add_parser(
@@ -1147,6 +1153,120 @@ Examples:
     svc_sub.add_parser("install", help="Install and start the gateway service (sudo on Linux)")
     svc_sub.add_parser("uninstall", help="Stop and remove the gateway service (sudo on Linux)")
     svc_sub.add_parser("status", help="Show service status (systemctl/launchctl)")
+
+    # cloud — provision + run KiroClaw on the user's own AWS EC2 (bring-your-own
+    # AWS; credentials resolved by the aws CLI, never stored by KiroClaw).
+    cloud_parser = sub.add_parser(
+        "cloud",
+        help="Run KiroClaw on your own AWS EC2 instance",
+        epilog="""
+Examples:
+  kiroclaw cloud launch                  # interactive: provision + configure + open dashboard
+  kiroclaw cloud launch --size power     # non-interactive size
+  kiroclaw cloud launch --new            # create a separate new instance
+  kiroclaw cloud list                    # list your cloud instances
+  kiroclaw cloud connect                 # reopen the dashboard over SSM
+  kiroclaw cloud stop | start            # pause / resume (save cost)
+  kiroclaw cloud destroy                 # remove EVERYTHING from AWS
+  kiroclaw cloud iam-policy              # print the least-privilege IAM policy
+  kiroclaw cloud doctor                  # check prerequisites + AWS reachability
+""",
+        formatter_class=_fmt,
+    )
+
+    def _cloud_common(p: "argparse.ArgumentParser") -> None:
+        p.add_argument(
+            "--profile", default="", help="AWS profile name (default: saved / CLI default)"
+        )
+        p.add_argument("--region", default="", help="AWS region (default: saved / us-east-1)")
+        p.add_argument("--tag", default="", help="Instance tag (default: last launched)")
+
+    cloud_sub = cloud_parser.add_subparsers(dest="cloud_action")
+    _c_launch = cloud_sub.add_parser("launch", help="Provision + configure an instance")
+    _c_launch.add_argument("--profile", default="", help="AWS profile name")
+    _c_launch.add_argument("--region", default="", help="AWS region (default: us-east-1)")
+    _c_launch.add_argument(
+        "--size",
+        default="",
+        choices=_cloud_size_choices(),
+        help="Instance size tier (default: balanced / interactive picker)",
+    )
+    _c_launch.add_argument("-y", "--yes", action="store_true", help="Accept defaults, no prompts")
+    _c_launch.add_argument(
+        "--new",
+        action="store_true",
+        help="Create a separate new instance instead of resuming the saved one",
+    )
+    _c_launch.add_argument(
+        "--keep-on-failure",
+        action="store_true",
+        help="On bootstrap failure, keep the instance (disable rollback) for inspection",
+    )
+
+    _c_list = cloud_sub.add_parser("list", help="List your KiroClaw cloud instances")
+    _c_list.add_argument("--profile", default="")
+    _c_list.add_argument("--region", default="")
+
+    _c_status = cloud_sub.add_parser("status", help="Show one instance's state")
+    _cloud_common(_c_status)
+
+    def _tunnel_opts(p: "argparse.ArgumentParser") -> None:
+        _cloud_common(p)
+        p.add_argument(
+            "--local-port",
+            type=int,
+            default=0,
+            help="Local port to forward the dashboard to (default: 5599)",
+        )
+        p.add_argument(
+            "--no-browser",
+            action="store_true",
+            help="Open the tunnel but don't launch a browser",
+        )
+
+    _c_connect = cloud_sub.add_parser("connect", help="Open the dashboard over an SSM tunnel")
+    _tunnel_opts(_c_connect)
+    # `tunnel` — a clear standalone command to open the dashboard SSM tunnel,
+    # independent of launch/setup (alias of connect).
+    _c_tunnel = cloud_sub.add_parser(
+        "tunnel", help="Open the dashboard SSM tunnel (standalone; alias of connect)"
+    )
+    _tunnel_opts(_c_tunnel)
+    _c_login = cloud_sub.add_parser(
+        "login", help="Sign kiro-cli in on the instance (fixes 'not logged in' chat errors)"
+    )
+    _cloud_common(_c_login)
+    _c_login.add_argument(
+        "--no-browser", action="store_true", help="Print the device URL but don't open a browser"
+    )
+    _c_stop = cloud_sub.add_parser("stop", help="Stop the instance (pause billing)")
+    _cloud_common(_c_stop)
+    _c_start = cloud_sub.add_parser("start", help="Start a stopped instance")
+    _cloud_common(_c_start)
+
+    _c_destroy = cloud_sub.add_parser(
+        "destroy", help="Remove the instance and ALL its AWS resources"
+    )
+    _cloud_common(_c_destroy)
+    _c_destroy.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    _c_destroy.add_argument(
+        "--dry-run", action="store_true", help="Show the delete command, don't run it"
+    )
+
+    _c_iam = cloud_sub.add_parser(
+        "iam-policy", help="Print the least-privilege IAM policy to apply"
+    )
+    _c_iam.add_argument("--profile", default="")
+    _c_iam.add_argument("--region", default="")
+    _c_boundary = cloud_sub.add_parser(
+        "iam-boundary",
+        help="Pre-create the immutable instance permissions boundary (admin, one-time)",
+    )
+    _c_boundary.add_argument("--profile", default="")
+    _c_boundary.add_argument("--region", default="")
+    _c_doctor = cloud_sub.add_parser("doctor", help="Check cloud prerequisites + AWS reachability")
+    _c_doctor.add_argument("--profile", default="")
+    _c_doctor.add_argument("--region", default="")
 
     # logs — tail the gateway log. Reads from the systemd journal when running
     # as a service on Linux, the launchd stdout file on macOS, or the
@@ -1375,12 +1495,8 @@ Examples:
     ws_delete.add_argument("name", help="Workspace name to delete")
 
     # scan
-    scan_parser = sub.add_parser(
-        "scan", help="Scan directories for project agents (.kiro/agents/)"
-    )
-    scan_parser.add_argument(
-        "paths", nargs="+", help="Directories to scan for .kiro/agents/"
-    )
+    scan_parser = sub.add_parser("scan", help="Scan directories for project agents (.kiro/agents/)")
+    scan_parser.add_argument("paths", nargs="+", help="Directories to scan for .kiro/agents/")
 
     # app
     app_parser = sub.add_parser(
@@ -1692,6 +1808,8 @@ Examples:
         _restart(args.port)
     elif args.command == "service":
         sys.exit(_service_cmd(args))
+    elif args.command == "cloud":
+        sys.exit(handle_cloud(args))
     elif args.command == "logs":
         _logs_cmd(args)
     elif args.command == "token":
@@ -1735,6 +1853,8 @@ Examples:
 
 
 from kiro_claw.cli_chat import _chat, _tui  # noqa: E402
+from kiro_claw.cli_cloud import add_size_choices as _cloud_size_choices  # noqa: E402
+from kiro_claw.cli_cloud import handle_cloud  # noqa: E402
 from kiro_claw.cli_commands import (  # noqa: E402
     _artifact,
     _cron,

@@ -23,7 +23,6 @@ Each agent is identified by its ``modeId`` — the value passed to
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -33,6 +32,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
+# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
+# gateway/cron machinery that actually locks runs only on macOS/Linux.
+from kiro_claw import flock_compat as fcntl
 from kiro_claw.config.loader import config_dir  # noqa: E402 (avoid circular at module load)
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import sel as _sel

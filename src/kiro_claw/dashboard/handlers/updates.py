@@ -60,6 +60,12 @@ async def _do_update_check() -> None:
     proj = os.environ.get("KIROCLAW_PROJECT_DIR", "")
     if not proj:
         return
+    # Skip when the project dir isn't a git checkout — e.g. a cloud/EC2 install
+    # that received its source as a tarball. Without this the update poller
+    # spams "git fetch failed: not a git repository" every cycle. exists() (not
+    # isdir): in linked worktrees/submodules .git is a file, but git works.
+    if not os.path.exists(os.path.join(proj, ".git")):
+        return
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -88,8 +94,12 @@ async def _do_update_check() -> None:
             return
 
         local = await asyncio.create_subprocess_exec(
-            "git", "rev-parse", "HEAD",
-            cwd=proj, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            "git",
+            "rev-parse",
+            "HEAD",
+            cwd=proj,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             local_out, _ = await asyncio.wait_for(local.communicate(), timeout=10)
@@ -101,8 +111,12 @@ async def _do_update_check() -> None:
             await local.communicate()
             return
         remote = await asyncio.create_subprocess_exec(
-            "git", "rev-parse", "@{u}",
-            cwd=proj, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            "git",
+            "rev-parse",
+            "@{u}",
+            cwd=proj,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             remote_out, _ = await asyncio.wait_for(remote.communicate(), timeout=10)
@@ -123,8 +137,12 @@ async def _do_update_check() -> None:
         target_sha = remote_sha if local_sha != remote_sha else local_sha
         if local_sha and remote_sha:
             show = await asyncio.create_subprocess_exec(
-                "git", "show", f"{target_sha}:src/kiro_claw/__init__.py",
-                cwd=proj, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                "git",
+                "show",
+                f"{target_sha}:src/kiro_claw/__init__.py",
+                cwd=proj,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             try:
                 show_out, _ = await asyncio.wait_for(show.communicate(), timeout=10)
@@ -148,9 +166,14 @@ async def _do_update_check() -> None:
         if available:
             diff_base = f"v{_local_version}" if local_sha == remote_sha else local_sha
             diff = await asyncio.create_subprocess_exec(
-                "git", "diff", f"{diff_base}..{target_sha}",
-                "--", "CHANGELOG.md",
-                cwd=proj, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                "git",
+                "diff",
+                f"{diff_base}..{target_sha}",
+                "--",
+                "CHANGELOG.md",
+                cwd=proj,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             try:
                 diff_out, _ = await asyncio.wait_for(diff.communicate(), timeout=10)
@@ -266,7 +289,13 @@ async def _venv_pip_install(proj: str, state: DashboardState) -> bool:
     """
     state.push_update_progress("building", "Installing package (pip)…")
     install = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "pip", "install", "-e", ".", "--quiet",
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        ".",
+        "--quiet",
         cwd=proj,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -305,6 +334,7 @@ async def _restart_gateway(state: DashboardState) -> None:
     # kiro_claw.dashboard.handlers (which re-exports this module), so this
     # must stay inline to avoid an import cycle at module load.
     from kiro_claw.dashboard.chat import save_all_slots_to_history
+
     try:
         save_all_slots_to_history(state)
     except Exception:
@@ -326,6 +356,14 @@ async def api_update_apply(request: web.Request) -> web.Response:
     proj = os.environ.get("KIROCLAW_PROJECT_DIR", "")
     if not proj:
         return web.json_response({"error": "KIROCLAW_PROJECT_DIR not set"}, status=400)
+    # Mirror the _do_update_check git guard: a tarball install (e.g. cloud/EC2)
+    # has no .git, so `git pull` cannot update it — fail with a clear message
+    # instead of a generic "git pull failed".
+    if not os.path.exists(os.path.join(proj, ".git")):
+        return web.json_response(
+            {"error": "Not a git checkout — update by redeploying (e.g. `kiroclaw cloud launch`)"},
+            status=409,
+        )
 
     # Signal updating state via SSE
     state.push_refresh("updating")
@@ -348,7 +386,8 @@ async def api_update_apply(request: web.Request) -> web.Response:
             pass
         await dirty.communicate()
         return web.json_response(
-            {"error": "Timed out checking working tree status"}, status=500,
+            {"error": "Timed out checking working tree status"},
+            status=500,
         )
     if dirty_out and dirty_out.strip():
         logger.warning("Update skipped: working tree has uncommitted changes")
@@ -713,7 +752,10 @@ async def api_stream(request: web.Request) -> web.StreamResponse:
                     break
 
             data = json.dumps(
-                {**state.status_snapshot(update_available=bool(_update_info.get("available"))), "version": _local_version}
+                {
+                    **state.status_snapshot(update_available=bool(_update_info.get("available"))),
+                    "version": _local_version,
+                }
             )
             await resp.write(f"event: dashboard\ndata: {data}\n\n".encode())
 
