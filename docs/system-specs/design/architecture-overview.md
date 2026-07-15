@@ -51,7 +51,7 @@ User → CLI / Slack / Dashboard → KiroClaw
 - **Minimal dependencies** — stdlib core; `slack-sdk` + `aiohttp` only external deps
 - **Project-level config** — `agents/` and `skills/` editable without code changes
 - **Isolated workspace** — LLM sessions and tasks operate in per-session subdirectories under `workspace_root()` (`/Volumes/workplace/kiroclaw-workspace` on macOS, `~/workplace/kiroclaw-workspace` on Linux)
-- **React SPA frontend** — Vite builds to `static/dist/`, served by aiohttp; SPA fallback middleware for React Router; legacy `dashboard.html` fallback if dist absent
+- **React SPA frontend** — Vite builds to `static/dist/`, served by aiohttp; SPA fallback middleware for React Router; if the dist bundle is absent the gateway serves a static "not found" guidance page (the legacy `dashboard.html` fallback was removed — Talos V2285871874)
 - **Frontend security** — DOMPurify sanitizes all `dangerouslySetInnerHTML`; `sudo tee -a` for `/etc/hosts` (no shell injection)
 - **Custom domain** — `kiroclaw setup` uses `kiroclaw.localhost` (RFC 6761, no /etc/hosts needed)
 

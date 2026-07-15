@@ -593,9 +593,12 @@ def _path_in_home_dirs(
     expanded = os.path.expanduser(os.path.expandvars(path_str))
 
     # Anchor a relative input against the supplied workspace dir so it resolves
-    # to the real file rather than the gateway's CWD.
+    # to the real file rather than the gateway's CWD.  Absolutize base_dir
+    # itself first — if a caller passes a relative base_dir, os.path.join would
+    # re-anchor against the process CWD (the very thing the parameter exists to
+    # avoid), giving zero protection when CWD is unrelated to the workspace.
     if base_dir and not os.path.isabs(expanded):
-        expanded = os.path.join(base_dir, expanded)
+        expanded = os.path.join(os.path.abspath(base_dir), expanded)
 
     # Build the candidate forms.  Symlink-resolved forms defeat a link bypass;
     # the lexical forms are the fail-safe fallback when resolution cannot
@@ -700,11 +703,6 @@ _RELATIVE_SENSITIVE_RE = re.compile(
     rf"(?:^|[\s'\"=:,;])(?:\.\.?/)+(?:{_SENSITIVE_SEGMENT_ALT})(?:/|\s|$|['\"])",
     re.IGNORECASE,
 )
-# Segment-anchored symlink-creation verbs: ``ln`` (any flags) or ``cp`` (the
-# ``-s``/``--symbolic-link`` form is what makes cp create a link; we accept any
-# ``cp`` here since it is paired with the relative-sensitive match, so a plain
-# ``cp`` of an unrelated file never trips this).
-_SYMLINK_CREATE_VERB_RE = re.compile(r"(?:^|[;&|`\n]|\$\()\s*(?:ln|cp)(?:\s|$)", re.IGNORECASE)
 
 
 def is_sensitive_bash_command(command: str) -> str | None:
@@ -716,10 +714,12 @@ def is_sensitive_bash_command(command: str) -> str | None:
         return "Blocked: command accesses sensitive credential path"
     if _EXTRACT_INTO_TRUST_ROOT_RE.search(command):
         return "Blocked: command extracts into the governance trust-root directory"
-    # Staging a symlink to a credential file via relative traversal (the
-    # home-anchored/absolute forms are already blocked by the matcher above).
-    if _SYMLINK_CREATE_VERB_RE.search(command) and _RELATIVE_SENSITIVE_RE.search(command):
-        return "Blocked: command stages a symlink to a sensitive credential path"
+    # Block ANY command referencing a sensitive path via relative traversal,
+    # regardless of verb.  The home-anchored/absolute forms are already caught
+    # by the matcher above; this covers the relative-traversal forms that escape
+    # it (was gated on ln/cp only, so dd/base64/xxd/head/tail slipped past).
+    if _RELATIVE_SENSITIVE_RE.search(command):
+        return "Blocked: command references a sensitive credential path via relative traversal"
     return None
 
 
@@ -728,7 +728,21 @@ def is_sensitive_bash_command(command: str) -> str | None:
 # Domain-agnostic: we flag the PAYLOAD, not the destination.
 # Any URL with secrets in query params is suspicious regardless of domain.
 
-_URL_RE = re.compile(r"https?://([a-zA-Z0-9._-]+\.[a-zA-Z]{2,})(:\d+)?(/[^\s)\"'>]*)?")
+# Host group (group 1) matches THREE host shapes so a raw-IP exfil destination
+# is not silently skipped (Talos 78224f3f): a DNS name with a letter TLD, a raw
+# IPv4 literal (``192.168.1.1``, incl. link-local/metadata ``169.254.169.254``),
+# or a bracketed IPv6 literal (``[::1]``, ``[fd00::1]``). The prior regex required
+# a ``.<letters>`` TLD, so ``http://169.254.169.254/latest/…/<secret>`` never
+# matched _URL_RE and its path/query was never scanned. Group 3 stays the
+# path+query so the scan/redact call sites are unchanged.
+_URL_RE = re.compile(
+    r"https?://"
+    r"("
+    r"[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}"  # DNS name with a letter TLD
+    r"|\d{1,3}(?:\.\d{1,3}){3}"  # raw IPv4 literal
+    r"|\[[0-9A-Fa-f:.]+\]"  # bracketed IPv6 literal (incl. IPv4-mapped ::ffff:d.d.d.d)
+    r")(:\d+)?(/[^\s)\"'>]*)?"
+)
 
 # Query string length threshold — normal URLs rarely exceed this
 _EXFIL_QUERY_MIN_LEN = 200
@@ -811,6 +825,26 @@ def _is_safe_presigned(domain: str, query: str) -> bool:
     return True
 
 
+# Hard, unambiguous credential markers scanned across the FULL URL path+query
+# (Talos 78224f3f) — a real AWS key / SSH-or-PEM header / Slack token in a URL is
+# exfil even to an otherwise-safe host, and even with no ``?`` query (secret in
+# the PATH). Distinct from the broader _EXFIL_PATTERNS base64/length heuristics,
+# which stay query-only (long base64 PATH segments — CDN asset ids, git object
+# hashes — are benign).
+_HARD_CREDENTIAL_RE = re.compile(
+    r"(?:"
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}"  # AWS access key ID
+    r'|(?:SecretAccessKey|aws_secret_access_key)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+    r'|(?:SessionToken|aws_session_token)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+    r'|(?:AccessKeyId|aws_access_key_id)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+    r"|(?:ssh-rsa|ssh-ed25519)[\s+%]"  # SSH public key
+    r"|BEGIN[\s+%](?:RSA|DSA|EC|OPENSSH)[\s+%]PRIVATE[\s+%]KEY"  # private key header
+    r"|xox[bpas]-[0-9a-zA-Z-]+"  # Slack token
+    r")",
+    re.IGNORECASE,
+)
+
+
 def scan_exfiltration_urls(text: str) -> list[str]:
     """Scan text for URLs that may be exfiltrating data via query params.
 
@@ -822,23 +856,37 @@ def scan_exfiltration_urls(text: str) -> list[str]:
         domain = match.group(1)
         path_and_query = match.group(3) or ""
         qmark = path_and_query.find("?")
+        query = path_and_query[qmark + 1 :] if qmark != -1 else ""
+
+        # Valid S3 presigned URLs carry AKIA in X-Amz-Credential legitimately, so
+        # exempt them wholesale BEFORE the hard-credential path scan below would
+        # otherwise flag them.
+        if query and _is_safe_presigned(domain, query):
+            continue
+
+        # Hard credential markers ANYWHERE in the path or query (Talos 78224f3f).
+        # The scan below is query-only, so a secret embedded in the URL PATH
+        # (``https://evil/AKIA…`` — no ``?``) escaped it entirely, and a raw-IP
+        # host never even matched _URL_RE. These markers (AKIA/ASIA, key=value
+        # creds, SSH/PEM, Slack) are unambiguous, so flag regardless of domain — a
+        # real AWS key in a URL is exfil even to an otherwise-safe host. The
+        # base64-blob / length heuristics stay query-only (below) since long
+        # base64 PATH segments — CDN asset ids, git object hashes — are benign.
+        if _HARD_CREDENTIAL_RE.search(path_and_query):
+            warnings.append(f"Suspicious URL with credential in path/query: {domain}")
+            continue
+
         if qmark == -1:
             continue
 
-        query = path_and_query[qmark + 1 :]
-
+        # (Valid S3 presigned URLs were already exempted at the top of the loop,
+        # so no _is_safe_presigned re-check is needed here.)
         if len(query) >= _EXFIL_QUERY_MIN_LEN:
-            # S3 presigned URLs on amazonaws.com have long queries but are safe
-            if _is_safe_presigned(domain, query):
-                continue
             warnings.append(
                 f"Suspicious URL with long query params ({len(query)} chars): "
                 f"{domain}{path_and_query[:60]}..."
             )
         elif _EXFIL_PATTERNS.search(query):
-            # S3 presigned URLs on amazonaws.com match the blob pattern but are safe
-            if _is_safe_presigned(domain, query):
-                continue
             warnings.append(f"Suspicious URL with credential-like query data: {domain}")
     return warnings
 
@@ -858,15 +906,23 @@ def redact_exfiltration_urls(text: str) -> tuple[str, list[str]]:
         full_url = match.group(0)
         path_and_query = match.group(3) or ""
         qmark = path_and_query.find("?")
+        query = path_and_query[qmark + 1 :] if qmark != -1 else ""
+
+        # Exempt valid S3 presigned URLs before the path scan (mirror of scan_).
+        if query and _is_safe_presigned(domain, query):
+            continue
+
+        # Hard credential markers anywhere in path or query (Talos 78224f3f) —
+        # redact the whole URL regardless of domain (mirror of scan_).
+        if _HARD_CREDENTIAL_RE.search(path_and_query):
+            result = result.replace(full_url, f"[REDACTED: suspicious URL to {domain}]")
+            continue
+
         if qmark == -1:
             continue
 
-        query = path_and_query[qmark + 1 :]
-
+        # (Valid S3 presigned URLs were already exempted at the top of the loop.)
         if len(query) >= _EXFIL_QUERY_MIN_LEN or _EXFIL_PATTERNS.search(query):
-            # S3 presigned URLs on amazonaws.com are safe — don't redact
-            if _is_safe_presigned(domain, query):
-                continue
             result = result.replace(full_url, f"[REDACTED: suspicious URL to {domain}]")
 
     return result, warnings
@@ -914,10 +970,21 @@ _CREDENTIAL_PATTERNS = re.compile(
     #      material always begins on the line *after* the header) matches only
     #      the header phrase, leaving trailing content intact, while a genuine
     #      truncated key still has its body lines redacted.
+    #      The final ``(?=\r?\n[A-Za-z0-9+/=])`` lookahead alternative lets the
+    #      run cross a SINGLE blank line when the *next* line begins with base64
+    #      material. RFC 1421 ENCRYPTED PEMs put a MANDATORY blank line between
+    #      the ``DEK-Info:`` header and the base64 body; without this lookahead
+    #      the per-line "every continuation must contain a base64 char" rule
+    #      stopped at that blank line and leaked the whole encrypted body (for
+    #      both a truncated key AND a complete encrypted key whose body exceeds
+    #      the full-block cap). Because the lookahead consumes nothing, TWO+
+    #      consecutive blank lines still terminate the run — trailing prose is
+    #      preserved (no over-redaction). (CR-289301166.)
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"(?:"
     r"[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
-    r"|(?:\r?\n(?:Proc-Type:[^\n]*|DEK-Info:[^\n]*|[A-Za-z0-9+/=]+(?=\r?\n|\Z)|))*"
+    r"|(?:\r?\n(?:Proc-Type:[^\n]*|DEK-Info:[^\n]*|[A-Za-z0-9+/=]+(?=\r?\n|\Z)"
+    r"|(?=\r?\n[A-Za-z0-9+/=])))*"
     r")"
     r"|xox[bpas]-[0-9a-zA-Z-]{10,}"  # Slack token
     # Telegram bot token: ``<bot_id>:<secret>`` — bot_id is 6+ digits, secret is
@@ -950,24 +1017,38 @@ _CREDENTIAL_PATTERNS = re.compile(
     # DB connection URIs with embedded credentials — redact the
     # ``scheme://user:pass@`` prefix (the password lives here).
     r"|(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis(?:s)?|amqp(?:s)?)"
-    r"://[^\s:/@]+:[^\s/@]+@"
-    # ── JWT / OAuth Bearer tokens (Talos cc1d6bdd) ──
-    # `eyJ` is the base64url encoding of every JWT header's `{"` prefix; a JWT is
-    # three `.`-separated base64url segments (header.payload.signature). The HTTP
-    # `Authorization: Bearer <token>` header carries opaque or JWT bearer creds.
-    # The JWT alternative is case-sensitive (`eyJ` is a fixed base64url prefix).
-    # The header name + scheme are matched case-insensitively via a scoped
-    # `(?i:…)` group because HTTP header names are case-insensitive (RFC 7230
+    # User portion is `*` (not `+`): empty-user connection strings (e.g. MongoDB
+    # Atlas IAM `mongodb+srv://:secret@…`) still redact the password (Heimdall,
+    # ported from KiroClaw CR-286281237).
+    r"://[^\s:/@]*:[^\s/@]+@"
+    # ── JWT / JWE / OAuth Bearer tokens (Talos cc1d6bdd; JWE hardening a8e5fe6a) ──
+    # `eyJ` is the base64url encoding of every JWT header's `{"` prefix; a signed
+    # JWT (JWS) is three `.`-separated base64url segments (header.payload.sig) and
+    # an encrypted JWT (JWE, RFC 7516) is five (header.key.iv.ciphertext.tag), so
+    # the segment quantifier accepts `(?:\.[A-Za-z0-9_-]*){2,4}` further segments
+    # after the header to redact BOTH shapes as one token. Post-header segments use
+    # `*` (not `+`) so an EMPTY segment still counts: a compact JWE with direct
+    # (`alg:dir`) or key-agreement (`ECDH-ES`) key management has an empty Encrypted
+    # Key (2nd) segment — shape `header..iv.ciphertext.tag` — which a `+` quantifier
+    # would fail to match, leaking the ciphertext + tag. The `.` separators are
+    # still required, so bare `eyJson`-style prose (no dots) is not over-redacted.
+    # The HTTP `Authorization: Bearer <token>` header carries opaque or JWT bearer
+    # creds. The JWT alternative is case-sensitive (`eyJ` is a fixed base64url
+    # prefix). The header name + scheme are matched case-insensitively via scoped
+    # `(?i:…)` groups because HTTP header names are case-insensitive (RFC 7230
     # §3.2), HTTP/2 mandates lowercase names, and the `Bearer` scheme is
     # case-insensitive (RFC 6750 §2.1) — so `authorization: bearer …` emitted by
-    # requests / net/http / HTTP2 frame logs is redacted too. Both alternatives
-    # are scoped tightly: the JWT segment class cannot cross the literal `.`
-    # separators and the Bearer token class (`[A-Za-z0-9._~+/-]`, RFC 6750
-    # `b64token`) stops at whitespace/quotes, so neither over-captures. A Bearer
-    # header carrying a JWT redacts as one match (the Bearer class subsumes the
-    # JWT); a bare JWT is still caught independently (defense in depth).
-    r"|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"  # JWT header.payload.sig
-    r"|(?i:Authorization:\s*Bearer)\s+[A-Za-z0-9._~+/-]+=*"  # HTTP bearer auth header
+    # requests / net/http / HTTP2 frame logs is redacted too. The separator is
+    # JSON-aware (Talos round-2, CR-289081658): an optional quote may precede the
+    # `:`/`=` and the token, so a serialized header `{"Authorization": "Bearer
+    # <tok>"}` in a structured-log/JSON request dump is redacted as well. Both
+    # alternatives are scoped tightly: the JWT segment class cannot cross the
+    # literal `.` separators and the Bearer token class (`[A-Za-z0-9._~+/-]`, RFC
+    # 6750 `b64token`) stops at whitespace/quotes, so neither over-captures. A
+    # Bearer header carrying a JWT redacts as one match (the Bearer class subsumes
+    # the JWT); a bare JWT is still caught independently (defense in depth).
+    r"|eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){2,4}"  # JWS (3-seg) / JWE (5-seg incl. dir/ECDH-ES)
+    r"|(?i:Authorization)[\"\']?\s*[:=]\s*[\"\']?(?i:Bearer)\s+[A-Za-z0-9._~+/-]+=*"  # HTTP/JSON bearer
     r")",
 )
 
@@ -1117,6 +1198,16 @@ def _looks_like_secret_key(token: str) -> bool:
        word-based identifiers and slash-delimited file paths that survive the
        entropy floor. Both gates apply to EVERY token (a '/' or '+' does not
        exempt a token, so 40-char mixed-case file paths stay intact).
+
+    BOUNDARY ASSUMPTION: this classifier deliberately evaluates an EXACTLY-40-char
+    window (gate 1). It does NOT itself scan longer runs — a real key glued to an
+    adjacent base64 char with no delimiter (e.g. ``X`` + key, key + ``A``,
+    ``SECRET=`` + key + ``ABC``, key + ``X`` + key) forms a 41+ char run that would
+    fail the exact-40 gate and leak verbatim. Callers that receive raw ``{40,}``
+    runs MUST use :func:`_contains_bare_secret`, which slides a 40-char window
+    across the run so a glued secret is still caught. Keep the exact-40 shape here:
+    it is what lets the structural gates cleanly separate real keys from 64-char
+    sha256 hex, base64 document blobs, etc.
     """
     if len(token) != _SECRET_KEY_LEN:
         return False
@@ -1137,6 +1228,41 @@ def _looks_like_secret_key(token: str) -> bool:
     )
 
 
+def _contains_bare_secret(run: str) -> bool:
+    """Return True if any 40-char window of *run* looks like a bare secret key.
+
+    :func:`_looks_like_secret_key` only accepts an EXACTLY-40-char token, but the
+    ``_BARE_SECRET_RUN_RE`` boundary look-arounds capture the longest possible run
+    of base64-alphabet chars. A genuine 40-char secret glued to an adjacent
+    base64 char with no delimiter (``X`` + key, key + ``A``, ``SECRET=`` + key +
+    ``ABC``, key + ``X`` + key) produces a 41+ char run that would fail the
+    exact-40 gate and leak verbatim. We slide a 40-char window across the run and
+    report a hit if ANY window clears every gate. This stays linear in the run
+    length (the regex yields disjoint spans), so cost is bounded overall.
+
+    ENCODED-TEXT-BLOB EXCLUSION: if the WHOLE run base64-decodes to printable
+    text it is a cohesive encoded blob (e.g. an OAuth/PKCE ``code_challenge``,
+    which is ``base64(sha256-hex)``), not a bare secret — those are handled by
+    the decode-and-scan pass instead. We must skip it here because sliding a
+    40-char window byte-by-byte across such a blob creates base64-*misaligned*
+    sub-windows whose garbage decode looks high-entropy and would clear every
+    per-window gate, wrongly redacting a legitimate sign-in URL (regression
+    guarded by the OAuth-URL corpus). This is the same bias-toward-not-redacting
+    that :func:`_looks_like_secret_key` already applies per-window (gate 5),
+    lifted to run granularity so a misaligned window cannot defeat it. A genuine
+    glued secret (``X`` + key, key + ``ABC``, key + ``X`` + key) does NOT decode
+    cleanly as a whole run, so it still reaches the sliding window below.
+    """
+    if len(run) < _SECRET_KEY_LEN:
+        return False
+    if _decodes_to_printable_text(run):
+        return False
+    for start in range(len(run) - _SECRET_KEY_LEN + 1):
+        if _looks_like_secret_key(run[start : start + _SECRET_KEY_LEN]):
+            return True
+    return False
+
+
 def _decode_b64_safe(text: str) -> str:
     """Try to base64-decode chunks in text; return decoded content or ''."""
     for m in _B64_CHUNK_RE.finditer(text):
@@ -1147,6 +1273,12 @@ def _decode_b64_safe(text: str) -> str:
         except Exception:
             continue
     return ""
+
+
+# Standard replacement tag for a redacted credential. Shared between the batch
+# redactor (`redact_credentials`) and the streaming fail-closed path
+# (`StreamRedactor.feed`) so the on-the-wire marker is identical everywhere.
+_REDACTED_CREDENTIAL_TAG = "[REDACTED: credential]"
 
 
 def redact_credentials(text: str) -> tuple[str, list[str]]:
@@ -1160,7 +1292,7 @@ def redact_credentials(text: str) -> tuple[str, list[str]]:
     # 1. Redact plaintext credential patterns
     for m in _CREDENTIAL_PATTERNS.finditer(result):
         matched = m.group()
-        tag = "[REDACTED: credential]"
+        tag = _REDACTED_CREDENTIAL_TAG
         result = result.replace(matched, tag, 1)
         warnings.append(f"Redacted credential pattern: {matched[:20]}...")
 
@@ -1180,13 +1312,18 @@ def redact_credentials(text: str) -> tuple[str, list[str]]:
     # been redacted away by an earlier pass.
     for m in _BARE_SECRET_RUN_RE.finditer(text):
         run = m.group()
-        if not _looks_like_secret_key(run):
+        # Slide a 40-char window across the run rather than gating the whole run
+        # on len == 40: a real secret glued to an adjacent base64 char (no
+        # delimiter) yields a 41+ char run that the exact-40 shape check would
+        # miss, leaking the key verbatim. Redact the whole run if ANY window is a
+        # secret.
+        if not _contains_bare_secret(run):
             continue
         if run not in result:
             # Already redacted by pass 1/2 (e.g. it was a labelled value or an
             # encoded-credential chunk) — nothing left to replace.
             continue
-        result = result.replace(run, "[REDACTED: credential]", 1)
+        result = result.replace(run, _REDACTED_CREDENTIAL_TAG, 1)
         warnings.append(f"Redacted bare secret key ({len(run)} chars)")
 
     return result, warnings
@@ -1287,12 +1424,14 @@ def redact(text: str) -> str:
 # a contiguous run of these; any byte OUTSIDE this set terminates an in-progress
 # match, so text up to (and including) such a terminator is safe to redact and
 # emit. Includes URL / base64 / connection-string punctuation so exfil URLs and
-# DB URIs are also held intact across chunk boundaries. (The private-key HEADER
+# DB URIs are also held intact across chunk boundaries — plus quotes and URL
+# query delimiters (``"`` ``'`` ``?&#``) so a JSON key/value or query-string
+# secret is not committed piecemeal across a chunk edge. (The private-key HEADER
 # phrase contains spaces and is the one pattern that can split on a terminator;
 # it is a non-secret header string and the final full-text pass still redacts
 # the persisted/displayed copy.)
 _CRED_CLASS: frozenset[str] = frozenset(
-    string.ascii_letters + string.digits + "_-+/=.:@%~"
+    string.ascii_letters + string.digits + "_-+/=.:@%~" + '"' + "'" + "?&#"
 )
 
 # Upper bound on withheld trailing characters. Larger than the longest
@@ -1300,6 +1439,63 @@ _CRED_CLASS: frozenset[str] = frozenset(
 # bounds latency/memory for a pathologically long unbroken run (only affects a
 # single >512-char secret with no delimiter, which no supported provider issues).
 _STREAM_HOLDBACK_MAX = 512
+
+# PEM header hold-back: matches an in-progress "BEGIN [type] PRIVATE KEY"
+# phrase in the tail of the commit buffer.  When found, we refuse to commit
+# at the whitespace boundary so the full multi-word marker stays inside one
+# redaction pass (Heimdall, ported from KiroClaw CR-286281237).
+_PEM_HOLD_RE = re.compile(
+    r"BEGIN[\s](?:RSA[\s]?|DSA[\s]?|EC[\s]?|OPENSSH[\s]?)?(?:PRIVATE)?[\s]?$",
+    re.IGNORECASE,
+)
+
+# JWTs (esp. RS256/ES256 with embedded claims) routinely exceed the 512-char DoS
+# floor, so a terminal JWT longer than _STREAM_HOLDBACK_MAX would be bisected by
+# the default cap and emitted half-redacted. When the withheld tail *looks like*
+# the start of a JWT, we raise the cap to this larger ceiling so the whole token
+# is rejoined before emission while still keeping the buffer bounded (Talos
+# round-2 follow-up to CR-289081658).
+_STREAM_HOLDBACK_JWT_MAX = 4096
+
+# The withheld tail is a partial JWT/JWE when it ends with the `eyJ` base64url
+# header prefix optionally followed by up to FOUR `.`-separated base64url segments
+# (the final segment may be empty mid-stream). Three segments = a JWS/JWT
+# (header.payload.sig); five = a compact JWE (header.key.iv.ciphertext.tag), so the
+# `{0,4}` trailing quantifier admits the full JWE shape too — matching the batch
+# `_CREDENTIAL_PATTERNS` JWE ceiling — instead of bisecting a >512-char JWE at the
+# 512 floor. Anchored to the buffer end (`\Z`).
+_PARTIAL_JWT_TAIL_RE = re.compile(r"eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){0,4}\Z")
+
+# Trailing (possibly incomplete) `Authorization: Bearer <token>` anchor at the end
+# of the stream buffer. Unlike a bare credential run, this anchor embeds WHITESPACE
+# (`Authorization: Bearer `) which is NOT in `_CRED_CLASS`, so the maximal-trailing-
+# cred-run holdback in `StreamRedactor.feed` would commit the `Authorization:` /
+# `Bearer ` prefix in one chunk and the opaque token in the next — redacting
+# neither, since the batch `Authorization:\s*Bearer` pattern only fires when the
+# whole anchor is present in a single `redact()` call. We therefore withhold from
+# the START of any such trailing anchor so the anchor and its token stay joined
+# until a terminator (or stream end) arrives.
+#
+# `\Z` pins the match to the buffer tail so only a genuinely in-progress anchor is
+# held. The `Bearer` word is matched by any of its prefixes (`B`…`Bearer`) so a
+# split mid-word (`Authorization: Bear` | `er opaque…`) still holds; a completed
+# anchor followed by a token then whitespace no longer matches (`\s+` after the
+# token cannot reach `\Z`), so it is committed and redacted whole. Requiring the
+# `Bearer` prefix bounds over-holding: ordinary prose like `Authorization: granted`
+# fails the match and is released immediately. Case-INSENSITIVE and JSON-aware to
+# mirror the batch pattern: HTTP/2 lower-cases header names (`authorization:` /
+# `bearer`) and JSON shapes the header as `{"Authorization": "Bearer <tok>"}` (a
+# quote before the `:` and before the token), so the anchor tolerates an optional
+# quote around `[:=]` and folds the `Authorization`/`Bearer` words — otherwise a
+# lowercase or JSON-shaped anchor split across chunks would not be held and its
+# token would leak. Opaque OAuth/refresh/SSO Bearer tokens carry no `eyJ` header,
+# so without this anchor a >512-char opaque bearer tail would stay on the 512 floor
+# and stream its raw tail.
+_BEARER_ANCHOR_PARTIAL_RE = re.compile(
+    r"""Authorization["']?\s*[:=]\s*["']?"""
+    r"(?:Bearer(?:\s+[A-Za-z0-9._~+/=-]*)?|Beare|Bear|Bea|Be|B)?\Z",
+    re.IGNORECASE,
+)
 
 
 class StreamRedactor:
@@ -1329,9 +1525,46 @@ class StreamRedactor:
         i = len(self._buf)
         while i > 0 and self._buf[i - 1] in _CRED_CLASS:
             i -= 1
-        # Cap the withheld tail so an unbroken run can't grow without bound.
-        if len(self._buf) - i > _STREAM_HOLDBACK_MAX:
-            i = len(self._buf) - _STREAM_HOLDBACK_MAX
+        # PEM header hold-back (Heimdall, ported from KiroClaw CR-286281237): the
+        # multi-word phrase "BEGIN RSA PRIVATE KEY" splits on whitespace.  If the
+        # tail of the commit window contains an in-progress PEM header prefix,
+        # refuse to commit at this boundary.
+        if i > 0 and _PEM_HOLD_RE.search(self._buf[max(0, i - 50) : i]):
+            i = 0
+        # Also withhold from the start of any trailing (possibly incomplete)
+        # `Authorization: Bearer <token>` anchor. Its embedded whitespace is not in
+        # _CRED_CLASS, so the run scan above would otherwise commit the anchor
+        # prefix and the opaque token in separate chunks — leaking the token, since
+        # the batch Bearer pattern only fires on the joined anchor.
+        anchor = _BEARER_ANCHOR_PARTIAL_RE.search(self._buf)
+        if anchor is not None:
+            i = min(i, anchor.start())
+        # Escalate the holdback cap to the JWT ceiling when the withheld tail is
+        # (the start of) a credential that legitimately exceeds the 512-char DoS
+        # floor: a partial JWT/JWE (`eyJ…`) OR a trailing `Authorization: Bearer`
+        # anchor. Bearer must be included alongside JWT — an opaque OAuth/refresh/
+        # SSO Bearer token > 512 chars has no `eyJ` prefix, so keying escalation on
+        # `_PARTIAL_JWT_TAIL_RE` alone left its 512-char tail streaming raw. Still
+        # bounded: a run with no credential anchor stays on the 512 floor.
+        cred_anchored = (
+            _PARTIAL_JWT_TAIL_RE.search(self._buf) is not None or anchor is not None
+        )
+        cap = _STREAM_HOLDBACK_MAX
+        if len(self._buf) - i > cap and cred_anchored:
+            cap = _STREAM_HOLDBACK_JWT_MAX
+        if len(self._buf) - i > cap:
+            if cred_anchored:
+                # Fail closed: a credential-anchored tail (JWT/JWE/Bearer) has blown
+                # past the 4096 ceiling. Bisecting here would emit the token's head
+                # raw, so instead redact+emit the safe prefix, append the tag, and
+                # DROP the oversized tail. A plain cred-class run with no credential
+                # anchor falls through to the bisect below and is committed
+                # (bisecting an opaque non-credential run cannot leak a structured
+                # secret and preserves the DoS bound with no data loss).
+                commit, self._buf = self._buf[:i], ""
+                out = self._redact(commit) if commit else ""
+                return out + _REDACTED_CREDENTIAL_TAG
+            i = len(self._buf) - cap
         if i <= 0:
             return ""  # whole buffer is a (possibly partial) credential run — hold
         commit, self._buf = self._buf[:i], self._buf[i:]
@@ -1588,6 +1821,91 @@ def audit_bash_command(command: str) -> str | None:
     return None
 
 
+# Data-egress / reverse-shell command shapes — the exfiltration-specific subset
+# of SUSPICIOUS_BASH_PATTERNS (Talos 5682f92b). These are enforced at the
+# tool-invocation gate (denied), unlike the full SUSPICIOUS_BASH_PATTERNS list
+# which stays advisory: that list also carries destructive-but-local shapes
+# (rm -rf, dd if=, chmod on system dirs, DROP TABLE) that a user may legitimately
+# run in their own workspace, so hard-denying all of them at the gate would break
+# ordinary use. This subset is narrowly the "push local data OUT / open a shell
+# to a remote" shapes, where a hijacked-agent block is worth the rare false
+# positive.
+#
+# Entries containing `*` are fnmatch globs (`*<pat>*`); the rest are
+# case-insensitive substrings, so they fire regardless of intervening flags /
+# token layout — `curl -d @f`, `curl -s -d @f`, `curl --data-binary @f` all
+# match. The `@` sigil on curl body/upload flags means "read from a local file"
+# (the tell-tale of egress); a bare `-d 'x=1'` inline body has no `@` and is not
+# matched. curl long options accept BOTH ` @` and `=@` separators, so both are
+# listed. `--data-raw` is deliberately EXCLUDED: it is the one --data variant
+# that does NOT interpret a leading `@` as a file reference, so `--data-raw @x`
+# posts the literal string `@x` (never reads a file) — including it would only
+# add false positives. Multipart uploads use a glob (`-F *=@`) so ANY field name
+# matches, not just a field literally named `file` (`curl -F x=@secret` exfils
+# just as well).
+_BASH_EXFIL_PATTERNS: list[str] = [
+    "-d @",  # curl POST body read from a local file (space + `=` separators)
+    "-d@",
+    "-d=@",
+    "--data @",
+    "--data=@",
+    "--data-binary @",
+    "--data-binary=@",
+    "--data-ascii @",
+    "--data-ascii=@",
+    "--data-urlencode @",  # also reads a local file when the value starts with @
+    "--data-urlencode=@",
+    "-F *=@",  # curl multipart file upload, any field name (glob)
+    "--form *=@",
+    "--upload-file",  # curl upload, long form
+    "wget --post-file",  # wget file upload
+    "/dev/tcp/",  # bash builtin reverse shell (>/dev/tcp/host/port)
+    "/dev/udp/",
+]
+
+# Exfil shapes where whitespace or flag CASE around an operator matters, so a
+# plain lowercased substring/glob would either miss a no-space variant or
+# false-positive. Matched via regex against the ORIGINAL (non-lowercased)
+# command. Each entry is (compiled pattern, human label).
+_BASH_EXFIL_RES: list[tuple[re.Pattern[str], str]] = [
+    # netcat reading a local file via input redirect — `nc host port < file` AND
+    # `nc host port <file` (no space after `<`, a valid shell redirect that the
+    # old `nc * < ` glob missed). `nc`/`ncat` is anchored at a word boundary so
+    # `sync`/`func` etc. do not match. Case-insensitive (command name).
+    (re.compile(r"(?:^|\s)nc(?:at)?\s+\S.*<", re.IGNORECASE), "nc/ncat file redirect"),
+    # netcat reverse shell `nc -e <prog>` / `ncat -e <prog>`. `nc`/`ncat` is
+    # anchored at a word boundary so `rsync -e ssh` (contains `nc -e`) and
+    # `vnc -e` do NOT match; a plain substring `"nc -e"` false-positived on them.
+    (re.compile(r"(?:^|\s)nc(?:at)?\s+-e\b", re.IGNORECASE), "nc/ncat reverse shell"),
+    # curl upload short form `-T <file>` / `-Tfile` (no space). CASE-SENSITIVE
+    # `-T`: curl's upload flag is uppercase, so this does NOT match lowercase long
+    # options such as `--trace-time`. `-T` must begin at a word boundary.
+    (re.compile(r"\bcurl\b.*(?:^|\s)-T\s*\S"), "curl -T upload"),
+]
+
+
+def audit_bash_exfiltration(command: str) -> str | None:
+    """Return a denial reason if *command* matches a data-egress / reverse-shell
+    shape that must be blocked at the tool-invocation gate, else None.
+
+    Scoped to _BASH_EXFIL_PATTERNS / _BASH_EXFIL_RES (exfil/reverse-shell only) so
+    it can be wired into the deny path in ``hooks.on_tool_call`` without blocking
+    benign local commands. The broader :func:`audit_bash_command` stays advisory.
+    """
+    lower = command.lower()
+    for pattern in _BASH_EXFIL_PATTERNS:
+        pat = pattern.lower()
+        if "*" in pat:
+            if fnmatch.fnmatch(lower, f"*{pat}*"):
+                return f"Blocked: command matches data-exfiltration pattern '{pattern}'"
+        elif pat in lower:
+            return f"Blocked: command matches data-exfiltration pattern '{pattern}'"
+    for rx, label in _BASH_EXFIL_RES:
+        if rx.search(command):
+            return f"Blocked: command matches data-exfiltration pattern ({label})"
+    return None
+
+
 def scan_history(history_dir: Path, last_n: int = 100) -> list[dict]:
     """Scan recent conversation history for suspicious tool usage.
 
@@ -1637,7 +1955,9 @@ def scan_memory() -> list[dict]:
     # lightweight import path. Skip the scan cleanly if it is unavailable.
     try:
         from kiro_claw.vector_memory import VectorMemoryStore
-    except ImportError:  # numpy/faiss/snowballstemmer are optional heavy deps
+    except Exception:  # numpy/faiss/snowballstemmer are optional heavy deps; any
+        # import-time failure (ImportError, OSError from a C-extension, etc.)
+        # must skip the scan cleanly rather than crash the caller.
         return findings
     try:
         store = VectorMemoryStore()

@@ -1109,6 +1109,64 @@ class TestInitSubagents:
                 orch._init_subagents()
         assert orch.subagent_mgr._max_concurrent == 5
 
+    def _capture_on_event(self, orch):
+        """Run _init_subagents with SubagentManager patched; return the on_event callback."""
+        with patch("kiro_claw.slack.handler.is_yolo_mode", return_value=False):
+            with patch("kiro_claw.slack.gateway.SubagentManager") as mock_sm:
+                mock_sm_inst = MagicMock()
+                mock_sm_inst.start_reaper = MagicMock()
+                mock_sm.return_value = mock_sm_inst
+                orch._init_subagents()
+                return mock_sm.call_args.kwargs["on_event"]
+
+    @pytest.mark.asyncio
+    async def test_subagent_spawn_and_done_push_slots_update_debounced(self):
+        """subagents_running flips at spawn/done — the on_event handler schedules a
+        debounced push_slots_update so slots-stream consumers (composer busy
+        affordance, Board working lane) stay live. Multiple events inside the
+        debounce window coalesce into one push. Covers the reaper too, since
+        _force_reap fires subagent_done through the same on_event path."""
+        from kiro_claw.subagent import SubagentInfo
+
+        orch = _make_orchestrator()
+        orch.sessions = _mock_sessions()
+        orch.ctx_builder = MagicMock()
+        orch.ctx_builder.hooks = MagicMock()
+        orch.dashboard_state = _mock_dashboard_state()
+        on_event = self._capture_on_event(orch)
+
+        info = SubagentInfo(id="a1", task="t", parent_session_key="dashboard:s1")
+        # Batch: two spawns + one done inside the 0.2s window -> one push.
+        await on_event("subagent_spawn", info, {})
+        await on_event("subagent_spawn", SubagentInfo(id="a2", task="t", parent_session_key="dashboard:s1"), {})
+        await on_event("subagent_done", info, {"elapsed": 1.0})
+        assert orch.dashboard_state.push_slots_update.call_count == 0  # debounced, not yet flushed
+        await asyncio.sleep(0.3)
+        assert orch.dashboard_state.push_slots_update.call_count == 1
+
+        # A later lifecycle event schedules a fresh push.
+        await on_event("subagent_done", SubagentInfo(id="a2", task="t", parent_session_key="dashboard:s1"), {"elapsed": 1.0})
+        await asyncio.sleep(0.3)
+        assert orch.dashboard_state.push_slots_update.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_subagent_tool_event_does_not_push_slots(self):
+        """High-frequency subagent_tool events must NOT trigger slots pushes —
+        only spawn/done flip the subagents_running truth value."""
+        from kiro_claw.subagent import SubagentInfo
+
+        orch = _make_orchestrator()
+        orch.sessions = _mock_sessions()
+        orch.ctx_builder = MagicMock()
+        orch.ctx_builder.hooks = MagicMock()
+        orch.dashboard_state = _mock_dashboard_state()
+        on_event = self._capture_on_event(orch)
+
+        info = SubagentInfo(id="a1", task="t", parent_session_key="dashboard:s1")
+        await on_event("subagent_tool", info, {"tool": "grep"})
+        await asyncio.sleep(0.3)
+        assert orch.dashboard_state.push_slots_update.call_count == 0
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: _init_heartbeat

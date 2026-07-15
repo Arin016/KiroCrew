@@ -34,6 +34,7 @@ from kiro_claw.platform import redact_via_context as redact
 from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS
 from kiro_claw.security import (
     _SENSITIVE_HOME_DIRS,
+    audit_bash_exfiltration,
     is_sensitive_bash_command,
     is_sensitive_path,
     scan_exfiltration_urls,
@@ -253,7 +254,11 @@ def _vet_shell_command(command: str) -> str | None:
     # ONLY deny gate for the cron `command` field — it executes via ``sh -c``
     # outside the kiro-cli ACP permission/hook flow — so an overlay-only deny
     # pattern would otherwise be silently bypassed here.
-    reason = current_context().security.is_denied(command) or is_sensitive_bash_command(command)
+    reason = (
+        current_context().security.is_denied(command)
+        or is_sensitive_bash_command(command)
+        or audit_bash_exfiltration(command)
+    )
     if reason:
         # Scrub the echoed reason through the SAME context the deny check used,
         # so a companion-overlay-detected token does not leak in the message

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from kiro_claw.providers.base import LLMProvider
 
 from kiro_claw.config.loader import KiroClawConfig
-from kiro_claw.context import ContextBuilder
+from kiro_claw.context import ContextBuilder, window_for_provider_client
 from kiro_claw.context_management import (
     COMPLETION_KEEP_DEFAULT_CHARS,
     apply_completion_keep,
@@ -2036,10 +2036,15 @@ class SubagentManager:
         named_agent = bool(info.agent and _AGENT_NAME_RE.fullmatch(info.agent))
         raw_task = info._raw_task or info.task
         message = raw_task if named_agent else (_SYSTEM_PREFIX + raw_task)
+        # Scale the injected-context budget to this subagent's model window (a
+        # subagent can be pinned to a smaller model). Resolved from the live
+        # client; None ⇒ 1M reference.
+        _sub_window = window_for_provider_client(client)
         # Off-loop: build_message embeds the episodic query (blocking urllib).
         full_message, _ = await run_in_embed_pool(
             self._ctx_builder.build_message,
             message, is_new, session_key, provider_type="claude_code" if is_cc else "acp",
+            model_window=_sub_window,
         )
 
         result_text = ""

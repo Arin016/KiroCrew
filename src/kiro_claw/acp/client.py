@@ -92,6 +92,7 @@ from kiro_claw.hooks import (
     fire_tool_hooks,
     get_global_hook_store,
 )
+from kiro_claw.mcp_gateway.claim import schedule_claim
 from kiro_claw.sandbox import wrap_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
@@ -1114,6 +1115,9 @@ class AcpClient:
         extra_env: dict[str, str] | None = None,
         acp_backend: str = "",
         audit_source: str | None = None,
+        mcp_gateway_overlay: str | Path | None = None,
+        mcp_gateway_settings_mcp_json: str | Path | None = None,
+        mcp_gateway_socket: str | Path | None = None,
     ):
         self._work_dir = Path(work_dir) if work_dir else Path.home() / ".kiroclaw" / "workspace"
         self._model = model or DEFAULT_MODEL
@@ -1129,6 +1133,14 @@ class AcpClient:
         self._audit_source = audit_source
         self._channel_id = channel_id
         self._extra_env = extra_env or {}
+        # MCP gateway overlay: when set, the sandbox bind-mounts it over
+        # ~/.kiro/agents so kiro-cli reads broker-wired MCP entries; the gateway
+        # socket is bind-mounted in so stubs can reach the broker. None = off.
+        self._mcp_gateway_overlay = str(mcp_gateway_overlay) if mcp_gateway_overlay else None
+        self._mcp_gateway_settings_mcp_json = (
+            str(mcp_gateway_settings_mcp_json) if mcp_gateway_settings_mcp_json else None
+        )
+        self._mcp_gateway_socket = str(mcp_gateway_socket) if mcp_gateway_socket else None
         self._sandbox_cleanup: str | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._pid: int | None = None
@@ -1289,6 +1301,18 @@ class AcpClient:
         self._session_key = session_key
         self._channel_id = channel_id
         self._last_activity = time.monotonic()
+        # Claim-push: tell gatewayd this runtime PID now belongs to
+        # ``session_key`` so every MCP stub connection under it carries the
+        # right ``_meta.caller`` immediately — event-driven replacement for
+        # the stub-side recaller poll (whose bounded budget stranded pool
+        # runtimes claimed late). Fire-and-forget; no-ops without a gateway
+        # socket or a live process.
+        schedule_claim(
+            self._mcp_gateway_socket,
+            self._process.pid if self._process else None,
+            session_key,
+            channel_id,
+        )
 
     async def set_model(self, model_id: str) -> None:
         """Switch model on a running session (used by warm pool post-claim)."""

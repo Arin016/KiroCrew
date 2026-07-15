@@ -543,6 +543,41 @@ function getSlotSubs(state: ChatState, slot: string) {
   return slot !== state.activeSlot ? state.slotActivity[slot]?.subagents : state.subagents
 }
 
+/**
+ * Live "sub-agents running" signal for a slot, derived from the
+ * subagent_spawn/tool/done WS events (the only real-time source — see the
+ * ChatSidebar countActive note: dashboardSlice fields only refresh on a full
+ * slots push). Counts pending/running/tool as active, mirroring ChatSidebar.
+ */
+export const selectSlotSubagentsActive = (state: RootState, slot: string): boolean => {
+  const subs = getSlotSubs(state.chat, slot)
+  if (!subs) return false
+  for (const a of Object.values(subs)) {
+    if (a.status === 'running' || a.status === 'tool' || a.status === 'pending') return true
+  }
+  return false
+}
+
+/**
+ * Single source of truth for "is this slot's composer busy" — the signal that
+ * queues the next message (busy affordance) and skips the optimistic user
+ * bubble (the backend returns a "queued" message instead, so an optimistic
+ * bubble would render a duplicate). Busy = main turn running OR background
+ * sub-agents running, with two redundant sub-agent signals OR'd
+ * (conservative): the live WS-derived signal (real-time, self-heals on
+ * sub-agent crash via the reaper's done event) and the slots-stream snapshot
+ * field (covers the first frames after reload/reconnect before WS events
+ * replay). Used by ChatPage (main route) and ChatPane (split view) — keep both
+ * routes on this selector so the rule cannot drift.
+ */
+export const selectComposerBusy = (state: RootState, slot: string | null): boolean => {
+  if (!slot) return state.chat.slotRunning
+  if (selectSlotStreamState(state, slot) !== 'idle') return true
+  if (slot === state.chat.activeSlot && state.chat.slotRunning) return true
+  if (selectSlotSubagentsActive(state, slot)) return true
+  return !!state.dashboard.slots.find((sl) => sl.key === slot)?.subagents_running
+}
+
 const chatSlice = createSlice({
   name: 'chat',
   initialState,

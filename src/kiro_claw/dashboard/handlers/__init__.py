@@ -437,7 +437,6 @@ def _list_aim_prompts() -> list[dict[str, Any]]:
 # ── Core (extracted to handlers/core.py) ──
 from kiro_claw.dashboard.handlers.core import (  # noqa: E402, F401
     _DIST_DIR,
-    _HTML_PATH,
     _STATIC_DIR,
     _build_stt_install_script,
     _find_suitable_python,

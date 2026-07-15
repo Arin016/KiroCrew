@@ -80,8 +80,9 @@ def ensure_dev_dist_symlink() -> Optional[Path]:
     A ``pip``/wheel install ships that directory pre-bundled (the npm build
     output is committed/packaged into the wheel). That path does not fire on a
     plain source-tree run (``PYTHONPATH=src python -m kiro_claw gateway``,
-    ``dev-backend.sh``, etc.), so the gateway silently falls through to the
-    legacy ``dashboard.html``.
+    ``dev-backend.sh``, etc.), so without this the gateway has no SPA bundle
+    and serves the "not found" guidance page (the legacy ``dashboard.html``
+    fallback was removed — Talos V2285871874).
 
     This helper reconciles the gap at gateway start:
 
@@ -96,8 +97,8 @@ def ensure_dev_dist_symlink() -> Optional[Path]:
     with no extra step.
 
     Returns the resolved dist path on success, ``None`` if nothing could be
-    found (caller should warn and let the gateway fall back to the legacy
-    dashboard HTML).
+    found (caller should warn; the gateway then serves the "not built"
+    guidance page — there is no legacy dashboard fallback).
     """
     kiro_claw_pkg_dir = Path(__file__).resolve().parent
     tree_dist = kiro_claw_pkg_dir / "static" / "dist"

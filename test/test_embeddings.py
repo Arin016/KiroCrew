@@ -152,6 +152,26 @@ class TestSsrfProtection:
         # be allowed — normalization must not over-block public destinations.
         assert _resolve_blocked_addr("134744072") is None
 
+    def test_trailing_dot_literals_rejected(self) -> None:
+        # Heimdall round-2 (CR-289119233 follow-up): a fully-qualified trailing-dot
+        # literal (``169.254.169.254.`` / ``127.0.0.1.``) is rejected by both
+        # ``ipaddress.ip_address`` and ``socket.inet_aton``, so it used to fall
+        # through as a DNS name and slip past the SSRF check. After trailing-dot
+        # normalization it must classify as blocked (link-local / loopback).
+        assert _resolve_blocked_addr("169.254.169.254.") == "169.254.169.254"
+        assert _resolve_blocked_addr("127.0.0.1.") == "127.0.0.1"
+
+    def test_trailing_dot_public_literal_still_allowed(self) -> None:
+        # The trailing-dot form of a public literal must still be allowed —
+        # normalization must not over-block public destinations.
+        assert _resolve_blocked_addr("93.184.216.34.") is None
+
+    def test_trailing_dot_imds_blocked_via_validate_url(self) -> None:
+        # End-to-end: the trailing-dot IMDS literal must be rejected by
+        # _validate_url even with allow_remote=True + https.
+        with pytest.raises(ValueError, match="SSRF protection"):
+            _validate_url("https://169.254.169.254.:11434", allow_remote=True)
+
 
 class TestEmbeddingClient:
     def test_init_validates_url(self) -> None:

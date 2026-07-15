@@ -3007,6 +3007,29 @@ class GatewayOrchestrator:
             event = LLMEvent(kind="permission_request", request_id=request_id, title=description)
             return await _approve_subagent(event, parent_session_key)
 
+        # Debounced slots push: keep slots[].subagents_running live for every
+        # SSE consumer (composer busy affordance, Board "working" lane, and
+        # external readers of the slots stream). Without this, the field is
+        # only fresh on a full GET — serialize_slots() computes it at call
+        # time but nothing pushed on sub-agent lifecycle transitions. The
+        # 0.2s coalesce window collapses batch spawns into one push. Covers
+        # the reaper too: _force_reap fires subagent_done through the same
+        # on_event path.
+        _slots_push_pending = False
+
+        def _flush_slots_push() -> None:
+            nonlocal _slots_push_pending
+            _slots_push_pending = False
+            if self.dashboard_state:
+                self.dashboard_state.push_slots_update()
+
+        def _schedule_slots_push() -> None:
+            nonlocal _slots_push_pending
+            if _slots_push_pending:
+                return
+            _slots_push_pending = True
+            asyncio.get_running_loop().call_later(0.2, _flush_slots_push)
+
         async def _subagent_event(etype: str, info: SubagentInfo, extra: dict) -> None:
             if not self.dashboard_state:
                 return
@@ -3047,6 +3070,10 @@ class GatewayOrchestrator:
             else:
                 # Lightweight status events — broadcast to all
                 self.dashboard_state.broadcast_ws(etype, {**base, **extra})
+                # subagents_running flips truth value exactly at spawn/done —
+                # push (debounced) so slots-stream consumers stay live.
+                if etype in ("subagent_spawn", "subagent_done"):
+                    _schedule_slots_push()
 
         self.subagent_mgr = SubagentManager(
             sessions=self.sessions,

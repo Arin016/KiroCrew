@@ -120,38 +120,22 @@ def test_assets_present_detects_dist_index(tmp_path: Path):
     fake_dist_index = tmp_path / "dist" / "index.html"
     fake_dist_index.parent.mkdir()
     fake_dist_index.write_text("<!doctype html>")
-    fake_html = tmp_path / "dashboard.html"
 
-    with patch.object(mod, "_DIST_INDEX", fake_dist_index), patch.object(
-        mod, "_HTML_PATH", fake_html
-    ):
+    with patch.object(mod, "_DIST_INDEX", fake_dist_index):
         assert mod.assets_present() is True
 
 
-def test_assets_present_detects_html_fallback(tmp_path: Path):
-    """assets_present returns True when dashboard.html exists (no dist/index.html)."""
+def test_assets_present_false_without_dist_index(tmp_path: Path):
+    """assets_present returns False when dist/index.html is absent.
+
+    The legacy ``dashboard.html`` fallback was removed (Talos V2285871874), so
+    the React bundle's ``dist/index.html`` is the sole presence criterion.
+    """
     from kiro_claw.dashboard import stale_asset_watchdog as mod
 
     fake_dist_index = tmp_path / "dist" / "index.html"  # does not exist
-    fake_html = tmp_path / "dashboard.html"
-    fake_html.write_text("<html></html>")
 
-    with patch.object(mod, "_DIST_INDEX", fake_dist_index), patch.object(
-        mod, "_HTML_PATH", fake_html
-    ):
-        assert mod.assets_present() is True
-
-
-def test_assets_present_false_when_nothing_exists(tmp_path: Path):
-    """assets_present returns False when neither dist/index.html nor dashboard.html exist."""
-    from kiro_claw.dashboard import stale_asset_watchdog as mod
-
-    fake_dist_index = tmp_path / "dist" / "index.html"
-    fake_html = tmp_path / "dashboard.html"
-
-    with patch.object(mod, "_DIST_INDEX", fake_dist_index), patch.object(
-        mod, "_HTML_PATH", fake_html
-    ):
+    with patch.object(mod, "_DIST_INDEX", fake_dist_index):
         assert mod.assets_present() is False
 
 
@@ -160,18 +144,15 @@ def test_assets_present_false_when_dist_dir_is_empty(tmp_path: Path):
 
     Regression guard: the watchdog's presence check must match the handler's
     serve criterion — an empty ``dist/`` node with no ``index.html`` still
-    causes the handler to serve the "Dashboard HTML not found" fallback.
+    causes the handler to serve the "Dashboard HTML not found" guidance page.
     """
     from kiro_claw.dashboard import stale_asset_watchdog as mod
 
     empty_dist_dir = tmp_path / "dist"
     empty_dist_dir.mkdir()  # directory exists, but no index.html inside
     fake_dist_index = empty_dist_dir / "index.html"
-    fake_html = tmp_path / "dashboard.html"  # also missing
 
-    with patch.object(mod, "_DIST_INDEX", fake_dist_index), patch.object(
-        mod, "_HTML_PATH", fake_html
-    ):
+    with patch.object(mod, "_DIST_INDEX", fake_dist_index):
         assert mod.assets_present() is False
 
 

@@ -1754,18 +1754,18 @@ async def test_served_shell_is_auth_independent() -> None:
 
 @pytest.mark.asyncio
 async def test_index_serves_guidance_when_bundle_missing(tmp_path, monkeypatch) -> None:
-    """Fallback branch: when neither the React build nor dashboard.html can be
-    read, index() serves the static guidance page (recognizable heading + cause
-    + restart hint) instead of a bare error. It must remain request-independent
-    and secret-free -- the same cold-start security contract as the normal shell
-    (this handler is served unauthenticated).
+    """Fallback branch: when the React build cannot be read, index() serves the
+    static guidance page (recognizable heading + cause + restart hint) instead
+    of a bare error. It must remain request-independent and secret-free -- the
+    same cold-start security contract as the normal shell (this handler is
+    served unauthenticated). The legacy dashboard.html fallback was removed
+    (Talos V2285871874); dist/index.html is the sole shell source.
     """
     import kiro_claw.dashboard.handlers.core as core
 
-    # Point both the React build index and the dashboard.html path at
-    # non-existent locations so index() falls into the FileNotFoundError branch.
+    # Point the React build index at a non-existent location so index() falls
+    # into the FileNotFoundError -> guidance-page branch.
     monkeypatch.setattr(core, "_DIST_INDEX", tmp_path / "no-dist" / "index.html")
-    monkeypatch.setattr(core, "_HTML_PATH", tmp_path / "no-dashboard.html")
 
     anon = _make_request(path="/", remote="10.0.0.1")
     authed = _make_request(

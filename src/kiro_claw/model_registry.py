@@ -175,7 +175,7 @@ def window(canonical_or_id: str) -> int:
     Falls back to the ``[1m]``/``-1m`` heuristic for an unlisted id (parity with
     the frontend ``contextWindow``), then 200k.
     """
-    key = _resolve_canonical(canonical_or_id, "claude_code")
+    key = _resolve_canonical(canonical_or_id, _WINDOW_INDEX)
     if key is not None:
         return int(_REGISTRY[key].get("window", 200_000))
     # Forward-compat: an unlisted [1m]/-1m id still resolves to the 1M window
@@ -189,6 +189,30 @@ def window(canonical_or_id: str) -> int:
 def _has_1m_token(lowered: str) -> bool:
     """True if ``lowered`` contains a standalone ``1m`` token (not ``10m`` etc.)."""
     return re.search(r"(^|[^a-z0-9])1m([^a-z0-9]|$)", lowered) is not None
+
+
+# The index that carries per-model window sizes. A context window is a property
+# of the MODEL, not the provider serving it (Opus 4.8 is 200K whether reached
+# via kiro-cli/``acp`` or ``claude_code``), and only this one index is populated
+# in model_registry.json — its ``aliases`` already include every kiro/acp-
+# advertised id (dotted ``claude-opus-4.8``, bare ``claude-opus-4-8[1m]``, …).
+# ``window()`` resolves against it too, so window membership must use the same
+# index. Named for the registry key, NOT because windows are claude_code-only.
+_WINDOW_INDEX = "claude_code"
+
+
+def has_known_window(canonical_or_id: str) -> bool:
+    """True if ``canonical_or_id`` is a model the registry has a window for.
+
+    Pairs with :func:`window`: it lets a caller tell a genuinely-known model
+    apart from an unlisted id that ``window()`` would silently default to 200k —
+    the distinction the context-budget scaler needs so it never shrinks an
+    unknown model's budget on a 200k assumption. Provider-independent by design
+    (see ``_WINDOW_INDEX``); resolves against the same index ``window()`` reads,
+    so the membership check and the window value can never disagree. Works for
+    kiro/acp model ids (the default provider) — they are registry aliases.
+    """
+    return _resolve_canonical(canonical_or_id, _WINDOW_INDEX) is not None
 
 
 def available_models(provider: str) -> list[str]:

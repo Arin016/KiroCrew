@@ -1956,10 +1956,27 @@ class DashboardState:
         except Exception:
             logger.warning("Failed to write %s", path.name, exc_info=True)
 
+    def serialize_slots(self) -> list:
+        """Serialize all slots for the sidebar/board, annotating each with a
+        ``subagents_running`` flag (True while background sub-agents run for the
+        slot's parent key). Kept as a DashboardState method so the three
+        serialization sites (SSE push, WS snapshot, GET /api/chat/slots) stay
+        consistent without giving _ChatSlot a state back-ref.
+        """
+        out = []
+        subs = getattr(self, "subagents", None)
+        for s in self._slots.values():
+            d = s.to_dict()
+            d["subagents_running"] = bool(
+                subs and subs.running_agents_for(f"dashboard:{s.key}")
+            )
+            out.append(d)
+        return out
+
     def push_slots_update(self) -> None:
         """Push current slot list to all SSE clients (instant UI update)."""
         yolo_active = self.is_yolo_active()  # expire first if needed
-        slots_data = [s.to_dict() for s in self._slots.values()]
+        slots_data = self.serialize_slots()
         mgr = getattr(self, "channel_manager", None)
         ch_trusted = bool(mgr and any(ch.trusted for ch in mgr._channels.values()))
         self._broadcast(

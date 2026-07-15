@@ -152,6 +152,13 @@ def _resolve_blocked_addr(host: str) -> str | None:
     # Drop any IPv6 zone/scope id (e.g. ``fe80::1%eth0``) before parsing, and
     # handle the bracket-less IPv6 ``urlparse`` hands back for ``https://[::1]``.
     addr_clean = host.split("%", 1)[0]
+    # Strip a trailing dot (fully-qualified form, e.g. ``169.254.169.254.`` /
+    # ``127.0.0.1.``). Both ``ipaddress.ip_address`` and ``socket.inet_aton``
+    # reject a trailing-dot literal, so without this it would fall through as a
+    # DNS name and ``_validate_url(allow_remote=True)`` would accept the IMDS /
+    # loopback target (SSRF). The kernel/resolver treats the FQDN form as the
+    # same address, so normalize it here before parsing (still **no DNS**).
+    addr_clean = addr_clean.rstrip(".")
     try:
         ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(addr_clean)
     except ValueError:

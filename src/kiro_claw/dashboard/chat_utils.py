@@ -500,12 +500,26 @@ def _edit_queued_by_id(messages: list[dict], queue_id: str, content: str) -> boo
     return False
 
 
+def is_system_injection(content: str) -> bool:
+    """True when a queued message is a system injection (sub-agent completion
+    or cron notification) rather than a plain user message.
+
+    Single source of truth for the predicate that decides which queued
+    messages keep draining during a sub-agent run (`_dequeue_next_system_message`),
+    which break a user-message merge (`_dequeue_next_message`), and which must
+    not consume the session-reset notice (chat_runner drain loop).
+    """
+    return content.startswith(SUBAGENT_COMPLETION_PREFIX) or content.startswith(
+        CRON_NOTIFY_PREFIX
+    )
+
+
 def _dequeue_next_message(slot, merge_enabled: bool) -> tuple:
     """Drain the queue: merge non-cron messages or pop the first one."""
     if merge_enabled and len(slot._queue) > 1:
         to_merge: list[dict] = []
         for item in list(slot._queue):
-            if item["content"].startswith(CRON_NOTIFY_PREFIX) or item["content"].startswith(SUBAGENT_COMPLETION_PREFIX):
+            if is_system_injection(item["content"]):
                 break
             to_merge.append(item)
         if len(to_merge) > 1:
@@ -514,6 +528,24 @@ def _dequeue_next_message(slot, merge_enabled: bool) -> tuple:
             return f"[{len(to_merge)} queued messages merged]\n\n{merged}", to_merge
     item = slot.queue_pop(0)
     return item["content"], [item]
+
+
+def _dequeue_next_system_message(slot) -> tuple:
+    """Pop the first queued sub-agent-completion or cron injection, leaving
+    plain user messages queued.
+
+    Implements the (always-on) queue-during-subagents behavior: while background
+    sub-agents run for a slot, a tangential user message is held (not drained)
+    so it does not start a main turn mid-run, while system injections that must
+    keep flowing (sub-agent completions, cron notifications) are still drained.
+    Returns ``(content, [item])`` for the drained item, or ``(None, [])`` when
+    only held (user) messages remain queued.
+    """
+    for i, item in enumerate(slot._queue):
+        if is_system_injection(item["content"]):
+            popped = slot.queue_pop(i)
+            return popped["content"], [popped]
+    return None, []
 
 
 def _prepare_messages(messages: list[dict], running: bool) -> list[dict]:

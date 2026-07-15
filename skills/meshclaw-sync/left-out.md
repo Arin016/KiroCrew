@@ -115,6 +115,17 @@ judgement calls.
 | [`cd6730f`](https://code.amazon.com/packages/MeshClawWebsite/commits/cd6730f) | frontend | 18 | **DEFER — open** | Artifacts page **masonry layout** rewrite: +572 lines on a hard-diverged 253-line page + a new `@virtuoso.dev/masonry` dependency, with **zero fix/security value** (pure layout). Batch-17's human review also deferred it. Decision needed: adopt the masonry rewrite (and the new dep) onto the fork's diverged Artifacts page, or drop permanently. |
 | [`6181474a`](https://code.amazon.com/packages/MeshClaw/commits/6181474a) | backend | 18 | **SKIP_INTERNAL — flagged** | SharePoint/Loop **redaction carve-out**. Skipped because it targets Amazon-corp M365 hosts only (precedent: `e62422ae`), but it was **explicitly flagged for human review** rather than cleanly out of scope — a reviewer should confirm the fork wants no SharePoint/Loop redaction path. |
 
+### Inherited-upstream findings (fix in BOTH repos — do NOT diverge the fork unilaterally)
+
+PR #88 (batch-33/34) drew four Codex findings whose flagged code is byte-identical to / a faithful port of the current MeshClaw beta. They are **latent gaps in upstream**, not fork regressions. Fixing them fork-only would diverge from upstream and be re-conflicted by the next sync, so they are tracked here to be fixed **upstream-first**, then flow back via a normal sync batch.
+
+| Upstream origin | Fork file:sym | Sev | Finding | Fix shape (upstream-first) |
+|---|---|---|---|---|
+| [`7cc8217d`](https://code.amazon.com/packages/MeshClaw/commits/7cc8217d) | `security.py` `StreamRedactor.feed` | HIGH | After a >4096-char credential-anchored tail is dropped (buffer cleared + `_REDACTED_CREDENTIAL_TAG`), a later chunk of the SAME token streams raw — the discard state isn't retained across `feed()` calls. | Add a discard-until-delimiter state flag retained across chunks; test a chunked token exceeding `_STREAM_HOLDBACK_JWT_MAX`. |
+| [`56fbb774`](https://code.amazon.com/packages/MeshClaw/commits/56fbb774) | `mcp_gateway/gatewayd.py` `_apply_claim` | HIGH | Any same-UID process can submit a `claim` and replace another connection's session identity; ancestor PID is client-supplied. This is the documented uid-`0700`-socket trust model, ported verbatim. | Authenticate claims with a gateway-only capability (or verify peer is the gateway process) and verify ancestry server-side. Design change — upstream first. |
+| [`82560fb7`](https://code.amazon.com/packages/MeshClaw/commits/82560fb7) | `security.py` `_BASH_EXFIL_PATTERNS` | MED | `curl -Ffile=@secret` (no space after `-F`) and `curl --form=file=@secret` (equals form) bypass the `-F *=@`/`--form *=@` globs, which require a space. Present verbatim upstream. | Add no-space + equals glob variants, or tokenize curl args structurally; cover with tests. |
+| [`a7736388`](https://code.amazon.com/packages/MeshClaw/commits/a7736388) | `context.py` `build_session_replay` | MED | A single newest message larger than the (window-scaled) `replay_budget` is emitted whole (the `and lines` guard admits the first line unconditionally), dominating a small model's context. Faithful port. | Truncate the first oversized line to `replay_budget`. |
+
 ### Resolved (deferred earlier, later ported — recorded for the audit trail)
 
 | Upstream SHA | Repo | Deferred in | Resolution |
@@ -122,6 +133,7 @@ judgement calls.
 | [`38864fd9`](https://code.amazon.com/packages/MeshClaw/commits/38864fd98f4fc7fabd81487b6e91ae6a49f0ebf1) (+ `d17306e1`) | backend | batch 1–3 (DEFERRED: 4331-line multi-instance SSH tunnels, no UI consumer) | **PORTED (PARTIAL) in batch-10** — kept the generic multi-instance registry / port-allocator / plain-OpenSSH tunnel manager + UI; **dropped** the Midway SSH-cert watchdog (`instances/midway.py`) and its `~/.ssh` carve-out (forbidden by `MIGRATION_PLAN.md`). |
 | [`b490c7e8`](https://code.amazon.com/packages/MeshClaw/commits/b490c7e8) | backend | batch 6–7 (DEFERRED: dynamic sub-agent concurrency cap; depended on absent `mcp_gateway.pool`) | **PORTED in batch-8** — relocated the ~50-line stdlib `/proc`-subtree RSS/CPU helpers into `subagent.py`; the absent-import objection was overcome. |
 | [`96c39b8`](https://code.amazon.com/packages/MeshClawWebsite/commits/96c39b8) | frontend | batch 18 (initially DEFER) | **RESCUED to KEEP in batch-18** — its backend pair `7b66e2e3` (MLX Whisper STT) was a keeper the same batch, so the UI was ported backend-first. |
+| [`ed984a05`](https://code.amazon.com/packages/MeshClaw/commits/ed984a05edc17e3d740c4feb32c0a6ada026184c) | backend | batch 33 (DEFER: 16-file, −2409-line legacy-HTML-dashboard removal landed after the batch-33 verdicts were verified) | **PORTED in batch-34 addendum (PR #88)** — the fork still shipped the legacy `dashboard.html`/`dashboard.js`/`purify.min.js`/`dashboard.css`/`cli-mode.css` + `_HTML_PATH` wiring + XSS test, so the generic-core XSS-surface reduction applied. `index()` now serves `dist/index.html` only (guidance page on missing bundle); `/static` route, theme assets, `kiroclaw-logo.png`, and `_BASE_CSP` preserved. Talos V2285871874 / CR-289374220. |
 
 ---
 

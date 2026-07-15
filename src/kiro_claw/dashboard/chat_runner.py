@@ -54,6 +54,7 @@ from kiro_claw.dashboard.chat_utils import (
     _broadcast_auto_tool,
     _broadcast_compaction_result,
     _dequeue_next_message,
+    _dequeue_next_system_message,
     _extract_bash_command,
     _history_key_for,
     _maybe_consolidate,
@@ -63,6 +64,7 @@ from kiro_claw.dashboard.chat_utils import (
     _redact_tool_field,
     _remove_queued_by_id,
     _validate_tool_name,
+    is_system_injection,
 )
 from kiro_claw.dashboard.handlers import (
     MAX_PROMPT_BYTES,
@@ -1771,17 +1773,22 @@ async def _run_chat(
                 if isinstance(client, AcpProvider) and client.client.resumed:
                     _provider_has_history = True
             if is_new and not _provider_has_history and state.context_builder.conversation_log:
-                from kiro_claw.context import build_session_replay  # circular: context -> chat
+                from kiro_claw.context import (  # circular: context -> chat
+                    build_session_replay,
+                    window_for_provider_client,
+                )
 
                 # Mesh-1726: drop the just-flushed current-turn user message
                 # from replay. chat_handlers.py:146 (or queue dequeue at L1898)
                 # always appended exactly one message before _run_chat fires,
                 # and the periodic flush_loop may have already written it to
                 # disk during the kiro-cli cold spawn (~5s flush vs ≥15s spawn).
+                # Scale the replay budget to the model window (client is live here).
                 compressed = build_session_replay(
                     state.context_builder.conversation_log,
                     session_key,
                     exclude_last_n=1,
+                    model_window=window_for_provider_client(client),
                 )
                 logger.info(
                     "Session replay: key=%s result=%s",
@@ -1850,6 +1857,16 @@ async def _run_chat(
                 folder_path = state.folder_breadcrumb(slot.folder_id) or None
                 slot._folder_changed = False
             message = _maybe_inject_persona(message, getattr(slot, "color_theme", ""), is_new)
+            # Scale the injected-context budget to the active model's context
+            # window so a 200K model gets one-fifth the memory/lessons/history
+            # chars a 1M model gets (same share of the window). Resolve from the
+            # live session client (prefers its usage-reported window, else its
+            # resolved model id) — the same helper Slack uses, so both surfaces
+            # share one strategy. Unset/Auto ⇒ None ⇒ the 1M reference (unchanged
+            # default behavior).
+            from kiro_claw.context import window_for_provider_client  # circular: context -> chat
+
+            model_window = window_for_provider_client(client)
             # build_message performs blocking work (episodic query embed via
             # urllib to Ollama, file reads) — run off-loop (mc-embed bulkhead)
             # so a slow embedding endpoint can't stall the gateway event loop.
@@ -1869,6 +1886,7 @@ async def _run_chat(
                 provider_type=cfg.agent.provider,
                 exclude_last_n=1,
                 folder_path=folder_path,
+                model_window=model_window,
             )
             full_message = _apply_incognito_prefix(slot, full_message)
             if is_new:
@@ -3739,16 +3757,12 @@ async def _run_chat(
         # after the start-of-turn consume already ran.
         await _consume_pending_reset(state, slot)
         # Process queued messages (FIFO) — keep SSE stream alive
+        next_msg = None
+        consumed: list = []
         if slot._queue:
-            if slot._stopping:
-                slot.append(
-                    "error",
-                    "⟳ Session reset — processing next message with conversation history",
-                    "msg msg-err",
-                )
-            slot._stopping = False
             state.push_slots_update()
             # ── Merge or pop: combine queued messages if configured ──
+            _cfg: "KiroClawConfig | None" = None
             try:
                 _cfg = KiroClawConfig.load()
                 merge = _cfg.dashboard.merge_queued_messages
@@ -3757,7 +3771,33 @@ async def _run_chat(
                     "Failed to load config; falling back to sequential dequeue", exc_info=True
                 )
                 merge = False
-            next_msg, consumed = _dequeue_next_message(slot, merge_enabled=merge)
+            # Hold tangential USER messages while background sub-agents still
+            # run for this slot, so they do not start a main turn mid-run.
+            # System injections (sub-agent completions, cron) still drain; held
+            # user messages release on a later turn once the last agent finishes
+            # and the hold lifts. Always on: steering is the effective opt-out.
+            _hold_users = bool(
+                state.subagents is not None
+                and state.subagents.running_agents_for(f"dashboard:{slot.key}")
+            )
+            if _hold_users:
+                next_msg, consumed = _dequeue_next_system_message(slot)
+            else:
+                next_msg, consumed = _dequeue_next_message(slot, merge_enabled=merge)
+
+        if next_msg is not None:
+            # Show the session-reset notice only when a real user message is
+            # about to be processed. While user messages are held during a
+            # sub-agent run, only system injections (sub-agent completions,
+            # cron) drain — they must NOT consume the notice, so _stopping is
+            # preserved for the held user message released on a later turn.
+            if slot._stopping and not is_system_injection(next_msg):
+                slot.append(
+                    "error",
+                    "⟳ Session reset — processing next message with conversation history",
+                    "msg msg-err",
+                )
+                slot._stopping = False
             # Notify frontend to remove each consumed queued card
             for item in consumed:
                 _c, _ = redact_exfiltration_urls(item["content"])
@@ -3802,8 +3842,12 @@ async def _run_chat(
             state._background_tasks.add(task)
             task.add_done_callback(state._background_tasks.discard)
         else:
-            slot._stopping = False
-            # Only send "done" when queue is empty — keeps SSE reader alive
+            # Clear _stopping only when the queue is genuinely drained; if user
+            # messages are being held during a sub-agent run, keep it so the
+            # reset notice fires on the turn that finally processes them.
+            if not slot._queue:
+                slot._stopping = False
+            # Send "done" (queue empty, or only held user messages) — keeps SSE reader alive
             slot.append("done", "", "done")
             # Clear task reference BEFORE pushing slot update so that
             # slot.running returns False immediately.  Without this,

@@ -16,7 +16,7 @@ import { useAgents } from '../hooks/useAgents'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAppSelector, useAppDispatch } from '../store'
-import { selectSlotMessages, selectSlotStreamState, hydrateSlotMessages, appendSlotMessage, requestStop, cancelQueuedMessage } from '../store/chatSlice'
+import { selectSlotMessages, selectSlotStreamState, selectComposerBusy, hydrateSlotMessages, appendSlotMessage, requestStop, cancelQueuedMessage } from '../store/chatSlice'
 import { api } from '../api/client'
 import { changeApprovalMode } from '../store/dashboardSlice'
 import { safeSetItem } from '../utils/safeStorage'
@@ -76,6 +76,11 @@ export default function ChatPane({
   const contextPct = useAppSelector((s) => s.chat.slotContextPct[slotKey] ?? 0)
   const contextTokens = useAppSelector((s) => s.chat.slotContextTokens?.[slotKey])
   const paneSlot = useAppSelector((s) => s.dashboard.slots.find((x) => x.key === slotKey))
+  // Shared composer-busy rule (chatSlice.selectComposerBusy): main turn
+  // streaming OR sub-agents running (dual signal). Drives the queue affordance
+  // and skips the optimistic user bubble (the backend returns a "queued"
+  // message instead, so an optimistic bubble would render a duplicate).
+  const busy = useAppSelector((s) => selectComposerBusy(s, slotKey))
   // Parent link for the "↳ fork of <parent>" tag. forked_from is the parent's
   // history key (dashboard:<slot>); strip the prefix to match the bare slot key.
   const parentKey = paneSlot?.forked_from ? paneSlot.forked_from.replace(/^dashboard:/, '') : null
@@ -213,9 +218,9 @@ export default function ChatPane({
     const files = pendingFiles
     setPendingFiles([])
     // Optimistic user bubble: show immediately in the right position (mirrors the
-    // single-chat send). Skipped mid-run — the backend returns a "queued" message
-    // instead, avoiding a duplicate.
-    if (!running && (text || files.length)) {
+    // single-chat send). Skipped while busy (main turn streaming OR sub-agents
+    // running) — the backend returns a "queued" message instead, avoiding a duplicate.
+    if (!busy && (text || files.length)) {
       dispatch(appendSlotMessage({
         slot: slotKey,
         message: { role: 'user', content: text, cls: 'msg msg-u', ts: new Date().toISOString(), ...(files.length ? { meta: { files } } : {}) },
@@ -223,7 +228,7 @@ export default function ChatPane({
     }
     const meta = files.length ? { files } : undefined
     api.sendChat(text, slotKey, undefined, undefined, meta).catch(() => undefined)
-  }, [input, pendingFiles, running, slotKey, dispatch])
+  }, [input, pendingFiles, busy, slotKey, dispatch])
 
   const onStop = useCallback(() => { dispatch(requestStop({ slotId: slotKey, force: false })) }, [dispatch, slotKey])
   const onCancelQueued = useCallback((queueId: string) => {
@@ -293,7 +298,7 @@ export default function ChatPane({
           value={input}
           onChange={setInput}
           onSend={doSend}
-          isRunning={running}
+          isRunning={busy}
           onStop={onStop}
           autoFocusKey={slotKey}
           agentName={paneSlot?.agent || 'default'}

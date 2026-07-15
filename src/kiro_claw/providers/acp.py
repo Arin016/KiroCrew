@@ -197,6 +197,9 @@ class AcpProvider(LLMProvider):
         effort_per_model: dict[str, str] | None = None,
         effort_defaults: object = None,
         tool_search: bool | None = None,
+        mcp_gateway_overlay: str | Path | None = None,
+        mcp_gateway_settings_mcp_json: str | Path | None = None,
+        mcp_gateway_socket: str | Path | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {
             "work_dir": work_dir,
@@ -206,6 +209,9 @@ class AcpProvider(LLMProvider):
             "channel_id": channel_id,
             "extra_env": extra_env,
             "acp_backend": acp_backend,
+            "mcp_gateway_overlay": mcp_gateway_overlay,
+            "mcp_gateway_settings_mcp_json": mcp_gateway_settings_mcp_json,
+            "mcp_gateway_socket": mcp_gateway_socket,
         }
         if agent:
             kwargs["agent"] = agent

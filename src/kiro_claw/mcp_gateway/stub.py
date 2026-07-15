@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from kiro_claw.executors import subprocess_executor
-from kiro_claw.mcp_caller import CallerContext
+from kiro_claw.mcp_caller import CallerContext, _parent_pid
 from kiro_claw.mcp_gateway.hashing import hash_command
 from kiro_claw.mcp_gateway.pool import READ_BUFFER_LIMIT_BYTES, PoolKey
 
@@ -247,6 +247,30 @@ def _resolve_channel_id(cli_value: Optional[str]) -> Optional[str]:
     return cli_value or os.environ.get("KIROCLAW_CHANNEL_ID") or None
 
 
+#: Ancestor-walk depth cap for the Register ``ancestor_pids`` chain. The real
+#: tree is ~4 deep (sandbox wrapper → kiro-cli → kiro-cli-chat → stub); 10
+#: leaves headroom without letting a pathological /proc loop run away.
+_ANCESTOR_WALK_MAX = 10
+
+
+def _ancestor_pids() -> list[int]:
+    """Ancestor PID chain of this stub, nearest parent first.
+
+    Uses :func:`kiro_claw.mcp_caller._parent_pid` (Linux /proc read, macOS
+    libproc — never spawns a subprocess). Stops at PID 1, a lookup failure,
+    or the depth cap. Always contains at least ``os.getppid()`` when
+    resolvable.
+    """
+    chain: list[int] = []
+    pid = os.getppid()
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen and len(chain) < _ANCESTOR_WALK_MAX:
+        chain.append(pid)
+        seen.add(pid)
+        pid = _parent_pid(pid)
+    return chain
+
+
 def _build_caller_block(channel_id: Optional[str]) -> dict[str, str]:
     """Assemble caller-identity from ``KIROCLAW_*`` env vars.
 
@@ -328,6 +352,16 @@ def build_register_payload(args: argparse.Namespace) -> dict:
         "channel_id": channel_id,
         "config_snapshot_hash": _CONFIG_SNAPSHOT_PLACEHOLDER,
         "caller": caller,
+        # Claim-push (gateway → gatewayd ``claim`` frame): the ancestor PID
+        # chain of this stub, nearest first. gatewayd indexes the connection
+        # under EVERY ancestor so a claim naming any level of the runtime's
+        # process tree hits. The chain matters because the PID the gateway
+        # records for a runtime (``AcpClient._process.pid``) can sit several
+        # layers above the stub's immediate parent — e.g.
+        # sandbox-wrapper → kiro-cli → kiro-cli-chat → stub — and a
+        # single-PID index would never match (found live: claim frames
+        # applied to 0 connections).
+        "ancestor_pids": _ancestor_pids(),
         # Flat mirror — gatewayd accepts either shape; flat wins on
         # log/diff tooling legibility.
         "session_key": caller["session_key"],
@@ -648,10 +682,16 @@ def _install_signal_handlers(
 # a ``recaller`` control frame so gatewayd stamps the right identity from then
 # on.
 _RECALLER_POLL_INTERVAL_SECS = 1.5
-# Give up after this long: a key that never appears means a genuinely
-# key-less context (ephemeral / incognito), not a lagging claim — polling
-# forever would leak a task per such stub.
-_RECALLER_POLL_MAX_SECS = 180.0
+# Backoff ceiling. Claim-push (gateway → gatewayd ``claim`` frame on rekey)
+# is now the primary identity-repair path; this poll is the FALLBACK for
+# claim-frame loss / gatewayd restarts, so it must never strand a connection
+# by expiring — a warm-pool runtime is routinely claimed far later than any
+# fixed budget (the old 180s cap stranded exactly that case; see the
+# claim-push Mesh ticket). Instead of a deadline, the interval decays from
+# 1.5s to this cap, so a long-idle pool stub costs one identity probe every
+# 30s instead of leaking an aggressive poll forever.
+_RECALLER_POLL_MAX_INTERVAL_SECS = 30.0
+_RECALLER_POLL_BACKOFF = 1.5
 
 
 async def _recaller_loop(
@@ -662,23 +702,24 @@ async def _recaller_loop(
     """Poll for a late-arriving session key and re-register the caller once.
 
     Started only when the initial Register carried an empty ``session_key``.
-    Exits on: key found (after sending one ``recaller`` frame), bridge
-    teardown (``stop_event``), or the poll deadline. Writes a whole frame per
-    ``_write_frame`` (a single synchronous ``writer.write`` before any await),
-    so it cannot interleave partial bytes with the stdin pump sharing this
-    ``writer``.
+    FALLBACK path under claim-push (the gateway's ``claim`` frame is the
+    primary repair); unbounded with interval backoff so a late claim can
+    never be stranded by a poll deadline. Exits on: key found (after sending
+    one ``recaller`` frame) or bridge teardown (``stop_event``). Writes a
+    whole frame per ``_write_frame`` (a single synchronous ``writer.write``
+    before any await), so it cannot interleave partial bytes with the stdin
+    pump sharing this ``writer``.
     """
     loop = asyncio.get_running_loop()
-    deadline = time.monotonic() + _RECALLER_POLL_MAX_SECS
-    while not stop_event.is_set() and time.monotonic() < deadline:
+    interval = _RECALLER_POLL_INTERVAL_SECS
+    while not stop_event.is_set():
         try:
             # Sleep-or-wake: return promptly if the bridge tears down.
-            await asyncio.wait_for(
-                stop_event.wait(), timeout=_RECALLER_POLL_INTERVAL_SECS
-            )
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
             return
         except asyncio.TimeoutError:
             pass
+        interval = min(interval * _RECALLER_POLL_BACKOFF, _RECALLER_POLL_MAX_INTERVAL_SECS)
         # ``_build_caller_block`` -> ``CallerContext.from_env`` does a
         # synchronous /proc ancestry walk + file reads; offload it to the
         # dedicated subprocess pool (not the shared default) so a slow or

@@ -239,6 +239,25 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     if not message:
         return web.json_response({"error": "message is required"}, status=400)
 
+    # Queue a message typed while background sub-agents are still running for
+    # this slot. The slot.running queue path above covers the mid-turn case;
+    # this covers the idle case (spawn_run is fire-and-forget, so the main slot
+    # goes idle while children run). Without the hold, this message would start a
+    # main turn immediately and interleave with the [Subagent completion event]
+    # injections. Queue it instead (reusing the slot queue) — the queue drain
+    # releases it after the last sub-agent finishes (see chat_runner _hold_users).
+    # Always on: steering is the effective opt-out.
+    if (
+        state.subagents is not None
+        and state.subagents.running_agents_for(f"dashboard:{slot.key}")
+    ):
+        qid = slot.queue_append(message)
+        _c, _ = redact_exfiltration_urls(message)
+        _c, _ = redact_credentials(_c)
+        _redacted = _redact_for_display(_c)
+        state.broadcast_ws("queue_push", {"slot": slot.key, "content": _redacted, "ts": datetime.now(timezone.utc).isoformat(), "queue_id": qid})
+        return web.json_response({"ok": True, "queued": True})
+
     # WS mode: return JSON immediately, chunks delivered via WebSocket
     ws_mode = request.query.get("ws") == "1"
 
@@ -435,7 +454,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
 async def api_chat_slots(request: web.Request) -> web.Response:
     """GET /api/chat/slots — list all chat slots."""
     state: DashboardState = request.app["state"]
-    return web.json_response([s.to_dict() for s in state._slots.values()])
+    return web.json_response(state.serialize_slots())
 
 
 async def api_chat_slot_detail(request: web.Request) -> web.Response:

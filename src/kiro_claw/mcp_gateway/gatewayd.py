@@ -876,6 +876,138 @@ def _audit_recaller_rejected(existing_caller: str, pool_label: str, reason: str)
         logger.debug("SEL audit emit for gateway recaller reject failed", exc_info=True)
 
 
+class _StubConn:
+    """Mutable per-connection identity holder, indexed by the owning runtime's
+    ancestor PID chain so a ``claim`` frame (claim-push) can update the caller
+    of every stub connection belonging to a just-claimed warm-pool runtime.
+
+    ``ancestor_pids`` is the stub's parent chain (nearest first) from the
+    Register frame. The connection is indexed under EVERY ancestor because
+    the PID the gateway names in a claim (``AcpClient._process.pid``) can sit
+    several layers above the stub's immediate parent (sandbox wrapper →
+    kiro-cli → kiro-cli-chat → stub); indexing a single level was found live
+    to make every claim miss.
+
+    ``caller`` starts as the register-time identity (often ``None`` for
+    warm-pool stubs) and is replaced by ``recaller`` frames (stub-initiated,
+    deny-by-default) or ``claim`` frames (gateway-initiated, replace-allowed).
+    Single event loop — no locking needed.
+    """
+
+    __slots__ = ("stub_uuid", "ancestor_pids", "pool_label", "caller")
+
+    def __init__(
+        self,
+        stub_uuid: str,
+        ancestor_pids: list[int],
+        pool_label: str,
+        caller: Optional[CallerContext],
+    ) -> None:
+        self.stub_uuid = stub_uuid
+        self.ancestor_pids = ancestor_pids
+        self.pool_label = pool_label
+        self.caller = caller
+
+
+#: Live stub connections indexed by every ancestor PID of the kiro-cli
+#: process tree that spawned the stub (``ancestor_pids`` on the Register
+#: frame; legacy single ``parent_pid`` accepted). Claim-push looks up this
+#: index to retarget every connection of a claimed runtime at once. Entries
+#: without usable PIDs (old stubs) are simply not indexed — they keep the
+#: recaller-poll fallback.
+_CONN_INDEX: dict[int, set[_StubConn]] = {}
+
+
+def _register_pids(register: dict[str, Any]) -> list[int]:
+    """Extract the ancestor PID list from a Register frame.
+
+    Accepts the current ``ancestor_pids`` list and the legacy single
+    ``parent_pid`` int. Non-int and out-of-range entries are dropped
+    (deny-by-default: garbage never lands in the index).
+    """
+    raw = register.get("ancestor_pids")
+    if not isinstance(raw, list):
+        legacy = register.get("parent_pid")
+        raw = [legacy] if legacy is not None else []
+    return [
+        p for p in raw
+        if isinstance(p, int) and not isinstance(p, bool) and p > 1
+    ]
+
+
+def _conn_index_add(conn: _StubConn) -> None:
+    for pid in conn.ancestor_pids:
+        _CONN_INDEX.setdefault(pid, set()).add(conn)
+
+
+def _conn_index_discard(conn: _StubConn) -> None:
+    for pid in conn.ancestor_pids:
+        conns = _CONN_INDEX.get(pid)
+        if conns is not None:
+            conns.discard(conn)
+            if not conns:
+                _CONN_INDEX.pop(pid, None)
+
+
+def _audit_caller_claimed(
+    old_caller: str, new_caller: str, pool_label: str, outcome: str, reason: str = ""
+) -> None:
+    """Emit a SEL audit event for a ``claim`` frame (claim-push identity set).
+
+    A claim frame re-binds — and unlike ``recaller``, may REPLACE — the caller
+    identity of every connection owned by the claimed runtime PID. That is an
+    authorization change and is recorded per connection in the HMAC-chained
+    SEL, mirroring :func:`_audit_caller_rekey`. The trust basis for allowing
+    replacement is the socket itself: it is uid-gated 0700, the same trust
+    level that authenticates Register frames. Wrapped defensively — an audit
+    failure must never break connection handling.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller=new_caller or "unknown",
+            operation="mcp-gateway.caller-claim",
+            outcome=outcome,
+            source="gateway",
+            resources=pool_label,
+            error=reason or (f"replaced caller={old_caller}" if old_caller else ""),
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for gateway caller-claim failed", exc_info=True)
+
+
+def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
+    """Apply a ``claim`` frame to every indexed connection of the target PID.
+
+    Returns the ack frame. Validation is deny-by-default: a non-integer or
+    out-of-range pid, or an empty/malformed caller, updates nothing and is
+    audited as denied. A valid claim REPLACES existing identities (gateway-
+    trusted; this is what keeps callers correct across warm-pool re-claims).
+    """
+    raw_pid = frame.get("pid")
+    pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else 0
+    updated_caller = _caller_from_register(frame)
+    if pid <= 1 or updated_caller is None or not updated_caller.session_key:
+        reason = f"malformed claim: pid={raw_pid!r} session_key={'' if updated_caller is None else updated_caller.session_key!r}"
+        logger.warning("claim rejected: %s", reason)
+        _audit_caller_claimed("", "", "pid-index", "denied", reason)
+        return {"type": "claim-rejected", "reason": reason}
+    conns = _CONN_INDEX.get(pid, set())
+    updated = 0
+    for conn in conns:
+        old_key = conn.caller.session_key if conn.caller is not None else ""
+        if old_key == updated_caller.session_key:
+            continue  # already correct — idempotent re-claim
+        conn.caller = updated_caller
+        updated += 1
+        _audit_caller_claimed(old_key, updated_caller.session_key, conn.pool_label, "allowed")
+        logger.info(
+            "stub %s claim → session_key=%s type=%s (was %s)",
+            conn.stub_uuid, updated_caller.session_key,
+            updated_caller.session_type, old_key or "<none>",
+        )
+    return {"type": "claimed", "updated": updated, "connections": len(conns)}
+
+
 def _audit_pool_fallback(caller: str, pool_label: str, reason: str) -> None:
     """Emit a SEL audit event when the gateway directs a stub to fall back to a
     direct, unpooled per-session exec.
@@ -1030,6 +1162,19 @@ async def _handle_connection(
         await _write_json_line(writer, {"type": "stats", **snapshot})
         return
 
+    # Claim-push short-circuit (one-shot control connection from the main
+    # gateway process): "session S now owns runtime PID P" — re-target the
+    # caller identity of every live stub connection under that PID. This is
+    # the event-driven replacement for the stub-side recaller poll, whose
+    # bounded budget stranded pool runtimes claimed later than the budget.
+    # Trust basis: the unix socket is uid-gated 0700 — the same gate that
+    # authenticates Register — so a claim may REPLACE a stale identity
+    # (fixes warm-pool re-claim staleness). Validation + auditing live in
+    # ``_apply_claim``.
+    if register.get("type") == "claim":
+        await _write_json_line(writer, _apply_claim(register))
+        return
+
     if register.get("type") not in (None, "register"):
         logger.warning(
             "stub first frame has type=%r, want 'register' or 'ping'",
@@ -1057,6 +1202,15 @@ async def _handle_connection(
         return
 
     caller = _caller_from_register(register)
+
+    # Claim-push index: record the runtime process tree that owns this stub
+    # so a ``claim`` frame naming ANY level of that tree re-targets every
+    # connection of the claimed runtime. Best-effort — stubs that send no
+    # usable PIDs simply keep the recaller-poll fallback.
+    conn = _StubConn(
+        stub_uuid, _register_pids(register), pool_key.human_readable(), caller
+    )
+    _conn_index_add(conn)
 
     # Provisional backend_id: the real pid isn't known until the backend
     # spawns. Using the pool digest gives operators a stable grep key that
@@ -1134,6 +1288,10 @@ async def _handle_connection(
             if not isinstance(msg, dict):
                 logger.warning("stub %s sent non-object frame; dropping", stub_uuid)
                 continue
+            # Claim-push pickup: a concurrent ``claim`` connection may have
+            # re-targeted this connection's identity via ``conn.caller``.
+            # Sync per-frame so the very next forward carries the new caller.
+            caller = conn.caller
             if msg.get("type") == "unregister":
                 logger.info("stub %s sent Unregister; closing", stub_uuid)
                 return
@@ -1190,6 +1348,7 @@ async def _handle_connection(
                 # Positive confirmation: key-less connection + valid recaller
                 # key — the one allowed transition. Audit the identity change.
                 caller = updated
+                conn.caller = updated
                 _audit_caller_rekey(caller.session_key, pool_key.human_readable())
                 logger.info(
                     "stub %s recaller → session_key=%s type=%s",
@@ -1398,6 +1557,7 @@ async def _handle_connection(
                 await _write_json_line(writer, _jsonrpc_error(msg, f"forward failed: {exc}"))
                 return
     finally:
+        _conn_index_discard(conn)
         if backend is not None:
             remaining = await backend.detach_stub(stub_uuid)
             logger.debug("stub %s detached; refcount=%d", stub_uuid, remaining)

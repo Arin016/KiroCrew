@@ -38,7 +38,12 @@ from kiro_claw.acp.client import AcpError, AcpProcessDied, AcpPromptBusy, AcpTim
 from kiro_claw.acp.types import STOP_REASON_CANCELLED, STOP_REASON_END_TURN
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import ACTIVATION_REVIEW, KiroClawConfig, config_dir, config_path
-from kiro_claw.context import ContextBuilder
+from kiro_claw.context import (
+    ContextBuilder,
+    build_cancelled_turn_preamble,
+    compress_thread_history,
+    window_for_provider_client,
+)
 from kiro_claw.cron import CronService, compute_next_run_ts, format_schedule, get_local_tz
 from kiro_claw.executors import run_in_embed_pool
 from kiro_claw.history import ConversationLog, HistoryConsolidator
@@ -2905,14 +2910,21 @@ async def handle_message(
 
         # Build message with context injection
         compressed: str | None = None
+        # Scale the injected-context budget to the live model's context window
+        # (200K model ⇒ one-fifth the memory/lessons/history chars of a 1M
+        # model, same window share). Derived from the resolved session client;
+        # Auto/unknown ⇒ None ⇒ the 1M reference (unchanged default).
+        _model_window = window_for_provider_client(client)
         # is_new = new kiro-cli/dashboard process, NOT new conversation.
         # The Slack thread persists across processes, so we compress its
         # history to bootstrap the fresh session's context window.
         if is_new and not resumed and context_builder and context_builder.conversation_log:
-            from kiro_claw.context import compress_thread_history
-
             compressed = await compress_thread_history(
-                context_builder.conversation_log, session_key, text, sessions
+                context_builder.conversation_log,
+                session_key,
+                text,
+                sessions,
+                model_window=_model_window,
             )
 
         # After a soft-cancel, kiro-cli drops the cancelled turn from its
@@ -2930,8 +2942,6 @@ async def handle_message(
             and context_builder.conversation_log
         ):
             _session.prev_turn_cancelled = False
-            from kiro_claw.context import build_cancelled_turn_preamble
-
             _preamble = build_cancelled_turn_preamble(context_builder.conversation_log, session_key)
             if _preamble:
                 text = _preamble + "\n\n" + text
@@ -3010,6 +3020,7 @@ async def handle_message(
                 thread_parent_text=thread_parent_text,
                 thread_meta=_thread_meta,
                 blocks_reads=_slack_blocks_reads,
+                model_window=_model_window,
             )
         else:
             full_message = text

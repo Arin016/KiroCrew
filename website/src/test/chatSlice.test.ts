@@ -35,6 +35,8 @@ import reducer, {
   appendQueuedMessage,
   editQueuedMessage,
   cancelQueuedMessage,
+  selectSlotSubagentsActive,
+  selectComposerBusy,
 } from '../store/chatSlice'
 import './mockApiClient'
 
@@ -1484,5 +1486,82 @@ describe('creatingSlot — New Chat pending flag', () => {
     expect(state.creatingSlot).toBe(true)
     state = reducer(state, rejected)
     expect(state.creatingSlot).toBe(false)
+  })
+})
+
+describe('selectSlotSubagentsActive', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const withSlot = { ...initial, activeSlot: 'slot-1' }
+  const wrap = (chat: ReturnType<typeof reducer>) => ({ chat }) as never
+
+  it('is false with no subagents', () => {
+    expect(selectSlotSubagentsActive(wrap(withSlot), 'slot-1')).toBe(false)
+  })
+
+  it('is true while a subagent runs on the active slot (spawn event)', () => {
+    const state = reducer(withSlot, sseSubagentSpawn({ slot: 'slot-1', id: 'a1', task: 't', agent: '' }))
+    expect(selectSlotSubagentsActive(wrap(state), 'slot-1')).toBe(true)
+  })
+
+  it('is true for a pending subagent (awaiting spawn approval)', () => {
+    const state = reducer(withSlot, sseSubagentPending({ slot: 'slot-1', id: 'a1', task: 't', approval_id: 'spawn:a1' }))
+    expect(selectSlotSubagentsActive(wrap(state), 'slot-1')).toBe(true)
+  })
+
+  it('clears when the subagent finishes (done event — reaper self-heal path)', () => {
+    let state = reducer(withSlot, sseSubagentSpawn({ slot: 'slot-1', id: 'a1', task: 't', agent: '' }))
+    state = reducer(state, sseSubagentDone({ slot: 'slot-1', id: 'a1', elapsed: 1 }))
+    expect(selectSlotSubagentsActive(wrap(state), 'slot-1')).toBe(false)
+  })
+
+  it('reads background slots from slotActivity, not the active-slot map', () => {
+    const state = reducer(withSlot, sseSubagentSpawn({ slot: 'bg-slot', id: 'b1', task: 't', agent: '' }))
+    expect(selectSlotSubagentsActive(wrap(state), 'bg-slot')).toBe(true)
+    expect(selectSlotSubagentsActive(wrap(state), 'slot-1')).toBe(false)
+  })
+})
+
+// Single source of truth for the composer busy/queue rule — shared by ChatPage
+// (main route) and ChatPane (split view). Busy = per-slot stream state OR the
+// global active-slot running flag OR either sub-agent signal (live WS-derived
+// OR slots-stream snapshot). Conservative OR of every input the two routes
+// previously computed separately.
+describe('selectComposerBusy', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const withSlot = { ...initial, activeSlot: 'slot-1' }
+  const wrap = (chat: ReturnType<typeof reducer>, slots: Array<{ key: string; subagents_running?: boolean }> = []) =>
+    ({ chat, dashboard: { slots } }) as never
+
+  it('is idle when nothing runs', () => {
+    expect(selectComposerBusy(wrap(withSlot), 'slot-1')).toBe(false)
+  })
+
+  it('is busy while the main turn streams (per-slot stream state)', () => {
+    expect(selectComposerBusy(wrap({ ...withSlot, slotState: 'streaming' }), 'slot-1')).toBe(true)
+  })
+
+  it('is busy on the global running flag for the active slot', () => {
+    expect(selectComposerBusy(wrap({ ...withSlot, slotRunning: true }), 'slot-1')).toBe(true)
+  })
+
+  it('is busy on the live WS sub-agent signal even when the main turn is idle', () => {
+    // The regression this CR fixes: main idle but sub-agents running must queue.
+    const state = reducer(withSlot, sseSubagentSpawn({ slot: 'slot-1', id: 'a1', task: 't', agent: '' }))
+    expect(selectComposerBusy(wrap(state), 'slot-1')).toBe(true)
+  })
+
+  it('is busy on the snapshot field alone (first frames after reload)', () => {
+    expect(selectComposerBusy(wrap(withSlot, [{ key: 'slot-1', subagents_running: true }]), 'slot-1')).toBe(true)
+  })
+
+  it('clears when the subagent finishes (done event — reaper self-heal path)', () => {
+    let state = reducer(withSlot, sseSubagentSpawn({ slot: 'slot-1', id: 'a1', task: 't', agent: '' }))
+    state = reducer(state, sseSubagentDone({ slot: 'slot-1', id: 'a1', elapsed: 1 }))
+    expect(selectComposerBusy(wrap(state, [{ key: 'slot-1', subagents_running: false }]), 'slot-1')).toBe(false)
+  })
+
+  it('falls back to the global running flag when slot is null', () => {
+    expect(selectComposerBusy(wrap({ ...withSlot, slotRunning: true }), null)).toBe(true)
+    expect(selectComposerBusy(wrap(withSlot), null)).toBe(false)
   })
 })

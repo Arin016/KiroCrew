@@ -94,7 +94,7 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
 
     # Push current slots immediately so sidebar populates without waiting
     try:
-        slots_data = [s.to_dict() for s in state._slots.values()]
+        slots_data = state.serialize_slots()
         await ws.send_json({"type": "slots", "data": slots_data, "yolo": state._yolo})
     except Exception:
         pass

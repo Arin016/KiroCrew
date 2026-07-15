@@ -1,0 +1,450 @@
+"""In-process functional tests for claim-push (gateway → gatewayd ``claim``).
+
+Claim-push is the event-driven replacement for the stub-side recaller poll:
+on warm-pool ``rekey()`` the gateway sends a one-shot ``claim`` frame naming
+the runtime PID and the claiming session; gatewayd re-targets the caller of
+every live stub connection indexed under that PID. These tests drive the real
+``gatewayd._handle_connection`` loop (same harness as the recaller tests) and
+verify:
+
+* a claim re-targets a key-less connection mid-stream — the very next
+  forwarded call carries the claimed identity (per-frame pickup),
+* a claim REPLACES an existing identity (re-claim correctness; unlike the
+  deny-by-default stub ``recaller``) with an ``allowed`` audit,
+* malformed claims (bad pid / empty key) update nothing and audit ``denied``,
+* the claim first-frame connection is acked with ``{"type": "claimed"}``,
+* the PID index is populated at register and cleaned up at teardown,
+* the stub Register payload carries the ``ancestor_pids`` chain, and
+* the ``claim`` sender module (``mcp_gateway.claim``) round-trips against a
+  real unix socket and no-ops safely without its preconditions.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+import pytest
+
+from kiro_claw.mcp_gateway import claim as claim_mod
+from kiro_claw.mcp_gateway import gatewayd as gw
+from kiro_claw.mcp_gateway import socketsec
+from kiro_claw.mcp_gateway import stub as stub_mod
+
+pytestmark = pytest.mark.xdist_group("mcp_gateway")
+
+_PID = 424242
+#: Simulated runtime ancestry, nearest first: kiro-cli-chat → kiro-cli →
+#: sandbox wrapper. A claim naming ANY of these must hit — the live bug was
+#: the gateway claiming with the sandbox-wrapper PID (top of the tree) while
+#: the index only held the stub's immediate parent.
+_ANCESTORS = [_PID, 424241, 424240]
+_WRAPPER_PID = _ANCESTORS[-1]
+
+
+def _register(
+    session_key: str, ancestor_pids: list[int] | None = None
+) -> dict[str, Any]:
+    return {
+        "type": "register",
+        "stub_uuid": "cp-stub-0001",
+        "server_name": "echo-mcp",
+        "agent_name": "cp-agent",
+        "command_args_hash": "0" * 64,
+        "effective_env_hash": "1" * 64,
+        "work_dir": "/tmp",
+        "binary_version": "deadbeef",
+        "os_uid": 1000,
+        "sandbox_mode": "standard",
+        "autoapprove_set_hash": "2" * 64,
+        "approval_mode": "interactive",
+        "trust_all_tools": False,
+        "user_identity": "cp",
+        "channel_id": "C_CP",
+        "config_snapshot_hash": "3" * 64,
+        "parent_pid": (ancestor_pids or _ANCESTORS)[0],  # legacy field, first ancestor
+        "ancestor_pids": ancestor_pids if ancestor_pids is not None else _ANCESTORS,
+        "session_key": session_key,
+        "session_type": "unknown" if not session_key else "dashboard",
+        "principal_id": "",
+    }
+
+
+def _claim(pid: Any, session_key: str) -> dict[str, Any]:
+    return {
+        "type": "claim",
+        "pid": pid,
+        "caller": {
+            "session_key": session_key,
+            "session_type": "dashboard",
+            "principal_id": "cp",
+            "channel_id": "C_CP",
+        },
+    }
+
+
+_CALL = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "x"}}
+
+
+class _QueueReader:
+    """Reader fed dynamically so a test can interleave a claim between frames."""
+
+    def __init__(self) -> None:
+        self._q: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
+
+    def feed(self, frame: dict[str, Any]) -> None:
+        self._q.put_nowait((json.dumps(frame) + "\n").encode())
+
+    def eof(self) -> None:
+        self._q.put_nowait(None)
+
+    async def readuntil(self, sep: bytes = b"\n") -> bytes:
+        item = await self._q.get()
+        if item is None:
+            raise asyncio.IncompleteReadError(b"", None)
+        return item
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.frames: list[dict[str, Any]] = []
+
+    def write(self, b: bytes) -> None:
+        for line in b.decode().splitlines():
+            if line.strip():
+                self.frames.append(json.loads(line))
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+    def is_closing(self) -> bool:
+        return False
+
+    def get_extra_info(self, _name: str, default: Any = None) -> Any:
+        return default
+
+
+class _FakeBackend:
+    supports_caller_identity = True
+
+    def __init__(self) -> None:
+        self.callers: list[Any] = []
+        self.forwarded = asyncio.Event()
+
+    async def attach_stub(self, _uuid: str) -> "asyncio.Queue[bytes]":
+        return asyncio.Queue()
+
+    async def detach_stub(self, _uuid: str) -> int:
+        return 0
+
+    async def forward_from_stub(self, _uuid: str, _msg: dict, caller: Any = None) -> None:
+        self.callers.append(caller)
+        self.forwarded.set()
+
+
+class _FakePool:
+    """Minimal pool double: the fork's lazy-spawn attach releases its hand-out
+    reservation via ``pool.unreserve`` in a ``finally`` (absent upstream at this
+    commit), so a bare ``object()`` would raise AttributeError. Nothing else on
+    the pool is reached (hot_keys=None skips ``pool.get``)."""
+
+    def unreserve(self, _key: object) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _clean_index() -> Any:
+    gw._CONN_INDEX.clear()
+    yield
+    gw._CONN_INDEX.clear()
+
+
+def _patch_env(monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeBackend, list[dict[str, Any]]]:
+    monkeypatch.setattr(
+        socketsec, "check_peer_uid", lambda _w, _uid: socketsec.PeerCredResult.MATCH
+    )
+    fake_backend = _FakeBackend()
+    sel_calls: list[dict[str, Any]] = []
+
+    class _FakeSEL:
+        def log_api_access(self, **kwargs: Any) -> None:
+            sel_calls.append(kwargs)
+
+    async def _fake_acquire(_pool: Any, _key: Any, _resolver: Any):
+        return fake_backend, True
+
+    async def _fake_drain(_inbox: Any, _writer: Any) -> None:
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    monkeypatch.setattr(gw, "_acquire_backend", _fake_acquire)
+    monkeypatch.setattr(gw, "_drain_inbox_to_stub", _fake_drain)
+    return fake_backend, sel_calls
+
+
+def _claim_events(sel_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [e for e in sel_calls if e.get("operation") == "mcp-gateway.caller-claim"]
+
+
+async def _handle(reader: Any, writer: Any) -> None:
+    await asyncio.wait_for(
+        gw._handle_connection(
+            reader, writer, pool=_FakePool(), resolver=object(),
+            socket_path=Path("/tmp/cp.sock"), hot_keys=None,
+        ),
+        timeout=5.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_retargets_live_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Key-less register forwards caller=None; after a claim for its runtime
+    tree the very next forwarded call carries the claimed identity. The claim
+    deliberately names the TOP ancestor (sandbox-wrapper PID) while the stub's
+    immediate parent is a different PID — the exact live topology
+    (sandbox wrapper → kiro-cli → kiro-cli-chat → stub) where a single-level
+    index made every claim miss."""
+    fb, sel = _patch_env(monkeypatch)
+    reader = _QueueReader()
+    reader.feed(_register(""))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    assert fb.callers == [None]
+
+    ack = gw._apply_claim(_claim(_WRAPPER_PID, "dashboard:chat-CP-1"))
+    assert ack["type"] == "claimed" and ack["updated"] == 1
+
+    fb.forwarded.clear()
+    reader.feed(_CALL)
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    reader.feed({"type": "unregister"})
+    await task
+
+    assert len(fb.callers) == 2
+    assert fb.callers[1] is not None
+    assert fb.callers[1].session_key == "dashboard:chat-CP-1"
+    events = _claim_events(sel)
+    assert len(events) == 1 and events[0]["outcome"] == "allowed"
+    assert events[0]["caller"] == "dashboard:chat-CP-1"
+
+
+@pytest.mark.asyncio
+async def test_claim_replaces_existing_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-claim: unlike the stub recaller (deny-by-default), a gateway claim
+    REPLACES an existing identity so a re-claimed pool runtime is never stale."""
+    fb, sel = _patch_env(monkeypatch)
+    reader = _QueueReader()
+    reader.feed(_register("dashboard:old-session"))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+
+    ack = gw._apply_claim(_claim(_PID, "dashboard:new-session"))
+    assert ack["updated"] == 1
+
+    fb.forwarded.clear()
+    reader.feed(_CALL)
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    reader.feed({"type": "unregister"})
+    await task
+
+    assert fb.callers[0].session_key == "dashboard:old-session"
+    assert fb.callers[1].session_key == "dashboard:new-session"
+    events = _claim_events(sel)
+    assert len(events) == 1 and events[0]["outcome"] == "allowed"
+    assert "dashboard:old-session" in (events[0].get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_claim_idempotent_same_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claiming the identity a connection already has is a no-op (no audit spam)."""
+    fb, sel = _patch_env(monkeypatch)
+    reader = _QueueReader()
+    reader.feed(_register("dashboard:same-1"))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+
+    ack = gw._apply_claim(_claim(_PID, "dashboard:same-1"))
+    assert ack["type"] == "claimed" and ack["updated"] == 0 and ack["connections"] == 1
+    reader.feed({"type": "unregister"})
+    await task
+    assert _claim_events(sel) == []
+
+
+@pytest.mark.asyncio
+async def test_claim_malformed_rejected_and_audited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deny-by-default validation: bad pid types and empty keys update nothing."""
+    _, sel = _patch_env(monkeypatch)
+    for bad in (
+        _claim(0, "dashboard:x"),          # pid out of range
+        _claim("42", "dashboard:x"),       # pid wrong type
+        _claim(True, "dashboard:x"),       # bool is not a pid
+        _claim(_PID, ""),                  # empty session key
+    ):
+        ack = gw._apply_claim(bad)
+        assert ack["type"] == "claim-rejected", bad
+    events = _claim_events(sel)
+    assert len(events) == 4
+    assert all(e["outcome"] == "denied" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_claim_first_frame_connection_acked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-shot claim connection is answered with the ack frame and closes."""
+    _patch_env(monkeypatch)
+    writer = _RecordingWriter()
+    reader = _QueueReader()
+    reader.feed(_claim(_PID, "dashboard:chat-CP-9"))
+    await _handle(reader, writer)
+    assert writer.frames and writer.frames[0]["type"] == "claimed"
+    assert writer.frames[0]["updated"] == 0  # nothing registered under _PID
+
+
+@pytest.mark.asyncio
+async def test_conn_index_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register indexes the connection under EVERY ancestor PID; teardown
+    cleans all of them up."""
+    fb, _ = _patch_env(monkeypatch)
+    reader = _QueueReader()
+    reader.feed(_register(""))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    for pid in _ANCESTORS:
+        assert pid in gw._CONN_INDEX and len(gw._CONN_INDEX[pid]) == 1
+    reader.eof()
+    await task
+    for pid in _ANCESTORS:
+        assert pid not in gw._CONN_INDEX
+
+
+def test_register_pids_legacy_and_garbage() -> None:
+    """_register_pids accepts the ancestor list, falls back to legacy
+    single parent_pid, and drops garbage entries deny-by-default."""
+    assert gw._register_pids({"ancestor_pids": [10, 20, 30]}) == [10, 20, 30]
+    assert gw._register_pids({"parent_pid": 42}) == [42]
+    assert gw._register_pids({"ancestor_pids": [0, 1, True, "9", 77]}) == [77]
+    assert gw._register_pids({}) == []
+
+
+def test_stub_register_payload_carries_ancestor_pids() -> None:
+    """The Register payload names the stub's full ancestor chain (nearest
+    first) so gatewayd can index every level of the runtime process tree."""
+    args = stub_mod._parse_args(
+        ["--server", "echo-mcp", "--agent", "cp-agent",
+         "--target-command", "/bin/true", "--work-dir", "/tmp"]
+    )
+    payload = stub_mod.build_register_payload(args)
+    chain = payload["ancestor_pids"]
+    assert isinstance(chain, list) and chain, chain
+    assert chain[0] == os.getppid()
+    assert all(isinstance(p, int) and p > 1 for p in chain)
+    # Chain walks upward: on Linux the second entry (when present) must be
+    # the parent of the first.
+    assert len(set(chain)) == len(chain)  # no cycles
+
+
+def test_classify_session_type() -> None:
+    assert claim_mod.classify_session_type("dashboard:chat-1") == "dashboard"
+    assert claim_mod.classify_session_type("cron:job-1") == "cron"
+    assert claim_mod.classify_session_type("hook:h-1") == "hook"
+    assert claim_mod.classify_session_type("slack:123.456") == "slack-thread"
+    assert claim_mod.classify_session_type("") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_send_claim_roundtrip(tmp_path: Path) -> None:
+    """The sender round-trips a claim frame over a real unix socket and treats
+    a ``claimed`` ack as success, anything else as failure."""
+    received: list[dict[str, Any]] = []
+    sock = tmp_path / "gw.sock"
+
+    async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw = await reader.readline()
+        received.append(json.loads(raw))
+        writer.write(json.dumps({"type": "claimed", "updated": 3}).encode() + b"\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_unix_server(_serve, path=str(sock))
+    try:
+        ok = await claim_mod.send_claim(str(sock), 777, "dashboard:chat-RT-1", "C1")
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert ok is True
+    assert received[0]["type"] == "claim" and received[0]["pid"] == 777
+    assert received[0]["caller"]["session_key"] == "dashboard:chat-RT-1"
+    assert received[0]["caller"]["session_type"] == "dashboard"
+
+
+@pytest.mark.asyncio
+async def test_send_claim_failure_paths(tmp_path: Path) -> None:
+    """A missing socket or a non-ack response returns False without raising."""
+    assert await claim_mod.send_claim(str(tmp_path / "absent.sock"), 7, "dashboard:x") is False
+
+    sock = tmp_path / "nak.sock"
+
+    async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()
+        writer.write(json.dumps({"type": "claim-rejected", "reason": "test"}).encode() + b"\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_unix_server(_serve, path=str(sock))
+    try:
+        assert await claim_mod.send_claim(str(sock), 7, "dashboard:x") is False
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_send_claim_aggregate_timeout_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gatewayd that accepts but never responds is bounded by ONE aggregate
+    budget — not one budget per phase (connect/drain/readline), which would
+    triple the worst-case stall (AutoSDE finding f-d76c6f17)."""
+    monkeypatch.setattr(claim_mod, "_CLAIM_TIMEOUT_SECS", 0.3)
+    sock = tmp_path / "stall.sock"
+    stalled = asyncio.Event()
+
+    async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()  # accept the frame, then stall forever
+        await stalled.wait()
+        writer.close()
+
+    server = await asyncio.start_unix_server(_serve, path=str(sock))
+    try:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        assert await claim_mod.send_claim(str(sock), 7, "dashboard:x") is False
+        elapsed = loop.time() - start
+        # Single aggregate bound: well under 2x the budget, never 3x.
+        assert elapsed < claim_mod._CLAIM_TIMEOUT_SECS * 2
+    finally:
+        stalled.set()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_schedule_claim_preconditions() -> None:
+    """schedule_claim silently no-ops when socket/pid/key are missing — the
+    legitimate non-gateway and test contexts must never error or leak tasks."""
+    claim_mod.schedule_claim(None, 42, "dashboard:x")
+    claim_mod.schedule_claim("/tmp/x.sock", None, "dashboard:x")
+    claim_mod.schedule_claim("/tmp/x.sock", 0, "dashboard:x")
+    claim_mod.schedule_claim("/tmp/x.sock", 42, "")
+    assert claim_mod._PENDING == set()

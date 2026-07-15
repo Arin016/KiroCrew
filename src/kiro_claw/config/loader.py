@@ -77,7 +77,7 @@ from kiro_claw.instances.constants import MAX_RECOVERY_ATTEMPTS_CEILING as _MAX_
 from kiro_claw.instances.constants import (
     RECOVER_BACKOFF_MAX_CEILING_SECS as _RECOVER_BACKOFF_CEILING,
 )
-from kiro_claw.mcp_gateway.rewriter import default_overlay_dir, default_socket_path  # noqa: F401
+from kiro_claw.mcp_gateway.rewriter import default_overlay_dir, default_socket_path
 
 logger = logging.getLogger(__name__)
 
@@ -3089,6 +3089,18 @@ class KiroClawConfig:
         sandbox = self.agent.sandbox
         tool_search = self.agent.tool_search
 
+        # MCP gateway: resolve overlay + socket once when enabled. None when
+        # the feature flag is off -> AcpClient falls through to per-session MCP.
+        _gw = self.mcp_gateway
+        if _gw.enabled:
+            _gw_overlay = _gw.overlay_dir or str(default_overlay_dir())
+            _gw_socket = _gw.socket_path or str(default_socket_path())
+            _gw_settings = str(Path(_gw_overlay).parent / "settings" / "mcp.json")
+        else:
+            _gw_overlay = None
+            _gw_socket = None
+            _gw_settings = None
+
         def _acp(
             session_key: str | None = None,
             agent: str | None = None,
@@ -3132,6 +3144,9 @@ class KiroClawConfig:
                 extra_env=extra_env,
                 effort_per_model=_eff_per_model,
                 tool_search=tool_search,
+                mcp_gateway_overlay=_gw_overlay,
+                mcp_gateway_settings_mcp_json=_gw_settings,
+                mcp_gateway_socket=_gw_socket,
             )
 
         return _acp

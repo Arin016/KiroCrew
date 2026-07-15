@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
 _DIST_INDEX = _DIST_DIR / "index.html"
-_HTML_PATH = _STATIC_DIR / "dashboard.html"
 _SSE_INTERVAL_SECS = 5
 
 # Sentinel returned in place of sensitive config values in API responses. Kept
@@ -117,7 +116,14 @@ def _sel():
 
 
 async def index(request: web.Request) -> web.Response:
-    """Serve the dashboard HTML — prefer React build if available.
+    """Serve the React dashboard SPA shell (``static/dist/index.html``).
+
+    When the built SPA bundle is absent/unreadable, serve the static
+    ``_DASHBOARD_HTML_NOT_FOUND`` guidance page (restart/rebuild instructions).
+    The legacy server-rendered ``dashboard.html`` fallback was removed (Talos
+    XSS follow-up 6d6c1a9b / V2285871874): it shipped an incomplete HTML
+    ``esc()`` and a permissive inline-script surface, and existed only as a
+    build-time fallback. The React SPA (reviewed clean) is now the only shell.
 
     SECURITY CONTRACT — DO NOT inject server/user/session state into this
     response. The auth middleware serves this handler UNAUTHENTICATED on the
@@ -128,9 +134,8 @@ async def index(request: web.Request) -> web.Response:
     would leak it across the auth boundary. Keep dynamic data behind gated
     ``/api/*`` routes. Pinned by test_served_shell_is_auth_independent.
     """
-    path = _DIST_INDEX if _DIST_INDEX.is_file() else _HTML_PATH
     try:
-        html = path.read_text(encoding="utf-8")
+        html = _DIST_INDEX.read_text(encoding="utf-8")
     except FileNotFoundError:
         html = _DASHBOARD_HTML_NOT_FOUND
     return web.Response(text=html, content_type="text/html")

@@ -29,6 +29,7 @@ from kiro_claw.acp.client import (
 )
 from kiro_claw.acp.runtime import AcpRuntime, AcpRuntimeDead, AcpRuntimeError, AcpSessionHandle
 from kiro_claw.acp.types import STOP_REASON_END_TURN
+from kiro_claw.mcp_gateway.claim import schedule_claim
 from kiro_claw.providers.base import CancelOutcome, LLMEvent, LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,15 @@ class AcpSessionProvider(LLMProvider):
         self._session_key = session_key
         self._channel_id = channel_id
         self._runtime._last_activity = time.monotonic()
+        # Claim-push: re-target every MCP stub connection under the shared
+        # runtime's PID to the claiming session (see AcpClient.rekey for the
+        # rationale). Fire-and-forget; no-ops without a gateway socket.
+        schedule_claim(
+            self._runtime._mcp_gateway_socket,
+            self._runtime.pid,
+            session_key,
+            channel_id,
+        )
 
     @property
     def _agent(self) -> str:

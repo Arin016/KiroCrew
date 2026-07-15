@@ -19,9 +19,9 @@ won't be killed (the watchdog detects "assets vanished", not "assets never
 existed").
 
 The presence check mirrors ``handlers/core.py:index()``'s serve criterion
-exactly (``dist/index.html`` is a file, OR ``dashboard.html`` is a file), so
-a partial-prune state where an empty ``dist/`` directory node remains cannot
-mask a genuine vanish.
+exactly (``dist/index.html`` is a file — the legacy ``dashboard.html`` fallback
+was removed, Talos V2285871874), so a partial-prune state where an empty
+``dist/`` directory node remains cannot mask a genuine vanish.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import asyncio
 import logging
 from typing import Protocol
 
-from kiro_claw.dashboard.handlers.core import _DIST_INDEX, _HTML_PATH
+from kiro_claw.dashboard.handlers.core import _DIST_INDEX
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +61,14 @@ class _ShutdownSignal(Protocol):
 def assets_present() -> bool:
     """Return True if the dashboard can serve a real page (not the fallback).
 
-    Mirrors the criterion used by ``handlers/core.py:index()``: prefer the
-    React bundle's ``dist/index.html``, otherwise the legacy
-    ``dashboard.html``. Checking ``_DIST_INDEX.is_file()`` (not
-    ``_DIST_DIR.is_dir()``) is critical: an empty ``dist/`` directory node
-    is a valid partial-prune state where the handler serves the fallback,
+    Mirrors the criterion used by ``handlers/core.py:index()``: the React
+    bundle's ``dist/index.html`` must be present (the legacy ``dashboard.html``
+    fallback was removed — Talos V2285871874). Checking ``_DIST_INDEX.is_file()``
+    (not ``_DIST_DIR.is_dir()``) is critical: an empty ``dist/`` directory node
+    is a valid partial-prune state where the handler serves the guidance page,
     and the watchdog must recognise that as "assets vanished."
     """
-    return _DIST_INDEX.is_file() or _HTML_PATH.is_file()
+    return _DIST_INDEX.is_file()
 
 
 async def run_stale_asset_watchdog(

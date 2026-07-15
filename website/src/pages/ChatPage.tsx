@@ -11,6 +11,7 @@ import {
   switchSlot, createSlot, deleteSlot, fetchHistory,
   appendMessage, resumeFromHistory, forkSlot,
   setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, editQueuedMessage,
+  selectComposerBusy,
   setVoiceAudio,
   toggleActivity, openActivityToTab,
   setActiveSlot, truncateAfterIndex, replaceMessages,
@@ -465,6 +466,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     return out
   }, [messages, activeSlot])
   const slotRunning = useAppSelector(s => s.chat.slotRunning)
+  // Shared composer-busy rule (chatSlice.selectComposerBusy). Drives the
+  // composer's busy/queue affordance so a message sent during a sub-agent run
+  // reads as "will queue".
+  const composerBusy = useAppSelector(s => selectComposerBusy(s, s.chat.activeSlot))
   const slotStopping = useAppSelector(s => s.chat.slotStopping)
   const slotLoading = useAppSelector(s => s.chat.slotLoading)
   const pendingQuestion = useAppSelector(s => s.chat.pendingQuestion)
@@ -1843,9 +1848,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     if (knowledgeBlock) meta.knowledge = { items: knowledgeBlock.items.length, tokens: knowledgeBlock.totalTokens, titles: knowledgeBlock.items.map(i => i.title), content: knowledgeBlock.items.map(i => ({ title: i.title, text: i.content.slice(0, 2000) })) }
     if (widgetOrigin) meta.origin = 'widget'
     const metaPayload = Object.keys(meta).length ? meta : undefined
-    // Skip optimistic user bubble when the slot is already running — the
-    // backend will send a "queued" role message instead, avoiding a duplicate.
-    if (!store.getState().chat.slotRunning || forceNew) {
+    // Skip optimistic user bubble when the slot is busy (shared rule:
+    // chatSlice.selectComposerBusy) — the backend sends a "queued" role
+    // message instead, avoiding a duplicate.
+    const _busy = selectComposerBusy(store.getState(), slot ?? null)
+    if (!_busy || forceNew) {
       dispatch(appendMessage({ role: 'user', content: displayTxt, cls: '', ts: new Date().toISOString(), meta: metaPayload }))
     }
     window.dispatchEvent(new Event('voice-stop'))
@@ -3132,7 +3139,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
               contextUsedTokens={contextTokens?.used}
               contextWindowTokens={contextTokens?.window || provider.getContextWindow(currentSlot?.model || resolvedModel || 'auto')}
               showContextPct={chatConfig.showContextPct}
-              isRunning={slotRunning}
+              isRunning={composerBusy}
               onStop={() => {
                 const slot = activeSlot
                 if (!slot) return
