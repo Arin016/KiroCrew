@@ -1,6 +1,6 @@
 name: Codex Review
 
-# Second AI reviewer using OpenAI GPT-5.5 via Amazon Bedrock (Mantle).
+# Second AI reviewer using OpenAI GPT-5.6 Sol via Amazon Bedrock (Mantle).
 # Runs alongside claude-review.yml to provide a second independent perspective.
 # Runs the Codex CLI directly with model_provider = amazon-bedrock; the CLI
 # authenticates to Bedrock with the OIDC role's SigV4 credentials via the AWS
@@ -58,7 +58,7 @@ jobs:
           mkdir -p "$HOME/.codex"
           cat > "$HOME/.codex/config.toml" <<'EOF'
           model_provider = "amazon-bedrock"
-          model = "openai.gpt-5.5"
+          model = "openai.gpt-5.6-sol"
           EOF
 
       - name: Write review prompt
@@ -134,7 +134,7 @@ jobs:
           if [ -f codex-review-output.md ] && [ -s codex-review-output.md ]; then
             # Prefix with Codex header to distinguish from Claude review
             {
-              echo "## Codex Review (GPT-5.5 via Bedrock)"
+              echo "## Codex Review (GPT-5.6 Sol via Bedrock)"
               echo ""
               cat codex-review-output.md
             } > /tmp/codex-comment.md
