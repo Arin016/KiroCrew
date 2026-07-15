@@ -203,13 +203,20 @@ function SessionStatus() {
     return () => clearInterval(t)
   }, [detail.kind])
 
-  const icon = detail.kind === 'idle' ? <PanelRight size={14} /> : detail.kind === 'thinking' ? <Loader size={11} className="animate-spin" /> : detail.kind === 'streaming' ? <Circle size={9} fill="currentColor" /> : detail.kind === 'tool' ? <Wrench size={11} /> : <Loader size={11} className="animate-spin" />
+  // The PanelRight glyph is the activity-panel toggle affordance and must stay
+  // visible at all times, including mid-turn. When the agent is busy we append
+  // a live status icon + label after it, rather than replacing the toggle. The
+  // old behaviour swapped PanelRight out for the status icon, so the panel
+  // toggle disappeared whenever the session was thinking/streaming/tool-running.
+  const busyIcon = detail.kind === 'thinking' ? <Loader size={11} className="animate-spin" /> : detail.kind === 'streaming' ? <Circle size={9} fill="currentColor" /> : detail.kind === 'tool' ? <Wrench size={11} /> : detail.kind === 'idle' ? null : <Loader size={11} className="animate-spin" />
   const warn = (detail.kind === 'thinking' && elapsed > 30) || (detail.kind === 'streaming' && elapsed > 15)
-  const label = warn ? <><AlertTriangle size={11} /> Slow ({elapsed}s)</> : detail.kind === 'idle' ? null : <><span className="truncate">{detail.text}</span><span className="shrink-0"> ({elapsed}s)</span></>
+  const label = detail.kind === 'idle' ? null : warn ? <><AlertTriangle size={11} /> Slow ({elapsed}s)</> : <><span className="truncate">{detail.text}</span><span className="shrink-0"> ({elapsed}s)</span></>
 
   return (
     <span className={`inline-flex items-center gap-1.5 text-[11px] font-mono max-w-[30vw] rounded-md px-1.5 py-0.5 bg-bg/80 backdrop-blur-sm ${warn ? 'text-amber-400' : 'text-muted'}`} title={detail.kind === 'idle' ? 'Ready' : `${detail.text} · ${new Date(detail.ts).toLocaleTimeString()}`}>
-      <span className="shrink-0">{icon}</span> {label}
+      <span className="shrink-0"><PanelRight size={14} /></span>
+      {busyIcon && <span className="shrink-0">{busyIcon}</span>}
+      {label}
     </span>
   )
 }
