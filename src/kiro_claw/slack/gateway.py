@@ -532,16 +532,41 @@ class GatewayOrchestrator:
         is_background = source in _BACKGROUND_APPROVAL_SOURCES
 
         async def _approve(event: LLMEvent, parent_session_key: str = "") -> bool:
-            # Resolve slot: use explicit slot, or try to find from active dashboard slot
-            # Heuristic fallback: picks first running slot (dict insertion order). Not guaranteed
-            # to be the correct slot for subagents, but explicit slot param is the primary path.
-            resolved_slot = ""
-            if not resolved_slot and self.dashboard_state and self.dashboard_state._slots:
-                # Heuristic: pick first running slot (insertion order)
+            request_id = str(event.request_id)
+            # Background callers pass the authoritative parent session key. Prefer it
+            # over a request-ID resolver because tool permission IDs are opaque UUIDs,
+            # unlike spawn approvals (``spawn:<agent_id>``). Treating a tool request ID
+            # as an agent ID loses the dashboard slot and hides the approval prompt.
+            parent_slot = (
+                parent_session_key.removeprefix("dashboard:")
+                if parent_session_key.startswith("dashboard:")
+                else ""
+            )
+
+            # Heuristic fallback: pick the first running slot only when the caller
+            # supplied neither an authoritative parent nor an explicit resolver.
+            resolved_slot = parent_slot
+            if (
+                not resolved_slot
+                and slot_resolver is None
+                and self.dashboard_state
+                and self.dashboard_state._slots
+            ):
                 for k in self.dashboard_state._slots:
                     if self.dashboard_state._slots[k].running:
                         resolved_slot = k.removeprefix("dashboard:")
                         break
+
+            if parent_slot:
+                approval_slot = parent_slot
+            elif slot_resolver:
+                try:
+                    approval_slot = slot_resolver(request_id) or ""
+                except Exception:
+                    logger.warning("slot_resolver failed for %s", request_id, exc_info=True)
+                    approval_slot = ""
+            else:
+                approval_slot = resolved_slot
 
             # Per-source auto-approve (e.g. cron, taskrunner, subagent)
             if source in self._cfg.hooks.get("auto_approve_sources", []):
@@ -598,16 +623,7 @@ class GatewayOrchestrator:
 
                 _safe_title = redact(event.title)
 
-                if slot_resolver:
-                    try:
-                        _parent_slot_key = slot_resolver(str(event.request_id))
-                    except Exception:
-                        logger.warning("slot_resolver failed for %s", event.request_id, exc_info=True)
-                        _parent_slot_key = None
-                elif resolved_slot:
-                    _parent_slot_key = resolved_slot
-                else:
-                    _parent_slot_key = None
+                _parent_slot_key = approval_slot or None
 
                 if _parent_slot_key:
                     _ps = (self.dashboard_state._slots or {}).get(_parent_slot_key)
@@ -659,8 +675,6 @@ class GatewayOrchestrator:
                         outcome="not_auto_approved",
                         resources=_safe_title,
                     )
-
-            request_id = str(event.request_id)
 
             # Post approval buttons to Slack DM if available
             if self.slack and self._owner_id:
@@ -714,7 +728,7 @@ class GatewayOrchestrator:
                                 event.title,
                                 tool_input=event.tool_input,
                                 tool_purpose=event.tool_purpose,
-                                slot=slot_resolver(request_id) if slot_resolver else resolved_slot,
+                                slot=approval_slot,
                                 is_background=is_background,
                             )
                         )
@@ -772,7 +786,7 @@ class GatewayOrchestrator:
                     event.title,
                     tool_input=event.tool_input,
                     tool_purpose=event.tool_purpose,
-                    slot=slot_resolver(request_id) if slot_resolver else resolved_slot,
+                    slot=approval_slot,
                     is_background=is_background,
                 )
             return True  # no UI → auto-approve

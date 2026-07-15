@@ -465,6 +465,70 @@ class TestInteractiveApproval:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_parent_session_beats_spawn_resolver_for_tool_trust(self):
+        """Opaque tool request IDs still inherit trust from the parent dashboard slot."""
+        orch = _make_orchestrator(slack_enabled=False)
+        ds = _mock_dashboard_state()
+        ds._yolo = False
+        slot = MagicMock()
+        slot._trust = True
+        slot.running = False
+        ds._slots = {"parent-slot": slot}
+        ds.request_approval = AsyncMock(return_value=False)
+        orch.dashboard_state = ds
+        resolver = MagicMock(return_value="")
+        callback = orch._interactive_approval("subagent", slot_resolver=resolver)
+        event = MagicMock()
+        event.request_id = "opaque-tool-request-id"
+        event.title = "git diff"
+        event.tool_input = ""
+        event.tool_purpose = ""
+
+        with patch("kiro_claw.sel.sel") as mock_sel:
+            mock_sel.return_value.log_api_access = MagicMock()
+            result = await callback(event, "dashboard:parent-slot")
+
+        assert result is True
+        resolver.assert_not_called()
+        ds.request_approval.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_parent_session_routes_tool_approval_when_spawn_resolver_misses(self):
+        """Tool approval renders in its parent slot even though its ID is not spawn:<id>."""
+        orch = _make_orchestrator(slack_enabled=False)
+        ds = _mock_dashboard_state()
+        ds._yolo = False
+        slot = MagicMock()
+        slot._trust = False
+        slot.running = False
+        ds._slots = {"parent-slot": slot}
+        ds.request_approval = AsyncMock(return_value=False)
+        orch.dashboard_state = ds
+        resolver = MagicMock(return_value="")
+        callback = orch._interactive_approval("subagent", slot_resolver=resolver)
+        event = MagicMock()
+        event.request_id = "opaque-tool-request-id"
+        event.title = "git diff"
+        event.tool_input = ""
+        event.tool_purpose = "review changes"
+
+        with patch("kiro_claw.sel.sel") as mock_sel:
+            mock_sel.return_value.log_api_access = MagicMock()
+            result = await callback(event, "dashboard:parent-slot")
+
+        assert result is False
+        resolver.assert_not_called()
+        ds.request_approval.assert_awaited_once_with(
+            "opaque-tool-request-id",
+            "subagent",
+            "git diff",
+            tool_input="",
+            tool_purpose="review changes",
+            slot="parent-slot",
+            is_background=False,
+        )
+
+    @pytest.mark.asyncio
     async def test_all_slots_trusted_approves(self):
         """All slots trusted, no resolver → auto-approve."""
         orch = _make_orchestrator(slack_enabled=False)
