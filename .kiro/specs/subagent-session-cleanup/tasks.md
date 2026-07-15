@@ -115,5 +115,5 @@ Implement provider-agnostic session file cleanup for subagent sessions. The impl
 - Checkpoints ensure incremental validation
 - Property tests validate universal correctness properties
 - Unit tests validate specific examples and edge cases
-- Build command: `brazil-build format && brazil-build release`
+- Build command: `black && isort && flake8 && mypy && python -m pytest`
 - Test framework: pytest + pytest-asyncio + Hypothesis

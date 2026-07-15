@@ -159,13 +159,6 @@ _SAFE_TOOL_EXACT: frozenset[str] = frozenset(
     s.lower()
     for s in (
         "WorkspaceSearch",
-        "InternalSearch",
-        "InternalCodeSearch",
-        "ReadInternalWebsites",
-        "TaskeiGetTask",
-        "TaskeiGetRooms",
-        "TaskeiGetRoomResources",
-        "TaskeiListTasks",
     )
 )
 

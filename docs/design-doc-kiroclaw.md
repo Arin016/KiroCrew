@@ -364,7 +364,7 @@ kiroclaw's system prompt is thin (orchestration rules only). Step-specific exper
   LLMProvider.stream(full_prompt)            ← sent to kiro-cli with all context assembled
 ```
 
-- **Triggered skills**: Step text scanned against skill trigger keywords. "Create a Brazil package" triggers the `brazil` skill (full content injected).
+- **Triggered skills**: Step text scanned against skill trigger keywords. "Create a new project" triggers a matching skill (full content injected).
 - **Episodic memory**: Vector similarity search pulls relevant past fragments.
 - **Working memory**: Files changed, decisions, blockers from prior steps — survives context compaction.
 
@@ -612,7 +612,7 @@ New LLM-facing capabilities must be MCP tools (not just CLI commands). kiro-cli 
 
 ### 5.1 kiroclaw Is an Orchestrator, Not a Coding Specialist
 
-kiroclaw has full coding tools (`fs_write`, `execute_bash`, `fs_read`, `grep`, `glob`, `builder-mcp`) but its prompt is optimized for orchestration. For serious coding, create a dedicated agent with a focused prompt, coding skills, and appropriate tool constraints.
+kiroclaw has full coding tools (`fs_write`, `execute_bash`, `fs_read`, `grep`, `glob`) but its prompt is optimized for orchestration. For serious coding, create a dedicated agent with a focused prompt, coding skills, and appropriate tool constraints.
 
 ### 5.2 Agent Lifecycle
 
@@ -826,7 +826,7 @@ The limitation isn't that the state is too thin — it's that there's no shared 
 - The branch is the artifact, not the LLM's text summary of what it did
 
 **Generalized: any external store works for non-coding tasks:**
-- A shared document (Quip, wiki) for research tasks — agents append findings, later agents read the accumulated document
+- A shared document (wiki) for research tasks — agents append findings, later agents read the accumulated document
 - A database table for data processing tasks — agents write intermediate results, downstream agents query them
 - An S3 bucket for artifact-heavy tasks — agents upload outputs, downstream agents download inputs
 
@@ -878,7 +878,7 @@ ContextBuilder pipeline (configurable per agent):
   └── PipelineProvider      (custom: current pipeline status) ← user-defined
 ```
 
-**Level 2 — Context agent.** Take it further: the context assembly step itself is an LLM call. A lightweight, fast agent (e.g., `kiroclaw-lite` on Sonnet) receives the user's message plus a manifest of available context sources (with previews/summaries). It returns a selection: "for this message, inject the brazil skill, last 5 conversation messages, and the git diff — skip memory and lessons." The main agent then runs with exactly the context the context agent selected.
+**Level 2 — Context agent.** Take it further: the context assembly step itself is an LLM call. A lightweight, fast agent (e.g., `kiroclaw-lite` on Sonnet) receives the user's message plus a manifest of available context sources (with previews/summaries). It returns a selection: "for this message, inject the matching skill, last 5 conversation messages, and the git diff — skip memory and lessons." The main agent then runs with exactly the context the context agent selected.
 
 This is essentially the same pattern as per-step agent selection (7.1), but applied to the context layer. The context agent is a planner that decides what the worker agent needs to know. It runs as a fast pre-step before each main LLM call — one cheap Sonnet call to select context, then one Opus call with the right context loaded.
 

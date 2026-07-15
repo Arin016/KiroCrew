@@ -100,25 +100,16 @@ describe('ArtifactDetailPage popout navigation containment', () => {
     await waitFor(() => expect(screen.getByText('library page target')).toBeInTheDocument())
   })
 
-  it('main dashboard: the "Iterate" affordance seeds the prefill and navigates locally', async () => {
-    // Fork adaptation: the header "Iterate" button is `!popout`-gated (a popout
-    // never navigates itself into a chat), so the sendNav prefill branch is
-    // exercised here in the main dashboard — the fork analogue of upstream's
-    // "Ask agent to address". It builds a fresh chat slot, seeds the composer
-    // prefill (a real sessionStorage write in the main window), and navigates
-    // locally. The popout FORWARD path is covered by the two cases above.
+  it('main dashboard: the "Iterate" affordance is hidden pending redesign (P472753393)', async () => {
+    // The header "Iterate" button is gated behind SHOW_ARTIFACT_ITERATE (false),
+    // so it does not render even in the main dashboard (its `!popout` branch).
+    // When the redesign re-enables the flag, restore this to click the button
+    // and assert the local-nav prefill / sendNav path (fork analogue of
+    // upstream's "Ask agent to address").
     vi.mocked(api).createChatSlot = vi.fn().mockResolvedValue({ key: 'new-slot-1' })
     renderPage(false)
     await waitFor(() => expect(screen.getByText(/Artifact: cr-queue/i)).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: /iterate/i }))
-    await waitFor(() => expect(screen.getByText('chat page target')).toBeInTheDocument())
-    // No forward in the main window — it navigates locally.
-    expect(vi.mocked(forwardToMain)).not.toHaveBeenCalled()
-    // sendNav seeds the composer prefill for the new slot before navigating.
-    const raw = sessionStorage.getItem('kiroclaw_prefill')
-    expect(raw).not.toBeNull()
-    const parsed = JSON.parse(raw as string)
-    expect(parsed.slotKey).toBe('new-slot-1')
-    expect(parsed.prompt).toContain('cr-queue')
+    expect(screen.queryByRole('button', { name: /iterate/i })).toBeNull()
+    expect(vi.mocked(api).createChatSlot).not.toHaveBeenCalled()
   })
 })

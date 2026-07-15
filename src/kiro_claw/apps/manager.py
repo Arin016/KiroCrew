@@ -954,6 +954,9 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "author": "kiroclaw",
         "tags": ["collaboration", "agents"],
         "defaultEnabled": False,
+        # Hidden from the App Store Browse grid (opt-in via `kiroclaw app enable channels`).
+        # Code and routes remain fully intact; this only gates store visibility.
+        "hidden": True,
         "permissions": {
             "api": ["/api/channels"],
             "events": ["channel", "channel_message"],
@@ -961,16 +964,6 @@ _BUILTIN_APPS: list[dict[str, Any]] = [
         "ui": {
             "pages": [{"route": "/channels", "label": "Channels", "icon": "Users"}],
         },
-    },
-    {
-        "name": "board",
-        "version": "1.0.0",
-        "displayName": "Board",
-        "description": "4-lane Kanban view — auto-sorts sessions by urgency",
-        "author": "kiroclaw",
-        "tags": ["dashboard", "sessions", "kanban"],
-        "defaultEnabled": False,
-        "ui": {"pages": [{"route": "/board", "label": "Board", "icon": "KanbanSquare"}]},
     },
     {
         "name": "projects",
@@ -1149,12 +1142,15 @@ def register_builtin_apps() -> int:
             discovered.append(app_data)
     hardcoded_names = {a["name"] for a in _BUILTIN_APPS}
 
-    # Clean up apps that have been escalated to built-in surfaces or merged
-    # into an existing surface — remove stale installed state so they don't
-    # linger in the App Store / nav after the promotion.
+    # Clean up apps that have been escalated to built-in surfaces, merged into
+    # an existing surface, or removed from the fork — delete stale installed
+    # state so they don't linger in the App Store / nav after the change.
     #   - knowledge: promoted from App Store to registerBuiltinSurface()
     #   - orchestrated: Autopilot merged into the unified Chat surface (mode flag)
-    _escalated = ["knowledge", "orchestrated"]
+    #   - board: removed from the fork (mirrors upstream CR-289326017, alongside
+    #     the Channels hide P472750613); drop stale beta-install dirs so the
+    #     orphaned entry doesn't resurface in the App Store Browse grid.
+    _escalated = ["knowledge", "orchestrated", "board"]
     for esc_name in _escalated:
         esc_dir = app_dir(esc_name)
         if esc_dir.is_dir():

@@ -1,8 +1,14 @@
 # De-Amazoning Report — KiroClaw (public OSS fork)
 
-_Final state. Date: 2026-06-02. KiroClaw is the public, GitHub-distributable,
+_Date: 2026-06-02. KiroClaw is the public, GitHub-distributable,
 pip+npm-installable OSS fork that strips all Amazon-internal couplings. The
 de-Amazoned fork now lives in this `KiroClaw` package._
+
+> **NOTE (updated post-2026-06-02):** a later **KiroACP-only** refactor
+> superseded the `claude_code`-default decisions recorded below — `agent.provider`
+> is now fixed to `acp` and kiro-cli is REQUIRED; the standalone Claude Code and
+> Bedrock providers were removed. See current `CLAUDE.md` / `AGENTS.md`. The
+> provider-related lines below are annotated inline where stale.
 
 ## Final Health
 
@@ -13,7 +19,7 @@ de-Amazoned fork now lives in this `KiroClaw` package._
 | Frontend typecheck (`tsc -b`) | **0 errors** |
 | Frontend build (`npm run build`) | **succeeds** → `website/dist` → copied to `src/kiro_claw/static/dist` |
 | Repo-wide Amazon-infra string scan | **0 remaining** (live URLs / accounts / aliases / org-IDs / build) |
-| Default agent provider | `claude_code` (claude-agent-acp) |
+| Default agent provider | `acp` (kiro-cli over ACP) — KiroACP-only (see note above) |
 | Original KiroClaw package | untouched (git clean) |
 
 ## What Was Removed (deleted)
@@ -38,9 +44,12 @@ de-Amazoned fork now lives in this `KiroClaw` package._
 
 ## What Changed (behavior)
 
-- **Default agent backend** flipped `acp` → `claude_code` (public `@agentclientprotocol/claude-agent-acp`).
-  kiro-cli remains an OPTIONAL backend (resolved via PATH, graceful `None` when absent). Generic ACP
-  JSON-RPC protocol layer kept intact.
+- **Default agent backend**: the initial de-Amazoning flipped `acp` → `claude_code`, but a later
+  **KiroACP-only refactor reversed this** — `agent.provider` is now fixed to `acp` and kiro-cli is
+  REQUIRED. The standalone `ClaudeCodeProvider`/`BedrockProvider`, `cc_agent`, and `mirror` modules were
+  deleted and the public `claude-agent-acp` registration removed; only the dormant `ACP_BACKEND_CLAUDE`
+  seam in `acp/client.py` is intentionally kept (no-op) so an internal companion can re-register Claude
+  Code. Generic ACP JSON-RPC protocol layer kept intact.
 - **Embeddings** pull from the PUBLIC Ollama registry (`ollama pull qwen3-embedding:0.6b`, documented
   `nomic-embed-text` fallback) instead of the internal Gitfarm GGUF package. SigV4 off by default.
 - **Slack enterprise gate** is DEFAULT-OPEN (no hardcoded org-ID frozenset; opt-in via
@@ -50,7 +59,8 @@ de-Amazoned fork now lives in this `KiroClaw` package._
 - **Self-update** is `git pull` + `pip install -e .` + `npm build` (no toolbox/brazil).
 - **App registry** install rewritten from Brazil/`ssh://git.amazon.com` to generic `git clone`.
 - `amazon-transcribe` + `boto3` + Polly are OPTIONAL (lazy imports; `[options.extras_require]`); local
-  whisper STT is the default. Bedrock provider kept as an optional backend (lazy boto3).
+  whisper STT is the default. (The Bedrock provider was later REMOVED in the KiroACP-only refactor — the
+  `[aws]` extra is gone; `boto3` now only serves optional STT.)
 
 ## What Stayed (intentional, generic)
 
@@ -58,7 +68,9 @@ de-Amazoned fork now lives in this `KiroClaw` package._
   `~/.aws`/`~/.ssh` sensitive-path blocking, SEL audit log.
 - Core product: Slack gateway, web dashboard, CLI, sessions, cron, heartbeat, subagents, task runner,
   memory/learning, skills, artifacts, knowledge (local_folder/obsidian), channels, side conversations.
-- ACP client + providers (claude-agent-acp default, kiro-cli optional, Bedrock optional).
+- ACP client + the single ACP provider driving the `kiro-cli` backend (KiroACP-only). The
+  claude-agent-acp and Bedrock providers were removed in the later KiroACP-only refactor; the dormant
+  `ACP_BACKEND_CLAUDE` protocol seam in `acp/client.py` is kept for an internal companion.
 - Internal module/field names (`kiro_claw`, `kiro_agent`, etc.) — renaming the import namespace was out
   of scope and would break the 7780-test suite. Only user-facing strings were genericized.
 

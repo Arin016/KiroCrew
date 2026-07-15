@@ -21,7 +21,6 @@ import logging
 import os
 import re
 import tempfile
-import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
@@ -782,12 +781,6 @@ def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
 
         if req.type == "slash_commands":
             payload = req.payload or {}
-            # Handle /tk directly (TaskKeeper quick-note logging)
-            if payload.get("command") == "/tk":
-                t = asyncio.create_task(_handle_tk_note(orch, payload))
-                orch._handler_tasks.add(t)
-                t.add_done_callback(orch._handler_tasks.discard)
-                return
             t = asyncio.create_task(_handle_slash(orch, payload))
             orch._handler_tasks.add(t)
             t.add_done_callback(orch._handler_tasks.discard)
@@ -1243,116 +1236,6 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
                 await orch.slack.views_publish(user_id=user_id, view=fallback)
         except Exception:
             logger.debug("Fallback home tab also failed", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
-# /tk quick-note handler (TaskKeeper integration)
-# ---------------------------------------------------------------------------
-
-_TK_NOTES_FILE = Path.home() / ".taskkeeper" / "quick-notes.json"
-_TK_MAX_NOTES = 500
-_tk_notes_lock: asyncio.Lock | None = None
-
-
-async def _handle_tk_note(orch: GatewayOrchestrator, payload: dict) -> None:
-    """Handle /tk slash command: log a quick note to TaskKeeper's quick-notes.json."""
-    global _tk_notes_lock
-    if _tk_notes_lock is None:
-        _tk_notes_lock = asyncio.Lock()
-
-    text = (payload.get("text") or "").strip()
-    caller_id = payload.get("user_id", "")
-    response_url = payload.get("response_url", "")
-    channel_id = payload.get("channel_id", "")
-    channel_name = payload.get("channel_name", "")
-
-    async def _respond(msg: str) -> None:
-        if not response_url:
-            return
-        try:
-            async with aiohttp.ClientSession() as sess:
-                await sess.post(response_url, json={"response_type": "ephemeral", "text": msg})
-        except Exception:
-            logger.debug("/tk response_url failed", exc_info=True)
-
-    if not caller_id or not is_allowed_user(caller_id):
-        sel().log_api_access(
-            caller=caller_id,
-            operation="slack.tk_note",
-            outcome="denied",
-            source="slack",
-            error="unauthorized sender",
-        )
-        await _respond("⛔ You are not authorized to use this command.")
-        return
-
-    if not text:
-        sel().log_api_access(
-            caller=caller_id,
-            operation="slack.tk_note",
-            outcome="rejected",
-            source="slack",
-            error="empty input",
-        )
-        await _respond("Usage: `/tk <note>` — log a quick action item for TaskKeeper.")
-        return
-
-    # Extract optional permalink (last URL in text)
-    url_match = re.search(r"(https://\S+)$", text)
-    permalink = url_match.group(1) if url_match else None
-    clean_text = text[: url_match.start()].strip() if url_match else text
-
-    if not clean_text:
-        clean_text = text
-        permalink = None
-
-    # Atomic write to quick-notes.json
-    notes_dir = _TK_NOTES_FILE.parent
-    notes_dir.mkdir(parents=True, exist_ok=True)
-
-    def _write_note() -> None:
-        notes: list = []
-        if _TK_NOTES_FILE.exists():
-            try:
-                data = json.loads(_TK_NOTES_FILE.read_text())
-                notes = data if isinstance(data, list) else []
-            except (ValueError, OSError):
-                notes = []
-        notes.append(
-            {
-                "text": clean_text,
-                "permalink": permalink,
-                "user_id": caller_id,
-                "channel_id": channel_id,
-                "channel": channel_name,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-        )
-        # Cap file size: keep most recent notes
-        if len(notes) > _TK_MAX_NOTES:
-            notes = notes[-_TK_MAX_NOTES:]
-        tmp_path = _TK_NOTES_FILE.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(notes, indent=2))
-        os.replace(tmp_path, _TK_NOTES_FILE)
-
-    async with _tk_notes_lock:
-        await asyncio.to_thread(_write_note)
-
-    sel().log_api_access(
-        caller=caller_id,
-        operation="slack.tk_note",
-        outcome="allowed",
-        source="slack",
-        resources=clean_text[:100],
-    )
-    logger.info("/tk logged: %r (channel=%s)", clean_text, channel_name)
-
-    # Respond via response_url
-    resp_text = f'✅ Logged: "{clean_text}"'
-    if permalink:
-        resp_text += f"\n🔗 {permalink}"
-    resp_text += "\n_Will appear in your next `check slack`._"
-    await _respond(resp_text)
 
 
 # Slash command handler

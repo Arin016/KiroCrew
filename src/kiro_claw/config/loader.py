@@ -1756,135 +1756,6 @@ class SttConfig:
     )
 
 
-DEFAULT_QUICK_REACTIONS: list[str] = [
-    "thumbsup",
-    "white_check_mark",
-    "eyes",
-    "pray",
-    "tada",
-    "heart",
-]
-
-
-@dataclass
-class KeywordHook:
-    """A keyword-triggered workflow hook for Secretary."""
-
-    keyword: str
-    action: str  # "spawn_session" | "notify" | "auto_reply"
-    agent: str = "kiroclaw"
-    template: str = "{message}"
-    channels: list[str] = field(default_factory=list)
-    senders: list[str] = field(default_factory=list)
-    autonudge: bool = True
-    max_cycles: int = 24
-    cooldown_seconds: int = 300
-    # auto_reply only: prompt the LLM uses to draft the reply.
-    # Supports placeholders: {message}, {sender}, {channel_name}, {keyword}, {context}.
-    # If empty, falls back to Secretary's standard draft prompt (style_rules + user context).
-    reply_prompt: str = ""
-
-
-@dataclass
-class SecretaryConfig:
-    """Secretary — reads your Slack, drafts replies, presents for approval."""
-
-    enabled: bool = field(
-        default=False,
-        metadata=_meta("Enabled", "Enable Secretary background polling."),
-    )
-    user_id: str = field(
-        default="",
-        metadata=_meta("User ID", "Authenticated Slack user ID (set during setup)."),
-    )
-    watched_channels: list[str] = field(
-        default_factory=list,
-        metadata=_meta("Watched Channels", "Slack channel IDs to monitor."),
-    )
-    poll_interval_seconds: int = field(
-        default=60,
-        metadata=_meta("Poll Interval", "Seconds between polls."),
-    )
-    style_rules: list[str] = field(
-        default_factory=list,
-        metadata=_meta("Style Rules", "Initial communication style rules for drafting."),
-    )
-    alert_keywords: list[str] = field(
-        default_factory=list,
-        metadata=_meta(
-            "Alert Keywords", "Keywords that trigger immediate notification (e.g. SEV, outage)."
-        ),
-    )
-    alert_on_name_mention: bool = field(
-        default=False,
-        metadata=_meta("Alert on Name Mention", "Notify when your name is mentioned without @."),
-    )
-    test_mode: bool = field(
-        default=False,
-        metadata=_meta("Test Mode", "Include own messages in inbox (for testing)."),
-    )
-    quick_reactions: list[str] = field(
-        default_factory=lambda: list(DEFAULT_QUICK_REACTIONS),
-        metadata=_meta("Quick Reactions", "Emoji names for the quick-access reaction row."),
-    )
-    auto_cleanup_enabled: bool = field(
-        default=True,
-        metadata=_meta(
-            "Auto Cleanup",
-            "Automatically delete stored Slack sessions after retention period.",
-        ),
-    )
-    dm_retention_days: int = field(
-        default=90,
-        metadata=_meta("DM Retention (days)", "Days to retain DM sessions before auto-deletion."),
-    )
-    channel_retention_days: int = field(
-        default=365,
-        metadata=_meta(
-            "Channel Retention (days)",
-            "Days to retain channel message sessions before auto-deletion.",
-        ),
-    )
-    keyword_hooks: list[dict] = field(
-        default_factory=list,
-        metadata=_meta("Keyword Hooks", "Keyword-triggered workflow dispatchers."),
-    )
-    auto_dismiss_on_reply: bool = field(
-        default=False,
-        metadata=_meta(
-            "Auto-dismiss on direct reply",
-            "Opt-in: when you reply directly in Slack, mark the matching inbox "
-            "item as handled automatically.",
-        ),
-    )
-
-
-@dataclass
-class TaskKeeperConfig:
-    """TaskKeeper task management with triage and To-Do sync."""
-
-    enabled: bool = field(
-        default=False,
-        metadata=_meta("Enabled", "Enable TaskKeeper app."),
-    )
-    username: str = field(
-        default="",
-        metadata=_meta("Username", "Slack username for @mention search."),
-    )
-    email_enabled: bool = field(
-        default=False,
-        metadata=_meta("Email", "Enable email scanning."),
-    )
-    scan_interval_seconds: int = field(
-        default=300,
-        metadata=_meta("Scan Interval", "Seconds between automatic scans (min 60)."),
-    )
-    auto_scan_enabled: bool = field(
-        default=False,
-        metadata=_meta("Auto Scan", "Enable periodic background scanning."),
-    )
-
-
 @dataclass
 class McpGatewayConfig:
     """Sidecar MCP broker daemon — shares MCP backends across sessions."""
@@ -2373,14 +2244,6 @@ class KiroClawConfig:
         default_factory=SttConfig,
         metadata=_meta("STT", "Speech-to-text transcription settings."),
     )
-    secretary: SecretaryConfig = field(
-        default_factory=SecretaryConfig,
-        metadata=_meta("Secretary", "Secretary reads Slack, drafts replies."),
-    )
-    taskkeeper: TaskKeeperConfig = field(
-        default_factory=TaskKeeperConfig,
-        metadata=_meta("TaskKeeper", "TaskKeeper task management with triage and To-Do sync."),
-    )
     mcp_gateway: McpGatewayConfig = field(
         default_factory=McpGatewayConfig,
         metadata=_meta("MCP Gateway", "Sidecar MCP broker that shares backends across sessions."),
@@ -2636,12 +2499,6 @@ class KiroClawConfig:
         stt_data = data.get("stt", {})
         if not isinstance(stt_data, dict):
             stt_data = {}
-        secretary_data = data.get("secretary", {})
-        if not isinstance(secretary_data, dict):
-            secretary_data = {}
-        taskkeeper_data = data.get("taskkeeper", {})
-        if not isinstance(taskkeeper_data, dict):
-            taskkeeper_data = {}
         instances_data = data.get("instances", {})
         if not isinstance(instances_data, dict):
             instances_data = {}
@@ -2938,49 +2795,6 @@ class KiroClawConfig:
                 for r in (data.get("registries") or [])
                 if isinstance(r, dict) and r.get("repo")
             ],
-            secretary=SecretaryConfig(
-                enabled=bool(secretary_data.get("enabled", False)),
-                user_id=str(secretary_data.get("user_id", "")),
-                watched_channels=[
-                    str(c) for c in secretary_data.get("watched_channels", []) if isinstance(c, str)
-                ],
-                poll_interval_seconds=max(30, int(secretary_data.get("poll_interval_seconds", 60))),
-                style_rules=[
-                    str(r) for r in secretary_data.get("style_rules", []) if isinstance(r, str)
-                ],
-                alert_keywords=[
-                    str(k) for k in secretary_data.get("alert_keywords", []) if isinstance(k, str)
-                ],
-                alert_on_name_mention=bool(secretary_data.get("alert_on_name_mention", False)),
-                test_mode=bool(secretary_data.get("test_mode", False)),
-                quick_reactions=[
-                    str(r)
-                    for r in (secretary_data.get("quick_reactions") or DEFAULT_QUICK_REACTIONS)
-                    if isinstance(r, str)
-                ],
-                auto_cleanup_enabled=bool(
-                    secretary_data.get("auto_cleanup_enabled", True)
-                ),
-                dm_retention_days=max(
-                    1, int(secretary_data.get("dm_retention_days", 90))
-                ),
-                channel_retention_days=max(
-                    1, int(secretary_data.get("channel_retention_days", 365))
-                ),
-                keyword_hooks=secretary_data.get("keyword_hooks") or [],
-                auto_dismiss_on_reply=bool(
-                    secretary_data.get("auto_dismiss_on_reply", False)
-                ),
-            ),
-            taskkeeper=TaskKeeperConfig(
-                enabled=bool(taskkeeper_data.get("enabled", False)),
-                username=str(taskkeeper_data.get("username", "")),
-                email_enabled=bool(taskkeeper_data.get("email_enabled", False)),
-                scan_interval_seconds=max(
-                    60, int(taskkeeper_data.get("scan_interval_seconds", 300))
-                ),
-                auto_scan_enabled=bool(taskkeeper_data.get("auto_scan_enabled", False)),
-            ),
             mcp_gateway=McpGatewayConfig(
                 enabled=bool(mcp_gateway_data.get("enabled", False)),
                 socket_path=str(mcp_gateway_data.get("socket_path", "")),
@@ -3104,8 +2918,6 @@ class KiroClawConfig:
             "memory_stores": {name: asdict(ms_cfg) for name, ms_cfg in self.memory_stores.items()},
             "default_memory_store": self.default_memory_store,
             "stt": asdict(self.stt),
-            "secretary": asdict(self.secretary),
-            "taskkeeper": asdict(self.taskkeeper),
             "instances": asdict(self.instances),
             "mcp_gateway": asdict(self.mcp_gateway),
             "taskrunner": asdict(self.taskrunner),
@@ -3134,7 +2946,6 @@ class KiroClawConfig:
         else:
             slack_section.pop("trusted_bot_ids", None)
         slack_section["observe_ttl_hours"] = self.observe_ttl_hours
-        d["secretary"] = asdict(self.secretary)
         return d
 
     def save(self) -> None:

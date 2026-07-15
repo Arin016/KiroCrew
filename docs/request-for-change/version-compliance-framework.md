@@ -1,6 +1,5 @@
 # Version Compliance Framework for KiroClaw
 
-**Taskei:** [Mesh-1649](https://taskei.amazon.dev/tasks/Mesh-1649)
 **Author:** Bolin Chen (bolichen)
 **Requested by:** Gabe Sanchez (gsanc)
 **Status:** Draft
@@ -198,7 +197,7 @@ per-channel enforcement.
 | **Block non-Toolbox at startup** | Breaks development workflow (`pip install -e .`). Not recommended for default. |
 | **Warn non-Toolbox installs** | Prints advisory; does not block. Still checks version authority. |
 | **Exempt `--dev` flag** | `kiroclaw --dev server` skips compliance check. Only works in dev workspaces. |
-| **Environment detection** | If running inside Brazil workspace → exempt. Otherwise → enforce. |
+| **Environment detection** | If running inside development checkout → exempt. Otherwise → enforce. |
 
 **Recommendation:** Warn but do not block non-Toolbox installs. The version authority check
 still applies (git installs have a version in `__init__.py`). Add `--skip-version-check` flag
@@ -228,7 +227,7 @@ for development use only, gated behind dev-workspace detection.
 ### Phase 3: Hardening (optional, 1 week)
 
 1. Non-Toolbox install warning at startup
-2. `--skip-version-check` dev escape hatch (Brazil workspace only)
+2. `--skip-version-check` dev escape hatch (development checkout only)
 3. Heartbeat absence alerting (detect shadow installs)
 4. Tie into Mesh-1648 (YOLO override governance) for unified compliance view
 
@@ -242,7 +241,7 @@ for development use only, gated behind dev-workspace detection.
 | Denial-of-service via false `block` | CAZ approval required for prod `min_version` changes (matches Kiro Learn) |
 | Fail-open on authority outage | Bounded: 60s cache means brief outages are invisible. Extended outage = warn-only mode (no blocking without fresh authority response) |
 | Heartbeat data exfiltration | No PII; owner_id hashed; opt-out available; transport encrypted |
-| Dev workflow disruption | Brazil workspace detection exempts development; `--skip-version-check` escape hatch |
+| Dev workflow disruption | development checkout detection exempts development; `--skip-version-check` escape hatch |
 
 ---
 
@@ -276,8 +275,8 @@ for development use only, gated behind dev-workspace detection.
 
 ## 12. References
 
-- [Kiro Learn Extension Compliance](https://docs.hub.amazon.dev/kiro-learn/compliance/) — DDB-backed min-version gate
-- [Builder Toolbox Documentation](https://docs.hub.amazon.dev/toolbox/) — Distribution and recall mechanisms
+- an internal min-version gate
+- the toolbox distribution mechanism — distribution and recall mechanisms
 - [KiroClaw Security Deep Dive](../security-deep-dive.md) — Defense-in-depth architecture
 - [KiroClaw apps/version.py](../../src/kiro_claw/apps/version.py) — Existing `check_min_version` implementation
 - Mesh-1648: YOLO Override Governance (related compliance work)

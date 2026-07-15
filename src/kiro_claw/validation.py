@@ -461,13 +461,6 @@ SKILL_SEARCH_SCHEMA = ToolSchema(
     ],
 )
 
-TASKKEEPER_COMPLETE_SCHEMA = ToolSchema(
-    tool_name="taskkeeper_complete",
-    fields=[
-        FieldSpec("task_id", int, required=True, min_val=1, max_val=999999),
-    ],
-)
-
 # Absolute filesystem path. Empty string is allowed (clears the project) —
 # the validator skips the pattern check on empty values, so the regex only
 # needs to cover the non-empty case.
@@ -914,7 +907,6 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "knowledge_dedup": KNOWLEDGE_DEDUP_SCHEMA,
     "search_chat_history": SEARCH_CHAT_HISTORY_SCHEMA,
     "get_chat_session": GET_CHAT_SESSION_SCHEMA,
-    "taskkeeper_complete": TASKKEEPER_COMPLETE_SCHEMA,
     "set_project": SET_PROJECT_SCHEMA,
     "artifact_save": ARTIFACT_SAVE_SCHEMA,
     "artifact_get": ARTIFACT_GET_SCHEMA,

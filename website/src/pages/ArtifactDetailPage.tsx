@@ -26,6 +26,17 @@ import { writePrefill } from '../utils/navIntent'
 import type { FileType } from '../components/FileRenderers'
 import type { Artifact, ArtifactEvent } from '../types'
 
+// Artifact "Iterate" affordances are hidden pending an artifact redesign
+// (task P472753393). This gates every user-facing entry point into the
+// iterate flow — the header button, the pending-comments "Submit All" action,
+// and the "click Iterate" tips — while leaving iterateWithAgent /
+// buildPromptForChat and the agent-driven `iterated` lifecycle event fully
+// intact. Flip to `true` (or delete the gate) when the redesign lands.
+// NOTE (MeshClaw sync): the upstream keeps these visible — do NOT let a sync
+// re-show them; see skills/meshclaw-sync/SKILL.md → "Fork-initiated UX
+// divergences" (verdict SKIP_FORKUX).
+const SHOW_ARTIFACT_ITERATE = false
+
 function readThemeVars(): Record<string, string> {
   if (typeof window === 'undefined' || typeof document === 'undefined') return {}
   const computed = getComputedStyle(document.documentElement)
@@ -589,7 +600,11 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
   // cleanly: markdown (via data-sourcepos) and text (rendered === source).
   // JSON / SVG selection produces noisy anchors; revisit when there's a real
   // user demand.
-  const commentable = !!artifact && !editing && isCurrent && (
+  // Inline commenting exists solely to feed the Iterate flow (its only submit
+  // path is `onSubmitAll={iterateWithAgent}`). While the Iterate affordances are
+  // hidden pending redesign (P472753393), gate comment creation on the same flag
+  // so users can't add comments that have nowhere to go.
+  const commentable = SHOW_ARTIFACT_ITERATE && !!artifact && !editing && isCurrent && (
     artifact.kind === 'markdown' || artifact.kind === 'text'
   )
   const isMarkdown = artifact?.kind === 'markdown'
@@ -832,7 +847,7 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
                 user can finish the prompt themselves. For widgets (which
                 can't be edited inline) this is the ONLY way to ask the
                 agent to change the artifact. */}
-            {!editing && !popout && (
+            {SHOW_ARTIFACT_ITERATE && !editing && !popout && (
               <button
                 type="button"
                 onClick={iterateWithAgent}
@@ -1067,10 +1082,12 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
             ? `Showing Live (v${detailQuery.data?.version ?? '?'})`
             : `Showing v${effectiveVersion} (historical)`}
           {dirty && <span className="ml-2 text-warn">• unsaved changes</span>}
+          {/* `commentable` already implies SHOW_ARTIFACT_ITERATE (see its definition). */}
           {commentable && comments.length === 0 && (
             <span className="ml-2 text-muted/80">Tip: select text to add inline comments, or click <strong>Iterate</strong> to chat with the agent.</span>
           )}
-          {!commentable && !editing && isCurrent && (
+          {/* This tip's guard is load-bearing: `!commentable` is true when the flag is off. */}
+          {SHOW_ARTIFACT_ITERATE && !commentable && !editing && isCurrent && (
             <span className="ml-2 text-muted/80">Tip: click <strong>Iterate</strong> to chat with the agent about this artifact.</span>
           )}
         </div>

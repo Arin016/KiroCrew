@@ -147,11 +147,10 @@ Manages Ollama server lifecycle and model provisioning:
 |-------|-------|
 | Model | Qwen/Qwen3-Embedding-0.6B (Q8_0 GGUF) |
 | License | Apache-2.0 (on approved list for self-approval) |
-| Source | `KiroClawModelQwen3Embedding` Brazil package on Gitfarm (internal) |
+| Source | public Ollama registry (`ollama pull qwen3-embedding:0.6b`) |
 | Runtime | Ollama (MIT license, native via brew or install script) |
 | Data flow | Text → localhost:11434 → float vectors (no data leaves machine) |
 | Policy | Self-approvable under [Public Dataset and ML Model Policy](https://policy.a2z.com/docs/83291/publication) |
-| Approval | [P392279208](https://issues.amazon.com/issues/P392279208) (self-resolving ticket, resolved 2026-03-03) |
 
 Conditions met for self-approval:
 1. Internal use only — model runs locally, no 3P API calls
@@ -301,15 +300,14 @@ exclude). To keep it off the per-message filesystem/config hot path:
 - MCP tools (native): kiro-cli calls directly — **preferred for all LLM-facing operations**
   - `kiroclaw-cron`: cron scheduling
   - `kiroclaw-core`: spawn, learn, task tools
-  - `builder-mcp`: internal websites, tickets, search
 - Skills are for on-demand knowledge only (not for CLI command wrappers — use MCP tools instead)
 
 ## MCP Discovery (`mcp_discovery.py`)
 
-Auto-sync at startup + on-demand discovery from dashboard. Default servers: `builder-mcp`, `kiroclaw-cron`, `kiroclaw-core`.
+Auto-sync at startup + on-demand discovery from dashboard. Default servers: `kiroclaw-cron`, `kiroclaw-core`.
 
 **Server sources** (merged by `list_servers()`):
-1. `agents/defaults.json` → `mcpServers` (default: only `builder-mcp`)
+1. `agents/defaults.json` → `mcpServers` (default: none beyond the managed servers)
 2. `~/.kiro/agents/kiroclaw.json` → `mcpServers` (installed config, merged)
 3. `~/.kiro/settings/mcp.json` and `~/.kiroclaw/mcp.json` (scanned at startup and on-demand)
 
@@ -319,7 +317,7 @@ Auto-sync at startup + on-demand discovery from dashboard. Default servers: `bui
 
 **On-demand discovery** (dashboard): same `discover_servers_to_sync()` + `sync_to_agent_config()` triggered by "Discover & Sync" button.
 
-**Probing**: spawns each MCP server, sends JSON-RPC `initialize` + `tools/list` handshake, reports status + tool names. 30-second timeout, 1MB stdout buffer (builder-mcp responses exceed default 64KB). Cleanup via `finally` block (no zombie processes). Results cached in `handlers.py` with 10-min TTL; GET `/api/mcp/probe` returns cached results non-blocking, POST `/api/mcp/probe` forces a fresh probe and updates cache.
+**Probing**: spawns each MCP server, sends JSON-RPC `initialize` + `tools/list` handshake, reports status + tool names. 30-second timeout, 1MB stdout buffer (an MCP server's responses exceed the default 64KB). Cleanup via `finally` block (no zombie processes). Results cached in `handlers.py` with 10-min TTL; GET `/api/mcp/probe` returns cached results non-blocking, POST `/api/mcp/probe` forces a fresh probe and updates cache.
 
 **Enable/Disable**: `POST /api/mcp/toggle` adds/removes `@name` from `tools` and `allowedTools` arrays in installed config (`~/.kiro/agents/kiroclaw.json`). Does NOT modify `agents/defaults.json`. Disabled servers stay in `mcpServers` but kiro-cli won't load their tools.
 

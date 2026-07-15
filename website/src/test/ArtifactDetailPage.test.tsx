@@ -241,7 +241,11 @@ describe('ArtifactDetailPage', () => {
   })
 
   // ── Phase 4 (Mesh-1654): comments → chat ────────────────────────────────
-  it('shows the "select text to comment" tip on commentable kinds (markdown)', async () => {
+  // Inline commenting feeds the Iterate flow, which is hidden pending redesign
+  // (P472753393) via SHOW_ARTIFACT_ITERATE. While hidden, the "select text to
+  // add inline comments" tip must NOT appear on any kind. Flip these back to
+  // assert presence when the Iterate redesign re-enables the flag.
+  it('does not show the "select text to comment" tip while Iterate is hidden (markdown)', async () => {
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(
       mkArtifact({ kind: 'markdown', content: '# Doc' }),
     )
@@ -250,7 +254,7 @@ describe('ArtifactDetailPage', () => {
       .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
-    expect(screen.getByText(/select text to add inline comments/i)).toBeInTheDocument()
+    expect(screen.queryByText(/select text to add inline comments/i)).toBeNull()
   })
 
   it('does not show comment tip on non-commentable kinds (widget)', async () => {
@@ -261,22 +265,6 @@ describe('ArtifactDetailPage', () => {
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
     expect(screen.queryByText(/select text to add inline comments/i)).toBeNull()
-  })
-
-  it('hides comment tip when in edit mode', async () => {
-    vi.mocked(api).artifact = vi.fn().mockResolvedValue(
-      mkArtifact({ kind: 'markdown', content: '# Doc' }),
-    )
-    vi.mocked(api).artifactVersions = vi
-      .fn()
-      .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
-    renderRoute()
-    await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
-    expect(screen.getByText(/select text to add inline comments/i)).toBeInTheDocument()
-    screen.getByTitle('Edit content').click()
-    await waitFor(() =>
-      expect(screen.queryByText(/select text to add inline comments/i)).toBeNull(),
-    )
   })
 
   // ── Phase 5 (Mesh-1654): lifecycle event log + activity timeline ────────
@@ -326,27 +314,28 @@ describe('ArtifactDetailPage', () => {
     expect(screen.getByText(/no lifecycle events yet/i)).toBeInTheDocument()
   })
 
-  // ── nrb feedback Round 2: Iterate button + revert metadata + ui sessions
-  it('Iterate button is visible for editable kinds (markdown)', async () => {
+  // ── Iterate affordances hidden pending redesign (P472753393) ────────────
+  // The header "Iterate" button is gated behind SHOW_ARTIFACT_ITERATE (false).
+  // These assert it is ABSENT for every kind; flip back to assert presence when
+  // the redesign re-enables the flag.
+  it('Iterate button is hidden for editable kinds (markdown)', async () => {
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(mkArtifact({ kind: 'markdown' }))
     vi.mocked(api).artifactVersions = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
-    // Match by the button's title attribute to disambiguate from the
-    // tip text that also mentions "Iterate".
-    expect(screen.getByTitle(/Discuss this artifact with the agent/i)).toBeInTheDocument()
+    expect(screen.queryByTitle(/Discuss this artifact with the agent/i)).toBeNull()
   })
 
-  it('Iterate button is visible for widget artifacts (so users can chat about them)', async () => {
+  it('Iterate button is hidden for widget artifacts', async () => {
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(mkArtifact({ kind: 'widget' }))
     vi.mocked(api).artifactVersions = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
-    expect(screen.getByTitle(/Discuss this artifact with the agent/i)).toBeInTheDocument()
+    expect(screen.queryByTitle(/Discuss this artifact with the agent/i)).toBeNull()
   })
 
   it('reverted events render with from_version and no broken session link', async () => {
@@ -604,7 +593,9 @@ describe('ArtifactDetailPage', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
   })
 
-  it('Iterate button opens new chat slot with prefill', async () => {
+  it('no Iterate button means no chat-slot creation entry point (hidden pending redesign)', async () => {
+    // With SHOW_ARTIFACT_ITERATE off (P472753393) the header button is gone,
+    // so there is no UI path to createChatSlot from the artifact page.
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(
       mkArtifact({ kind: 'markdown', content: '# v1' }),
     )
@@ -615,8 +606,8 @@ describe('ArtifactDetailPage', () => {
     vi.mocked(api).createChatSlot = createSlotSpy
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
-    fireEvent.click(screen.getByTitle(/Discuss this artifact with the agent/i))
-    await waitFor(() => expect(createSlotSpy).toHaveBeenCalled())
+    expect(screen.queryByTitle(/Discuss this artifact with the agent/i)).toBeNull()
+    expect(createSlotSpy).not.toHaveBeenCalled()
   })
 
   it('description renders when artifact has one', async () => {
@@ -751,11 +742,10 @@ describe('ArtifactDetailPage', () => {
     confirmSpy.mockRestore()
   })
 
-  it('iterate button shows comment count badge when comments are pending', async () => {
-    // The comment count appears on the Iterate button. We can't easily
-    // simulate text selection in jsdom but we can verify the badge
-    // markup is absent when there are no comments (covers the conditional
-    // render path).
+  it('iterate button (with its comment-count badge) is absent while hidden', async () => {
+    // The comment-count badge lived on the Iterate button. With the button
+    // hidden pending redesign (P472753393) neither the button nor the badge
+    // renders. Restore the badge assertion when the redesign re-enables it.
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(
       mkArtifact({ kind: 'markdown' }),
     )
@@ -764,9 +754,7 @@ describe('ArtifactDetailPage', () => {
       .mockResolvedValue({ slug: 'cr-queue', versions: [1] })
     renderRoute()
     await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
-    const iterateBtn = screen.getByTitle(/Discuss this artifact/i)
-    // Look for the badge span (only renders when comments.length > 0).
-    expect(iterateBtn.querySelector('.bg-accent-fg\\/20')).toBeNull()
+    expect(screen.queryByTitle(/Discuss this artifact/i)).toBeNull()
   })
 
   it('SVG artifacts render without iframe', async () => {

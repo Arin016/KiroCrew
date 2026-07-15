@@ -517,8 +517,9 @@ export default function AppsPage() {
               <div className="text-center py-12 text-muted text-sm">Loading registry…</div>
             ) : (() => {
               // Merge disabled builtins into browse list for discovery
+              // (hidden builtins are excluded — opt-in via `kiroclaw app enable <name>`)
               const disabledBuiltins: RegistryApp[] = apps
-                .filter(a => a.origin === 'builtin' && !a.enabled)
+                .filter(a => a.origin === 'builtin' && !a.enabled && !(a.manifest as any)?.hidden)
                 .map(a => ({
                   name: a.name,
                   displayName: a.displayName || a.name,

@@ -17,8 +17,8 @@ Settings → Apps (or `kiroclaw app enable deploy-web`).
 
 ## 1. One-time AWS setup
 
-You need an AWS account you control (Amazon-internal Isengard or an external AWS
-account both work). Setup is once; every later publish is ~30 seconds.
+You need an AWS account you control. Setup is once; every later publish is
+~30 seconds.
 
 ### 1.1 Where the profile must live (important)
 
@@ -48,7 +48,7 @@ Fix:
 
 > Tip: if a long-running gateway still resolves v1, symlink v2 into a directory
 > that already precedes `/usr/bin` in the gateway's `PATH` (e.g.
-> `ln -sf ~/.local/bin/aws ~/.toolbox/bin/aws`) — `execvp` re-resolves per call,
+> `ln -sf ~/.local/bin/aws /usr/local/bin/aws`) — `execvp` re-resolves per call,
 > so the fix takes effect without a restart.
 
 ### 1.3 Authenticate
@@ -63,8 +63,8 @@ aws configure --profile myweb      # or a long-lived named profile
 For `aws configure sso`, the account is bound at the **account selection** step;
 the profile stores a profile name only, not an account number.
 
-**Amazon-internal:** use `ada credentials update` / `ada profile add` as usual.
-A `credential_process` entry in `~/.aws/config` lets the CLI auto-refresh tokens.
+**Auto-refreshing credentials:** if your org uses an SSO or credential helper,
+a `credential_process` entry in `~/.aws/config` lets the CLI auto-refresh tokens.
 
 ### 1.4 Configure Web Deploy
 

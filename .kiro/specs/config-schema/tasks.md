@@ -29,7 +29,7 @@ Formalize KiroClaw's configuration by making the Python dataclass hierarchy the 
     - _Requirements: 2.2, 2.3, 2.4, 2.5, 9.4_
 
 - [x] 2. Checkpoint — verify dataclass changes
-  - Ensure all tests pass (`brazil-build format && brazil-build clean && brazil-build && brazil-build test`), ask the user if questions arise.
+  - Ensure all tests pass (`black && isort && flake8 && mypy && python -m pytest`), ask the user if questions arise.
 
 - [ ] 3. Implement config/schema.py — schema registry
   - [x] 3.1 Create `config/schema.py` with `ConfigEntry` dataclass, `build_json_schema()`, `flatten_to_entries()`, `config_entry_to_dict()`, and module-level singletons `JSON_SCHEMA` and `SCHEMA_REGISTRY`
@@ -167,7 +167,7 @@ Formalize KiroClaw's configuration by making the Python dataclass hierarchy the 
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 7.1_
 
 - [x] 8. Final checkpoint — full build and test
-  - Run `brazil-build format && brazil-build clean && brazil-build && brazil-build test` to verify everything passes. Ensure all tests pass, ask the user if questions arise.
+  - Run `black && isort && flake8 && mypy && python -m pytest` to verify everything passes. Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
 

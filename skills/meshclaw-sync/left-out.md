@@ -93,6 +93,7 @@ some batches and **not** others:
 | **SKIP_INTERNAL** | Touches a subsystem **absent** from the de-Amazoned fork (mcp_gateway, secretary, writing-review, auto-research, promptfarm, GitFarm/Cloud-Sync, AIM, team_manager, RUM telemetry, Harmony Artifactory, LCARS/Bikini-Bottom themes, etc.). 100% confined — nothing generic to salvage. |
 | **SKIP_NONKIROACP** | Specific to a deleted LLM provider (Bedrock / Claude Code). Meaningless under the fork's single-provider `agent.provider` enum `["acp"]`. |
 | **SKIP** | Other deliberate skip (e.g. Brazil-`Config`-only hunk that the setuptools build ignores; a Midway-stub-only change; a generic helper with zero fork consumers per the anti-miss check). |
+| **SKIP_FORKUX** | A fork-initiated **intentional UX / product divergence** — an upstream surface the public fork deliberately hides or removes for launch (e.g. the artifact **Iterate** button, the **Channels** app store listing, the **Board** app). NOT an Amazon coupling; a product choice. Porting a commit that *hides/removes* the surface = KEEP (it aligns the fork); a commit that *re-shows/re-adds* it = SKIP_FORKUX (or PARTIAL if mixed). See SKILL.md Step 2 → "Fork-initiated UX / feature divergences". |
 | **ALREADY_PRESENT** | The fork already carries the change's post-image (often a restore/revert of a regression the fork never had). Porting = no-op. |
 | **DEFER** | Technically portable but deliberately held for a separate scoped change or human review. **See the [Human-decision section](#human-decision-items-defer--flagged) — these are the live ones.** |
 | **NA_INTERNAL** | Early-batch label equivalent to SKIP_INTERNAL (Amazon-internal-only dependency). |
@@ -542,6 +543,33 @@ stubbed**. If you're wondering why a class of upstream commit never lands:
 
 See [`../../CLAUDE.md`](../../CLAUDE.md) ("do not re-introduce Amazon-internal
 couplings") and `DEAMAZON_REPORT.md` for the authoritative deleted/stubbed list.
+
+---
+
+## Fork-initiated UX / feature divergences (do-not-reintroduce)
+
+These are **not** sync left-outs and **not** Amazon-coupling removals — they are
+deliberate public-launch product choices where the fork hides or removes a
+surface that MeshClaw keeps. Verdict for a commit that re-introduces one:
+**SKIP_FORKUX** (port the rest of a mixed commit as PARTIAL). The enforcing sync
+rule is SKILL.md Step 2 → "Fork-initiated UX / feature divergences"; this is the
+durable record of WHAT and WHY. Guarding on the exact mechanism matters — a note
+that only says "hidden" is unenforceable when upstream ships the same default.
+
+| Surface | Fork mechanism | Upstream (watch for re-add) | Task |
+|---|---|---|---|
+| Artifact **Iterate** button + all its entry points | `website/src/pages/ArtifactDetailPage.tsx` module const `SHOW_ARTIFACT_ITERATE = false` gates the header button, inline comment creation (`commentable`), the pending-comments "Submit All" path, and the "click Iterate" tips. `iterateWithAgent`/`buildPromptForChat` + the `iterated` lifecycle event stay. | Upstream keeps the button visible (icon-only `Sparkles`), and its `CommentsSidebar.tsx` `onAskAgent` ("Ask agent to address") + `ArtifactPanel.tsx` SubmitBar are additional iterate triggers absent from the fork — strip those too if that comment stack is ever ported. Symbols don't rename, so a sync will treat them as directly portable. | P472753393 |
+| **Channels** app store listing | `src/kiro_claw/apps/manager.py` `_BUILTIN_APPS` "channels" entry carries `"hidden": True`; `website/src/pages/AppsPage.tsx` Browse grid filters `!(a.manifest as any)?.hidden`. Code/routes/`ChannelPage` stay (opt-in via `kiroclaw app enable channels`). This MIRRORS upstream MeshClaw CR-289326017, so it should be at parity. | `defaultEnabled:False` is parity, NOT the divergence — the guard is the `hidden:True` flag + the AppsPage filter. Don't drop either on sync. | P472750613 |
+| **Board** app (fully removed) | Deleted `website/src/pages/BoardPage.tsx`, the `/board` `builtinRegistry.ts` route, the `_BUILTIN_APPS` "board" entry, the `KanbanSquare` nav icon, the Alt+B / KeyB shortcut, the `MigrationCheck` prefix, and the Board tests. MIRRORS upstream CR-289326017 (which also removed Board). | If a pre-CR-289326017 upstream commit re-adds Board, DROP it. | (CR-289326017) |
+| Voice/TTS **Piper** provider UI | `website/src/pages/settings/VoicePanel.tsx` adds a Piper/Polly provider selector + Piper fields; `dashboard/chat_voice.py` exposes/persists `provider` + `piper_*`. Upstream VoicePanel is Polly-only. | This is fork-AHEAD (a public feature upstream lacks). A sync of upstream's Polly-only VoicePanel must NOT drop the Piper selector — reconcile, keep both providers. | P472753900-adjacent |
+
+**De-Amazon feature removals** (the `/tk` command, Secretary/TaskKeeper config,
+`taskkeeper_complete`, the `HEARTBEAT_SAFE_TOOLS` Amazon tool names, the
+`amazon_dev_story` eval, Secretary `.mjs` scripts) are recorded above under
+"Recurring reasons at a glance" + the SKIP tables, and in `DEAMAZON_REPORT.md`.
+Note specifically: `HEARTBEAT_SAFE_TOOLS` in `slack/gateway.py` was TRIMMED to
+generic + kiroclaw-core reads — the old rubric line calling those names
+"inert, keep verbatim" no longer applies (see SKILL.md Step 2).
 
 ---
 

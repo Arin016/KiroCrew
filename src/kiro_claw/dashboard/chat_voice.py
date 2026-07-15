@@ -23,7 +23,15 @@ from kiro_claw.config.loader import config_path
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.slack.handler import _vc
-from kiro_claw.voice_reply import VALID_ENGINES, stitch_mp3s, streaming_voice_reply
+from kiro_claw.voice_reply import (
+    PROVIDER_PIPER,
+    VALID_ENGINES,
+    VALID_PROVIDERS,
+    stitch_mp3s,
+    streaming_voice_reply,
+    synthesize_speech,
+    validate_length_scale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,7 @@ async def api_voice_config(request: web.Request) -> web.Response:
         return web.json_response(
             {
                 "enabled": _vc.global_enabled,
+                "provider": _vc.provider,
                 "voice": _vc.default_voice,
                 "engine": _vc.default_engine,
                 "rate": _vc.default_rate,
@@ -41,6 +50,10 @@ async def api_voice_config(request: web.Request) -> web.Response:
                 "autoSpeak": _vc.global_enabled,
                 "aws_profile": _vc.aws_profile,
                 "region": _vc.region,
+                "piper_binary": _vc.piper_binary,
+                "piper_model": _vc.piper_model,
+                "piper_model_config": _vc.piper_model_config,
+                "piper_length_scale": _vc.piper_length_scale,
             }
         )
 
@@ -51,6 +64,10 @@ async def api_voice_config(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
     # Update in-memory
+    # ``in VALID_PROVIDERS`` would raise TypeError on an unhashable JSON value
+    # (list/dict), 500ing the PUT — require a str first.
+    if "provider" in body and isinstance(body["provider"], str) and body["provider"] in VALID_PROVIDERS:
+        _vc.provider = body["provider"]
     if "voice" in body:
         _vc.default_voice = str(body["voice"])
     if "engine" in body and body["engine"] in VALID_ENGINES:
@@ -67,21 +84,46 @@ async def api_voice_config(request: web.Request) -> web.Response:
         _vc.aws_profile = str(body["aws_profile"]).strip()
     if "region" in body:
         _vc.region = str(body["region"]).strip()
+    if "piper_binary" in body:
+        _vc.piper_binary = str(body["piper_binary"]).strip()
+    if "piper_model" in body:
+        _vc.piper_model = str(body["piper_model"]).strip()
+    if "piper_model_config" in body:
+        _vc.piper_model_config = str(body["piper_model_config"]).strip()
+    if "piper_length_scale" in body:
+        # Coerce to finite/positive via the shared validator (rejects non-numeric,
+        # inf/NaN, and <=0) so a bad value can't reach synthesis or be persisted
+        # as unserializable JSON that breaks the browser's config GET.
+        _vc.piper_length_scale = validate_length_scale(body["piper_length_scale"])
 
-    # Persist to config.json
+    # Persist to config.json. MERGE into the existing voice_reply block rather
+    # than rewriting it wholesale — the loader (slack/handler.py) also reads
+    # auto_speak / auto_reply_to_voice from here, and a wholesale rewrite would
+    # silently drop any key not in this handler's set.
     try:
         cfg_path = config_path()
         with open(cfg_path) as f:
             cfg = json.load(f)
-        cfg["voice_reply"] = {
-            "enabled": _vc.global_enabled,
-            "voice_id": _vc.default_voice,
-            "engine": _vc.default_engine,
-            "rate": _vc.default_rate,
-            "pitch": _vc.default_pitch,
-            "aws_profile": _vc.aws_profile,
-            "region": _vc.region,
-        }
+        vr = cfg.get("voice_reply")
+        if not isinstance(vr, dict):
+            vr = {}
+        vr.update(
+            {
+                "enabled": _vc.global_enabled,
+                "provider": _vc.provider,
+                "voice_id": _vc.default_voice,
+                "engine": _vc.default_engine,
+                "rate": _vc.default_rate,
+                "pitch": _vc.default_pitch,
+                "aws_profile": _vc.aws_profile,
+                "region": _vc.region,
+                "piper_binary": _vc.piper_binary,
+                "piper_model": _vc.piper_model,
+                "piper_model_config": _vc.piper_model_config,
+                "piper_length_scale": _vc.piper_length_scale,
+            }
+        )
+        cfg["voice_reply"] = vr
         with open(cfg_path, "w") as f:
             json.dump(cfg, f, indent=2)
     except Exception:
@@ -117,6 +159,13 @@ async def api_voice_synthesize(request: web.Request) -> web.Response:
     engine = body.get("engine", _vc.default_engine)
     rate = body.get("rate", _vc.default_rate)
     pitch = body.get("pitch", _vc.default_pitch)
+
+    # Piper produces a single local WAV (not sentence-chunked SSML like Polly).
+    # streaming_voice_reply is Polly-only, so route the selected provider through
+    # the provider-aware synthesize_speech and emit one chunk + complete —
+    # otherwise the DEFAULT (Piper) provider would yield no dashboard audio.
+    if _vc.provider == PROVIDER_PIPER:
+        return await _synthesize_nonstreaming(state, text, slot_key)
 
     chunk_paths: list[str] = []
     final_path: str | None = None
@@ -183,6 +232,53 @@ async def api_voice_synthesize(request: web.Request) -> web.Response:
         for p in chunk_paths:
             with contextlib.suppress(OSError):
                 os.unlink(p)
+
+
+async def _synthesize_nonstreaming(
+    state: DashboardState, text: str, slot_key: str
+) -> web.Response:
+    """Synthesize one clip via the provider-aware ``synthesize_speech`` and emit
+    it as a single ``voice_chunk`` + ``voice_complete``.
+
+    Used for providers (Piper) that produce a single local file rather than the
+    sentence-chunked Polly SSML stream. The audio is delivered whole; the
+    dashboard player already handles a single-chunk reply.
+    """
+    audio_path: str | None = None
+    try:
+        audio_path = await synthesize_speech(
+            text,
+            provider=_vc.provider,
+            piper_binary=_vc.piper_binary,
+            piper_model=_vc.piper_model,
+            piper_model_config=_vc.piper_model_config,
+            length_scale=_vc.piper_length_scale,
+        )
+        if not audio_path:
+            msg = "Piper TTS unavailable — check the piper binary and model path in Voice settings."
+            state.broadcast_ws("voice_error", {"slot": slot_key, "error": msg})
+            return web.json_response({"ok": False, "error": msg}, status=502)
+        with open(audio_path, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+        state.broadcast_ws(
+            "voice_chunk",
+            {"slot": slot_key, "index": 0, "sentence": text, "audio": audio_b64},
+        )
+        state.broadcast_ws(
+            "voice_complete",
+            {"slot": slot_key, "audio": audio_b64, "chunks": 1},
+        )
+        return web.json_response({"ok": True, "chunks": 1})
+    except Exception as exc:
+        logger.exception("Piper voice synthesis failed")
+        err_msg, _ = redact_exfiltration_urls(str(exc))
+        err_msg, _ = redact_credentials(err_msg)
+        state.broadcast_ws("voice_error", {"slot": slot_key, "error": err_msg})
+        return web.json_response({"ok": False, "error": err_msg}, status=500)
+    finally:
+        if audio_path:
+            with contextlib.suppress(OSError):
+                os.unlink(audio_path)
 
 
 # ── Voices list (cached) ──

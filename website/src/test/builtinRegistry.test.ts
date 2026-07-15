@@ -7,7 +7,6 @@ describe('builtinRegistry', () => {
     it('returns true for registered routes', () => {
       expect(hasBuiltinComponent('/worlds')).toBe(true)
       expect(hasBuiltinComponent('/channels')).toBe(true)
-      expect(hasBuiltinComponent('/board')).toBe(true)
     })
 
     it('returns false for unregistered routes', () => {
@@ -20,7 +19,7 @@ describe('builtinRegistry', () => {
 
   describe('getBuiltinComponent', () => {
     it('returns a lazy component for registered routes', () => {
-      const component = getBuiltinComponent('/board')
+      const component = getBuiltinComponent('/channels')
       expect(component).toBeDefined()
       // Lazy components have $$typeof and _payload
       expect(component).toHaveProperty('$$typeof')
@@ -34,7 +33,7 @@ describe('builtinRegistry', () => {
 
   describe('BUILTIN_COMPONENT_REGISTRY', () => {
     it('contains all expected builtin app routes', () => {
-      const expectedRoutes = ['/worlds', '/channels', '/board']
+      const expectedRoutes = ['/worlds', '/channels']
       for (const route of expectedRoutes) {
         expect(BUILTIN_COMPONENT_REGISTRY).toHaveProperty(route)
       }

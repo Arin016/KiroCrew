@@ -205,7 +205,7 @@ Declare platform requirements if your app only runs on specific operating system
     "os": ["macos"],
     "installMode": "client",
     "clientInstall": {
-      "shell": "git clone ssh://git.amazon.com/pkg/MyApp ~/MyApp && cd ~/MyApp && KIROCLAW_HOST={{gateway_host}} bash setup.sh",
+      "shell": "git clone https://github.com/you/MyApp.git ~/MyApp && cd ~/MyApp && KIROCLAW_HOST={{gateway_host}} bash setup.sh",
       "postInstall": "open ~/Applications/MyApp.app"
     }
   }
@@ -492,5 +492,5 @@ cp -R release/mac-arm64/MyApp.app ~/Applications/MyApp.app
 ## 10. Support
 
 - Questions: `#kiroclaw-contributors` on Slack
-- Bugs: file a Taskei task in the [KiroClaw room](https://taskei.amazon.dev/rooms/f1f5b5a6-d64e-4efc-8ec0-a477760b5613/tasks)
-- Feature requests: same Taskei room, tag with `app-store`
+- Bugs: file a [GitHub issue](https://github.com/kirodotdev-labs/kiroclaw/issues)
+- Feature requests: same, label `app-store`

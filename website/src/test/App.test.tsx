@@ -14,7 +14,6 @@ vi.mock('../pages/LogsPage', () => ({ default: () => <div data-testid="logs-page
 vi.mock('../pages/KiroClawAgentsPage', () => ({ default: () => <div data-testid="mc-agents-page">MCAgentsPage</div> }))
 vi.mock('../pages/NotificationsPage', () => ({ default: () => <div data-testid="notifications-page">NotificationsPage</div> }))
 vi.mock('../pages/SchedulePage', () => ({ default: () => <div data-testid="schedule-page">SchedulePage</div> }))
-vi.mock('../pages/BoardPage', () => ({ default: () => <div data-testid="board-page">BoardPage</div> }))
 vi.mock('../hooks/useWebSocket', () => ({ useWebSocket: () => ({ subscribeLogs: () => {} }) }))
 vi.mock('../hooks/useAgents', () => ({ useAgents: vi.fn(() => ({ agents: [{ name: 'kiroclaw' }, { name: 'reviewer' }, { name: 'oracle' }], defaultAgent: 'kiroclaw' })) }))
 vi.mock('../providers/context', () => ({ useProvider: () => ({ id: 'acp' }) }))
@@ -87,11 +86,6 @@ describe('App routing', () => {
   it('renders logs page at /logs', () => {
     renderWithProviders(<App />, { route: '/logs' })
     expect(screen.getByTestId('logs-page')).toBeInTheDocument()
-  })
-
-  it('renders board page at /board', async () => {
-    renderWithProviders(<App />, { route: '/board' })
-    expect(await screen.findByTestId('board-page')).toBeInTheDocument()
   })
 
   it('redirects unknown routes to /chat', () => {

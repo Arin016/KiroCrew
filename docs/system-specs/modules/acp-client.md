@@ -59,7 +59,7 @@ Data-driven — no code changes needed:
 
 Note: there IS a top-level `agents/` directory used at runtime for project-level overrides, but the bundled source lives in `src/kiro_claw/config/`.
 
-Default model: `claude-opus-4.8`. Default tools: `execute_bash`, `fs_read`, `fs_write`, `code`, `grep`, `glob`, `use_aws`, `web_fetch`, `web_search`, `introspect`, `session`, `report`, `@kiroclaw-cron`, `@kiroclaw-core`, `@builder-mcp`.
+Default model: `claude-opus-4.8`. Default tools: `execute_bash`, `fs_read`, `fs_write`, `code`, `grep`, `glob`, `use_aws`, `web_fetch`, `web_search`, `introspect`, `session`, `report`, `@kiroclaw-cron`, `@kiroclaw-core`.
 
 **Security enforcement** (`agent.py`): `repair_agent_configs()` is the single entry point (called at install, gateway startup, and periodically ~60s). It runs two passes:
 

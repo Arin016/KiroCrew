@@ -91,7 +91,7 @@ begins from the newly committed text.
   before hitting the browser — matching the batch endpoint's behaviour.
 - Partials are ephemeral (replaced) and never persisted server-side, but
   redaction still runs because the live dashboard display counts as an
-  external surface per the AUTOSDE `security-controls` guideline.
+  external surface per the `security-controls` guideline.
 
 ## Non-goals (Phase 1)
 

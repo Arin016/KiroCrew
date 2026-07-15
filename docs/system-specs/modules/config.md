@@ -1,6 +1,6 @@
 # Config Module
 
-Last Updated: 2026-07-13 (Schema refresh: documented security-bounded load-time clamp — SUBAGENT_AUTO_MAX_CEILING=64 / SUBAGENT_MAX_TURNS_CEILING=200 / POOL_SIZE_MAX=10, `_clamp_security_bounds` + `config_bounds_clamped` SEL event; added clamped AgentConfig fields, SessionConfig.pool_size, MessagingConfig/SkillsConfig/TelemetryConfig/DashboardConfig (theme_mode/theme_color/onboarded) DTOs, KeywordHook + deny-by-default bot-admission, `_resolve_named_agent_model`/`kiro_agents_dir`; corrected `_resolve_agent_model` fallback to `config_package_dir()/defaults.json`. 2026-06-22: AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
+Last Updated: 2026-07-15 (Removed the SecretaryConfig / TaskKeeperConfig / KeywordHook DTOs and the `secretary`/`taskkeeper` KiroClawConfig fields — the Secretary/TaskKeeper features were dropped from the public fork (P472753900); config-baseline regenerated. Prior — 2026-07-13 Schema refresh: documented security-bounded load-time clamp — SUBAGENT_AUTO_MAX_CEILING=64 / SUBAGENT_MAX_TURNS_CEILING=200 / POOL_SIZE_MAX=10, `_clamp_security_bounds` + `config_bounds_clamped` SEL event; added clamped AgentConfig fields, SessionConfig.pool_size, MessagingConfig/SkillsConfig/TelemetryConfig/DashboardConfig (theme_mode/theme_color/onboarded) DTOs, `_resolve_named_agent_model`/`kiro_agents_dir`; corrected `_resolve_agent_model` fallback to `config_package_dir()/defaults.json`. 2026-06-22: AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroClaw agents)
 
 ## Overview
 
@@ -219,36 +219,6 @@ class SttConfig:
     timeout_secs: int = 300
 
 @dataclass
-class KeywordHook:
-    keyword: str                   # trigger keyword matched against inbound messages
-    action: str                    # "spawn_session" | "notify" | "auto_reply"
-    agent: str = "kiroclaw"
-    template: str = "{message}"
-    channels: list[str] = field(default_factory=list)
-    senders: list[str] = field(default_factory=list)  # bot-admission allowlist; see deny-by-default note
-    autonudge: bool = True
-    max_cycles: int = 24
-    cooldown_seconds: int = 300
-    reply_prompt: str = ""         # auto_reply only; empty falls back to the standard draft prompt
-
-@dataclass
-class SecretaryConfig:
-    enabled: bool = False
-    user_id: str = ""
-    watched_channels: list[str] = field(default_factory=list)
-    poll_interval_seconds: int = 60
-    style_rules: list[str] = field(default_factory=list)
-    alert_keywords: list[str] = field(default_factory=list)
-    alert_on_name_mention: bool = False
-    test_mode: bool = False        # include own messages in inbox (for testing)
-    quick_reactions: list[str] = field(...)  # emoji names for the quick-access reaction row
-    auto_cleanup_enabled: bool = True
-    dm_retention_days: int = 90
-    channel_retention_days: int = 365
-    keyword_hooks: list[dict] = field(default_factory=list)  # KeywordHook entries (parsed into KeywordHook)
-    auto_dismiss_on_reply: bool = False
-
-@dataclass
 class MessagingConfig:
     use_transport: bool = True     # route inbound Slack through SlackTransport → TurnDriver → SlackRenderer (the canonical path); false falls back to the native handle_message monolith
 
@@ -274,7 +244,7 @@ class DashboardConfig:
 
 # Additional top-level DTOs (not fully expanded here — see loader.py):
 # OrchestratorConfig, CronHistoryConfig, TunnelConfig, InstancesConfig, HeartbeatConfig,
-# TaskKeeperConfig, WorkspaceConfig, MemoryStoreConfig, ExternalRegistryConfig,
+# WorkspaceConfig, MemoryStoreConfig, ExternalRegistryConfig,
 # KiroClawAgentConfig, SlackConfig.
 
 @dataclass
@@ -285,9 +255,8 @@ class KiroClawConfig:
     memory: MemoryConfig
     knowledge: KnowledgeConfig
     stt: SttConfig
-    secretary: SecretaryConfig
     hooks_data: dict               # raw hooks from config.json
-    dashboard_url: str = ""        # e.g. "http://my-host.corp.amazon.com:8080"
+    dashboard_url: str = ""        # e.g. "http://my-host.example.com:8080"
     auto_update: bool = True
     snapshot_dir: str = ""         # snapshot output dir (default ~/.kiroclaw/snapshots)
     slack_channels: dict[str, ChannelConfig]  # per-channel config keyed by channel ID
@@ -324,18 +293,6 @@ could exhaust host memory/CPU/the process table (DoS). The dashboard write gate
 (`dashboard/handlers/core.py`) and the runtime pool cap **import these same
 constants**, so write-gate / load-clamp / runtime-cap cannot drift apart —
 closing the direct-config-edit DoS gap.
-
-### KeywordHook bot-admission (deny-by-default)
-
-`SecretaryConfig.keyword_hooks` entries parse into `KeywordHook`. The intended
-dispatch contract is deny-by-default on `KeywordHook.senders`: a `spawn_session`
-hook with an empty `senders` list is treated as unauthorized and cannot
-dispatch; when `senders` is non-empty, only messages from those sender IDs (and
-bots whose user ID is in the list) are admitted. `auto_reply` likewise requires
-at least one of `channels`/`senders`. Note: in this fork the Secretary service
-that consumes these hooks is stubbed (`slack/gateway.py` keeps
-`secretary_svc=None`), so the DTO is config-schema only until a consumer
-exists.
 
 ### Dashboard theme persistence
 
@@ -399,7 +356,7 @@ Returns the effective config for a channel:
     }
   },
   "dashboard": {
-    "url": "http://my-host.corp.amazon.com:8080"
+    "url": "http://my-host.example.com:8080"
   },
   "snapshot_dir": ""
 }

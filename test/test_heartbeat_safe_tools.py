@@ -41,17 +41,15 @@ class TestHeartbeatSafeTools:
         """Spot-check tools every heartbeat task should reasonably need."""
         for name in [
             "Read", "Grep", "Glob",
-            "ReadInternalWebsites",
-            "CodeReviewReadActions",
-            "TicketingReadActions",
-            "GetPipelineDetails",
-            "ApolloReadActions",
-            "OncallReadActions",
-            "QueryKnowledgeBases",
-            "TaskeiGetTask",
+            "WorkspaceSearch",
             "learn_list",
             "cron_list",
             "spawn_list",
+            "spawn_status",
+            "artifact_list",
+            "artifact_get",
+            "artifact_versions",
+            "local_knowledge_search",
         ]:
             assert name in HEARTBEAT_SAFE_TOOLS, f"{name} missing from allowlist"
 
@@ -79,7 +77,7 @@ class TestHeartbeatSafeTools:
 
 class TestIsHeartbeatSafeTool:
     def test_allowlist_match(self) -> None:
-        assert _is_heartbeat_safe_tool("ReadInternalWebsites")
+        assert _is_heartbeat_safe_tool("WorkspaceSearch")
 
     def test_unknown_read_verb_rejected_strict_allowlist(self) -> None:
         """Strict allowlist: unknown tools (even with read-shaped names)
@@ -104,16 +102,15 @@ class TestIsHeartbeatSafeTool:
         assert not _is_heartbeat_safe_tool("   ")
 
     def test_whitespace_stripped(self) -> None:
-        assert _is_heartbeat_safe_tool("  ReadInternalWebsites  ")
+        assert _is_heartbeat_safe_tool("  WorkspaceSearch  ")
 
     def test_mcp_server_prefix_stripped(self) -> None:
         """kiro-cli ACP sends tool names as ``mcp__<server>__<tool>``.
         The prefix must be stripped before matching the allowlist."""
-        assert _is_heartbeat_safe_tool("mcp__builder-mcp__CodeReviewReadActions")
-        assert _is_heartbeat_safe_tool("mcp__builder-mcp__ReadInternalWebsites")
-        assert _is_heartbeat_safe_tool("mcp__builder-mcp__GetPipelineDetails")
-        assert _is_heartbeat_safe_tool("mcp__kiroclaw-core__recall")
         assert _is_heartbeat_safe_tool("mcp__kiroclaw-core__learn_list")
+        assert _is_heartbeat_safe_tool("mcp__kiroclaw-core__spawn_list")
+        assert _is_heartbeat_safe_tool("mcp__kiroclaw-core__local_knowledge_search")
+        assert _is_heartbeat_safe_tool("mcp__kiroclaw-cron__cron_list")
 
     def test_mcp_prefix_write_tool_still_rejected(self) -> None:
         """MCP prefix stripping must not widen the allowlist — write tools
@@ -126,15 +123,14 @@ class TestIsHeartbeatSafeTool:
         """Runtime titles arrive as ``Running: @server/Tool`` — the status
         prefix and @server/ must be stripped to reach the bare tool name.
         Regression test for Mesh-2310."""
-        assert _is_heartbeat_safe_tool("Running: @builder-mcp/ReadInternalWebsites")
-        assert _is_heartbeat_safe_tool("Running: @builder-mcp/InternalSearch")
-        assert _is_heartbeat_safe_tool("Running: @builder-mcp/GetPipelineHealth")
         assert _is_heartbeat_safe_tool("Running: @kiroclaw-core/learn_list")
+        assert _is_heartbeat_safe_tool("Running: @kiroclaw-core/spawn_list")
+        assert _is_heartbeat_safe_tool("Running: @kiroclaw-cron/cron_list")
 
     def test_at_server_slash_tool_without_running_prefix(self) -> None:
         """@server/Tool without a status prefix must also normalize."""
-        assert _is_heartbeat_safe_tool("@builder-mcp/ReadInternalWebsites")
-        assert _is_heartbeat_safe_tool("@builder-mcp/CodeReviewReadActions")
+        assert _is_heartbeat_safe_tool("@kiroclaw-core/artifact_list")
+        assert _is_heartbeat_safe_tool("@kiroclaw-core/local_knowledge_search")
 
     def test_running_prefix_bare_tool_name(self) -> None:
         """Running: <bare tool> (no server prefix) must also match."""
@@ -191,7 +187,7 @@ class TestHeartbeatApproval:
     async def test_approves_allowlisted_tool(self, orchestrator, monkeypatch) -> None:
         sel_mock = MagicMock()
         monkeypatch.setattr("kiro_claw.slack.gateway.sel", lambda: sel_mock)
-        event = _make_event("ReadInternalWebsites")
+        event = _make_event("WorkspaceSearch")
         assert await orchestrator._heartbeat_approval(event) is True
         # Approvals must also emit a SEL audit event (security-controls
         # guideline: every permission decision is audited).
@@ -202,7 +198,7 @@ class TestHeartbeatApproval:
         # Audit must record which agent was making the call so operators can
         # filter heartbeat decisions distinctly from other unattended sessions.
         assert kwargs["agent"] == "kiroclaw-heartbeat"
-        assert kwargs["tool_name"] == "ReadInternalWebsites"
+        assert kwargs["tool_name"] == "WorkspaceSearch"
         assert kwargs["metadata"]["reason"] == "in_heartbeat_safe_tools"
         # The approve-path audit MUST be a fail-closed (synchronous, raising)
         # SEL write — otherwise the async queue swallows a write failure and the
@@ -295,7 +291,7 @@ class TestHeartbeatApproval:
         sel_mock = MagicMock()
         sel_mock.log_tool_invocation.side_effect = RuntimeError("sel down")
         monkeypatch.setattr("kiro_claw.slack.gateway.sel", lambda: sel_mock)
-        approve_event = _make_event("ReadInternalWebsites")
+        approve_event = _make_event("WorkspaceSearch")
         assert await orchestrator._heartbeat_approval(approve_event) is False
 
     @pytest.mark.asyncio
@@ -330,7 +326,7 @@ class TestHeartbeatApproval:
 
         monkeypatch.setattr(builtins, "open", _boom)
         try:
-            event = _make_event("ReadInternalWebsites")
+            event = _make_event("WorkspaceSearch")
             assert await orchestrator._heartbeat_approval(event) is False
         finally:
             SecurityEventLog._instance = None

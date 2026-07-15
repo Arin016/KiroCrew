@@ -46,7 +46,6 @@ code blocks, Mermaid diagrams, and clickable file paths.
 - **Edit queued messages**: edit a message waiting in the queue in place before it runs (order preserved)
 - **iOS-style queue stack**: queued messages displayed as a visual stack
 - **Streaming transcription**: live speech-to-text partials via WebSocket
-- **Board view**: 4-lane Kanban view for sessions (Active, Idle, Completed, Archived)
 - **Weighted content search**: session content search with weighted ranking
 - **Memory mode**: per-session choice — persistent (default), incognito (blocks learn_add), or temporary (no memory consolidation)
 - **Merge queued messages**: optionally merge queued messages into a single prompt

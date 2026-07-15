@@ -47,8 +47,8 @@ Highest wins at collisions:
 >
 > **Resolution-aware fallback:** a server may be defined in several sources
 > with different commands. If the merged winner's command does not resolve
-> (e.g. a bare command whose binary isn't on the rebuild PATH — the
-> builder-mcp shadowing case), `rebuild_agent_config` falls back to the same
+> (e.g. a bare command whose binary isn't on the rebuild PATH),
+> `rebuild_agent_config` falls back to the same
 > server's spec from the other sources (kiroclaw > kiro-global > cc-global)
 > before dropping it, so one source's unresolvable command can't kill a
 > server another source can resolve.

@@ -2,8 +2,6 @@
 
 **Date:** 2026-04-09
 **Status:** Implemented (Beta)
-**CR:** [CR-266105689](https://code.amazon.com/reviews/CR-266105689)
-**Design Doc:** [Quip](https://quip-amazon.com/bC3YA01Qyqh0/KiroClaw-Multi-Agent-Orchestration)
 
 > Covers: orchestrated chat design, Go/Go All/Cancel lifecycle, execution, failure handling, known issues, and optimization roadmap.
 

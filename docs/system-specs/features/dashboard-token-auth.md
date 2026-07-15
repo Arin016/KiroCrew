@@ -314,7 +314,7 @@ Single `dashboard.url` field on `KiroClawConfig` (default: `""`), loaded from `c
 ```json
 {
   "dashboard": {
-    "url": "http://my-host.corp.amazon.com:8080"
+    "url": "http://my-host.example.com:8080"
   }
 }
 ```

@@ -56,6 +56,15 @@ changing code, **never reintroduce** any of the following (see
 credential redaction, destructive-command deny patterns, `~/.aws` / `~/.ssh`
 sensitive-path blocking, SEL audit log.
 
+**Fork-initiated UX divergences (do not let a MeshClaw sync re-introduce):** the
+artifact **Iterate** button is hidden (`SHOW_ARTIFACT_ITERATE` in
+`ArtifactDetailPage.tsx`), the **Channels** app is hidden from the App Store
+(`"hidden": True` on its `_BUILTIN_APPS` entry + the `AppsPage` Browse filter),
+the **Board** app is removed, and the Voice panel adds a local **Piper** TTS
+provider upstream lacks. These are launch product choices, recorded with their
+exact mechanisms in `skills/meshclaw-sync/left-out.md` → "Fork-initiated UX /
+feature divergences" (verdict `SKIP_FORKUX`).
+
 > Stale references: `website/Config` (Brazil) and `website/AUTOSDE.yaml` are
 > leftover internal files not used by the public build — don't treat them as
 > the build system, and don't add new ones.

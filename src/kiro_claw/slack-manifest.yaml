@@ -27,10 +27,6 @@ features:
       description: Dashboard access, allowlist, and channel tracking
       usage_hint: "dashboard [duration] | @user | #channel"
       should_escape: true
-    - command: /tk
-      description: Log a quick action item to TaskKeeper
-      usage_hint: "[note text] [optional: slack permalink]"
-      should_escape: false
 
 oauth_config:
   scopes:

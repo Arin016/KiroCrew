@@ -1,18 +1,24 @@
 # Voice Streaming — Design Document
 
-Last Updated: 2026-07-13
+Last Updated: 2026-07-15 (added the local **Piper** TTS provider + provider
+selector; `voice_reply` config gained `provider` + `piper_*` fields; the
+dashboard synth endpoint routes Piper through a single-clip non-streaming path.)
 
 ## Overview
 
-Real-time text-to-speech for dashboard chat responses using AWS Polly. Voice
-playback starts as soon as the first sentence finishes streaming — no waiting
-for the full response. Sending a new message interrupts playback immediately.
+Real-time text-to-speech for dashboard chat responses. Two providers: **Piper**
+(local, offline, the default — no AWS needed) and **AWS Polly** (cloud). For
+Polly, voice playback starts as soon as the first sentence finishes streaming —
+no waiting for the full response. Piper produces a single local clip delivered
+whole. Sending a new message interrupts playback immediately.
 
 ## Architecture
 
 ```
-chat_chunk (WS) → sentence detection (frontend) → POST /api/voice/synthesize
-    → Polly TTS (backend) → voice_chunk (WS) → Audio playback (browser)
+Polly:  chat_chunk (WS) → sentence detection (frontend) → POST /api/voice/synthesize
+    → Polly TTS (per sentence) → voice_chunk (WS) → Audio playback (browser)
+Piper:  POST /api/voice/synthesize → synthesize_speech() one WAV
+    → single voice_chunk + voice_complete (WS) → Audio playback (browser)
 ```
 
 ### Components
@@ -21,10 +27,10 @@ chat_chunk (WS) → sentence detection (frontend) → POST /api/voice/synthesize
 |-----------|------|------|
 | Sentence detector | `frontend/src/hooks/useWebSocket.ts` | Watches streaming chunks for sentence boundaries |
 | Playback queue | `frontend/src/hooks/useWebSocket.ts` | Queues and plays audio chunks sequentially |
-| Synthesize endpoint | `src/kiro_claw/dashboard/chat_voice.py` | `POST /api/voice/synthesize` — splits text into sentences, calls Polly, broadcasts chunks (re-exported via `chat.py`) |
-| Voice config endpoint | `src/kiro_claw/dashboard/chat_voice.py` | `GET/PUT /api/voice/config` — read/update voice settings (re-exported via `chat.py`) |
-| Polly TTS | `src/kiro_claw/voice_reply.py` | `streaming_voice_reply()` async generator, `stitch_mp3s()` for final MP3 |
-| Settings UI | `frontend/src/pages/chat/ChatSettings.tsx` | Auto-speak toggle, voice/engine/speed/pitch pickers |
+| Synthesize endpoint | `src/kiro_claw/dashboard/chat_voice.py` | `POST /api/voice/synthesize` — Polly: splits text into sentences + broadcasts chunks; Piper: `_synthesize_nonstreaming()` emits one clip (re-exported via `chat.py`) |
+| Voice config endpoint | `src/kiro_claw/dashboard/chat_voice.py` | `GET/PUT /api/voice/config` — read/update voice settings incl. `provider` + `piper_*` (re-exported via `chat.py`) |
+| TTS synthesis | `src/kiro_claw/voice_reply.py` | `synthesize_speech()` provider dispatcher (Polly `aws polly` / local `piper`), `streaming_voice_reply()` (Polly-only), `validate_length_scale()`, `stitch_mp3s()` |
+| Settings UI | `website/src/pages/settings/VoicePanel.tsx` | Provider selector + auto-speak toggle; Polly fields (voice/engine/speed/profile/region) or Piper fields (model/binary/speed) |
 
 ## Streaming Auto-Speak Flow
 
@@ -57,13 +63,18 @@ Stored in `~/.kiroclaw/config.json` under `voice_reply`:
 
 | Setting | Default | Range |
 |---------|---------|-------|
-| `voice_id` | Ruth | Any Polly voice ID |
-| `engine` | generative | generative, neural, long-form, standard |
-| `rate` | 100% | 50%–200% |
-| `pitch` | +0% | -20% to +20% |
+| `provider` | piper | `piper` (local) or `polly` (AWS). Invalid values fall back to `polly` on load |
+| `voice_id` | Ruth | Any Polly voice ID (Polly only) |
+| `engine` | generative | generative, neural, long-form, standard (Polly only) |
+| `rate` | 100% | 50%–200% (Polly only) |
+| `pitch` | +0% | -20% to +20% (Polly only) |
 | `enabled` | true | Controls auto-speak and Slack voice replies |
 | `aws_profile` | _(empty)_ | AWS CLI profile name for Polly calls. Empty = use default credentials |
 | `region` | _(empty)_ | AWS region for Polly. Empty = use CLI default |
+| `piper_model` | _(empty)_ | Path to a Piper `.onnx` voice model. Required for Piper |
+| `piper_binary` | _(empty)_ | Path to the `piper` executable. Empty = auto-detect on PATH / `~/piper-venv/bin/piper` |
+| `piper_model_config` | _(empty)_ | Optional `.onnx.json` config (auto-detected next to the model if empty) |
+| `piper_length_scale` | 1.0 | Piper speed (lower = faster); coerced finite/positive by `validate_length_scale()` |
 
 ### AWS Authentication
 

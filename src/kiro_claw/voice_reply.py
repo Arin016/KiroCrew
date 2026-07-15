@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shutil
@@ -101,6 +102,7 @@ DEFAULT_VOICE = "Ruth"
 DEFAULT_ENGINE = "generative"
 DEFAULT_RATE = "100%"
 DEFAULT_PITCH = "+0%"
+DEFAULT_LENGTH_SCALE = 1.0  # Piper speed: <1 faster, >1 slower
 OUTPUT_FORMAT = "mp3"
 MAX_CHARS = 2900  # Polly SSML limit ~3000 chars, leave margin
 
@@ -117,6 +119,25 @@ def _validate_rate(rate: str) -> str:
 def _validate_pitch(pitch: str) -> str:
     """Return *pitch* if it looks like ``'+10%'``, else the default."""
     return pitch if _PITCH_RE.match(pitch) else DEFAULT_PITCH
+
+
+def validate_length_scale(value: object) -> float:
+    """Coerce *value* to a finite, positive Piper length-scale.
+
+    Returns :data:`DEFAULT_LENGTH_SCALE` for anything non-numeric, non-finite
+    (``inf``/``nan``), zero, or negative. ``float()`` of a very large int can
+    raise ``OverflowError``, so that is caught too. Shared by the config loader
+    and the dashboard PUT handler so a bad value can never reach synthesis or be
+    persisted as unserializable JSON (``Infinity``/``NaN`` would break the
+    browser's ``JSON.parse`` of the config GET).
+    """
+    try:
+        scale = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_LENGTH_SCALE
+    if not math.isfinite(scale) or scale <= 0:
+        return DEFAULT_LENGTH_SCALE
+    return scale
 
 
 def strip_markdown(text: str) -> str:

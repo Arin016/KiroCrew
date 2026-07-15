@@ -93,6 +93,7 @@ from kiro_claw.task import Task
 from kiro_claw.taskrunner import TaskRunner
 from kiro_claw.voice_reply import VALID_PROVIDERS
 from kiro_claw.voice_reply import is_available as _tts_available
+from kiro_claw.voice_reply import validate_length_scale as _validate_length_scale
 from kiro_claw.voice_reply import voice_reply as _voice_reply_fn
 
 logger = logging.getLogger(__name__)
@@ -1168,10 +1169,10 @@ def set_orch_cfg(cfg: KiroClawConfig) -> None:
     _vc.piper_binary = _vr.get("piper_binary", "")
     _vc.piper_model = _vr.get("piper_model", "")
     _vc.piper_model_config = _vr.get("piper_model_config", "")
-    try:
-        _vc.piper_length_scale = float(_vr.get("piper_length_scale", 1.0))
-    except (TypeError, ValueError):
-        _vc.piper_length_scale = 1.0
+    # Coerce to finite/positive — a config.json with inf/NaN (JSON accepts both)
+    # would otherwise reach synthesis and be re-serialized as non-RFC JSON,
+    # breaking the dashboard's config GET.
+    _vc.piper_length_scale = _validate_length_scale(_vr.get("piper_length_scale", 1.0))
 
 
 def set_dashboard_state(state: object) -> None:

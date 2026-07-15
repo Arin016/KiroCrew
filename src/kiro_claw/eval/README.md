@@ -18,7 +18,7 @@ kiroclaw eval
 kiroclaw eval memory_recall_basic
 kiroclaw eval memory_recall_basic lesson_application
 
-# Run all scenarios (including the 54-turn BananaHub story — slow)
+# Run all scenarios
 kiroclaw eval --all
 ```
 
@@ -30,7 +30,6 @@ kiroclaw eval --all
 | `memory_recall_basic` | 4 | 2 | memory_recall | ~1 min |
 | `lesson_application` | 2 | 2 | lesson_application | ~30s |
 | `context_accumulation` | 3 | 3 | context_accumulation, memory_recall | ~2 min |
-| `amazon_dev_story` | 54 | 8 | memory_recall, lesson_application, context_accumulation, tool_discovery, task_completion | ~15 min |
 
 ## Output
 

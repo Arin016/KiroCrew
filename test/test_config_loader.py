@@ -27,7 +27,6 @@ from kiro_claw.config.loader import (
     MemoryConfig,
     MemoryStoreConfig,
     ResolvedBindings,
-    SecretaryConfig,
     SessionConfig,
     SlackConfig,
     SttConfig,
@@ -263,18 +262,6 @@ _dashboard_config_st = st.builds(
     url=st.text(min_size=0, max_size=50),
 )
 
-_secretary_config_st = st.builds(
-    SecretaryConfig,
-    enabled=st.booleans(),
-    user_id=st.text(min_size=0, max_size=20),
-    watched_channels=st.lists(st.text(min_size=1, max_size=15), max_size=3),
-    poll_interval_seconds=st.integers(min_value=30, max_value=600),
-    style_rules=st.lists(st.text(min_size=1, max_size=30), max_size=3),
-    alert_keywords=st.lists(st.text(min_size=1, max_size=20), max_size=3),
-    alert_on_name_mention=st.booleans(),
-    test_mode=st.booleans(),
-)
-
 _kiroclaw_config_st = st.builds(
     KiroClawConfig,
     agent=_agent_config_st,
@@ -282,7 +269,6 @@ _kiroclaw_config_st = st.builds(
     memory=_memory_config_st,
     slack=_slack_config_st,
     dashboard=_dashboard_config_st,
-    secretary=_secretary_config_st,
     hooks=st.just({}),
     agents=st.dictionaries(
         keys=_safe_name_st,
@@ -364,16 +350,6 @@ class TestConfigLoaderProperties:
         assert loaded.dashboard.url == config.dashboard.url
         assert loaded.dashboard.widget_density == config.dashboard.widget_density
         assert loaded.dashboard.recent_tint_count == config.dashboard.recent_tint_count
-
-        # Compare secretary
-        assert loaded.secretary.enabled == config.secretary.enabled
-        assert loaded.secretary.user_id == config.secretary.user_id
-        assert loaded.secretary.watched_channels == config.secretary.watched_channels
-        assert loaded.secretary.poll_interval_seconds == config.secretary.poll_interval_seconds
-        assert loaded.secretary.style_rules == config.secretary.style_rules
-        assert loaded.secretary.alert_keywords == config.secretary.alert_keywords
-        assert loaded.secretary.alert_on_name_mention == config.secretary.alert_on_name_mention
-        assert loaded.secretary.test_mode == config.secretary.test_mode
 
         # Compare top-level fields
         assert loaded.hooks == config.hooks

@@ -116,6 +116,7 @@ any of these (confirm ABSENT by `ls website/src/...`):
 | `McpGatewayCard`/`SharedMcpGatewayToggle`/`McpPoolable*` (Shared MCP gateway UI) | `mcp_gateway/` backend ABSENT |
 | GitFarm workspace-sync (`SyncPanel`, `/api/workspace-sync`), AIM auto-update toggle | absent/stubbed subsystems |
 | Harmony Artifactory artifact browse/share UI (`/api/artifactory/*`, `/api/artifacts/*/publish`) | absent subsystem |
+| Artifact **Iterate** button re-show; **Channels** app un-hide; **Board** app re-add | **SKIP_FORKUX** — fork hides/removes these for launch; see "Fork-initiated UX / feature divergences" below + `left-out.md`. A Polly-only VoicePanel sync must RECONCILE (keep the Piper selector), not drop it. |
 | `lcars/` theme, Bikini-Bottom/parody theme refactors, RUM telemetry (`rum.ts` is an inert stub) | cosmetic/internal, no generic core fix |
 
 A commit that adds a **generic SPA mechanism** (a surface, a hook, a renderer)
@@ -125,11 +126,15 @@ apps the fork HAS, like `/file-explorer`).
 
 **Confirm ABSENT by `ls`, not memory** — a commit confined to an absent dir is
 SKIP/NA_INTERNAL. A commit that merely *mentions* an internal name in a
-docstring/comment or in an exact-match allowlist of tool-name strings (e.g.
-`HEARTBEAT_SAFE_TOOLS` listing `TaskeiGetTask`, `search_arcc`,
-`BrazilBuildAnalyzerTool`) is still KEEP — those literals are **inert** in OSS
-(the tools never resolve), so copy them verbatim per COPY-not-rewrite rather
-than editing the allowlist.
+docstring/comment is still KEEP — the literal is inert in OSS. **EXCEPTION —
+`HEARTBEAT_SAFE_TOOLS` (`slack/gateway.py`) was TRIMMED** (P472753900) to the
+generic + kiroclaw-core reads (`Read`/`Grep`/`Glob`/`WorkspaceSearch` +
+`learn_list`/`cron_list`/`spawn_list`/`spawn_status`/`artifact_*`/
+`local_knowledge_search`). The Amazon-internal names (`TaskeiGetTask`,
+`ReadInternalWebsites`, `search_arcc`, `recall`, `BrazilBuildAnalyzerTool`,
+CRUX/Apollo/SAS/pipeline reads, …) were REMOVED — do NOT re-add them on sync
+(SKIP_FORKUX for the allowlist hunk; port the rest as PARTIAL). This reverses the
+old "copy the allowlist verbatim" guidance.
 
 **KEEP** — generic core fixes: provider/ACP logic, session/cron/memory, Slack
 gateway + dashboard, security controls (deny patterns, redaction, trust
@@ -157,6 +162,38 @@ internal ones. Examples:
 - A hunk anchored on a fork stub with no upstream pre-image (e.g. the
   `sync_aim_packages` iterdir loop the fork replaced with `return None`) has
   **no anchor — drop it.**
+
+### Fork-initiated UX / feature divergences (intentional hides — DROP re-adds)
+
+Beyond the Amazon-coupling and provider removals, this fork **deliberately hides
+or removes** some upstream product surfaces for the public launch. These are NOT
+Amazon couplings and NOT provider issues — they are intentional product choices.
+Verdict for a commit that re-shows/re-adds one: **SKIP_FORKUX** (port the rest of
+a mixed commit as PARTIAL). Porting a commit that *hides/removes* the surface is
+KEEP — it aligns the fork. The durable record + exact mechanisms live in
+[`left-out.md`](left-out.md) → "Fork-initiated UX / feature divergences"; guard
+the MECHANISM stated there, not just the feature name.
+
+- **Artifact "Iterate" button** — hidden behind `SHOW_ARTIFACT_ITERATE = false`
+  in `website/src/pages/ArtifactDetailPage.tsx` (gates the header button, inline
+  comment creation, the comments "Submit All" path, and the tips). DROP any
+  upstream hunk that re-shows it or widens its render gate; if the upstream
+  comment stack (`CommentsSidebar.tsx` `onAskAgent`, `ArtifactPanel.tsx`
+  SubmitBar) is ever ported, strip its iterate triggers too. Keep the `iterated`
+  lifecycle event + `iterateWithAgent`/`buildPromptForChat` (dormant, for the
+  one-line re-enable). (P472753393)
+- **Channels app** — hidden from the App Store Browse grid via `"hidden": True`
+  on its `_BUILTIN_APPS` entry (`apps/manager.py`) + the `!manifest.hidden` filter
+  in `AppsPage.tsx`. This MIRRORS upstream CR-289326017, so it is at parity —
+  keep the `hidden` flag + filter; note `defaultEnabled:False` is parity, not the
+  guard. (P472750613)
+- **Board app** — fully removed (`BoardPage.tsx`, `/board` route, `_BUILTIN_APPS`
+  entry, `KanbanSquare` icon, Alt+B shortcut, tests), mirroring CR-289326017. DROP
+  a pre-CR upstream hunk that re-adds Board.
+- **Voice Piper provider UI** — the fork's `VoicePanel.tsx` adds a Piper/Polly
+  selector + `provider`/`piper_*` in `chat_voice.py`; upstream is Polly-only. This
+  is fork-AHEAD: when syncing upstream's Polly-only VoicePanel, RECONCILE (keep the
+  Piper selector), do not drop it.
 
 ### Anti-miss: a NAME is not a verdict (the #1 cause of wrongly-dropped fixes)
 

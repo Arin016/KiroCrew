@@ -31,7 +31,6 @@ recursive-include src/kiro_claw/config *
 recursive-include src/kiro_claw/apps *.json
 recursive-include src/kiro_claw/eval/scenarios *.json
 recursive-include src/kiro_claw/docs *.md
-recursive-include src/kiro_claw/scripts *.mjs
 recursive-include src/kiro_claw/tests_fixtures *
 
 # --- Pruning: never ship test trees, vendored node deps, or build cruft ------

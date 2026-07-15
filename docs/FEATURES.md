@@ -190,7 +190,6 @@ Full-featured React SPA at `localhost:5476` (or `http://kiroclaw.localhost:5476`
 - **Rewind** — edit any past user message in place and replay the conversation from that point
 - **Fork session** — fork a session into a new tab with full context carried over
 - **Regenerate replies** — regenerate assistant replies with variant history navigation
-- **Board view** — 4-lane Kanban view for sessions (Active, Idle, Completed, Archived)
 - **Warm session pool** — pre-warm kiro-cli sessions with configurable default agent for instant response
 - **Tool purpose pills** — tool call labels show purpose text, persisted across reloads
 - **Batch tool rejection** — reject multiple pending tool approvals at once

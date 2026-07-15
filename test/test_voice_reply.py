@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_claw.voice_reply import (
+    DEFAULT_LENGTH_SCALE,
     DEFAULT_PITCH,
     DEFAULT_PROVIDER,
     DEFAULT_RATE,
@@ -26,6 +27,7 @@ from kiro_claw.voice_reply import (
     synthesize_speech,
     text_to_ssml,
     upload_voice_to_slack,
+    validate_length_scale,
     voice_reply,
 )
 
@@ -153,6 +155,18 @@ class TestValidation:
         assert _validate_pitch("banana") == DEFAULT_PITCH
         assert _validate_pitch("10%") == DEFAULT_PITCH  # missing +/-
         assert _validate_pitch("") == DEFAULT_PITCH
+
+    def test_valid_length_scale(self) -> None:
+        assert validate_length_scale(1.5) == 1.5
+        assert validate_length_scale("0.85") == 0.85
+        assert validate_length_scale(2) == 2.0
+
+    def test_invalid_length_scale_returns_default(self) -> None:
+        # Non-numeric, non-finite, zero/negative, and OverflowError (huge int)
+        # all fall back to the default rather than reaching synthesis or being
+        # persisted as unserializable JSON.
+        for bad in ["fast", None, float("inf"), float("nan"), 0, -1.0, 10 ** 400, [1]]:
+            assert validate_length_scale(bad) == DEFAULT_LENGTH_SCALE
 
     def test_valid_engines(self) -> None:
         assert "neural" in VALID_ENGINES

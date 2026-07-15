@@ -61,7 +61,7 @@ User habits, tool preferences, communication style. Replaced wholesale by the co
 Example content:
 ```markdown
 - Prefers Slack for communication and monitoring
-- Uses Brazil build system for package management
+- Uses the standard Python build system (setuptools/pip) for package management
 - Prefers deep code analysis with hidden critical information uncovered
 - Wants diagrams in documentation for complex flows
 ```
@@ -119,7 +119,7 @@ Structured facts stored as key-value pairs in SQLite. Opt-in — requires enabli
 
 Example entries:
 ```
-user.dev_desktop_host_current: dev-dsk-zejiangg-2b.us-west-2.amazon.com
+user.dev_desktop_host_current: dev-host.example.com
 project.kiroclaw.zoom_fix_implemented: True
 pref.prefers_configregions_over_null_guards: True
 ```

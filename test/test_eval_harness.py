@@ -192,7 +192,6 @@ class TestToolSafety:
         "tool_name,expected",
         [
             ("read_file", "prefix_fs"),
-            ("ReadInternalWebsites", "exact"),
             ("grep_workspace", "prefix_fs"),
             ("glob_files", "prefix_fs"),
             ("search", "unsafe"),  # ambiguous short name
@@ -201,7 +200,6 @@ class TestToolSafety:
             ("describe_resource", "prefix_api"),
             ("web_search_query", "prefix_api"),
             ("WorkspaceSearch", "exact"),
-            ("TaskeiGetTask", "exact"),
             ("write_file", "unsafe"),
             ("execute_bash", "unsafe"),
             ("delete_resource", "unsafe"),

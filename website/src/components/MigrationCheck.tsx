@@ -23,7 +23,7 @@ interface AppEntry {
 }
 
 // Routes that can never host a builtin app — skip query entirely
-const NON_APP_PREFIXES = ['/chat', '/settings', '/board', '/orchestrated', '/capabilities', '/apps/migrate', '/apps/detail']
+const NON_APP_PREFIXES = ['/chat', '/settings', '/orchestrated', '/capabilities', '/apps/migrate', '/apps/detail']
 
 export default function MigrationCheck() {
   const location = useLocation()

@@ -569,19 +569,6 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         title, _ = redact_credentials(title)
         slot.title = title
         slot._titled = True
-    # Pin to a TaskKeeper task if provided. The taskkeeper_complete MCP tool
-    # will refuse to operate on any other task_id from this slot, so prompt
-    # injection in task content cannot pivot to unrelated tasks.
-    # Note: explicit bool exclusion since `bool` is a subclass of `int` in
-    # Python — without it, `{"taskkeeper_task_id": true}` would silently bind
-    # the slot to task #1 (since True == 1).
-    tk_task_id = body.get("taskkeeper_task_id") if isinstance(body, dict) else None
-    if (
-        isinstance(tk_task_id, int)
-        and not isinstance(tk_task_id, bool)
-        and 1 <= tk_task_id <= 999999
-    ):
-        slot._taskkeeper_task_id = tk_task_id
     # Default project to workspace directory so file search works out of the box
     if not slot.project:
         cfg_proj = cfg.dashboard.default_project if cfg else ""

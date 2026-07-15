@@ -203,7 +203,7 @@ Centralized validation for all 12 MCP tool handlers (SDO-183):
 
 ### Dashboard Authentication & Authorization
 
-**Dashboard URL config** — single `dashboard.url` field in `config.json` (e.g. `http://my-host.corp.amazon.com:8080`). Hostname, port, local-only mode, and allowed origins are all derived from this URL. When not set, defaults to `localhost:5476`. `KIROCLAW_PORT` env var overrides the port (dev mode).
+**Dashboard URL config** — single `dashboard.url` field in `config.json` (e.g. `http://my-host.example.com:8080`). Hostname, port, local-only mode, and allowed origins are all derived from this URL. When not set, defaults to `localhost:5476`. `KIROCLAW_PORT` env var overrides the port (dev mode).
 
 **SSH tunnel instructions** — All SSH tunnel commands printed by `kiroclaw gateway` and `kiroclaw doctor` now use the `-N` flag (`ssh -NL ...`) to suppress remote shell allocation. The tunnel purely forwards the port without opening an interactive session on the remote host.
 

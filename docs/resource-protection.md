@@ -55,7 +55,7 @@ of failure.
 
 1. **Subagent timeout is not configurable.** `_TIMEOUT_SECS` (30 min) is hardcoded. Some
    legitimate tasks (large code generation, complex multi-tool workflows) may need longer.
-   Tracked: [configurable subagent timeout](https://taskei.amazon.dev/tasks/1b15e311)
+   Tracked: configurable subagent timeout
 
 2. **`cleanup_orphaned_sessions` only runs at startup/shutdown.** If a session's process dies
    mid-run without triggering `AcpProcessDied` (e.g. OOM kill), the PID stays in

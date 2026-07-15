@@ -301,33 +301,7 @@ HEARTBEAT_SAFE_TOOLS = frozenset({
     "Grep",
     "Glob",
     # Workspace exploration
-    "WorkspaceGitDetails",
     "WorkspaceSearch",
-    # Internal Amazon read APIs (builder-mcp)
-    "ReadInternalWebsites",
-    "InternalSearch",
-    "InternalCodeSearch",
-    "SearchAcronymCentral",
-    # Code review reads (CRUX)
-    "CodeReviewReadActions",
-    # Ticketing / Taskei reads
-    "TicketingReadActions",
-    "TaskeiGetTask",
-    "TaskeiGetRooms",
-    "TaskeiGetRoomResources",
-    "TaskeiListTasks",
-    # Pipeline / Apollo / on-call reads
-    "GetPipelineDetails",
-    "GetPipelineHealth",
-    "GetPipelinesRelevantToUser",
-    "ApolloReadActions",
-    "OncallReadActions",
-    # SAS / security-assurance reads
-    "GetSasRisks",
-    "GetSasCampaigns",
-    # Knowledge base reads
-    "ListKnowledgeBases",
-    "QueryKnowledgeBases",
     # KiroClaw-core reads (no side effects)
     "learn_list",
     "cron_list",
@@ -336,17 +310,7 @@ HEARTBEAT_SAFE_TOOLS = frozenset({
     "artifact_list",
     "artifact_get",
     "artifact_versions",
-    "recall",
     "local_knowledge_search",
-    "search_arcc",
-    # Software recommendations / search (read)
-    "SearchSoftwareRecommendations",
-    "GetSoftwareRecommendation",
-    # Test-run reads
-    "ReadRemoteTestRun",
-    # Build analyzers (read)
-    "BrazilBuildAnalyzerTool",
-    "BrazilPackageBuilderAnalyzerTool",
 })
 
 

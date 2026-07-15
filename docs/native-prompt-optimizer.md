@@ -2,8 +2,6 @@
 
 **Author:** yohaseti  
 **Date:** 2026-05-07 (updated 2026-05-08)  
-**CR:** [CR-272822846](https://code.amazon.com/reviews/CR-272822846)  
-**Taskei:** https://taskei.amazon.dev/tasks/2840787e-fac1-431f-8eff-99715004d28d
 
 ---
 

@@ -77,7 +77,6 @@ for rel in [
     "apps",            # builtins + app.json manifests + registry
     "eval/scenarios",  # eval specs
     "docs",            # in-app docs served by the dashboard
-    "scripts",         # *.mjs helpers
     "static",          # css/js + the staged dashboard dist
     "skills",          # bundled SKILL.md (if present under the pkg)
 ]:

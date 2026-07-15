@@ -200,7 +200,7 @@ Key design decisions:
       "model": "auto",
       "workspace": "oncall",
       "memory_store": "oncall-knowledge",
-      "tools": ["@builder-mcp", "@kiroclaw-core"]
+      "tools": ["@kiroclaw-cron", "@kiroclaw-core"]
     }
   }
   ```

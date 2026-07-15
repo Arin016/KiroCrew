@@ -47,7 +47,6 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'nav-notifications', key: 'n', alt: true, label: 'Notifications panel', group: 'Panel Navigation' },
   { id: 'nav-projects', key: 'p', alt: true, label: 'Projects panel', group: 'Panel Navigation' },
   { id: 'nav-schedule', key: 's', alt: true, label: 'Schedule panel', group: 'Panel Navigation' },
-  { id: 'nav-board', key: 'b', alt: true, label: 'Board panel', group: 'Panel Navigation' },
   // Actions
   { id: 'focus-input', key: 'Enter', alt: true, label: 'Focus text input', group: 'Actions' },
   { id: 'new-chat', key: 'n', alt: true, shift: true, label: 'New chat', group: 'Actions' },
@@ -283,7 +282,7 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     if (isInput) return
 
     // Panel navigation
-    const panelMap: Record<string, string> = { KeyC: '/chat', KeyN: '/notifications', KeyP: '/projects', KeyS: '/schedule', KeyB: '/board' }
+    const panelMap: Record<string, string> = { KeyC: '/chat', KeyN: '/notifications', KeyP: '/projects', KeyS: '/schedule' }
     if (!e.shiftKey && panelMap[code]) {
       e.preventDefault()
       navigate(panelMap[code])
