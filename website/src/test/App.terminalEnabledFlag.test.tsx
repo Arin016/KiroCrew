@@ -7,7 +7,7 @@
  * flag in terminalRegistry (`_enabled`, initialised to false). App is the ONE
  * place that flips that flag on, via:
  *
- *   const terminalEnabled = terminalConfig?.enabled === true
+ *   const terminalEnabled = terminalConfig?.enabled !== false
  *   useEffect(() => { setTerminalEnabledFlag(terminalEnabled) }, [terminalEnabled])
  *
  * This wiring has been silently dropped once already: the original feature
@@ -21,9 +21,11 @@
  * the flag -- none assert that App actually sets it, which is exactly why the
  * regression slipped through green tests. These tests pin the App-to-registry
  * contract directly so a future App.tsx refactor can't silently drop it again:
- *   1. config enabled  -> isTerminalEnabled() becomes true
- *   2. config disabled -> App actively drives the flag to false, even if a
- *      prior enabled session had left it true (button removed on disable)
+ *   1. server reports enabled -> isTerminalEnabled() becomes true
+ *   2. server reports enabled:false (explicit opt-out) -> App drives the flag
+ *      to false, even if a prior enabled session had left it true
+ *   3. the probe FAILS (non-OK / error) -> App keeps the flag ON (default-on):
+ *      a transient failure must not hide an enabled terminal
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { waitFor } from '@testing-library/react'
@@ -101,11 +103,22 @@ describe('App terminal-enabled registry flag sync', () => {
     await waitFor(() => expect(isTerminalEnabled()).toBe(true))
   })
 
-  it('drives the flag OFF when config is disabled, even if a prior session left it on', async () => {
-    // Simulate a stale "on" flag left over from an earlier enabled session:
-    // if App only ever turned the flag ON (the buggy ws.onopen approach), a
-    // later config-off would leave the button stuck visible. The config-driven
-    // effect must actively clear it.
+  it('keeps the flag ON when the probe fails (default-on)', async () => {
+    // A transient / auth-timing failure of the /api/terminal/sessions probe
+    // must NOT hide an enabled terminal. The queryFn falls back to
+    // {enabled:true} on a non-OK response, so App drives the flag ON.
+    server.use(
+      http.get('/api/terminal/sessions', () => new HttpResponse(null, { status: 500 })),
+    )
+    expect(isTerminalEnabled()).toBe(false)
+    renderWithProviders(<App />, { route: '/chat' })
+    await waitFor(() => expect(isTerminalEnabled()).toBe(true))
+  })
+
+  it('drives the flag OFF only on an explicit enabled:false (opt-out honored)', async () => {
+    // The backend opt-out (dashboard.terminal.enabled=false) is still honored:
+    // an explicit false hides the terminal. Simulate a stale "on" flag left
+    // over from an earlier enabled session — the effect must actively clear it.
     setTerminalEnabledFlag(true)
     server.use(
       http.get('/api/terminal/sessions', () => HttpResponse.json({ enabled: false, sessions: [] })),

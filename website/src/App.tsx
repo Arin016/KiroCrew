@@ -684,12 +684,19 @@ export default function App() {
     queryKey: ['terminal-enabled'],
     queryFn: async () => {
       const r = await fetch('/api/terminal/sessions')
-      if (!r.ok) return { enabled: false }
+      // Default-on: the terminal is enabled unless the server explicitly says
+      // otherwise. A transient/auth-timing failure of this probe must NOT hide
+      // an enabled terminal (previously it fell back to {enabled:false} and,
+      // with staleTime, kept the panel hidden for 60s).
+      if (!r.ok) return { enabled: true }
       return r.json()
     },
     staleTime: 60_000,
   })
-  const terminalEnabled = terminalConfig?.enabled === true
+  // Hide only on an explicit opt-out (dashboard.terminal.enabled=false).
+  // While the probe is loading (terminalConfig undefined) the terminal shows,
+  // so there is no hidden-until-fetch-resolves flash.
+  const terminalEnabled = terminalConfig?.enabled !== false
   useEffect(() => { setTerminalEnabledFlag(terminalEnabled) }, [terminalEnabled])
   const navigate = useNavigate()
 
