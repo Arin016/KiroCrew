@@ -57,6 +57,28 @@ export default function ChatProgressTrack({ sections, currentIdx, onScrollToSect
     queueMicrotask(() => { closingRef.current = false })
   }, [])
 
+  // Close on click/focus outside. The panel focuses itself on open, so the
+  // onMouseLeave focus-inside guard keeps it open once the pointer leaves —
+  // without this, clicking away never dismisses it.
+  useEffect(() => {
+    if (!open) return
+    const isOutside = (target: EventTarget | null) =>
+      !panelRef.current?.contains(target as Node) &&
+      !triggerRef.current?.contains(target as Node)
+    const onPointerDown = (e: PointerEvent) => {
+      if (isOutside(e.target)) setOpen(false)
+    }
+    const onFocusIn = (e: FocusEvent) => {
+      if (isOutside(e.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('focusin', onFocusIn, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
+    }
+  }, [open])
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!open) {
       if (e.key === 'Enter' || e.key === ' ') {
