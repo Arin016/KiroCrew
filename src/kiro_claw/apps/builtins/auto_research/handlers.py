@@ -20,6 +20,10 @@ from typing import Any
 from aiohttp import web
 
 from kiro_claw.apps.builtins.auto_research import subquestion_queue as _sq
+from kiro_claw.apps.builtins.auto_research.workflow_template import (
+    RESEARCH_WORKFLOW_SOURCE,
+    build_workflow_args,
+)
 from kiro_claw.autonudge import get_instance as _autonudge_instance
 from kiro_claw.config.paths import config_dir
 from kiro_claw.knowledge.llm_pool import LLMPool
@@ -55,13 +59,8 @@ _DB_INIT_LOCK = threading.Lock()
 _INITIALIZED_DBS: set[str] = set()
 MAX_CYCLES_HARD_CAP = 100
 # Execution mode + recursive-exploration budget defaults (RL v2). The SQLite
-# column DEFAULTs in _get_db() mirror these — keep them in sync. The public
-# fork ships agent mode ONLY: the Dynamic Workflow runner is absent here, so
-# VALID_EXECUTION_MODES is ("agent",) and create_campaign clamps any stray
-# 'workflow' back to 'agent' — a workflow-mode campaign can never start with no
-# runner and sit zombie in RUNNING. The execution_mode DB column is kept
-# (default 'agent') for forward-compat.
-VALID_EXECUTION_MODES = ("agent",)
+# column DEFAULTs in _get_db() mirror these — keep them in sync.
+VALID_EXECUTION_MODES = ("agent", "workflow")
 DEFAULT_EXECUTION_MODE = "agent"
 DEFAULT_MAX_SUBQUESTIONS_PER_ROUND = 3
 DEFAULT_DEPTH_DECAY = 0.5
@@ -320,13 +319,9 @@ def validate_campaign(config: dict) -> dict:
         errors.append("Question too vague — provide more context (min 20 characters)")
     if len(config.get("sub_questions", [])) < 2:
         warnings.append("Consider decomposing into sub-questions for better coverage")
-    # RL v2 dropped the "sources required" gate (agent mode researches without a
-    # pre-selected source list). The public fork ships agent mode ONLY (the
-    # Dynamic Workflow runner is absent), so reject any execution_mode other than
-    # 'agent' — this keeps workflow mode unreachable so a workflow-mode campaign
-    # can never start with no runner and sit zombie in RUNNING.
+    # RL v2: validate execution_mode against supported modes.
     if config.get("execution_mode", DEFAULT_EXECUTION_MODE) not in VALID_EXECUTION_MODES:
-        errors.append("Execution mode must be 'agent'")
+        errors.append("Execution mode must be 'agent' or 'workflow'")
 
     max_cycles = config.get("max_cycles", 30)
     if max_cycles > MAX_CYCLES_HARD_CAP:
@@ -492,8 +487,7 @@ def create_campaign(config: dict) -> dict:
     campaign_id = uuid.uuid4().hex[:8]
     name = config.get("name") or config["question"][:50].strip()
     parent_id = config.get("parent_id") or None
-    # RL v2: validate/clamp execution mode + recursive-exploration budget. Any
-    # stray non-'agent' mode is clamped back to 'agent' (workflow runner absent).
+    # RL v2: validate/clamp execution mode + recursive-exploration budget.
     exec_mode = config.get("execution_mode", DEFAULT_EXECUTION_MODE)
     if exec_mode not in VALID_EXECUTION_MODES:
         exec_mode = DEFAULT_EXECUTION_MODE
@@ -684,12 +678,19 @@ async def _watchdog_loop(app: web.Application | None = None) -> None:
             await asyncio.sleep(POLL_INTERVAL)
             db = _get_db()
             active = db.execute(
-                "SELECT id, idle_secs, max_cycles, started_at, auto_approve FROM campaigns WHERE status = ?",
+                "SELECT id, idle_secs, max_cycles, started_at, auto_approve, execution_mode "
+                "FROM campaigns WHERE status = ?",
                 (CampaignStatus.RUNNING,),
             ).fetchall()
             db.close()
             for row in active:
                 cid = row["id"]
+                # Workflow-mode campaigns are driven by a Dynamic Workflow run;
+                # the adapter translates its events/result into the RL file+SSE
+                # model. The agent-mode body below does not apply to them.
+                if row["execution_mode"] == "workflow":
+                    await _poll_workflow_campaign(cid, state)
+                    continue
                 slot = state._slots.get(f"research-{cid}") if state is not None else None
                 # 24h auto-approve cap: expire trust and require re-authorization.
                 started = row["started_at"]
@@ -1180,6 +1181,224 @@ async def _stop_loop(cid: str, *, remove: bool) -> None:
         await svc.update(loop.id, active=False)
 
 
+# --- Dynamic Workflow mode helpers ---
+
+_WORKFLOW_RUN_FILE = "workflow_run.json"
+
+
+def _campaign_execution_mode(campaign_id: str) -> str:
+    db = _get_db()
+    row = db.execute(
+        "SELECT execution_mode FROM campaigns WHERE id = ?", (campaign_id,)
+    ).fetchone()
+    db.close()
+    return (row["execution_mode"] if row else DEFAULT_EXECUTION_MODE) or DEFAULT_EXECUTION_MODE
+
+
+def _write_workflow_run_id(campaign_id: str, run_id: str) -> None:
+    d = _campaign_dir(campaign_id)
+    # cycle_offset: number of cycle files already written by prior runs. Pause
+    # cancels the DW run and resume launches a NEW run whose investigate events
+    # restart at index 0; without this offset the adapter would re-index new
+    # findings over the old ones (or drop them until the new run out-produced the
+    # old). Persisting the offset makes the resumed run append correctly.
+    cycle_offset = len(_list_cycle_files(campaign_id))
+    d.joinpath(_WORKFLOW_RUN_FILE).write_text(
+        json.dumps({"run_id": run_id, "ts": time.time(), "cycle_offset": cycle_offset}))
+
+
+def _read_workflow_cycle_offset(campaign_id: str) -> int:
+    d = _safe_campaign_dir(campaign_id)
+    p = (d / _WORKFLOW_RUN_FILE) if d else None
+    if not p or not p.exists():
+        return 0
+    try:
+        return int(json.loads(p.read_text()).get("cycle_offset", 0) or 0)
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        return 0
+
+
+def _read_workflow_run_id(campaign_id: str) -> str | None:
+    d = _safe_campaign_dir(campaign_id)
+    p = (d / _WORKFLOW_RUN_FILE) if d else None
+    if not p or not p.exists():
+        return None
+    try:
+        return str(json.loads(p.read_text()).get("run_id") or "") or None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+async def _launch_workflow(request: web.Request, cid: str) -> None:
+    """Start the research methodology as a Dynamic Workflow (workflow mode).
+
+    Best-effort: if the gateway's WorkflowService is unavailable or the start
+    fails, mark the campaign FAILED so it doesn't sit zombie in RUNNING. The
+    watchdog adapter (`_poll_workflow_campaign`) translates the run's
+    events/result into the same cycle/findings files + SSE the UI already
+    consumes.
+    """
+    state = request.app.get("state")
+    svc = getattr(state, "workflow_service", None) if state is not None else None
+    if svc is None:
+        logger.warning(
+            "auto_research: workflow_service unavailable; cannot launch workflow for %s", cid)
+        update_campaign_status(
+            cid, CampaignStatus.FAILED,
+            error_message="Dynamic Workflow engine unavailable — cannot start workflow mode.")
+        _emit_sse({"type": "failed", "campaign_id": cid})
+        return
+    db = _get_db()
+    row = db.execute("SELECT * FROM campaigns WHERE id = ?", (cid,)).fetchone()
+    db.close()
+    if row is None:
+        return
+    args = build_workflow_args(dict(row))
+    try:
+        res = await svc.start(RESEARCH_WORKFLOW_SOURCE, name="research-" + cid, args=args)
+    except Exception:
+        logger.exception("auto_research: workflow start failed for %s", cid)
+        update_campaign_status(
+            cid, CampaignStatus.FAILED,
+            error_message="Workflow start failed — see gateway logs for details.")
+        _emit_sse({"type": "failed", "campaign_id": cid})
+        return
+    run_id = (res or {}).get("run_id")
+    if run_id:
+        _write_workflow_run_id(cid, run_id)
+        _audit("campaign_workflow_started", cid)
+    else:
+        logger.warning("auto_research: workflow start returned no run_id for %s: %s", cid, res)
+        update_campaign_status(
+            cid, CampaignStatus.FAILED,
+            error_message="Workflow start returned no run ID.")
+        _emit_sse({"type": "failed", "campaign_id": cid})
+
+
+async def _stop_workflow(request: web.Request, cid: str) -> None:
+    """Cancel a campaign's Dynamic Workflow run (workflow mode). Best-effort."""
+    state = request.app.get("state")
+    svc = getattr(state, "workflow_service", None) if state is not None else None
+    run_id = _read_workflow_run_id(cid)
+    if svc is not None and run_id:
+        try:
+            await svc.cancel(run_id)
+        except Exception:
+            logger.exception("auto_research: workflow cancel failed for %s", cid)
+
+
+async def _poll_workflow_campaign(campaign_id: str, state: Any) -> None:
+    """Adapter: translate a Dynamic Workflow run's events/result into the RL
+    file + SSE model the existing UI consumes. Each `investigate:` agent that
+    finishes becomes a cycle finding; on terminal the run's report is written to
+    FINDINGS.md and the campaign is marked COMPLETE/FAILED. Best-effort — never
+    raises into the watchdog.
+    """
+    try:
+        def _redact_llm(s: Any) -> str:
+            text = str(s or "")
+            if not _HAS_SECURITY:
+                # Fail closed: strip the text entirely rather than persisting
+                # potentially credential-laden LLM output to disk unredacted.
+                return _redact_finding({"v": text})["v"] if text else ""
+            cleaned, _ = redact_credentials(text)
+            cleaned, _ = redact_exfiltration_urls(cleaned)
+            return cleaned
+
+        svc = getattr(state, "workflow_service", None) if state is not None else None
+        run_id = _read_workflow_run_id(campaign_id)
+        if svc is None or not run_id:
+            return
+        # svc.result() reads a file-backed snapshot (JSON on disk) — it does not
+        # mutate the event-loop-affine registry. Offloading to a thread avoids
+        # blocking the loop on file I/O while remaining safe to call concurrently
+        # (reads only, no shared mutable state with the loop).
+        snap = await asyncio.to_thread(svc.result, run_id)
+        if not snap:
+            # Bounded-poll fallback: if the run snapshot is gone (LRU eviction,
+            # lost record) and the campaign has been RUNNING for > 1h with no
+            # progress, mark it FAILED rather than let it sit zombie forever.
+            d = _safe_campaign_dir(campaign_id)
+            run_file = (d / _WORKFLOW_RUN_FILE) if d else None
+            if run_file and run_file.exists():
+                try:
+                    run_meta = json.loads(run_file.read_text())
+                    started_ts = float(run_meta.get("ts", 0))
+                    if started_ts and (time.time() - started_ts) > 3600:
+                        update_campaign_status(
+                            campaign_id, CampaignStatus.FAILED,
+                            error_message="Workflow run snapshot lost after 1h — run likely evicted or crashed.")
+                        _emit_sse({"type": "failed", "campaign_id": campaign_id})
+                except (json.JSONDecodeError, OSError, ValueError, TypeError):
+                    pass
+            return
+        d = _campaign_dir(campaign_id)
+        events = snap.get("events") or []
+        # Correlate agent_started (carries label/phase) -> agent_finished by id.
+        started: dict = {}
+        for e in events:
+            if e.get("type") == "agent_started":
+                data = e.get("data") or {}
+                started[data.get("agent_id")] = data
+        investigate: list = []
+        for e in events:
+            if e.get("type") == "agent_finished":
+                data = e.get("data") or {}
+                meta = started.get(data.get("agent_id"), {})
+                if str(meta.get("label", "")).startswith("investigate") and data.get("ok"):
+                    investigate.append((meta, data))
+        cycle_offset = _read_workflow_cycle_offset(campaign_id)
+        wrote = False
+        # Each investigation maps to one cycle file (intentional: the UI shows
+        # per-investigation progress, and total_cycles is a UI counter, not the
+        # DW round count. The DW script's max_rounds caps exploration rounds;
+        # per_round is already bounded by parallel_workers to limit fan-out).
+        for i in range(len(investigate)):
+            cycle_no = cycle_offset + i + 1
+            fpath = d.joinpath("findings", "cycle_%03d.json" % cycle_no)
+            if fpath.exists():
+                continue  # already written by an earlier poll (idempotent)
+            meta, fin = investigate[i]
+            label = str(meta.get("label", ""))
+            insight = label[len("investigate: "):] if label.startswith("investigate: ") else label
+            finding = {
+                "cycle": cycle_no,
+                "summary": _redact_llm(fin.get("result_summary", "")),
+                "key_insight": _redact_llm(insight),
+                "sources_checked": [], "sources_empty": [],
+                "new_findings_count": 1, "evidence_strength": "moderate",
+            }
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(json.dumps(finding, indent=2))
+            wrote = True
+        if wrote:
+            count = len(_list_cycle_files(campaign_id))
+            db = _get_db()
+            db.execute("BEGIN")
+            db.execute("UPDATE campaigns SET total_cycles=? WHERE id=?", (count, campaign_id))
+            db.commit()
+            db.close()
+            _emit_sse({"type": "new_finding", "campaign_id": campaign_id,
+                       "finding": _read_finding_file(_list_cycle_files(campaign_id)[-1])})
+        status = snap.get("status")
+        if status == "finished":
+            result = snap.get("result") if isinstance(snap.get("result"), dict) else {}
+            report = str((result or {}).get("report") or "")
+            if not report:
+                fs = (result or {}).get("findings") or []
+                report = "\n\n".join(str(x) for x in fs) if isinstance(fs, list) else ""
+            d.joinpath("FINDINGS.md").write_text(_redact_llm(report) or "(no findings gathered)")
+            update_campaign_status(campaign_id, CampaignStatus.COMPLETE)
+            _emit_sse({"type": "complete", "campaign_id": campaign_id})
+        elif status in ("failed", "cancelled"):
+            update_campaign_status(
+                campaign_id, CampaignStatus.FAILED,
+                error_message=_redact_llm(snap.get("error") or "workflow run ended without completing"))
+            _emit_sse({"type": "failed", "campaign_id": campaign_id})
+    except Exception:
+        logger.exception("auto_research: workflow poll failed for %s", campaign_id)
+
+
 # --- HTTP handlers ---
 
 
@@ -1502,11 +1721,23 @@ async def _handle_action(request: web.Request) -> web.Response:
     if "error" in result:
         return web.json_response(result, status=404)
     if action in ("start", "resume"):
-        await _launch_loop(request, cid)
+        mode = _campaign_execution_mode(cid)
+        if mode == "workflow":
+            await _launch_workflow(request, cid)
+        else:
+            await _launch_loop(request, cid)
     elif action == "pause":
-        await _stop_loop(cid, remove=False)
+        mode = _campaign_execution_mode(cid)
+        if mode == "workflow":
+            await _stop_workflow(request, cid)
+        else:
+            await _stop_loop(cid, remove=False)
     elif action == "stop":
-        await _stop_loop(cid, remove=True)
+        mode = _campaign_execution_mode(cid)
+        if mode == "workflow":
+            await _stop_workflow(request, cid)
+        else:
+            await _stop_loop(cid, remove=True)
     return web.json_response(result)
 
 
@@ -1516,7 +1747,12 @@ async def _handle_delete(request: web.Request) -> web.Response:
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
         return web.json_response({"error": "Invalid campaign ID"}, status=400)
-    await _stop_loop(cid, remove=True)  # tear down any running worker first
+    # Tear down any running worker (agent loop or workflow run) first.
+    mode = _campaign_execution_mode(cid)
+    if mode == "workflow":
+        await _stop_workflow(request, cid)
+    else:
+        await _stop_loop(cid, remove=True)
     result = delete_campaign(cid)
     if "error" in result:
         return web.json_response(result, status=404)
@@ -1530,6 +1766,13 @@ async def _handle_nudge(request: web.Request) -> web.Response:
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
         return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    # Workflow-mode campaigns are driven by a deterministic DW script; guidance
+    # injected mid-run has no effect (the script doesn't read guidance.txt).
+    if _campaign_execution_mode(cid) == "workflow":
+        return web.json_response(
+            {"error": "Nudge/guidance not supported in workflow mode — the script "
+                      "runs autonomously. Use agent mode for interactive guidance."},
+            status=409)
     body = await request.json()
     text = body.get("text", "")
     if not text:
@@ -1860,6 +2103,14 @@ async def _handle_add_question(request: web.Request) -> web.Response:
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
         return web.json_response({"error": "Invalid campaign ID"}, status=400)
+    # Workflow-mode campaigns plan sub-questions at launch (the DW script
+    # decomposes them internally); adding questions mid-run has no effect.
+    if _campaign_execution_mode(cid) == "workflow":
+        return web.json_response(
+            {"error": "Adding questions mid-run not supported in workflow mode — "
+                      "sub-questions are planned at launch. Use agent mode for "
+                      "interactive exploration."},
+            status=409)
     body = await request.json()
     text = (body.get("text") or "").strip()
     if not text:

@@ -118,6 +118,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
   const [successCriteria, setSuccessCriteria] = useState('')
   const [autoApprove, setAutoApprove] = useState(false)
   const [parallelWorkers, setParallelWorkers] = useState(1)
+  const [executionMode, setExecutionMode] = useState<'agent' | 'workflow'>('agent')
   const [validation, setValidation] = useState<Validation | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -172,7 +173,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
     setSubmitting(true)
     setError(null)
     try {
-      const c = await api.researchCreate({ question, sub_questions: buildSubs(), scope_constraints: scopeConstraints, max_cycles: maxCycles, idle_secs: idleSecs, success_criteria: successCriteria, auto_approve: autoApprove, parallel_workers: parallelWorkers })
+      const c = await api.researchCreate({ question, sub_questions: buildSubs(), scope_constraints: scopeConstraints, max_cycles: maxCycles, idle_secs: idleSecs, success_criteria: successCriteria, auto_approve: autoApprove, parallel_workers: parallelWorkers, execution_mode: executionMode })
       if (c?.id) { await api.researchAction(c.id, 'start'); onDone() }
     } catch {
       setError('Failed to start campaign — please try again.')
@@ -193,6 +194,25 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
       ))}</div>
 
       {step === 0 && <div className="space-y-4">
+        <div className="p-3 rounded-md bg-bg border border-border">
+          <div className="text-xs text-muted mb-2">How sub-agent execution is orchestrated. Both handle open-ended research. Choose once at setup.</div>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setExecutionMode('agent')} className={`text-left p-2 rounded border ${executionMode === 'agent' ? 'border-accent bg-accent/10' : 'border-border'}`}>
+              <div className="font-medium text-sm">Agent <span className="text-muted font-normal">(adaptive)</span></div>
+              <div className="text-xs text-muted mt-0.5">The AI drives every round itself — deciding what to investigate, managing sub-agents, and following new leads from findings as they emerge.</div>
+            </button>
+            <button type="button" onClick={() => setExecutionMode('workflow')} className={`text-left p-2 rounded border ${executionMode === 'workflow' ? 'border-accent bg-accent/10' : 'border-border'}`}>
+              <div className="font-medium text-sm">Dynamic Workflow <span className="text-muted font-normal">(scripted)</span></div>
+              <div className="text-xs text-muted mt-0.5">The AI writes an orchestration script up front; a deterministic runner manages sub-agent execution while the AI only plans, investigates, and synthesizes. Replayable, budget-capped.</div>
+            </button>
+          </div>
+          {executionMode === 'workflow' && (
+            <div className="text-xs text-warn mt-2 flex items-start gap-1">
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              <span>Dynamic Workflow can fan out to many sub-agents, and its budget cap stops the run hard if hit (mid-run synthesis may be lost). Start with conservative cycle/worker limits.</span>
+            </div>
+          )}
+        </div>
         <div>
           <label htmlFor="research-question" className="text-sm font-medium">What do you want to research?
             <textarea id="research-question" aria-label="What do you want to research?" className="w-full mt-1 p-2 rounded-md text-sm bg-bg border border-border resize-y" rows={3} value={question} onChange={e => setQuestion(e.target.value)} placeholder="How do other teams handle API rate limiting?" />

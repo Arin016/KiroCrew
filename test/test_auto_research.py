@@ -2057,17 +2057,14 @@ class TestExecutionModeAndBudget:
         assert c["depth_decay"] == DEFAULT_DEPTH_DECAY
         assert c["reserve_fraction"] == DEFAULT_RESERVE_FRACTION
 
-    def test_workflow_mode_clamped_to_agent(self):
-        # Divergence from upstream: the public fork has no Dynamic Workflow
-        # runner, so VALID_EXECUTION_MODES is ("agent",) and create_campaign
-        # clamps a stray 'workflow' back to 'agent' (never a zombie RUNNING
-        # workflow with no runner). The recursive-exploration budget fields still
-        # persist as given.
+    def test_workflow_mode_accepted(self):
+        # With the Dynamic Workflow engine ported, 'workflow' is a valid
+        # execution mode — create_campaign preserves it as-is.
         r = create_campaign(self._base(
             execution_mode="workflow", max_subquestions_per_round=5,
             depth_decay=0.25, reserve_fraction=0.2))
         c = get_campaign(r["id"])
-        assert c["execution_mode"] == DEFAULT_EXECUTION_MODE
+        assert c["execution_mode"] == "workflow"
         assert c["max_subquestions_per_round"] == 5
         assert c["depth_decay"] == 0.25
         assert c["reserve_fraction"] == 0.2
@@ -2090,12 +2087,12 @@ class TestExecutionModeAndBudget:
         assert not r["can_start"]
         assert any("execution mode" in e.lower() for e in r["errors"])
 
-    def test_validate_rejects_workflow_mode(self):
-        # Divergence from upstream: workflow mode is unreachable in the public
-        # fork (no DW runner), so validate rejects it rather than accepting it.
+    def test_validate_accepts_workflow_mode(self):
+        # With the Dynamic Workflow engine ported, 'workflow' is a valid
+        # execution mode — validate_campaign accepts it.
         r = validate_campaign(self._base(execution_mode="workflow"))
-        assert not r["can_start"]
-        assert "workflow" not in VALID_EXECUTION_MODES
+        assert "workflow" in VALID_EXECUTION_MODES
+        assert not any("execution mode" in e.lower() for e in r["errors"])
 
 
 class TestRecursiveExploration:
