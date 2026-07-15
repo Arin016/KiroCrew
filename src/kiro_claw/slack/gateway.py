@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import uuid
+import webbrowser
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,7 +84,12 @@ from kiro_claw.dashboard.stale_asset_watchdog import run_stale_asset_watchdog
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
 from kiro_claw.embeddings import OllamaManager, _validate_url, make_sync_embed_fn
-from kiro_claw.executors import cron_executor, maintenance_executor, run_in_embed_pool
+from kiro_claw.executors import (
+    cron_executor,
+    maintenance_executor,
+    run_in_embed_pool,
+    subprocess_executor,
+)
 from kiro_claw.frontend import build_frontend_async
 from kiro_claw.heartbeat import (
     HEARTBEAT_TASK_TIMEOUT_SECS,
@@ -3969,9 +3975,28 @@ class GatewayOrchestrator:
                 elif _skip_open:
                     print("🐾 Headless remote session — skipping browser auto-open")
                 else:
-                    import webbrowser
-
-                    webbrowser.open(dashboard_url)
+                    # Offload to subprocess executor — webbrowser.open() can
+                    # block indefinitely on a wedged /usr/bin/open process,
+                    # which would starve the default thread pool if we used
+                    # asyncio.to_thread(). The subprocess executor is a
+                    # dedicated pool for exactly this class of hang.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.get_running_loop().run_in_executor(
+                                subprocess_executor(),
+                                webbrowser.open,
+                                dashboard_url,
+                            ),
+                            timeout=5.0,
+                        )
+                    except (TimeoutError, asyncio.TimeoutError):
+                        logger.debug("webbrowser.open timed out — skipping")
+                        print(
+                            "🐾 Browser was slow to open — skipping auto-open.\n"
+                            "   Dashboard is running. Open this URL manually:\n"
+                            f"   {dashboard_url}\n"
+                            "   Or run: kiroclaw token"
+                        )
 
         asyncio.create_task(_start_bg_session())
 

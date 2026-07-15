@@ -85,6 +85,30 @@ const { attachContextMenu } = require("./context-menu");
 // Set app name for macOS menu bar and dock
 app.name = "KiroClaw";
 
+// Single-instance lock. On macOS LaunchServices reuses the already-running .app
+// when the user relaunches from the Dock / Spotlight, so a second instance is
+// harmless (a no-op there). The fork's supported non-mac target is the Linux
+// AppImage, which has no such reuse — double-clicking the AppImage again spawns
+// a fresh process. Two instances against the same ~/.kiroclaw racing
+// .local_secret and stopping each other's gateway on before-quit is bad news
+// (kills the shared gateway out from under the other instance). Grab the lock;
+// if we can't, exit immediately and let the existing instance surface itself.
+// Uses app.exit(0) not app.quit(): quit() is async so this module's remaining
+// top-level code (store mutations via migrateRemoteHostConfig, resolvePort side
+// effects) would still run and race the primary instance's state before quit
+// fires. app.exit(0) is synchronous with no lifecycle side effects.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 let mainWindow = null;
 let tray = null;
 let gatewayProcess = null;

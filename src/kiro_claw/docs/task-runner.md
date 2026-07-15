@@ -50,6 +50,25 @@ Task specs are markdown files with structured steps:
 4. Run `pytest` and fix any failures
 ```
 
+## Tool Approval
+
+Approval depends on how the run was launched:
+
+- **Dashboard / chat `run` / Slack `run`** (inside the gateway): tool calls that aren't allow/deny-listed **prompt** interactively.
+- **`kiroclaw run TASK.md`** (standalone CLI): no interactive channel, so it's **deny-by-default** — a tool runs only if it matches `hooks.auto_approve_tools`; otherwise it's rejected and logged with `reason: headless_no_authorization`. (`TOOL_DENY` / `auto_deny_tools` always wins; the allowlist works with or without a handler.)
+
+To let `kiroclaw run` use tools, allowlist them in `~/.kiroclaw/config.json`:
+
+```json
+{
+  "hooks": {
+    "auto_approve_tools": ["read", "Reading *", "Running: pytest *", "fs_write"]
+  }
+}
+```
+
+Patterns match the tool title with or without the `Running: `/`Reading ` prefix and support `*` globs. Scope it to the tools the task needs — a blanket `*` re-opens the gap. Or run from the dashboard to approve interactively instead.
+
 ## Progress Tracking
 
 The dashboard shows live step progress with status icons:

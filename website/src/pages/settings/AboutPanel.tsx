@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, Scale, CheckCircle2, AlertCircle, GitBranch, GitCommitHorizontal, ExternalLink, ArrowUp, Package, X } from 'lucide-react'
 import { Card, CardTitle, Btn } from '../../components/ui'
@@ -7,6 +7,7 @@ import { useAppSelector } from '../../store'
 import { codeBrowserBranchUrl, codeBrowserCommitUrl } from '../../lib/codeBrowser'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
 import { api, ApiError } from '../../api/client'
+import { sanitize } from '../../api/helpers'
 
 type UpdateState = {
   state: 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'
@@ -39,6 +40,12 @@ function getUpdateApi(): UpdateAPI | undefined {
 const ACCENT_TINT: React.CSSProperties = {
   background: 'color-mix(in oklab, var(--accent) 12%, transparent)',
   borderColor: 'color-mix(in oklab, var(--accent) 30%, transparent)',
+}
+
+// Accent gradient wash for the identity hero (overrides Card's flat bg-card).
+const HERO_BG: React.CSSProperties = {
+  background:
+    'linear-gradient(135deg, color-mix(in oklab, var(--accent) 14%, transparent), color-mix(in oklab, var(--accent) 3%, transparent) 55%, var(--card))',
 }
 
 /** Row: label on the left, value on the right. */
@@ -115,6 +122,25 @@ export function AboutPanel() {
   const [applyError, setApplyError] = useState('')
   const [restarting, setRestarting] = useState(false)
   const [autoUpdate, setAutoUpdate] = useState(true)
+  // Full changelog viewer (collapsible) — restores the changelog view that the
+  // removed top-bar version pill used to provide; now lives in Settings > About.
+  // Full changelog is open by default — this is a full page now, not a cramped
+  // dropdown, so the changelog is primary content (bounded to a scroll box below).
+  const [showFull, setShowFull] = useState(true)
+  // Fetch via useQuery: dedups concurrent requests, caches, and gives proper
+  // loading/error states (avoids the empty-content infinite-spinner and the
+  // mount-vs-toggle double fetch). `enabled: showFull` loads it on mount.
+  const {
+    data: fullChangelog,
+    isLoading: changelogLoading,
+    isError: fullChangelogError,
+  } = useQuery({
+    queryKey: ['full-changelog'],
+    queryFn: () => api.changelog().then(d => (d as { content?: string })?.content ?? ''),
+    enabled: showFull,
+  })
+  // Memoize the DOMPurify pass so it doesn't re-run on every render.
+  const safeChangelog = useMemo(() => (fullChangelog ? sanitize(fullChangelog) : ''), [fullChangelog])
   const { data: mcCfg } = useQuery({ queryKey: ['mc-config-autoupdate'], queryFn: () => api.kiroclawConfig() })
   useEffect(() => {
     const v = (mcCfg as any)?.auto_update
@@ -162,43 +188,54 @@ export function AboutPanel() {
 
   return (
     <>
-      <Card>
-        {/* Identity */}
-        <div className="flex items-center gap-3.5 py-1.5">
+      <Card style={HERO_BG}>
+        {/* Identity hero */}
+        <div className="flex items-center gap-4">
           <img
             src={avatar}
             alt=""
-            className="w-11 h-11 rounded-xl object-cover bg-bg-hover shrink-0"
+            className="w-14 h-14 rounded-2xl object-cover bg-bg-hover shrink-0"
+            style={{ boxShadow: '0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent)' }}
             onError={e => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden' }}
           />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2.5 flex-wrap">
-              <span className="text-[17px] font-bold text-text-strong">{botName || 'KiroClaw'}</span>
+              <span className="text-[19px] font-extrabold tracking-tight text-text-strong">{botName || 'KiroClaw'}</span>
               <span className="text-[12px] font-mono font-semibold text-accent rounded-full px-2.5 py-0.5 border" style={ACCENT_TINT}>v{version}</span>
+              {!isDesktop && (updateAvailable
+                ? <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold rounded-full px-2 py-0.5"
+                    style={{ color: 'var(--warn)', background: 'color-mix(in oklab, var(--warn) 14%, transparent)' }}>
+                    <ArrowUp size={11} className="lucide-inline" /> Update available</span>
+                : <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold rounded-full px-2 py-0.5"
+                    style={{ color: 'var(--ok)', background: 'color-mix(in oklab, var(--ok) 14%, transparent)' }}>
+                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: 'var(--ok)' }} /> Up to date</span>
+              )}
             </div>
-            <div className="text-[12.5px] text-muted mt-0.5">Autonomous agent management · open source</div>
+            <div className="text-[12.5px] text-muted mt-1">Autonomous agent management · runs locally · open source</div>
           </div>
         </div>
 
-        {/* Build metadata */}
-        {(buildBranch || buildCommit) && (
-          <div className="mt-3 pt-3 border-t border-border flex flex-wrap gap-2">
-            {buildBranch && (
-              <a href={codeBrowserBranchUrl(buildBranch)} target="_blank" rel="noopener noreferrer"
-                 title="Browse this branch on GitHub"
-                 className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={ACCENT_TINT}>
-                <GitBranch size={12} className="shrink-0" /> <span className="truncate max-w-[220px]">{buildBranch}</span> <ExternalLink size={10} className="opacity-60 shrink-0" />
-              </a>
-            )}
-            {buildCommit && (
-              <a href={codeBrowserCommitUrl(buildCommit)} target="_blank" rel="noopener noreferrer"
-                 title="View this commit on GitHub"
-                 className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={ACCENT_TINT}>
-                <GitCommitHorizontal size={12} className="shrink-0" /> {buildCommit} <ExternalLink size={10} className="opacity-60 shrink-0" />
-              </a>
-            )}
-          </div>
-        )}
+        {/* Build + license chips */}
+        <div className="mt-4 flex flex-wrap gap-2">
+          {buildBranch && (
+            <a href={codeBrowserBranchUrl(buildBranch)} target="_blank" rel="noopener noreferrer"
+               title="Browse this branch on GitHub"
+               className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={ACCENT_TINT}>
+              <GitBranch size={12} className="shrink-0" /> <span className="truncate max-w-[220px]">{buildBranch}</span> <ExternalLink size={10} className="opacity-60 shrink-0" />
+            </a>
+          )}
+          {buildCommit && (
+            <a href={codeBrowserCommitUrl(buildCommit)} target="_blank" rel="noopener noreferrer"
+               title="View this commit on GitHub"
+               className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={ACCENT_TINT}>
+              <GitCommitHorizontal size={12} className="shrink-0" /> {buildCommit} <ExternalLink size={10} className="opacity-60 shrink-0" />
+            </a>
+          )}
+          <span className="inline-flex items-center gap-1.5 text-[12px] text-muted border border-border rounded-lg px-2.5 py-1 bg-bg"
+                title="Open source under the Apache 2.0 license">
+            <Scale size={12} className="shrink-0" /> Apache 2.0
+          </span>
+        </div>
 
         {isDesktop && channel && <Row label="Update channel">{channel}</Row>}
         {isDesktop && info?.platform && <Row label="Platform">{info.platform}</Row>}
@@ -267,14 +304,35 @@ export function AboutPanel() {
             </div>
           </div>
         )}
-      </Card>
 
-      <Card>
-        <CardTitle><Scale size={15} className="lucide-inline" /> License</CardTitle>
-        <Row label="License">Apache 2.0</Row>
-        <p className="mt-2 text-[13px] text-muted">
-          {botName || 'KiroClaw'} is open source. Memory, scheduling, and agent orchestration run locally on your machine.
-        </p>
+        {/* Full changelog — collapsible; restores the changelog view removed with
+            the top-bar pill. Shared across desktop + web. */}
+        <div className="mt-3 pt-3 border-t border-border">
+          <button
+            type="button"
+            aria-expanded={showFull}
+            className="text-[13px] text-muted hover:text-text cursor-pointer bg-transparent border-none px-0"
+            onClick={() => setShowFull(v => !v)}
+          >
+            {showFull ? '▾ Hide Full Changelog' : '▸ View Full Changelog'}
+          </button>
+          {showFull && (
+            <div className="mt-2 p-3 bg-bg rounded-lg border border-border max-h-[360px] overflow-y-auto text-[13px] text-text">
+              {changelogLoading ? (
+                <span className="text-muted flex items-center gap-1.5"><RefreshCw size={13} className="lucide-inline animate-spin" /> Loading changelog…</span>
+              ) : fullChangelogError ? (
+                <span className="text-danger flex items-center gap-1.5"><AlertCircle size={13} className="lucide-inline" /> Couldn't load the changelog.</span>
+              ) : fullChangelog ? (
+                // DOMPurify-sanitize the fetched changelog source before rendering:
+                // MarkdownRenderer uses rehype-raw (raw HTML passes through), so strip
+                // any HTML/script the /api/changelog response could carry (defense-in-depth).
+                <MarkdownRenderer content={safeChangelog} />
+              ) : (
+                <span className="text-muted">No changelog available.</span>
+              )}
+            </div>
+          )}
+        </div>
       </Card>
 
       {/* Web update confirm — shows the changelog, then applies (which restarts the gateway). */}

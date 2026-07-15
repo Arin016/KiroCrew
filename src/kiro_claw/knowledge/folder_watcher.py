@@ -19,7 +19,13 @@ from .readers import FileReader
 
 logger = logging.getLogger(__name__)
 
-HARD_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+# Build-output dirs are excluded because a rebuild deletes/recreates hundreds of
+# hashed chunk files at once; indexing that churn drives a bulk delete pass whose
+# per-file graph reload runs on the event loop and can stall it past the loop
+# watchdog (dist/assets/*.js was the motivating case). Dot-dirs (.cache, .next,
+# .venv) are already pruned separately by the startswith(".") rule in _walk.
+HARD_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                  "dist", "build", "out", "target"}
 DEFAULT_MAX_FILES = 5000
 
 # Extra skip dirs per source type

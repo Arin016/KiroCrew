@@ -22,6 +22,32 @@ describe('MarkdownRenderer list indentation', () => {
   })
 })
 
+describe('MarkdownRenderer streaming caret', () => {
+  it('appends an inline streaming caret after the trailing text while streaming', () => {
+    const { container } = render(<MarkdownRenderer content={'Hello world'} streaming glow />)
+    const caret = container.querySelector('.streaming-caret')
+    expect(caret).not.toBeNull()
+    // Inline placement: the caret lives inside the paragraph (same line as the
+    // last word), not as a bare block-level sibling of the root container.
+    expect(caret!.closest('p')).not.toBeNull()
+  })
+
+  it('does not render a caret when not streaming', () => {
+    const { container } = render(<MarkdownRenderer content={'Hello world'} />)
+    expect(container.querySelector('.streaming-caret')).toBeNull()
+  })
+
+  it('places the caret AFTER a trailing inline code span (not before it)', () => {
+    const { container } = render(<MarkdownRenderer content={'Hello `world`'} streaming glow />)
+    const code = container.querySelector('code')
+    const caret = container.querySelector('.streaming-caret')
+    expect(code).not.toBeNull()
+    expect(caret).not.toBeNull()
+    // The caret must follow the <code> element in document order.
+    expect(!!(code!.compareDocumentPosition(caret!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+  })
+})
+
 describe('MarkdownRenderer dollar-sign handling (currency vs math)', () => {
   it('treats single-$ currency as plain text, not inline math', () => {
     // Regression for: chat messages like `$9.99` accidentally parsed as

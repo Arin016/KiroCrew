@@ -35,15 +35,18 @@ except ImportError:
 import time
 
 from kiro_claw.config.loader import config_dir
+from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 # Consolidation caps live in vector_memory_constants (a light module with no
 # heavy transitive deps) so prompt-building callers can import them at top
 # level without pulling this module's numpy/faiss imports; re-exported here so
 # existing `from kiro_claw.vector_memory import _MAX_*` paths keep working.
 from kiro_claw.vector_memory_constants import (  # noqa: F401
+    _INJECTION_PATTERNS,
     _MAX_EPISODIC_PER_CONSOLIDATION,
     _MAX_LESSONS_PER_CONSOLIDATION,
     _MAX_SEMANTIC_PER_CONSOLIDATION,
+    _contains_injection,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,26 +136,6 @@ _BUILTIN_PREFIXES = [
     "lesson.*",
 ]
 
-_INJECTION_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
-    for p in [
-        r"ignore\s+(all\s+)?previous\s+instructions",
-        r"ignore\s+(all\s+)?above",
-        r"you\s+are\s+now",
-        r"new\s+instructions?:",
-        r"system\s*prompt",
-        r"<\s*system\s*>",
-        r"<\s*/?\s*instructions?\s*>",
-        r"IMPORTANT:\s*override",
-        r"forget\s+(everything|all)",
-        r"disregard\s+(all|previous|your)\s+instructions",
-        r"act\s+as\s+if",
-        r"pretend\s+you\s+are",
-        r"new\s+persona",
-        r"no\s+restrictions",
-    ]
-]
-
 # ── Schema ──
 
 _SCHEMA_V1 = """
@@ -224,11 +207,6 @@ _MAX_BACKFILLS_PER_CALL = 5  # cap lazy embedding backfills to bound latency
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
-
-
-def _contains_injection(text: str) -> bool:
-    """Check if text contains known prompt injection patterns."""
-    return any(p.search(text) for p in _INJECTION_PATTERNS)
 
 
 def _tokenize(text: str) -> set[str]:
@@ -891,6 +869,29 @@ class VectorMemoryStore:
                 len(text),
                 _EPISODIC_TEXT_MIN,
                 _EPISODIC_TEXT_MAX,
+            )
+            return False
+
+        # Prompt-injection screening (XPIA defense-in-depth, Talos 696671aa).
+        # Episodic text is derived from conversation transcripts, so a poisoned
+        # turn could persist steering instructions that get re-injected into
+        # future contexts. Mirror the semantic-KV screen (validate_semantic) and
+        # drop the entry on match, emitting an auditable reject event.
+        if _contains_injection(text):
+            logger.warning("Episodic write rejected: blocked content patterns (src=%s)", source)
+            # The rejected text is untrusted conversation content and the snippet
+            # is surfaced verbatim on the dashboard (/api/memory/events -> get_events).
+            # Scrub exfiltration URLs + credentials before persisting the audit
+            # snippet so poisoned text can't smuggle secrets onto that surface.
+            safe_snippet, _ = redact_exfiltration_urls(text[:200])
+            safe_snippet, _ = redact_credentials(safe_snippet)
+            self._log_event(
+                SemanticRejectCode.INJECTION.value,
+                "episodic",
+                "",
+                None,
+                safe_snippet,
+                source,
             )
             return False
 
@@ -1878,11 +1879,19 @@ class VectorMemoryStore:
     # ── Observability ──
 
     def get_rejection_stats(self) -> dict[str, int]:
-        """Return counts of semantic write rejections by reason."""
+        """Return counts of write rejections by reason.
+
+        ``injection_blocked`` is counted across BOTH semantic and episodic
+        writes (episodic screening added for Talos 696671aa). The other codes
+        stay semantic-scoped: ``conflict_skip`` is also emitted for episodic
+        FAISS dedup, so counting episodic there would conflate benign
+        deduplication with policy rejections.
+        """
         rows = self.db.execute(
             "SELECT event_type, COUNT(*) as count FROM memory_events "
-            "WHERE memory_type = 'semantic' AND event_type IN "
-            "('allowlist_reject', 'low_confidence', 'injection_blocked', 'conflict_skip') "
+            "WHERE event_type = 'injection_blocked' "
+            "OR (memory_type = 'semantic' AND event_type IN "
+            "('allowlist_reject', 'low_confidence', 'conflict_skip')) "
             "GROUP BY event_type"
         ).fetchall()
         return {r["event_type"]: r["count"] for r in rows}

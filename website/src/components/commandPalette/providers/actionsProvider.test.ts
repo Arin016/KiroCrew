@@ -83,6 +83,49 @@ describe('createActionsProvider — activation', () => {
   })
 })
 
+describe('createActionsProvider — pin current session', () => {
+  it('omits the pin action when there is no active session', async () => {
+    const { d } = deps()
+    const arr = await run(createActionsProvider({ ...d, pinCurrentSession: null }), '')
+    const titles = arr.map((r) => r.title)
+    expect(titles).not.toContain('Pin current session')
+    expect(titles).not.toContain('Unpin current session')
+  })
+
+  it('shows "Pin current session" when the active session is unpinned', async () => {
+    const { d } = deps()
+    const toggle = vi.fn()
+    const arr = await run(
+      createActionsProvider({ ...d, pinCurrentSession: { pinned: false, toggle } }),
+      'pin',
+    )
+    expect(arr.some((r) => r.title === 'Pin current session')).toBe(true)
+    expect(arr.some((r) => r.title === 'Unpin current session')).toBe(false)
+  })
+
+  it('shows "Unpin current session" when the active session is pinned', async () => {
+    const { d } = deps()
+    const toggle = vi.fn()
+    const arr = await run(
+      createActionsProvider({ ...d, pinCurrentSession: { pinned: true, toggle } }),
+      'pin',
+    )
+    expect(arr.some((r) => r.title === 'Unpin current session')).toBe(true)
+    expect(arr.some((r) => r.title === 'Pin current session')).toBe(false)
+  })
+
+  it('runs the injected toggle on activation', async () => {
+    const { d } = deps()
+    const toggle = vi.fn()
+    const arr = await run(
+      createActionsProvider({ ...d, pinCurrentSession: { pinned: false, toggle } }),
+      '',
+    )
+    arr.find((r) => r.title === 'Pin current session')!.onActivate()
+    expect(toggle).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('createActionsProvider — filtering', () => {
   it('filters to actions whose title matches the query', async () => {
     const { d } = deps()

@@ -172,6 +172,44 @@ _BLOCKED_SLASH_COMMANDS = frozenset(
     {"/quit", "/exit", "/q", "/chat", "/paste", "/reply", "/editor"}
 )
 
+# Single source of truth for slash-command descriptions surfaced by the
+# dashboard API (GET /api/slash-commands) and mirrored by the frontend
+# autocomplete fallback. Keys are slash-prefixed command names. Covers every
+# command in _SLASH_COMMANDS plus the claude_code-only /init, /review, and
+# /security-review so no command renders a blank description in either path.
+SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "/agent": "Switch or manage the active agent",
+    "/changelog": "Show the release changelog",
+    "/chat": "Save or load a chat session",
+    "/clear": "Clear conversation history",
+    "/code": "Open code intelligence tools",
+    "/compact": "Compact conversation to free context",
+    "/context": "Manage context files and token usage",
+    "/editor": "Compose your prompt in an external editor",
+    "/exit": "Exit the chat session",
+    "/experiment": "Toggle experimental features",
+    "/help": "Show available commands",
+    "/hooks": "View configured context hooks",
+    "/init": "Initialize project context",
+    "/issue": "Report an issue or bug",
+    "/logdump": "Dump session logs to a file",
+    "/mcp": "Show configured MCP servers",
+    "/model": "Show or switch the current model",
+    "/paste": "Paste an image from the clipboard",
+    "/prompts": "List or invoke saved prompts & agent SOPs",
+    "/q": "Quit the chat session",
+    "/quit": "Quit the chat session",
+    "/reply": "Reply to the last assistant message",
+    "/review": "Review code changes",
+    "/security-review": "Run a security review",
+    "/side": "Open a side conversation panel",
+    "/tangent": "Start a tangent conversation",
+    "/todos": "Show or manage the task list",
+    "/tools": "Show available tools",
+    "/usage": "Show billing and usage information",
+    "/workflows": "List and manage dynamic workflow runs",
+}
+
 
 def _broadcast_auto_tool(state: DashboardState, slot: _ChatSlot, event: "LLMEvent") -> str:
     """Broadcast an auto-approved tool call via WS with redacted title. Returns redacted title."""

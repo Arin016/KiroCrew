@@ -16,7 +16,7 @@ from kiro_claw import git_coord, shutdown_event
 from kiro_claw.acp.client import AcpProcessDied
 from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.executors import run_in_embed_pool
-from kiro_claw.hooks import TOOL_DENY, fire_tool_hooks, get_global_hook_store
+from kiro_claw.hooks import TOOL_AUTO_APPROVE, TOOL_DENY, fire_tool_hooks, get_global_hook_store
 from kiro_claw.llm_helpers import stream_and_collect_json
 from kiro_claw.providers.base import (
     EVENT_COMPLETE,
@@ -325,6 +325,11 @@ async def execute_task(
                     run.last_task_time = _time.time()
                     run.tokens_used += max(1, len(event.text) // 4)
                 elif event.kind == EVENT_PERMISSION_REQUEST:
+                    # Honor the user-configured auto-approve trust (hook
+                    # TOOL_AUTO_APPROVE from hooks.auto_approve_tools) before the
+                    # interactive prompt — the task runner previously handled only
+                    # TOOL_DENY and always prompted, ignoring explicit trust (Mesh-1859).
+                    _auto_approved = False
                     if ctx:
                         tool_result = ctx.hooks.on_tool_call(
                             event.title,
@@ -346,18 +351,45 @@ async def execute_task(
                                 error="hook_deny",
                             )
                             continue
-                    if on_tool_approval:
-                        run.last_task_time = _time.time()
-                        approved = await on_tool_approval(event)
-                        if not approved:
-                            await _reject_and_log(client, sel(), session_key, agent, event)
-                            continue
-                    # Mid-stream context check before approving tool
+                        if tool_result.action == TOOL_AUTO_APPROVE:
+                            _auto_approved = True
+
+                    # Mid-stream context check runs BEFORE authorization resolution:
+                    # context management is orthogonal to approval and must fire even
+                    # on the headless deny path, or overflow recovery (compact/reset)
+                    # would be skipped whenever a tool is about to be rejected.
                     pct = client.context_usage_pct()
                     if pct >= _MID_STREAM_COMPACT_PCT:
                         await _reject_and_log(client, sel(), session_key, agent, event,
                                               metadata={"reason": "context_overflow", "pct": pct})
                         raise _ContextOverflow(pct)
+
+                    # Positive-authorization resolution (deny-by-default shape):
+                    # each path is explicit — no falsy-guard fall-through.
+                    if _auto_approved:
+                        approve_reason = "hook_auto_approve"
+                    elif on_tool_approval:
+                        run.last_task_time = _time.time()
+                        approved = await on_tool_approval(event)
+                        if not approved:
+                            await _reject_and_log(client, sel(), session_key, agent, event)
+                            continue
+                        approve_reason = "interactive_approved"
+                    else:
+                        # No interactive handler and no explicit hook auto-approve:
+                        # the task runner is running headless (autonomous project /
+                        # cron) with no positive authorization for THIS tool.
+                        # Deny-by-default — reject. Tools the user explicitly trusts
+                        # via hooks.auto_approve_tools still pass (handled above as
+                        # TOOL_AUTO_APPROVE, independent of handler presence). We do
+                        # NOT read approval_mode or safety_override here: raw config
+                        # would bypass the SafetyOverride 24h TTL, and honoring the
+                        # override would reintroduce the global-YOLO dependency this
+                        # change deliberately avoids.
+                        await _reject_and_log(
+                            client, sel(), session_key, agent, event,
+                            metadata={"reason": "headless_no_authorization"})
+                        continue
 
                     await client.approve_tool(event.request_id)
                     run.last_task_time = _time.time()
@@ -367,9 +399,10 @@ async def execute_task(
                         source="taskrunner",
                         tool_name=event.title,
                         tool_kind=event.tool_kind,
-                        outcome="auto_approved",
+                        outcome="approved",
                         request_id=event.request_id,
-                        metadata={"task": task.index, "task_id": run.task_id},
+                        metadata={"task": task.index, "task_id": run.task_id,
+                                  "reason": approve_reason},
                     )
                 elif event.kind == EVENT_TOOL_CALL:
                     # Fire PreToolUse hooks for auto-approved tools (informational only)

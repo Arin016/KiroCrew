@@ -16,9 +16,38 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
-beta 5a62fdd7930e4d3e6fe9875ad3251388b41ee397      # 2026-07-14 MeshClaw backend triaged tip (batch-30). Candidates in the 3b679515..5a62fdd7 window triaged by content; 12 backend KEEP/PARTIAL ported (credit-usage normalize PARTIAL, spawn summarize, recency-tint field, slot-key normalize, artifacts content search, stale-asset watchdog, bulk-model endpoint PARTIAL, redact-before-truncate, SafeChildWatcher fallback PARTIAL, harness primitives, workflow deny/redact/max_turns, slack agent-name persist) + 4 SKIP_INTERNAL (secretary self-alert, ADC/kratos app-registry rows, setup.cfg console_scripts) + 2 SKIP_NONKIROACP (cc agent-skills sync, claude knowledge-worker approval_mode).
-frontend-beta 2bf7ede096556f74930eddd125db3645471fc825  # 2026-07-14 MeshClawWebsite triaged tip (batch-30). Candidates in the 2a70682..2bf7ede window triaged by content; 7 frontend KEEP ported (About/version-pill beautify, recency-tint wiring, electron fullscreen fix, palette artifacts+recents+prefix-Tab, bulk-model sidebar UI, open-in-pane file chip, comment repeated-anchor highlight) + 1 DEFER (4964a3e credit-usage popup — the FE half of the ebad8b6c pair, deferred to a follow-up batch: it reads credits_overage/percentage the backend text-scrape does not yet emit, so porting it alone regresses the pill).
-mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-14 MeshClaw mainline tip (upstream), unchanged since batch-27 (batch-30 re-confirmed). No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
+# --- Batch-31 (dual-repo beta sync 2026-07-15) ---
+# Branch sync/beta-2026-07-15 off origin/main 2567734. Backend window 5a62fdd7..84d8abf3,
+# frontend window 2bf7ede..ab0d8d2c, triaged by content. 21 commits ported IN CHRONOLOGICAL
+# ORDER (oldest first), one fix per commit, ZERO left out (no SKIP / DEFER this batch).
+# Tally: 21 PORTED = 15 backend + 6 frontend, incl. 3 PARTIAL (cec9758e electron single-
+#   instance-lock rescue, a5e914cb slash-desc fallback drop /workflows, 834470ac backend
+#   slash-desc drop /workflows assertion).
+# BACKEND (15, security-heavy — all generic-core KEEP per the "SSRF/redaction/XPIA/SEL =
+#   generic core" rubric): af5306f5 conftest AIM-skills isolation; 1d9968b0 episodic-memory
+#   injection scan (XPIA persistence); 30e126ca JWT/Bearer redaction; 6068f9db bare 40-char
+#   AWS-secret redaction; 4e5ad699 SSRF base guard on remote embedding URL; 1ebb2b20 remove
+#   flaky test_discovery_runs_off_event_loop; 2159a709 SEL HMAC-key + audit-log sensitive-path;
+#   834470ac backend slash-command descriptions; 975cc548 full PEM private-key body redaction;
+#   220fad51 SSRF alternate-IPv4-encoding block (follow-up to 4e5ad699, ported same wave);
+#   b19e6e1b Slack thread-parent/meta XPIA screen (moves _INJECTION_PATTERNS ->
+#   vector_memory_constants, re-exported); c035795f taskrunner TOOL_AUTO_APPROVE (re-applied on
+#   top of the fork governance kwargs); 0a010ec2 bound background MCP probe fan-out; 58be644c
+#   folder-watcher build-output-dir prune; 84d8abf3 webbrowser.open offload to subprocess_executor.
+# FRONTEND (6): cec9758e electron single-instance lock (PARTIAL — the ONLY generic hunk of an
+#   unsupported-Windows commit; all Windows scaffolding dropped, electron stays ^33); a5e914cb
+#   slash-command autocomplete descriptions (PARTIAL — dropped /workflows, absent in the fork);
+#   291660b0 pin/unpin current-session palette action; 77eaf255 changelog viewer in Settings >
+#   About (kept fork's GitHub tooltips, NOT code.amazon.com); 71a5d059 findBestOccurrence empty-
+#   anchor guard + V-shaped early-exit; ab0d8d2c inline blinking streaming caret.
+# KiroACP invariant HELD (no provider glue re-added; the 834470ac claude_code branch is the kept
+#   dormant seam, filled via the shared map). De-Amazon audit: 0 LIVE couplings (inert Talos IDs
+#   + builder-mcp test-fixture string only). Verify: per-commit pytest (touched files) + flake8 +
+#   isort all green; frontend tsc -b clean + touched vitest green.
+
+beta 84d8abf38224277a0cbde56e79d821b7d4472851      # 2026-07-15 MeshClaw backend triaged tip (batch-31). Candidates in the 5a62fdd7..84d8abf3 window triaged by content; 13 backend KEEP/PARTIAL ported (conftest AIM isolation, episodic injection-scan, JWT/Bearer redaction, bare-AWS-secret redaction, SSRF base guard, remove flaky skill-browser test, SEL key/log sensitive-path, slash-command descriptions, PEM body redaction, SSRF alt-IPv4, XPIA thread screening, taskrunner auto-approve, MCP probe fan-out bound, folder-watcher build dirs, webbrowser offload). No backend SKIP/DEFER this batch.
+frontend-beta ab0d8d2c26e881f0c897b841572b73b0a002dba0  # 2026-07-15 MeshClawWebsite triaged tip (batch-31). Candidates in the 2bf7ede..ab0d8d2c window triaged by content; 4 frontend KEEP/PARTIAL ported (electron single-instance lock PARTIAL, slash-command autocomplete descriptions PARTIAL, pin/unpin palette action, changelog viewer in Settings > About, findBestOccurrence guard, streaming caret). No frontend SKIP/DEFER this batch.
+mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-15 MeshClaw mainline tip (upstream), unchanged since batch-27 (batch-31 re-confirmed). No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA
 # (796e21c5) here, which broke the `$MAIN..origin/mainline` scan. Corrected in batch-13.

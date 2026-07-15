@@ -30,6 +30,17 @@ _HAS_GIT = shutil.which("git") is not None
 requires_git = pytest.mark.skipif(not _HAS_GIT, reason="git not available")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_aim_skills_dir(tmp_path, monkeypatch):
+    """Prevent SkillsLoader from discovering ~/.aim/skills during tests.
+
+    Without this, hosts with many AIM capability packages (400+ skill files,
+    ~35MB) inflate session context beyond _MAX_CONTEXT_CHARS, causing silent
+    truncation and non-deterministic test failures under xdist.
+    """
+    monkeypatch.setattr("kiro_claw.skills.aim_skills_dir", lambda: tmp_path / "no_aim")
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Pre-import ``tracemalloc`` so pytest's unraisable hook can't crash on it.
 

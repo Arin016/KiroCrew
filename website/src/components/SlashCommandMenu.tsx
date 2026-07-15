@@ -10,14 +10,36 @@ interface SlashCommand {
   description: string
 }
 
+// Offline fallback shown before the API query resolves (or if it fails).
+// Kept in sync with the backend SLASH_COMMAND_DESCRIPTIONS map so the same
+// text renders whether it came from the live API or this fallback. /kb is a
+// frontend-only command (also merged via FRONTEND_COMMANDS below).
 const FALLBACK_COMMANDS: SlashCommand[] = [
+  { name: '/agent', description: 'Switch or manage the active agent' },
+  { name: '/changelog', description: 'Show the release changelog' },
+  { name: '/chat', description: 'Save or load a chat session' },
   { name: '/clear', description: 'Clear conversation history' },
+  { name: '/code', description: 'Open code intelligence tools' },
   { name: '/compact', description: 'Compact conversation to free context' },
+  { name: '/context', description: 'Manage context files and token usage' },
+  { name: '/editor', description: 'Compose your prompt in an external editor' },
+  { name: '/exit', description: 'Exit the chat session' },
+  { name: '/experiment', description: 'Toggle experimental features' },
+  { name: '/help', description: 'Show available commands' },
+  { name: '/hooks', description: 'View configured context hooks' },
+  { name: '/issue', description: 'Report an issue or bug' },
   { name: '/kb', description: 'Search knowledge library' },
+  { name: '/logdump', description: 'Dump session logs to a file' },
   { name: '/mcp', description: 'Show configured MCP servers' },
-  { name: '/model', description: 'Show current model' },
+  { name: '/model', description: 'Show or switch the current model' },
+  { name: '/paste', description: 'Paste an image from the clipboard' },
   { name: '/prompts', description: 'List or invoke saved prompts & agent SOPs' },
-  { name: '/side', description: 'Open side conversation panel' },
+  { name: '/q', description: 'Quit the chat session' },
+  { name: '/quit', description: 'Quit the chat session' },
+  { name: '/reply', description: 'Reply to the last assistant message' },
+  { name: '/side', description: 'Open a side conversation panel' },
+  { name: '/tangent', description: 'Start a tangent conversation' },
+  { name: '/todos', description: 'Show or manage the task list' },
   { name: '/tools', description: 'Show available tools' },
   { name: '/usage', description: 'Show billing and usage information' },
 ]

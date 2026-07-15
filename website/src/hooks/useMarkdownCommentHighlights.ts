@@ -4,6 +4,7 @@
  *  the first match. Returns -1 when not found. Exported for unit tests +
  *  consumed by MarkdownPanel's CSS Highlight apply() loop. */
 export function findBestOccurrence(text: string, anchor: string, startOffset?: number): number {
+  if (!anchor) return -1
   let bestIdx = -1
   if (startOffset != null) {
     let from = 0
@@ -13,6 +14,7 @@ export function findBestOccurrence(text: string, anchor: string, startOffset?: n
       if (i < 0) break
       const dist = Math.abs(i - startOffset)
       if (dist < bestDist) { bestDist = dist; bestIdx = i }
+      else break // occurrences are in increasing order; distance is V-shaped past the nearest
       from = i + 1
     }
   } else {

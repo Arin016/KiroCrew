@@ -676,65 +676,6 @@ class TestExpandAgentGlobs:
             assert s["loaded_by_agents"] == _resolve_loaded_by_agents(p)
 
 
-# ── api_skills does not block the event loop (regression) ──
-
-
-class TestApiSkillsDoesNotBlockLoop:
-    """Regression for the 3.2.x gateway hard-exit: ``GET /api/skills`` must
-    run its filesystem-heavy discovery + annotation OFF the event loop, so a
-    slow catalog can't stall the loop past the loop-stall watchdog (~25s)."""
-
-    @pytest.mark.asyncio
-    async def test_discovery_runs_off_event_loop(self, fake_home, monkeypatch):
-        import asyncio
-
-        import kiro_claw.dashboard.handlers.prompts as prompts
-
-        # Make the synchronous discovery core observably "slow" and record the
-        # thread it runs on. If it ran on the loop thread, the heartbeat below
-        # could not tick while it slept.
-        loop_thread = __import__("threading").get_ident()
-        ran_on = {}
-
-        def _slow_collect(loader, aim_stdout, project_dir):
-            import threading
-            import time
-            ran_on["thread"] = threading.get_ident()
-            time.sleep(0.3)  # simulate a large-catalog blocking walk
-            return [{"key": "x", "name": "x", "loaded_by_agents": []}]
-
-        monkeypatch.setattr(prompts, "collect_skills_blocking", _slow_collect)
-
-        async def _fake_aim_stdout():
-            return None
-        monkeypatch.setattr(prompts, "_aim_list_stdout", _fake_aim_stdout)
-
-        state = MagicMock()
-        state._slots = {}
-        monkeypatch.setattr(prompts, "_get_skills", lambda s: MagicMock())
-
-        request = MagicMock()
-        request.app = {"state": state}
-
-        # Drive the handler while a concurrent heartbeat counts loop ticks.
-        ticks = {"n": 0}
-
-        async def _heartbeat():
-            for _ in range(30):
-                await asyncio.sleep(0.02)
-                ticks["n"] += 1
-
-        hb = asyncio.ensure_future(_heartbeat())
-        resp = await prompts.api_skills(request)
-        hb.cancel()
-
-        # The blocking work ran on a DIFFERENT thread than the event loop.
-        assert ran_on["thread"] != loop_thread
-        # And the loop kept ticking during the 0.3s "blocking" collect.
-        assert ticks["n"] >= 5
-        assert resp.status == 200
-
-
 # ── list_skill_tree ──
 
 

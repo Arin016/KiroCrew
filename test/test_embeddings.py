@@ -13,6 +13,7 @@ from kiro_claw.embeddings import (
     _HEALTH_CHECK_RETRIES,
     EmbeddingClient,
     OllamaManager,
+    _resolve_blocked_addr,
     _validate_url,
 )
 
@@ -31,6 +32,125 @@ class TestUrlValidation:
             _validate_url("http://user@localhost:11434")
         with pytest.raises(ValueError, match="must not contain credentials"):
             _validate_url("http://localhost:11434?token=secret")
+
+
+class TestSsrfProtection:
+    """Talos 76640a75: even with allow_remote+https, internal/metadata IP
+    *literals* must be rejected (SSRF) — with NO DNS on the sync/loop path.
+    A DNS *name* is not resolved here (blocking getaddrinfo is forbidden on the
+    event loop); the residual name-based / DNS-rebinding TOCTOU is accepted.
+    Malformed / hostless URLs are denied (fail-closed)."""
+
+    def test_metadata_ipv4_literal_rejected(self) -> None:
+        # IMDS endpoint — must be blocked even with allow_remote=True + https.
+        with pytest.raises(ValueError, match="SSRF protection"):
+            _validate_url("https://169.254.169.254", allow_remote=True)
+
+    def test_metadata_ipv6_literal_rejected(self) -> None:
+        with pytest.raises(ValueError, match="SSRF protection"):
+            _validate_url("https://[fd00:ec2::254]", allow_remote=True)
+
+    def test_rfc1918_literals_rejected(self) -> None:
+        for host in ("10.0.0.5", "172.16.3.4", "192.168.1.1"):
+            with pytest.raises(ValueError, match="SSRF protection"):
+                _validate_url(f"https://{host}:11434", allow_remote=True)
+
+    def test_loopback_literal_rejected_when_remote_scheme(self) -> None:
+        # 127.0.0.2 is a loopback literal but not the exact-string localhost
+        # allowlist, so it reaches the literal check and is rejected.
+        with pytest.raises(ValueError, match="SSRF protection"):
+            _validate_url("https://127.0.0.2:11434", allow_remote=True)
+
+    def test_unspecified_and_ipv4_mapped_rejected(self) -> None:
+        with pytest.raises(ValueError, match="SSRF protection"):
+            _validate_url("https://0.0.0.0:11434", allow_remote=True)
+        # IPv4-mapped IPv6 form of the IMDS address must not slip through.
+        with pytest.raises(ValueError, match="SSRF protection"):
+            _validate_url("https://[::ffff:169.254.169.254]", allow_remote=True)
+
+    def test_dns_name_not_resolved_on_sync_path(self, monkeypatch) -> None:
+        # A DNS *name* is NOT resolved here (no blocking getaddrinfo on the
+        # loop). It is allowed through the literal check; the residual
+        # name-based / DNS-rebinding TOCTOU is an accepted risk. The module now
+        # imports socket ONLY for the pure, non-blocking ``inet_aton`` literal
+        # parse — it must never call ``getaddrinfo`` / ``gethostbyname``.
+        import kiro_claw.embeddings as emb_mod
+
+        def _boom(*_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("DNS resolution attempted on sync path")
+
+        monkeypatch.setattr(emb_mod.socket, "getaddrinfo", _boom)
+        monkeypatch.setattr(emb_mod.socket, "gethostbyname", _boom)
+        _validate_url("https://internal.corp.example:11434", allow_remote=True)
+
+    def test_public_hostname_allowed(self) -> None:
+        # A DNS name over https with allow_remote is permitted (no raise, no DNS).
+        _validate_url("https://embeddings.example.com:443", allow_remote=True)
+
+    def test_public_literal_allowed(self) -> None:
+        # A public literal IP over https with allow_remote is permitted.
+        _validate_url("https://93.184.216.34:443", allow_remote=True)
+
+    def test_remote_still_requires_https_before_ssrf_check(self) -> None:
+        # http remote is rejected for the scheme reason before the SSRF check.
+        with pytest.raises(ValueError, match="must use https"):
+            _validate_url("http://169.254.169.254", allow_remote=True)
+
+    def test_remote_flag_still_required(self) -> None:
+        # Without allow_remote, a private literal is rejected as non-localhost.
+        with pytest.raises(ValueError, match="must be localhost"):
+            _validate_url("https://10.0.0.5:11434")
+
+    def test_malformed_url_denied_fail_closed(self) -> None:
+        # A URL whose host cannot be parsed must be DENIED, never allowed.
+        with pytest.raises(ValueError):
+            _validate_url("https://", allow_remote=True)
+        with pytest.raises(ValueError):
+            _validate_url("not a url", allow_remote=True)
+
+    def test_resolve_blocked_addr_helper(self) -> None:
+        # Pure / non-blocking: IP literals classified directly; a DNS name
+        # returns None WITHOUT any resolution.
+        assert _resolve_blocked_addr("169.254.169.254") == "169.254.169.254"
+        assert _resolve_blocked_addr("10.0.0.1") == "10.0.0.1"
+        assert _resolve_blocked_addr("fd00:ec2::254") == "fd00:ec2::254"
+        assert _resolve_blocked_addr("93.184.216.34") is None
+        assert _resolve_blocked_addr("public.example.com") is None
+
+    def test_alternate_ipv4_encodings_rejected(self) -> None:
+        # Heimdall follow-up: ``ipaddress.ip_address`` only accepts the canonical
+        # dotted-quad form, so alternate IPv4 literal encodings for loopback used
+        # to fall through as if they were DNS names. ``inet_aton`` normalization
+        # must now classify them as blocked (loopback = 127.0.0.1).
+        for host in (
+            "0x7f000001",  # hex loopback
+            "2130706433",  # decimal loopback
+            "017700000001",  # octal loopback
+            "127.1",  # short-form loopback
+        ):
+            assert _resolve_blocked_addr(host) == host, host
+
+    def test_alternate_imds_encodings_rejected(self) -> None:
+        # Alternate encodings of the IMDS endpoint 169.254.169.254 (link-local)
+        # must also be blocked after inet_aton normalization.
+        for host in (
+            "0xa9fea9fe",  # hex IMDS
+            "2852039166",  # decimal IMDS
+            "169.254.43518",  # mixed short-form IMDS
+        ):
+            assert _resolve_blocked_addr(host) == host, host
+
+    def test_alternate_encodings_blocked_via_validate_url(self) -> None:
+        # End-to-end: the alternate-encoding loopback/IMDS literals must be
+        # rejected by _validate_url even with allow_remote=True + https.
+        for host in ("0x7f000001", "2130706433", "0xa9fea9fe", "2852039166"):
+            with pytest.raises(ValueError, match="SSRF protection"):
+                _validate_url(f"https://{host}:11434", allow_remote=True)
+
+    def test_public_decimal_literal_still_allowed(self) -> None:
+        # A public address expressed in decimal (8.8.8.8 = 134744072) must still
+        # be allowed — normalization must not over-block public destinations.
+        assert _resolve_blocked_addr("134744072") is None
 
 
 class TestEmbeddingClient:

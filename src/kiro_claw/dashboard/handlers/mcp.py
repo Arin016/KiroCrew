@@ -248,7 +248,11 @@ async def _bg_mcp_probe() -> None:
     """Background MCP probe — populates cache at startup."""
     global _mcp_probe_ts, _mcp_probe_in_progress
     try:
-        from kiro_claw.mcp_discovery import list_servers, probe_server  # noqa: F811
+        # circular import: mcp_discovery defers imports of kiro_claw.agent
+        # which shares state with this module, so importing it at module top
+        # would cycle. Kept in-function like every other mcp_discovery import
+        # in this file. noqa: F811 for the same-named import at mcp.py:426.
+        from kiro_claw.mcp_discovery import probe_all  # noqa: F811
 
         global_mcps: dict[str, Any] = {}
         try:
@@ -257,18 +261,13 @@ async def _bg_mcp_probe() -> None:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
-        all_servers = list_servers()
-        probed = await asyncio.gather(
-            *(probe_server(s) for s in all_servers), return_exceptions=True
-        )
+        # Route through probe_all() so the fan-out is bounded by its
+        # _PROBE_MAX_CONCURRENCY semaphore (Mesh-1968 / Mesh-2661). An
+        # unbounded gather here floods the loop's default executor during a
+        # network blip and can starve the heartbeat into a watchdog _exit.
+        probed = await probe_all()
         result: list[dict[str, Any]] = []
-        for i, r in enumerate(probed):
-            if isinstance(r, BaseException):
-                s = all_servers[i]
-                s.status = "error"
-                s.error = str(r)[:200]
-            else:
-                s = r
+        for s in probed:
             d = s.to_dict()
             spec = global_mcps.get(s.name, {})
             d["enabled"] = not (isinstance(spec, dict) and spec.get("disabled"))

@@ -504,6 +504,66 @@ function rehypeStreamingReveal() {
   }
 }
 
+/**
+ * Rehype plugin: append an inline blinking caret (`<span class="streaming-caret">`)
+ * immediately after the message's LAST trailing text node, so it sits inline at
+ * the end of the streamed text (on the same line as the final word) rather than
+ * on a new line below the block.
+ *
+ * Runs only while streaming (added under MarkdownBlock's `glow` gate, which is
+ * true only for the last markdown block), so exactly one caret is injected. The
+ * caret is a childless element node — the glow/reveal plugins that run after it
+ * only touch text nodes, so it is left untouched and the trailing text still
+ * gets its shimmer/fade. On stream end the plugin drops out and the caret
+ * disappears with no leftover node (clean for selection/copy).
+ *
+ * Falls back to appending at the tree root only when there is no eligible text
+ * yet (e.g. the block is pure code) — a rare edge where a new-line caret is
+ * acceptable.
+ */
+function rehypeStreamingCaret() {
+  return (tree: HastRoot) => {
+    const candidates: { parent: HastParent; index: number }[] = []
+    const walk = (node: RootContent, parent: HastParent, index: number) => {
+      if (node.type === 'text') {
+        if (node.value && node.value.trim()) candidates.push({ parent, index })
+        return
+      }
+      // Block code: exclude entirely — the caret never belongs inside a fenced
+      // code/diff block.
+      if (node.type === 'element' && node.tagName === 'pre') return
+      // Inline code: record the <code> element itself as a candidate at the
+      // PARENT level (and don't recurse into its text children), so the caret
+      // lands AFTER the inline code, not before it. Without this, a message
+      // ending in `` `code` `` would splice the caret ahead of the <code>.
+      if (node.type === 'element' && node.tagName === 'code') { candidates.push({ parent, index }); return }
+      if (node.type === 'element' && node.children) {
+        for (let i = 0; i < node.children.length; i++) walk(node.children[i], node, i)
+      }
+    }
+    if (tree.children) {
+      for (let i = 0; i < tree.children.length; i++) walk(tree.children[i], tree, i)
+    }
+    const caret: HastElement = {
+      type: 'element',
+      tagName: 'span',
+      properties: { className: ['streaming-caret'], 'aria-hidden': 'true' },
+      children: [],
+    }
+    const target = candidates[candidates.length - 1]
+    if (target) {
+      // Insert as the next sibling of the last visible node (text run or inline
+      // <code>) so it renders inline right after the final content. Narrow on
+      // the parent kind (RootContent[] vs ElementContent[]) to keep the insert
+      // type-safe — spliceChildren removes a node, so it can't do an insert.
+      if (target.parent.type === 'root') target.parent.children.splice(target.index + 1, 0, caret)
+      else target.parent.children.splice(target.index + 1, 0, caret)
+    } else if (tree.children) {
+      tree.children.push(caret)
+    }
+  }
+}
+
 export function fixCodeFences(s: string): string {
   // Escape bare "N." lines so markdown doesn't render them as ordered lists.
   // CommonMark: 0-3 leading spaces = list item, 4+ = indented code block.
@@ -598,6 +658,9 @@ const MarkdownBlock = memo(function MarkdownBlock({ content, sourcePos, startLin
   let rehypePlugins: PluggableList = baseRehype
   if (glow) {
     const tail: PluggableList = []
+    // Inline caret first, so the glow/reveal plugins still see (and animate)
+    // the trailing text node that the caret is inserted after.
+    tail.push(rehypeStreamingCaret)
     if (!smooth) tail.push([rehypeStreamingGlow, { tailChars: GLOW_TAIL_CHARS }])
     if (smooth) tail.push(rehypeStreamingReveal)
     rehypePlugins = [...baseRehype, ...tail]

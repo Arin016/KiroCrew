@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import fnmatch
 import json
 import logging
+import math
 import os
 import re
 import string
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +20,15 @@ from urllib.parse import parse_qs
 
 from kiro_claw.executors import maintenance_executor
 from kiro_claw.sel import SecurityEvent, SecurityEventLog
+from kiro_claw.vector_memory_constants import _contains_injection
+
+# NB: kiro_claw.vector_memory is imported lazily inside scan_memory() rather than
+# at module top level. vector_memory.py imports redact_credentials/
+# redact_exfiltration_urls from this module at ITS top level, so a top-level
+# import here would create a circular import — under which the ImportError guard
+# would silently set the store to None and disable scan_memory(). The deferred
+# import breaks the cycle and also keeps the numpy/faiss/snowballstemmer stack
+# off the lightweight import path.
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -410,6 +422,21 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     ".netrc",
     ".git-credentials",
     ".kiroclaw/.env",
+    # Security Event Log trust root (Talos finding cdf82704). The SEL is a
+    # tamper-evident, HMAC-SHA256-chained audit trail (``sel.py``): each entry
+    # signs over the previous entry's hash using the key in ``sel_hmac.key``.
+    # An audited agent that could fs_read the key could forge/rewrite the entire
+    # chain and erase evidence of its own actions, and one that could read/rewrite
+    # ``security_events.jsonl`` could tamper with the log directly. Both are the
+    # governed subject's own audit root, so — like ``.kiroclaw/.env`` — they must
+    # never be readable OR writable through the shared file gate
+    # (``is_sensitive_path``). The gateway's own SEL writer/reader (``sel.py``,
+    # ``session_health.py``) opens these files directly and does NOT route through
+    # this gate, so legitimate audit logging still works. (Deeper hardening — an
+    # out-of-process signer that never exposes the key to the agent's namespace —
+    # is documented future work; this closes the read/rewrite path.)
+    ".kiroclaw/sel_hmac.key",
+    ".kiroclaw/security_events.jsonl",
     # Governance trust-root files (KEYSTONE of the two-level governance model).
     # Under "secure by default, not by mandate" the ONLY thing preventing a
     # prompt-injected agent from rewriting its own ceiling is that it cannot
@@ -867,7 +894,31 @@ _CREDENTIAL_PATTERNS = re.compile(
     r'|(?:SecretAccessKey|aws_secret_access_key)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
     r'|(?:SessionToken|aws_session_token)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
     r'|(?:AccessKeyId|aws_access_key_id)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
-    r"|BEGIN[\s](?:RSA|DSA|EC|OPENSSH)[\s]PRIVATE[\s]KEY"
+    # PEM private key: match the ENTIRE block (header + base64 body), not just
+    # the header phrase. redact_credentials() replaces the matched SPAN, so a
+    # header-only match (the original form) left the secret base64 body verbatim.
+    # Two mutually exclusive tails after the header:
+    #   1. Full block — ``[\s\S]*?`` (any char, incl. newlines) spans the body
+    #      lazily to the first END marker. ``[\s\S]`` (not a base64 char class)
+    #      is required so encrypted keys — whose ``Proc-Type:``/``DEK-Info:``
+    #      headers carry ``:`` and ``,`` — are fully spanned rather than cut
+    #      short at the first non-base64 char (Talos 05687e60).
+    #   2. Truncated block (no END) — consume only *subsequent* PEM body lines:
+    #      each continuation must start with a newline and be a base64 line or a
+    #      ``Proc-Type:``/``DEK-Info:`` metadata header. This deliberately does
+    #      NOT use ``$``/``\Z``: without re.MULTILINE ``$`` means end-of-STRING,
+    #      so a lazy ``[\s\S]*?`` with a ``|$`` fallback swallowed everything
+    #      from a header mentioned inline in prose (LLM output, docs) to the end
+    #      of the string — silently deleting all trailing lines. Requiring a
+    #      leading newline per line means an inline header in prose (real key
+    #      material always begins on the line *after* the header) matches only
+    #      the header phrase, leaving trailing content intact, while a genuine
+    #      truncated key still has its body lines redacted.
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"(?:"
+    r"[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+    r"|(?:\r?\n(?:Proc-Type:[^\n]*|DEK-Info:[^\n]*|[A-Za-z0-9+/=]+(?=\r?\n|\Z)|))*"
+    r")"
     r"|xox[bpas]-[0-9a-zA-Z-]{10,}"  # Slack token
     # Telegram bot token: ``<bot_id>:<secret>`` — bot_id is 6+ digits, secret is
     # ~35 URL-safe base64 chars. The ``{30,}`` floor sits deliberately below the
@@ -900,6 +951,23 @@ _CREDENTIAL_PATTERNS = re.compile(
     # ``scheme://user:pass@`` prefix (the password lives here).
     r"|(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis(?:s)?|amqp(?:s)?)"
     r"://[^\s:/@]+:[^\s/@]+@"
+    # ── JWT / OAuth Bearer tokens (Talos cc1d6bdd) ──
+    # `eyJ` is the base64url encoding of every JWT header's `{"` prefix; a JWT is
+    # three `.`-separated base64url segments (header.payload.signature). The HTTP
+    # `Authorization: Bearer <token>` header carries opaque or JWT bearer creds.
+    # The JWT alternative is case-sensitive (`eyJ` is a fixed base64url prefix).
+    # The header name + scheme are matched case-insensitively via a scoped
+    # `(?i:…)` group because HTTP header names are case-insensitive (RFC 7230
+    # §3.2), HTTP/2 mandates lowercase names, and the `Bearer` scheme is
+    # case-insensitive (RFC 6750 §2.1) — so `authorization: bearer …` emitted by
+    # requests / net/http / HTTP2 frame logs is redacted too. Both alternatives
+    # are scoped tightly: the JWT segment class cannot cross the literal `.`
+    # separators and the Bearer token class (`[A-Za-z0-9._~+/-]`, RFC 6750
+    # `b64token`) stops at whitespace/quotes, so neither over-captures. A Bearer
+    # header carrying a JWT redacts as one match (the Bearer class subsumes the
+    # JWT); a bare JWT is still caught independently (defense in depth).
+    r"|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"  # JWT header.payload.sig
+    r"|(?i:Authorization:\s*Bearer)\s+[A-Za-z0-9._~+/-]+=*"  # HTTP bearer auth header
     r")",
 )
 
@@ -920,10 +988,157 @@ def get_credential_patterns() -> list[re.Pattern[str]]:
 _B64_CHUNK_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 
 
+# ── Label-independent bare-secret detection (Talos bf7b1baf) ──
+# A 40-char AWS *secret access key* (the value paired with an AKIA/ASIA access
+# key ID) is a bare run of the base64 alphabet with NO distinctive prefix and NO
+# key= label, so none of the labelled/prefixed patterns in _CREDENTIAL_PATTERNS
+# catch it when it appears standalone (e.g. echoed alone, in a log line, or in a
+# JSON array element). We add a conservative, entropy-gated detector for this
+# shape. This is the HIGHEST false-positive-risk redaction rule in the module, so
+# it is deliberately over-gated: a token must clear EVERY gate below to be
+# redacted. The gates are ordered cheapest-first.
+#
+# AWS secret access keys are exactly 40 base64 characters. We match ANY isolated
+# run of >=40 base64-alphabet chars (word-boundary look-arounds keep surrounding
+# prose intact and stop a longer high-entropy blob from being split and missed),
+# then require the *specific 40-char secret shape* per token.
+_BARE_SECRET_RUN_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])")
+
+# Exactly-40 is the AWS secret-key length. Keeping the shape check length-exact
+# (rather than ">=40") is what lets the structural gates below cleanly separate
+# real keys from 64-char sha256 hex, base64 document blobs, etc.
+_SECRET_KEY_LEN = 40
+
+# Shannon-entropy floor (bits/char). A uniformly-random 40-char base64 string
+# averages ~4.78 bits/char and empirically almost never drops below ~4.4;
+# English-word identifiers, hex digests, and repeated/low-alphabet runs sit
+# below this. 4.3 is a conservative floor that admits real keys (the canonical
+# AWS example scores 4.66) while rejecting camelCase code identifiers and file
+# paths, which cluster around 4.0-4.3.
+_SECRET_ENTROPY_MIN = 4.3
+
+# Even after the entropy floor, camelCase / PascalCase code identifiers and
+# slash-delimited file paths (e.g. src/main/java/com/Example/FooBarBazClas1) can
+# survive on entropy ALONE. Two structural signals separate a random secret from
+# a word-based identifier or path: (a) a random key almost never contains a long
+# unbroken lowercase run, whereas identifiers/paths are built from dictionary
+# words that do; (b) a random key has a low vowel ratio, whereas English words
+# do not. NOTE: unlike a naive design we deliberately do NOT treat the presence
+# of '/' or '+' as a free pass to redact — 40-char mixed-case file paths contain
+# '/' yet are benign, so a '/' token must still clear both structural gates.
+# Thresholds are chosen from measured distributions (see test_security.py) with a
+# wide margin toward NOT redacting.
+_SECRET_MAX_LOWER_RUN = 5
+_SECRET_MAX_VOWEL_RATIO = 0.30
+
+# A token that base64-decodes to >=85% printable ASCII is encoded *text*, not a
+# random key (random 40-char keys decode to mostly non-printable bytes). Such a
+# token is left to the existing base64 decode-and-scan path in redact_credentials
+# so we do not double-count or mis-classify it here.
+_SECRET_PRINTABLE_DECODE_RATIO = 0.85
+
+_VOWELS: frozenset[str] = frozenset("aeiouAEIOU")
+
+# All-hex runs are git SHAs (40 hex), sha256 (64 hex), md5 (32 hex), etc. — never
+# an AWS secret key (which uses the full base64 alphabet). Reject them outright.
+_HEX_ONLY_RE = re.compile(r"\A[0-9a-fA-F]+\Z")
+
+
+def _shannon_entropy(token: str) -> float:
+    """Return the Shannon entropy of *token* in bits per character."""
+    if not token:
+        return 0.0
+    counts = Counter(token)
+    length = len(token)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
+
+def _decodes_to_printable_text(token: str) -> bool:
+    """Return True if *token* base64-decodes to mostly-printable ASCII.
+
+    Encoded human-readable text (a base64 document blob) decodes to printable
+    bytes; a random 40-char secret key decodes to mostly non-printable bytes. We
+    use this to exclude encoded-text blobs from the bare-secret heuristic (they
+    are handled by the existing decode-and-scan pass instead).
+    """
+    try:
+        raw = base64.b64decode(token + "=" * (-len(token) % 4), validate=False)
+    except Exception:
+        return False
+    if not raw:
+        return False
+    printable = sum(1 for b in raw if 0x20 <= b <= 0x7E or b in (0x09, 0x0A, 0x0D))
+    return printable / len(raw) >= _SECRET_PRINTABLE_DECODE_RATIO
+
+
+def _longest_lowercase_run(token: str) -> int:
+    """Return the length of the longest run of consecutive lowercase letters.
+
+    Dictionary-word identifiers and file-path segments contain long lowercase
+    word runs; a uniformly random base64 secret almost never does. This is the
+    primary discriminator that keeps camelCase identifiers and mixed-case file
+    paths out of the bare-secret heuristic.
+    """
+    best = current = 0
+    for ch in token:
+        if ch.islower():
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def _vowel_ratio(token: str) -> float:
+    """Return the fraction of alphabetic characters in *token* that are vowels."""
+    letters = [ch for ch in token if ch.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for ch in letters if ch in _VOWELS) / len(letters)
+
+
+def _looks_like_secret_key(token: str) -> bool:
+    """Return True if *token* has the shape of a bare AWS secret access key.
+
+    Conservative, multi-gate classifier for a label-less 40-char base64 secret
+    (Talos bf7b1baf). Every gate must pass; the design bias is toward NOT
+    redacting (a false negative merely reverts to today's behavior, a false
+    positive corrupts benign output). Gates, cheapest-first:
+
+    1. Length is EXACTLY 40 (AWS secret-key length).
+    2. Contains all three of lower + upper + digit (rejects all-lower prose runs,
+       all-upper CONSTANT_NAMES, base32, digit strings).
+    3. Not an all-hex run (rejects git SHAs, sha256/md5 digests).
+    4. Shannon entropy >= _SECRET_ENTROPY_MIN (rejects low-entropy repeats/prose
+       and most code identifiers, which cluster below 4.3).
+    5. Does not base64-decode to printable text (rejects encoded-text blobs).
+    6. Structural randomness: longest lowercase run <= _SECRET_MAX_LOWER_RUN AND
+       vowel ratio <= _SECRET_MAX_VOWEL_RATIO. These separate a random key from
+       word-based identifiers and slash-delimited file paths that survive the
+       entropy floor. Both gates apply to EVERY token (a '/' or '+' does not
+       exempt a token, so 40-char mixed-case file paths stay intact).
+    """
+    if len(token) != _SECRET_KEY_LEN:
+        return False
+    has_lower = any(ch.islower() for ch in token)
+    has_upper = any(ch.isupper() for ch in token)
+    has_digit = any(ch.isdigit() for ch in token)
+    if not (has_lower and has_upper and has_digit):
+        return False
+    if _HEX_ONLY_RE.match(token):
+        return False
+    if _shannon_entropy(token) < _SECRET_ENTROPY_MIN:
+        return False
+    if _decodes_to_printable_text(token):
+        return False
+    return (
+        _longest_lowercase_run(token) <= _SECRET_MAX_LOWER_RUN
+        and _vowel_ratio(token) <= _SECRET_MAX_VOWEL_RATIO
+    )
+
+
 def _decode_b64_safe(text: str) -> str:
     """Try to base64-decode chunks in text; return decoded content or ''."""
-    import base64
-
     for m in _B64_CHUNK_RE.finditer(text):
         try:
             decoded = base64.b64decode(m.group(), validate=True).decode("utf-8", errors="ignore")
@@ -956,6 +1171,23 @@ def redact_credentials(text: str) -> tuple[str, list[str]]:
         if decoded:
             result = result.replace(chunk, "[REDACTED: encoded credential]", 1)
             warnings.append(f"Redacted base64-encoded credential ({len(chunk)} chars)")
+
+    # 3. Detect and redact BARE 40-char AWS secret keys with no label/prefix
+    # (Talos bf7b1baf). These carry no distinctive marker for _CREDENTIAL_PATTERNS
+    # to anchor on, so an entropy + structural heuristic is the only way to catch
+    # a standalone secret value. Scan the ORIGINAL text (not the already-mutated
+    # result) so match offsets are stable; skip any run whose text has already
+    # been redacted away by an earlier pass.
+    for m in _BARE_SECRET_RUN_RE.finditer(text):
+        run = m.group()
+        if not _looks_like_secret_key(run):
+            continue
+        if run not in result:
+            # Already redacted by pass 1/2 (e.g. it was a labelled value or an
+            # encoded-credential chunk) — nothing left to replace.
+            continue
+        result = result.replace(run, "[REDACTED: credential]", 1)
+        warnings.append(f"Redacted bare secret key ({len(run)} chars)")
 
     return result, warnings
 
@@ -1398,9 +1630,15 @@ def scan_history(history_dir: Path, last_n: int = 100) -> list[dict]:
 
 def scan_memory() -> list[dict]:
     """Scan vector memory for suspicious content. Returns list of findings."""
-    from kiro_claw.vector_memory import VectorMemoryStore, _contains_injection
-
     findings: list[dict] = []
+    # Lazy import to avoid a circular dependency (vector_memory imports
+    # redact_credentials/redact_exfiltration_urls from this module at its top
+    # level) and to keep the optional numpy/faiss/snowballstemmer stack off the
+    # lightweight import path. Skip the scan cleanly if it is unavailable.
+    try:
+        from kiro_claw.vector_memory import VectorMemoryStore
+    except ImportError:  # numpy/faiss/snowballstemmer are optional heavy deps
+        return findings
     try:
         store = VectorMemoryStore()
         store.init()
@@ -1435,6 +1673,78 @@ def scan_memory() -> list[dict]:
 
     store.close()
     return findings
+
+
+def contains_injection(text: str | None) -> bool:
+    """Return True if *text* matches a known prompt-injection pattern.
+
+    Accepts ``None`` (returns ``False``) so callers can screen optional
+    fetched content — e.g. a Slack ``thread_parent_text`` that may be unset —
+    without a separate None check.
+
+    Public wrapper over the shared ``_INJECTION_PATTERNS`` set (defined in the
+    dependency-free ``vector_memory_constants`` module) so untrusted content
+    pulled from external surfaces — e.g. Slack thread-parent / thread-metadata
+    fetched from arbitrary, possibly non-owner authors — can be screened
+    before it is injected into the LLM prompt. The pattern set lives in the
+    light constants module (not ``vector_memory``, whose numpy/faiss/stemmer
+    deps are heavy), so it is imported at module top level with no lazy import
+    and no fail-open path: a screen that cannot run must not silently pass
+    untrusted content through.
+    """
+    if not text:
+        return False
+    return _contains_injection(text)
+
+
+def audit_injection_dropped(
+    *,
+    surface: str,
+    session_key: str = "",
+    channel_id: str = "",
+    thread_ts: str = "",
+    agent: str = "kiroclaw",
+    sample: str = "",
+) -> None:
+    """Emit an SEL audit event when injection-screened content is dropped.
+
+    Called when :func:`contains_injection` flags untrusted external content
+    (e.g. a Slack thread-parent message or thread metadata authored by a
+    non-owner) and the content is dropped before reaching the LLM prompt
+    (Talos 1fde6107). Recording the attempt keeps prompt-injection attempts
+    visible in the audit trail rather than silently discarded.
+
+    Best-effort: an SEL logging failure is logged at WARNING and never
+    propagates — the content is dropped regardless of audit success, so this
+    cannot break prompt building.
+    """
+    try:
+        SecurityEventLog().log(
+            SecurityEvent(
+                event_id=uuid.uuid4().hex[:16],
+                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                event_type="prompt_injection_dropped",
+                caller_identity=session_key,
+                agent=agent,
+                source="context",
+                operation=surface,
+                outcome="dropped",
+                resources=f"channel_id={channel_id} thread_ts={thread_ts}",
+                metadata={
+                    "surface": surface,
+                    "channel_id": channel_id,
+                    "thread_ts": thread_ts,
+                    "sample": sample[:200] if sample else "",
+                    "mechanism": "contains_injection",
+                },
+            )
+        )
+    except Exception:
+        logger.warning(
+            "SEL audit failed for prompt_injection_dropped on %r (content still dropped)",
+            surface,
+            exc_info=True,
+        )
 
 
 def should_record_observe_history(

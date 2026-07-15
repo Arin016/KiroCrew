@@ -59,6 +59,95 @@ class TestRedactCredentials:
         result, _ = redact_credentials(text)
         assert "BEGIN OPENSSH PRIVATE KEY" not in result
 
+    def test_redacts_full_private_key_body(self) -> None:
+        """Talos 05687e60: the base64 BODY (not just the header) must be redacted."""
+        body_a = "MIIEpAIBAAKCAQEA1234567890abcdefghijklmnopqrstuvwxyzABCDEF"
+        body_b = "GHIJKLMNOPQRSTUVWXYZ0987654321zyxwvutsrqponmlkjihgfedcba"
+        text = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            f"{body_a}\n{body_b}\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        result, warnings = redact_credentials(text)
+        assert body_a not in result
+        assert body_b not in result
+        assert "BEGIN RSA PRIVATE KEY" not in result
+        assert "END RSA PRIVATE KEY" not in result
+        assert "[REDACTED: credential]" in result
+        assert warnings
+
+    def test_redacts_truncated_private_key_body(self) -> None:
+        """A key block missing the END marker still has its body redacted."""
+        body = "MIIEpAIBAAKCAQEAtruncatedbodybytes1234567890abcdef"
+        text = f"-----BEGIN EC PRIVATE KEY-----\n{body}"
+        result, _ = redact_credentials(text)
+        assert body not in result
+        assert "BEGIN EC PRIVATE KEY" not in result
+
+    def test_redacts_encrypted_private_key_body(self) -> None:
+        """Encrypted PEM: Proc-Type/DEK-Info headers carry ':'/',' — body must
+        still be fully redacted (a base64-only body class would stop short)."""
+        body = "MIIEpAIBAAKCAQEAencryptedbodybytes0987654321zyxwvu"
+        text = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "Proc-Type: 4,ENCRYPTED\n"
+            "DEK-Info: AES-128-CBC,DDEA6208BB09B295E4C9BA85D2E85CD1\n\n"
+            f"{body}\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        result, _ = redact_credentials(text)
+        assert body not in result
+        assert "DEK-Info" not in result
+        assert "BEGIN RSA PRIVATE KEY" not in result
+
+    def test_redacts_two_private_key_blocks(self) -> None:
+        """Two adjacent key blocks: each body redacted, intervening prose kept."""
+        body1 = "MIIEpAIBAAKCAQEAfirstkeybody1234567890abcdefghij"
+        body2 = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAA"
+        text = (
+            f"-----BEGIN RSA PRIVATE KEY-----\n{body1}\n-----END RSA PRIVATE KEY-----\n"
+            "middle prose stays\n"
+            f"-----BEGIN OPENSSH PRIVATE KEY-----\n{body2}\n-----END OPENSSH PRIVATE KEY-----"
+        )
+        result, _ = redact_credentials(text)
+        assert body1 not in result
+        assert body2 not in result
+        assert "middle prose stays" in result
+
+    def test_private_key_prose_not_over_redacted(self) -> None:
+        """A full key block followed by prose: the END anchor stops the span so
+        the trailing prose is preserved (no over-redaction)."""
+        body = "MIIEpAIBAAKCAQEAbodybytes1234567890abcdefghijklmn"
+        text = (
+            f"-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----\n"
+            "Contact ops@example.com if this key is expired."
+        )
+        result, _ = redact_credentials(text)
+        assert body not in result
+        assert "Contact ops@example.com if this key is expired." in result
+
+    def test_no_false_positive_on_private_key_prose(self) -> None:
+        """Prose mentioning 'PRIVATE KEY' without the PEM markers is untouched."""
+        text = "See the PRIVATE KEY handling section of the runbook."
+        result, warnings = redact_credentials(text)
+        assert result == text
+        assert not warnings
+
+    def test_pem_header_in_prose_without_end_keeps_trailing_lines(self) -> None:
+        """A PEM BEGIN header mentioned inline in prose (no body, no END marker)
+        must not swallow trailing lines to end-of-string. Guards the `$`
+        end-of-string over-redaction regression (Talos 05687e60)."""
+        text = (
+            "For example, a PEM key starts with "
+            "-----BEGIN RSA PRIVATE KEY----- and contains base64 data.\n"
+            "Line 2 of docs.\n"
+            "Line 3."
+        )
+        result, _ = redact_credentials(text)
+        assert "Line 2 of docs." in result
+        assert "Line 3." in result
+        assert "and contains base64 data." in result
+
     def test_redacts_slack_token(self) -> None:
         text = "Token is xoxb-1234567890-abcdefghij"
         result, _ = redact_credentials(text)
@@ -229,6 +318,76 @@ class TestRedactCredentials:
         assert "TOKEN2" not in result
         assert '"region":"x"' in result
 
+    # ── JWT / Authorization: Bearer tokens (Talos cc1d6bdd) ──
+    # JWTs and OAuth bearer tokens leaked in tool output / logs were previously
+    # not redacted. `eyJ` is the base64url of every JWT header's `{"` prefix.
+
+    _JWT = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0"
+        ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    )
+
+    def test_redacts_jwt(self) -> None:
+        text = f"token={self._JWT}"
+        result, warnings = redact_credentials(text)
+        assert self._JWT not in result
+        assert "[REDACTED: credential]" in result
+        assert len(warnings) == 1
+
+    def test_redacts_jwt_in_prose(self) -> None:
+        text = f"Here is the id_token: {self._JWT} — do not log it."
+        result, _ = redact_credentials(text)
+        assert "eyJhbGci" not in result
+        assert "do not log it." in result  # trailing prose preserved (no over-capture)
+
+    def test_redacts_authorization_bearer(self) -> None:
+        text = "Authorization: Bearer abc123.def-456_ghi/jkl+mno=="
+        result, warnings = redact_credentials(text)
+        assert "abc123.def-456_ghi/jkl+mno==" not in result
+        assert "[REDACTED: credential]" in result
+        assert len(warnings) == 1
+
+    def test_redacts_authorization_bearer_no_space(self) -> None:
+        text = "Authorization:Bearer   opaque-token-value"
+        result, _ = redact_credentials(text)
+        assert "opaque-token-value" not in result
+
+    def test_redacts_lowercase_authorization_bearer(self) -> None:
+        """HTTP/2 + requests/net/http logs emit a lowercase header/scheme.
+
+        Header names are case-insensitive (RFC 7230 §3.2), HTTP/2 mandates
+        lowercase, and the `Bearer` scheme is case-insensitive (RFC 6750 §2.1),
+        so the case-sensitive prefix would otherwise leak the token.
+        """
+        text = "authorization: bearer opaque-token-value"
+        result, warnings = redact_credentials(text)
+        assert "opaque-token-value" not in result
+        assert "[REDACTED: credential]" in result
+        assert len(warnings) == 1
+
+    def test_redacts_bearer_jwt_single_match(self) -> None:
+        """A Bearer header carrying a JWT redacts as one match, not two."""
+        text = f"Authorization: Bearer {self._JWT}"
+        result, warnings = redact_credentials(text)
+        assert self._JWT not in result
+        assert "Bearer" not in result
+        assert len(warnings) == 1
+
+    def test_jwt_prefix_without_structure_not_redacted(self) -> None:
+        """A bare `eyJ` token with no `.`-separated segments must not over-redact."""
+        text = "The variable eyJson holds parsed JSON output."
+        result, warnings = redact_credentials(text)
+        assert result == text
+        assert warnings == []
+
+    def test_bearer_word_alone_not_redacted(self) -> None:
+        """The word `Bearer` without the `Authorization:` header prefix is prose."""
+        text = "The bond is a bearer instrument, not registered."
+        result, warnings = redact_credentials(text)
+        assert result == text
+        assert warnings == []
+
 
 class TestRedactCredentialsBase64:
     """Tests for base64-encoded credential detection."""
@@ -265,6 +424,150 @@ class TestRedactCredentialsBase64:
         text = "SGVsbG8="  # "Hello" — too short to trigger (< 40 chars)
         result, warnings = redact_credentials(text)
         assert result == text
+
+
+class TestBareSecretKeyRedaction:
+    """Label-independent 40-char AWS secret-key redaction (Talos bf7b1baf).
+
+    A bare 40-char base64 secret (the value paired with an AKIA/ASIA access key
+    ID) carries no distinctive prefix and no ``key=`` label, so the labelled
+    patterns miss it when it appears standalone. These tests prove the
+    entropy + structural heuristic catches real secret shapes WITHOUT
+    over-redacting git SHAs, hex digests, UUIDs, code identifiers, or file paths.
+    """
+
+    # ── TRUE POSITIVES: real 40-char secret-key shapes must be redacted ──
+
+    def test_redacts_bare_aws_example_secret_key(self) -> None:
+        # The canonical AWS documentation example secret access key, standalone
+        # (no label, no AKIA sibling) — the exact gap the finding describes.
+        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        result, warnings = redact_credentials(secret)
+        assert secret not in result
+        assert "[REDACTED: credential]" in result
+        assert warnings
+
+    def test_redacts_bare_secret_in_prose_context(self) -> None:
+        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        text = f"Here is the key: {secret} — keep it safe"
+        result, _ = redact_credentials(text)
+        assert secret not in result
+        assert "keep it safe" in result  # surrounding prose preserved
+
+    def test_redacts_bare_secret_in_json_array(self) -> None:
+        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        text = f'{{"keys": ["{secret}"]}}'
+        result, _ = redact_credentials(text)
+        assert secret not in result
+
+    def test_redacts_duplicate_bare_secret_occurrences(self) -> None:
+        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        text = f"{secret} and again {secret}"
+        result, _ = redact_credentials(text)
+        assert secret not in result  # BOTH copies gone
+
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",  # AWS doc example (40 chars)
+            "Kx3Q51tPusV/D0URlGfMmNbVc7Z8yJhLpQrStUwZ",  # random, with '/' (40 chars)
+            "Kx3Q51tPusVkD0URlGfMmNbVc7Z8yJhLpQrStUwZ",  # random alnum (40 chars)
+            "Zx9Kq2Wm7Vn4Bc1Xz8Lp5Rt3Yd6Fg0Hj2Ns4QwYt",  # random alnum (40 chars)
+        ],
+    )
+    def test_redacts_various_bare_secret_shapes(self, secret: str) -> None:
+        assert len(secret) == 40  # guard: AWS secret-key length
+        result, _ = redact_credentials(secret)
+        assert secret not in result, f"bare secret leaked: {secret!r}"
+
+    # ── TRUE NEGATIVES: high-FP-risk lookalikes must NOT be redacted ──
+
+    def test_git_sha_not_redacted(self) -> None:
+        # 40-char hex git commit SHA — must survive untouched.
+        for sha in [
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "356a192b7913b04c54574d18c28d46e6395428ab",
+            "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709",  # upper hex
+            "Da39A3ee5E6b4B0d3255BfeF95601890AfD80709",  # mixed hex
+        ]:
+            result, warnings = redact_credentials(sha)
+            assert result == sha, f"git SHA over-redacted: {sha!r}"
+            assert not warnings
+
+    def test_sha256_hex_not_redacted(self) -> None:
+        digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        result, warnings = redact_credentials(digest)
+        assert result == digest
+        assert not warnings
+
+    def test_md5_hex_not_redacted(self) -> None:
+        digest = "d41d8cd98f00b204e9800998ecf8427e"
+        result, warnings = redact_credentials(digest)
+        assert result == digest
+        assert not warnings
+
+    def test_uuid_not_redacted(self) -> None:
+        for u in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550E8400-E29B-41D4-A716-446655440000",
+        ]:
+            result, _ = redact_credentials(u)
+            assert result == u, f"UUID over-redacted: {u!r}"
+
+    def test_ordinary_prose_not_redacted(self) -> None:
+        text = "The quick brown fox jumps over the lazy dog once more today."
+        result, warnings = redact_credentials(text)
+        assert result == text
+        assert not warnings
+
+    def test_camelcase_identifier_not_redacted(self) -> None:
+        # 40-char camelCase/PascalCase code identifiers with digits — the class
+        # that overlaps real keys on entropy alone. The structural gates
+        # (longest-lowercase-run + vowel-ratio) must keep them intact.
+        for ident in [
+            "AbstractSingletonProxyFactoryBean2Impl3",
+            "getUserProfileByIdAndReturnJsonV2Respon",
+            "configLoaderV3ParseYamlAndMergeDefaults1",
+            "ThisIsA40CharacterCamelCaseIdentifier12T",
+            "React2ComponentWithHooksAndStateManager1",
+            "HTTPResponseHandlerV2ForJsonAndXmlData12",
+        ]:
+            result, warnings = redact_credentials(ident)
+            assert result == ident, f"identifier over-redacted: {ident!r}"
+            assert not warnings
+
+    def test_slash_delimited_file_paths_not_redacted(self) -> None:
+        # 40-char mixed-case file/package paths contain '/' (a base64 char) but
+        # are benign. Regression guard: the heuristic must NOT treat '/' as a
+        # free pass to redact — every '/' token still has to clear the structural
+        # gates, and dictionary-word path segments fail them.
+        for path in [
+            "src/main/java/com/Example/FooBarBazClas1",  # exactly 40 chars
+            "MyClass1/MyOther2/MyThird3/MyFourthClas4",  # exactly 40 chars
+        ]:
+            assert len(path) == 40  # guard: same length as an AWS secret key
+            result, warnings = redact_credentials(path)
+            assert result == path, f"file path over-redacted: {path!r}"
+            assert not warnings
+
+    def test_base32_and_digit_runs_not_redacted(self) -> None:
+        for token in [
+            "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXPJBSWY3DP",  # base32 (no lowercase)
+            "1234567890123456789012345678901234567890",  # digits only
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmn",  # lowercase only
+        ]:
+            result, warnings = redact_credentials(token)
+            assert result == token, f"token over-redacted: {token!r}"
+            assert not warnings
+
+    def test_base64_of_readable_text_not_over_redacted_as_bare(self) -> None:
+        # A base64 blob that decodes to printable text is handled by the
+        # encoded-credential path, not the bare-secret heuristic; a benign one
+        # must survive untouched.
+        blob = base64.b64encode(b"the quick brown fox jumps over lazyy").decode()[:40]
+        result, warnings = redact_credentials(blob)
+        assert result == blob
+        assert not warnings
 
 
 class TestSandboxDeniedCommands:
@@ -1078,6 +1381,28 @@ class TestIsSensitivePath:
     def test_kiroclaw_env(self) -> None:
         assert is_sensitive_path("~/.kiroclaw/.env") is True
 
+    def test_sel_hmac_key(self) -> None:
+        # Talos finding cdf82704: the SEL HMAC signing key is the trust root of
+        # the tamper-evident audit chain. If an audited agent could fs_read it,
+        # it could forge the entire chain, so it must be sensitive (read-blocked).
+        assert is_sensitive_path("~/.kiroclaw/sel_hmac.key") is True
+
+    def test_security_events_log(self) -> None:
+        # Talos finding cdf82704: the SEL audit log itself must not be
+        # readable/rewritable by the audited agent (tamper of the evidence trail).
+        assert is_sensitive_path("~/.kiroclaw/security_events.jsonl") is True
+
+    def test_sel_files_absolute_path(self) -> None:
+        home = str(Path.home())
+        assert is_sensitive_path(f"{home}/.kiroclaw/sel_hmac.key") is True
+        assert is_sensitive_path(f"{home}/.kiroclaw/security_events.jsonl") is True
+
+    def test_non_sel_kiroclaw_file_not_blocked(self) -> None:
+        # Regression guard: the SEL additions must not over-block routine
+        # ~/.kiroclaw reads (config.json, sessions.db) that operators/tools need.
+        assert is_sensitive_path("~/.kiroclaw/config.json") is False
+        assert is_sensitive_path("~/.kiroclaw/sessions.db") is False
+
     def test_safe_path(self) -> None:
         assert is_sensitive_path("~/Documents/code/main.py") is False
 
@@ -1177,6 +1502,16 @@ class TestIsSensitiveBashCommand:
     def test_base64_gnupg(self) -> None:
         result = is_sensitive_bash_command("base64 ~/.gnupg/secring.gpg")
         assert "blocked" in result.lower()
+
+    def test_cat_sel_hmac_key_blocked(self) -> None:
+        # Talos finding cdf82704: reading the SEL HMAC key via bash is blocked
+        # (adding it to _SENSITIVE_HOME_DIRS also arms the bash-read matcher).
+        result = is_sensitive_bash_command("cat ~/.kiroclaw/sel_hmac.key")
+        assert result is not None and "blocked" in result.lower()
+
+    def test_cat_security_events_log_blocked(self) -> None:
+        result = is_sensitive_bash_command("cat ~/.kiroclaw/security_events.jsonl")
+        assert result is not None and "blocked" in result.lower()
 
     def test_colon_separated_sensitive_path_blocked(self) -> None:
         # CR-284272012 H-p5: a sensitive path after ':' / VAR=val:path / a

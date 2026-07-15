@@ -3,10 +3,11 @@ import type { ReactNode } from 'react'
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
-import { Command, MessageSquarePlus, SunMoon, Keyboard } from 'lucide-react'
+import { Command, MessageSquarePlus, SunMoon, Keyboard, Pin } from 'lucide-react'
 
-import { useAppDispatch } from '../../../store'
+import { useAppDispatch, useAppSelector } from '../../../store'
 import { createSlot } from '../../../store/chatSlice'
+import { useSessionActions } from '../../../hooks/useSessionActions'
 import { useTheme } from '../../../hooks/useTheme'
 import { fuzzyMatch, makeScoreThenNameComparator } from '../../../utils/fuzzyMatch'
 import type { ResourceProvider, Result } from '../types'
@@ -63,6 +64,8 @@ export interface ActionsProviderDeps {
   toggleTheme: () => void
   /** Open the keyboard-shortcuts help modal. */
   openShortcuts: () => void
+  /** Pin state + toggle for the active session; null when no session is active (action omitted). */
+  pinCurrentSession?: { pinned: boolean; toggle: () => void } | null
 }
 
 const compareResults = makeScoreThenNameComparator<Result>(
@@ -102,6 +105,17 @@ export function createActionsProvider(deps: ActionsProviderDeps): ResourceProvid
       run: deps.openShortcuts,
     },
   ]
+
+  if (deps.pinCurrentSession) {
+    const { pinned, toggle } = deps.pinCurrentSession
+    actions.push({
+      key: 'pin-session',
+      title: pinned ? 'Unpin current session' : 'Pin current session',
+      subtitle: pinned ? 'Remove pin from this chat' : 'Pin this chat to the top',
+      icon: inlineIcon(Pin),
+      run: toggle,
+    })
+  }
 
   return {
     id: PROVIDER_ID,
@@ -148,6 +162,12 @@ export function useActionsProvider(opts: { openShortcuts: () => void }): Resourc
   const { cycle } = useTheme()
   const { openShortcuts } = opts
 
+  const { togglePin } = useSessionActions()
+  const activeSlot = useAppSelector((s) => s.chat.activeSlot)
+  const activePinned = useAppSelector(
+    (s) => s.dashboard.slots.find((slot) => slot.key === activeSlot)?.pinned ?? false,
+  )
+
   // "New session" is a write (createSlot); route it through useMutation for
   // error/loading state and consistency with paletteActions.ts's createSlot
   // mutation (AutoSDE use-react-query). onSuccess navigates to /chat so the
@@ -165,7 +185,10 @@ export function useActionsProvider(opts: { openShortcuts: () => void }): Resourc
           cycle()
         },
         openShortcuts,
+        pinCurrentSession: activeSlot
+          ? { pinned: activePinned, toggle: () => togglePin(activeSlot) }
+          : null,
       }),
-    [doNewSession, cycle, openShortcuts],
+    [doNewSession, cycle, openShortcuts, activeSlot, activePinned, togglePin],
   )
 }

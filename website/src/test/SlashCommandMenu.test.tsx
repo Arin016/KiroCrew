@@ -47,6 +47,14 @@ describe('SlashCommandMenu (shared-hook migration)', () => {
     expect(screen.getByText('/cc')).toBeInTheDocument()
   })
 
+  it('renders each command description from the API', async () => {
+    render(<Harness input="/" />)
+    // Wait for the resolved query, then assert the description column renders.
+    expect(await screen.findByText('Alpha command')).toBeInTheDocument()
+    expect(screen.getByText('Beta command')).toBeInTheDocument()
+    expect(screen.getByText('Gamma command')).toBeInTheDocument()
+  })
+
   it('filters by name prefix', async () => {
     render(<Harness input="/b" />)
     expect(await screen.findByText('/bb')).toBeInTheDocument()

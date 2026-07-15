@@ -32,7 +32,11 @@ from kiro_claw.config.loader import (
 )
 from kiro_claw.config.schema import SCHEMA_REGISTRY, config_entry_to_dict
 from kiro_claw.dashboard.chat_persistence import get_reasoning_effort_ordered
-from kiro_claw.dashboard.chat_utils import _SLASH_COMMANDS, _history_key_for
+from kiro_claw.dashboard.chat_utils import (
+    _SLASH_COMMANDS,
+    SLASH_COMMAND_DESCRIPTIONS,
+    _history_key_for,
+)
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.env import augmented_path
 from kiro_claw.executors import discovery_executor
@@ -1015,11 +1019,21 @@ async def api_slash_commands(request: web.Request) -> web.Response:
                 "security-review",
                 "usage",
             ]
-        result = [{"name": f"/{c}", "description": ""} for c in cc_commands]
-        result.append({"name": "/side", "description": "Open side conversation panel"})
+        result = [
+            {"name": f"/{c}", "description": SLASH_COMMAND_DESCRIPTIONS.get(f"/{c}", "")}
+            for c in cc_commands
+        ]
+        result.append(
+            {"name": "/side", "description": SLASH_COMMAND_DESCRIPTIONS.get("/side", "")}
+        )
         return web.json_response(result)
 
-    return web.json_response([{"name": c, "description": ""} for c in sorted(_SLASH_COMMANDS)])
+    return web.json_response(
+        [
+            {"name": c, "description": SLASH_COMMAND_DESCRIPTIONS.get(c, "")}
+            for c in sorted(_SLASH_COMMANDS)
+        ]
+    )
 
 
 async def api_agent_detail(request: web.Request) -> web.Response:

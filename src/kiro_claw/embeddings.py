@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import ipaddress
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ import platform
 import shlex
 import shutil
 import signal
+import socket
 import time
 import urllib.parse
 import urllib.request
@@ -26,6 +28,7 @@ import aiohttp
 from kiro_claw.config.loader import KiroClawConfig, config_dir, config_path
 from kiro_claw.constants import OLLAMA_DOCKER_CONTAINER
 from kiro_claw.platform import current_context, safe_context_call
+from kiro_claw.sel import sel
 
 # ── Optional dependency: botocore (AWS SigV4 signing) ──
 # Used only by the unmanaged-Ollama → API Gateway path (embedding_auth=aws_sigv4).
@@ -128,15 +131,75 @@ def _persist_embedding_runtime(runtime: str) -> None:
         logger.warning("Could not write config file; skipping runtime persistence")
 
 
+def _resolve_blocked_addr(host: str) -> str | None:
+    """Return the internal/metadata address *host* IS, or None. PURE / NON-BLOCKING.
+
+    Performs **no DNS** — nothing here may run on the event loop and block. Only
+    IP *literals* are inspected: if *host* is a literal IP that is private /
+    loopback / link-local / reserved / multicast / unspecified, its string form
+    is returned. This covers the IMDS endpoints (``169.254.169.254`` and
+    ``fd00:ec2::254``), all RFC1918 space (``10/8``, ``172.16/12``,
+    ``192.168/16``), ``127/8`` and ``::1``. IPv4 addresses mapped into IPv6
+    (``::ffff:a.b.c.d``) are unwrapped so a mapped internal address cannot slip
+    through.
+
+    Returns None when *host* is a public IP literal **or** a DNS name — a name
+    is deliberately *not* resolved here (blocking ``getaddrinfo`` on the loop is
+    forbidden), so the DNS-based range check is skipped and the residual
+    name-based / DNS-rebinding TOCTOU (a name pointing at a private/metadata
+    address at request time) is an accepted risk.
+    """
+    # Drop any IPv6 zone/scope id (e.g. ``fe80::1%eth0``) before parsing, and
+    # handle the bracket-less IPv6 ``urlparse`` hands back for ``https://[::1]``.
+    addr_clean = host.split("%", 1)[0]
+    try:
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(addr_clean)
+    except ValueError:
+        # ``ip_address`` only accepts the canonical dotted-quad / RFC-5952 forms,
+        # so alternate IPv4 literal encodings — hex (``0x7f000001``), decimal
+        # (``2130706433``), octal (``017700000001``), short-form (``127.1``) and
+        # the IMDS variants (``0xa9fea9fe`` / ``2852039166`` / ``169.254.43518``)
+        # — would fall through here as if they were DNS names and let aiohttp
+        # connect straight to loopback/IMDS. ``inet_aton`` performs the same
+        # permissive parse the C resolver / kernel would, so normalize through it
+        # (pure string parse, **no DNS**) before deciding this is a name.
+        try:
+            packed = socket.inet_aton(addr_clean)
+        except OSError:
+            # Genuine DNS name (inet_aton rejects it). No on-loop resolution;
+            # caller relies on the accepted name-based DNS-rebinding TOCTOU residual.
+            return None
+        except Exception:
+            # Any other parse failure: fail CLOSED — treat as blocked.
+            return addr_clean
+        ip = ipaddress.IPv4Address(packed)
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        return addr_clean
+    return None
+
+
 def _validate_url(url: str, *, allow_remote: bool = False) -> None:
     """Reject non-localhost embedding URLs unless explicitly configured.
 
-    Known limitation: no SSRF protection against internal network targets
-    (e.g. 169.254.169.254). Mitigated by owner-configured URL via the
-    token-authed loopback-only dashboard and POST-only with specific JSON body.
+    Even when ``allow_remote`` is set (and the URL is https), an IP-*literal*
+    host is rejected if it is a private / loopback / link-local / reserved /
+    metadata address (169.254.169.254, RFC1918, ::1, 127/8, fd00:ec2::254).
+    This closes the SSRF gap where an owner-configured or attacker-influenced
+    remote URL could target the instance metadata service or other internal
+    endpoints — **without any DNS lookup**, so nothing here blocks the event
+    loop. A malformed / empty host is denied (fail-closed). A DNS *name* is not
+    resolved here; the residual name-based / DNS-rebinding TOCTOU is accepted.
     """
-    from kiro_claw.sel import sel
-
     if "@" in url or "token=" in url.lower():
         sel().log_tool_invocation(
             session_key="embedding_url_validation",
@@ -145,8 +208,29 @@ def _validate_url(url: str, *, allow_remote: bool = False) -> None:
             metadata={"reason": "credentials_in_url"},
         )
         raise ValueError("Embedding URL must not contain credentials")
-    parsed = urllib.parse.urlparse(url)
-    host = parsed.hostname or ""
+    # Fail-closed: any parse error (malformed URL) denies rather than allows.
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or ""
+    except ValueError as exc:
+        sel().log_tool_invocation(
+            session_key="embedding_url_validation",
+            tool_name="_validate_url",
+            outcome="rejected_malformed",
+            resources=url,
+            metadata={"reason": "parse_error"},
+        )
+        raise ValueError(f"Embedding URL {url!r} is malformed; refusing (SSRF protection).") from exc
+    if not host:
+        # No parseable host -> nothing safe to allow. Deny (fail-closed).
+        sel().log_tool_invocation(
+            session_key="embedding_url_validation",
+            tool_name="_validate_url",
+            outcome="rejected_malformed",
+            resources=url,
+            metadata={"reason": "empty_host"},
+        )
+        raise ValueError(f"Embedding URL {url!r} has no host; refusing (SSRF protection).")
     if host not in ("localhost", "127.0.0.1", "::1"):
         if not allow_remote:
             sel().log_tool_invocation(
@@ -170,6 +254,20 @@ def _validate_url(url: str, *, allow_remote: bool = False) -> None:
             )
             raise ValueError(
                 "Remote embedding URLs must use https:// to prevent data leaks. " f"Got {url!r}"
+            )
+        blocked = _resolve_blocked_addr(host)
+        if blocked is not None:
+            sel().log_tool_invocation(
+                session_key="embedding_url_validation",
+                tool_name="_validate_url",
+                outcome="rejected_internal_addr",
+                resources=url,
+                metadata={"host": host, "blocked": blocked},
+            )
+            raise ValueError(
+                f"Remote embedding URL {host!r} is an internal address "
+                f"{blocked!r}; refusing to send embedding data to a private, "
+                "loopback, link-local, or metadata endpoint (SSRF protection)."
             )
         sel().log_tool_invocation(
             session_key="embedding_url_validation",
