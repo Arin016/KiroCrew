@@ -391,6 +391,12 @@ class _FakeTunnel:
 
 
 class TestSshTunnelArgvCompression:
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
     def test_compression_flag_present_by_default(self):
         from kiro_claw.instances.ssh_tunnel_manager import _build_ssh_tunnel_argv
 
@@ -1293,6 +1299,12 @@ class TestTunnelStatus:
 
 
 class TestSelfHealRefreshRestart:
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        import kiro_claw.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
     def _mgr(self, tmp_path, *, mint=None, factory=_ResilTunnel):
         from kiro_claw.instances.registry import InstancesRegistry
         from kiro_claw.instances.ssh_tunnel_manager import SshTunnelManager

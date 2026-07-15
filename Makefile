@@ -29,7 +29,7 @@ frontend:
 backend:
 	test -x $(VENV)/bin/python || $(PY) -m venv $(VENV)
 	$(PIP) install --upgrade pip setuptools wheel
-	KIROCLAW_SKIP_FRONTEND=1 $(PIP) install -e .
+	KIROCLAW_SKIP_FRONTEND=1 $(PIP) install -e ".[dev]"
 	bash packaging/resign-macos-libs.sh $(VENV)/bin/python
 
 test: build

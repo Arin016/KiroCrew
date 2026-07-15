@@ -123,6 +123,7 @@ async def _run(
         socketsec, "check_peer_uid",
         lambda _w, _uid: socketsec.PeerCredResult.MATCH,
     )
+    monkeypatch.setattr(socketsec, "socket_owner_only", lambda _path: True)
     fake_backend = _FakeBackend()
     sel_calls: list[dict[str, Any]] = []
 

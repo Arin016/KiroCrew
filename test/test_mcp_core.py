@@ -78,6 +78,13 @@ class TestSendMessageCronSession:
     Default delivery is notification-only; session="slack" adds Slack DM.
     """
 
+    @pytest.fixture(autouse=True)
+    def _permit_messaging(self, monkeypatch):
+        """Stub governance vets so a real ~/.kiroclaw/profiles/cron.json that
+        disables messaging doesn't block these payload-routing tests."""
+        monkeypatch.setattr("kiro_claw.mcp_core._vet_messaging_governance", lambda _sk: None)
+        monkeypatch.setattr("kiro_claw.mcp_core._vet_channel_governance", lambda _sk, _t: None)
+
     def test_default_notification_only(self):
         """Non-cron bare send_message(text=...) → no session in payload, notification only."""
         with patch("kiro_claw.mcp_core._post") as mock_post, patch.dict(

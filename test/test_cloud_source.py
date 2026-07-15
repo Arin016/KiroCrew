@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -254,21 +255,33 @@ class TestBuildTarball:
         finally:
             filtered.unlink()
 
-    def test_refilter_corrupt_archive_cleans_up_temp(self, tmp_path):
+    def test_refilter_corrupt_archive_cleans_up_temp(self, tmp_path, monkeypatch):
         # A corrupt source archive makes tarfile.open raise; _refilter_archive
         # must NOT leak the half-written 'filtered' temp (the caller only cleans
-        # up the original). Assert no NEW kiroclaw-src-*.tar.gz temp survives.
-        import glob
+        # up the original). Track the exact file created rather than globbing
+        # /tmp (the glob is racy under parallel xdist workers).
         import tarfile as _tf
         import tempfile as _tmp
 
+        import kiro_claw.cloud.source as _src
+
+        created: list[str] = []
+        real_ntf = _tmp.NamedTemporaryFile
+
+        def _capturing_ntf(*a, **kw):
+            f = real_ntf(*a, **kw)
+            created.append(f.name)
+            return f
+
+        monkeypatch.setattr(_tmp, "NamedTemporaryFile", _capturing_ntf)
+
         bad = tmp_path / "corrupt.tar.gz"
         bad.write_bytes(b"not a gzip tarball")
-        pattern = f"{_tmp.gettempdir()}/kiroclaw-src-*.tar.gz"
-        pre = set(glob.glob(pattern))
         with pytest.raises(_tf.TarError):
-            source._refilter_archive(bad)
-        assert set(glob.glob(pattern)) <= pre, "refilter leaked a temp file on corrupt archive"
+            _src._refilter_archive(bad)
+        assert created, "NamedTemporaryFile was never called"
+        leaked = [p for p in created if Path(p).exists()]
+        assert not leaked, f"refilter leaked temp file(s): {leaked}"
 
     def test_dirty_tree_uses_working_tree_not_git_archive(self, monkeypatch, tmp_path):
         # A dirty tracked working tree must NOT be packaged via `git archive HEAD`
