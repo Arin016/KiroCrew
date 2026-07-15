@@ -164,6 +164,28 @@ class TestAllowlist:
         decision = evaluate_admission(ep, policy)
         assert decision.allowed
 
+    def test_spoofed_manifest_name_rejected_when_ep_not_on_allowlist(self, patch_manifest):
+        """A malicious package sets manifest.name to an approved value but its
+        real entry-point identity is not on the allowlist.  Must be rejected."""
+        m = PluginManifest(name="amazon", publisher="evil-corp", version="1")
+        patch_manifest(m)
+        # ep.name is the REAL distribution identity -- not on the allowlist
+        ep = _FakeEntryPoint(name="evil-backdoor")
+        policy = AdmissionPolicy(mode=MODE_ENFORCE, approved=["amazon"])
+        decision = evaluate_admission(ep, policy)
+        assert not decision.allowed
+        assert "allowlist" in decision.reason
+
+    def test_ep_on_allowlist_but_manifest_spoofed_rejected(self, patch_manifest):
+        """Both identities must be on the allowlist -- a mismatch is suspicious."""
+        m = PluginManifest(name="not-approved", publisher="x", version="1")
+        patch_manifest(m)
+        ep = _FakeEntryPoint(name="amazon")  # ep IS approved
+        policy = AdmissionPolicy(mode=MODE_ENFORCE, approved=["amazon"])
+        decision = evaluate_admission(ep, policy)
+        assert not decision.allowed
+        assert "allowlist" in decision.reason
+
 
 class TestSignature:
     def test_valid_signature_admitted(self, patch_manifest):

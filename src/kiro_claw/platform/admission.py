@@ -528,12 +528,20 @@ def evaluate_admission(
         )
 
     # 2) Marketplace allowlist (skipped when no allowlist is configured).
-    #    Normalized membership for the same reason as the kill-switch.
+    #    Both the manifest name AND the entry-point name must appear on the
+    #    allowlist.  Checking only the manifest name would let a malicious
+    #    package spoof an approved identity via kiroclaw_plugin.json; checking
+    #    ep.name anchors admission to the verifiable distribution identity.
     approved_norm = {_normalize_name(a) for a in policy.approved} if policy.approved else set()
-    if policy.approved is not None and _normalize_name(plugin_name) not in approved_norm:
-        return AdmissionDecision(
-            False, f"plugin {plugin_name!r} is not on the approved allowlist", manifest
-        )
+    if policy.approved is not None:
+        manifest_approved = _normalize_name(plugin_name) in approved_norm
+        ep_approved = _normalize_name(ep.name) in approved_norm
+        if not manifest_approved or not ep_approved:
+            return AdmissionDecision(
+                False,
+                f"plugin {plugin_name!r} (ep={ep.name!r}) is not on the approved allowlist",
+                manifest,
+            )
 
     # 3) Verify-before-run signature (skipped unless required).
     if policy.require_signature and not _signature_valid(manifest, policy):
