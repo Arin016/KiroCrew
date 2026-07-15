@@ -1,4 +1,5 @@
-import { Bell, Code, Globe, Info, LayoutGrid, MessageCircle, MessageSquare, Mic, Palette, Server, ShieldCheck } from 'lucide-react'
+import { Bell, Code, Globe, Info, LayoutGrid, MessageSquare, Mic, Palette, Server, ShieldCheck } from 'lucide-react'
+import { SlackIcon } from '../components/SlackIcon'
 import { useAppSelector } from '../store'
 import SidePanelLayout from '../components/SidePanelLayout'
 import { BrowserPanel } from './settings/BrowserPanel'
@@ -23,7 +24,7 @@ const TABS = [
   { key: 'instances', label: 'Instances', icon: <Server size={16} />, description: 'Manage remote KiroClaw instances over SSH tunnels; switch between them from the top header' },
   { key: 'security', label: 'Security', icon: <ShieldCheck size={16} />, description: 'Security posture, defense layers, certifications, and data classification' },
   { key: 'notifications', label: 'Notifications', icon: <Bell size={16} />, description: 'Sound effects and per-category alert preferences' },
-  { key: 'slack', label: 'Slack', icon: <MessageCircle size={16} />, description: 'Slack channel integration settings' },
+  { key: 'slack', label: 'Slack', icon: <SlackIcon size={16} />, description: 'Slack channel integration settings' },
   { key: 'developer', label: 'Developer', icon: <Code size={16} />, description: 'Developer mode, logs, system metrics, and diagnostics' },
   { key: 'about', label: 'About', icon: <Info size={16} />, description: 'Version, update channel, check for updates, and license' },
 ]

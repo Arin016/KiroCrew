@@ -9,7 +9,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from aiohttp import web
 
@@ -24,7 +24,7 @@ from kiro_claw.browser.setup import (
 from kiro_claw.constants import CHAT_TURN_TIMEOUT
 from kiro_claw.dashboard.chat_persistence import _rehydrate_slot_from_history
 from kiro_claw.dashboard.chat_utils import _remove_queued_by_id
-from kiro_claw.dashboard.origin import is_loopback
+from kiro_claw.dashboard.origin import is_direct_local_request, is_loopback
 from kiro_claw.dashboard.state import (
     CRON_NOTIFY_END,
     CRON_NOTIFY_PREFIX,
@@ -455,7 +455,7 @@ async def api_send_message(request: web.Request) -> web.Response:
     """POST /api/send-message — send a message to Slack and/or dashboard."""
     from kiro_claw.security import redact_credentials, redact_exfiltration_urls  # noqa: F811
     from kiro_claw.slack.handler import is_allowed_user, is_tracked_channel  # noqa: F811
-    from kiro_claw.validation import CHANNEL_ID_RE, USER_ID_RE  # noqa: F811
+    from kiro_claw.validation import USER_ID_RE  # noqa: F811
 
     state: DashboardState = request.app["state"]
     try:
@@ -1288,3 +1288,387 @@ async def api_browser_config_save(request: web.Request) -> web.Response:
         resources=f"extension_mode={extension_mode}",
     )
     return web.json_response({"ok": True})
+
+
+# ── Slack configuration API ──
+# Secrets (bot/app token, owner id) live in config_dir/.env (0600). Non-secret
+# config (slash command, allowlists, behavior toggles) lives in config.json
+# under the "slack" key. GET returns masked previews + presence booleans.
+# Raw token values are write-only: no API path returns them (rotate at
+# api.slack.com or read .env on the machine itself if ever needed).
+
+#: Public field name → .env credential key for the two Slack secrets.
+_SLACK_SECRET_FIELDS = {
+    "bot_token": "SLACK_BOT_TOKEN",
+    "app_token": "SLACK_APP_TOKEN",
+}
+
+#: Seconds to wait for Slack when verifying a pasted token at save time.
+_TOKEN_VERIFY_TIMEOUT = 8
+
+
+async def _validate_slack_token(key: str, token: str) -> str | None:
+    """Check a pasted token against Slack before it is stored.
+
+    Bot tokens are checked with ``auth.test``; app-level tokens with
+    ``apps.connections.open`` (the same call the gateway makes at startup, so
+    a token that passes here will connect at boot). Returns ``None`` when
+    Slack accepts the token, or Slack's error code (e.g. ``invalid_auth``)
+    when it rejects it. Network failures propagate to the caller, which
+    treats them as "unverifiable" rather than invalid — saves must not be
+    blocked by being offline.
+    """
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    client = AsyncWebClient(token=token, timeout=_TOKEN_VERIFY_TIMEOUT)
+    try:
+        if key == "SLACK_APP_TOKEN":
+            await client.apps_connections_open(app_token=token)
+        else:
+            await client.auth_test()
+        return None
+    except SlackApiError as exc:
+        try:
+            return str(exc.response.get("error", "") or "rejected")[:60]
+        except Exception:
+            return "rejected"
+
+
+def _mask_secret(val: str) -> str:
+    """Return a masked preview keeping the token prefix + last 4 chars.
+
+    e.g. "xoxb-1234-abcd…wxyz" → "xoxb-••••wxyz". Empty string for no value.
+    """
+    if not val:
+        return ""
+    prefix = f"{val.split('-', 1)[0]}-" if "-" in val else ""
+    tail = val[-4:] if len(val) >= 4 else ""
+    return f"{prefix}••••{tail}"
+
+
+def _clean_id_list(raw: object, is_valid: Callable[[str], bool], label: str) -> list[str]:
+    """Validate and normalize a list of ID strings, dropping blanks.
+
+    Raises ``ValueError`` (message safe to surface) when *raw* is not a list or
+    an entry fails *is_valid*. Shared by the channel / enterprise-org fields.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"{label}s must be a list")
+    out: list[str] = []
+    for item in raw:
+        s = str(item).strip()
+        if not s:
+            continue
+        if not is_valid(s):
+            raise ValueError(f"invalid {label}: {s}")
+        out.append(s)
+    return out
+
+
+def _write_env_updates(updates: dict[str, str | None]) -> None:
+    """Update select keys in config_dir/.env, preserving comments and order.
+
+    A value of ``None`` deletes the key; new keys are appended. The write is
+    atomic (0600 temp file in the same dir, then rename) so a crash can never
+    truncate .env and lose other credentials, and there is no world-readable
+    window between create and chmod.
+    """
+    import tempfile  # noqa: F811
+
+    from kiro_claw.config.loader import env_path  # noqa: F811
+
+    ep = env_path()
+    lines = ep.read_text(encoding="utf-8").splitlines() if ep.exists() else []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if s and not s.startswith("#") and "=" in s:
+            k = s.split("=", 1)[0].strip()
+            if k in updates:
+                seen.add(k)
+                new_val = updates[k]
+                if new_val is None:
+                    continue
+                out.append(f"{k}={new_val}")
+                continue
+        out.append(line)
+    for k, new_val in updates.items():
+        if k not in seen and new_val:
+            out.append(f"{k}={new_val}")
+    ep.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(out) + ("\n" if out else "")
+    # mkstemp creates the file with mode 0600 and O_EXCL; rename is atomic on
+    # the same filesystem. fchmod is belt-and-suspenders in case of odd umask.
+    fd, tmp_name = tempfile.mkstemp(dir=str(ep.parent), prefix=".env.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_name, ep)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+async def api_slack_manifest(request: web.Request) -> web.Response:
+    """GET /api/slack/manifest — rendered Slack app manifest + create URL.
+
+    Mirrors ``kiroclaw manifest --url`` so the settings UI can offer one-click
+    Slack app creation without the CLI: the bundled template gets the user's
+    alias substituted, and the comment-stripped YAML is URL-encoded into
+    Slack's new-app deep link. Serves only the public template — no secrets.
+    """
+    import re  # noqa: F811
+    from importlib.resources import files as _pkg_files
+    from urllib.parse import quote
+
+    # Default to a non-identifying alias: $USER is a host account name and
+    # should not be volunteered to every authenticated client.
+    alias = request.query.get("alias", "").strip() or "kiroclaw"
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,32}", alias):
+        return web.json_response({"error": "invalid alias"}, status=400)
+    try:
+        template = _pkg_files("kiro_claw").joinpath("slack-manifest.yaml").read_text("utf-8")
+    except FileNotFoundError:
+        return web.json_response({"error": "manifest template missing"}, status=500)
+    rendered = template.replace("{{ALIAS}}", alias)
+    # Strip comment lines to keep the deep link short (same as the CLI).
+    lines = [ln for ln in rendered.splitlines() if not ln.lstrip().startswith("#")]
+    encoded = quote("\n".join(lines).strip() + "\n", safe="")
+    return web.json_response(
+        {
+            "alias": alias,
+            "manifest": rendered,
+            "create_url": f"https://api.slack.com/apps?new_app=1&manifest_yaml={encoded}",
+        }
+    )
+
+
+async def api_slack_config_get(request: web.Request) -> web.Response:
+    """GET /api/slack/config — read Slack config + masked secret status."""
+    from kiro_claw.config.loader import (  # noqa: F811
+        CRED_OWNER_ID,
+        CRED_SLACK_APP_TOKEN,
+        CRED_SLACK_BOT_TOKEN,
+        KiroClawConfig,
+    )
+
+    cfg = KiroClawConfig.load()
+    creds = cfg.load_credentials()
+    bot = creds.get(CRED_SLACK_BOT_TOKEN, "")
+    app = creds.get(CRED_SLACK_APP_TOKEN, "")
+    owner = creds.get(CRED_OWNER_ID, "")
+    slack = cfg.slack
+    state: DashboardState = request.app["state"]
+    return web.json_response(
+        {
+            # True only when the socket-mode connect succeeded this session —
+            # NOT merely "tokens were present at boot" (see DashboardState).
+            "connected": bool(getattr(state, "slack_socket_connected", False)),
+            # Short reason from the failed connect attempt ("invalid_auth",
+            # a network error class name, or "" when connected / untried).
+            "connect_error": str(getattr(state, "slack_connect_error", ""))[:120],
+            "configured": bool(bot and app and owner),
+            # Remote sessions get a read-only view: config edits (PUT) are
+            # loopback-only, so the UI disables all inputs and hides Save.
+            "read_only": not is_direct_local_request(request),
+            "bot_token_set": bool(bot),
+            "app_token_set": bool(app),
+            "bot_token_preview": _mask_secret(bot),
+            "app_token_preview": _mask_secret(app),
+            "owner_id": owner,
+            "command": slack.command,
+            # allowed_users / open_channels are deliberately NOT exposed: the
+            # runtime enforces owner-only access in this build (is_allowed_user
+            # ignores both), so surfacing editors would create access rules
+            # that are never honored. Re-add when multi-user Slack lands.
+            "allowed_enterprise_ids": list(slack.allowed_enterprise_ids),
+            "reactions_enabled": slack.reactions_enabled,
+            "show_thinking": slack.show_thinking,
+        }
+    )
+
+
+async def api_slack_config_save(request: web.Request) -> web.Response:
+    """PUT /api/slack/config — persist Slack secrets (.env) + config (config.json).
+
+    Token/owner changes need a gateway restart to reconnect Slack (creds are
+    read at gateway startup); the response returns ``restart_required`` so the
+    UI can surface a hint. Config-only changes take effect on the next message
+    or restart.
+    """
+    from kiro_claw.agent import _atomic_json_write  # noqa: F811
+    from kiro_claw.config.loader import (  # noqa: F811
+        CRED_OWNER_ID,
+        config_path,
+    )
+    from kiro_claw.validation import USER_ID_RE  # noqa: F811
+
+    caller = request.get("user", "dashboard")
+
+    def _deny(msg: str, status: int = 400) -> web.Response:
+        _sel().log_api_access(
+            caller=caller,
+            operation="slack.config.update",
+            outcome="denied",
+            source="dashboard",
+            error=msg,
+        )
+        return web.json_response({"error": msg}, status=status)
+
+    # Remote sessions are read-only: like /reveal, config writes are accepted
+    # only from the machine running the gateway, so a remote or tunneled
+    # session (even with a valid dashboard token) cannot alter Slack access
+    # or plant new tokens.
+    if not is_direct_local_request(request):
+        return _deny("read-only from remote sessions (local machine only)", status=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _deny("invalid JSON")
+    if not isinstance(body, dict):
+        return _deny("body must be an object")
+
+    # ── Phase 1: validate everything and stage changes. No writes happen until
+    # all validation passes, so a rejected field never leaves partial state
+    # (e.g. a token persisted while a bad channel ID 400s). ──
+
+    # Secrets → .env (empty/omitted token = leave unchanged; explicit clear via
+    # *_clear flag to avoid accidentally wiping a token on save).
+    env_updates: dict[str, str | None] = {}
+    for field_name, key in _SLACK_SECRET_FIELDS.items():
+        clear_flag = body.get(f"{field_name}_clear")
+        if clear_flag is not None and not isinstance(clear_flag, bool):
+            return _deny(f"{field_name}_clear must be a boolean")
+        if clear_flag is True:
+            env_updates[key] = None
+            continue
+        raw = body.get(field_name)
+        if isinstance(raw, str):
+            tok = raw.strip()
+            if tok.startswith(f"{key}="):  # strip an accidentally pasted env line
+                tok = tok[len(key) + 1 :].strip()
+            if tok:
+                if any(ch.isspace() for ch in tok):
+                    return _deny(f"{field_name} must not contain whitespace")
+                env_updates[key] = tok
+
+    if "owner_id" in body:
+        owner = str(body.get("owner_id", "")).strip()
+        if owner and not USER_ID_RE.match(owner):
+            return _deny("owner_id must be a Slack member ID (starts with U or W)")
+        # Only stage a real change: the UI sends the field on every save, and
+        # staging an unchanged value would flag restart_required on every
+        # config-only save.
+        current_owner = os.environ.get(CRED_OWNER_ID, "").strip()
+        if owner != current_owner:
+            env_updates[CRED_OWNER_ID] = owner or None
+
+    # Config → config.json under "slack" (staged, applied only after Phase 1).
+    path = config_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return _deny("config.json is corrupt", status=500)
+    if not isinstance(data.get("slack"), dict):
+        data["slack"] = {}
+    slack_cfg = data["slack"]
+    staged: dict[str, object] = {}
+    applied: list[str] = []
+
+    if "command" in body:
+        cmd = str(body.get("command", "")).strip().lstrip("/").strip()
+        if cmd and (len(cmd) > 32 or not all(c.isalnum() or c in "-_" for c in cmd)):
+            return _deny("command must be alphanumeric/-/_ and at most 32 chars")
+        # Empty input resets to the default rather than silently keeping the
+        # old value — previously the slash command could be set but never
+        # cleared. Stage only on actual change: the UI sends the field on
+        # every save, and command is boot-read, so staging an unchanged value
+        # would flag restart_required on every save.
+        new_cmd = cmd or "kiroclaw"
+        if new_cmd != slack_cfg.get("command", "kiroclaw"):
+            staged["command"] = new_cmd
+            applied.append("command")
+
+    if "allowed_enterprise_ids" in body:
+        try:
+            new_ents = _clean_id_list(
+                body.get("allowed_enterprise_ids"),
+                lambda v: bool(re.fullmatch(r"[ET][A-Z0-9]+", v)),
+                "enterprise ID",
+            )
+        except ValueError as exc:
+            return _deny(str(exc))
+        # Boot-read field: stage only on actual change (see command above).
+        if new_ents != slack_cfg.get("allowed_enterprise_ids", []):
+            staged["allowed_enterprise_ids"] = new_ents
+            applied.append("allowed_enterprise_ids")
+
+    for key in ("reactions_enabled", "show_thinking"):
+        if key in body:
+            val = body.get(key)
+            if not isinstance(val, bool):
+                return _deny(f"{key} must be a boolean")
+            staged[key] = val
+            applied.append(key)
+
+    # ── Phase 1.5: verify newly pasted tokens against Slack before storing.
+    # A token Slack rejects (invalid_auth etc.) fails the save right here,
+    # where the user can act on it — instead of being stored and silently
+    # failing at the next gateway startup. Network failure is NOT a rejection:
+    # the save proceeds with a warning so being offline never blocks config.
+    verify_warning = ""
+    for field_name, key in _SLACK_SECRET_FIELDS.items():
+        pending_tok = env_updates.get(key)
+        if not pending_tok:
+            continue  # cleared or unchanged — nothing to verify
+        try:
+            slack_err = await _validate_slack_token(key, pending_tok)
+        except Exception:
+            verify_warning = "Slack was unreachable, so the token was saved without verification."
+            continue
+        if slack_err:
+            return _deny(f"{field_name} rejected by Slack ({slack_err})")
+
+    # ── Phase 2: commit. All validation passed, so writes are safe. ──
+    if env_updates:
+        _write_env_updates(env_updates)
+        # Keep the live process environment in sync with the new .env state.
+        # load_credentials() lets os.environ win over .env, so without this a
+        # replaced/cleared token would keep being reported as installed by GET
+        # until restart, and spawned children would inherit the stale value.
+        # The Slack socket connection itself still reconnects only on restart,
+        # which restart_required below surfaces to the UI.
+        for key, new_val in env_updates.items():
+            if new_val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = new_val
+    if staged:
+        slack_cfg.update(staged)
+        _atomic_json_write(path, data)
+
+    _sel().log_api_access(
+        caller=caller,
+        operation="slack.config.update",
+        outcome="ok",
+        source="dashboard",
+        resources=",".join(applied + list(env_updates.keys())),
+    )
+    # command and enterprise IDs are read once at gateway startup; reactions
+    # and show_thinking are re-read per message, so only the former (plus any
+    # secret/owner change) need a restart to take effect.
+    boot_read = {"command", "allowed_enterprise_ids"}
+    return web.json_response(
+        {
+            "ok": True,
+            "restart_required": bool(env_updates) or bool(boot_read & staged.keys()),
+            "verify_warning": verify_warning,
+        }
+    )

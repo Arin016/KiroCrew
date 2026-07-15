@@ -926,6 +926,14 @@ async def start_dashboard(
     # Crons, lessons, spawn, taskrunner, send-message, notifications
     # are registered via _register_mcp_routes() above.
 
+    # Slack settings (dashboard-only, NOT in _register_mcp_routes: that set is
+    # also mounted on the token-less API-only server, and these endpoints
+    # write credentials / expose config state, so they must sit behind the
+    # dashboard's token auth in addition to the direct-local write gate).
+    app.router.add_get("/api/slack/config", handlers.api_slack_config_get)
+    app.router.add_put("/api/slack/config", handlers.api_slack_config_save)
+    app.router.add_get("/api/slack/manifest", handlers.api_slack_manifest)
+
     # Script Hooks
     app.router.add_get("/api/hooks", handlers.api_hooks)
     app.router.add_get("/api/kiro-hooks", handlers.api_kiro_hooks)

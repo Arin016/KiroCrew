@@ -37,6 +37,36 @@ export interface InstallStreamResult {
   clientInstall?: { shell?: string; postInstall?: string }
 }
 
+/** Slack config as returned by GET /api/slack/config (secrets masked). */
+export interface SlackConfigData {
+  connected: boolean
+  connect_error: string
+  configured: boolean
+  read_only: boolean
+  bot_token_set: boolean
+  app_token_set: boolean
+  bot_token_preview: string
+  app_token_preview: string
+  owner_id: string
+  command: string
+  allowed_enterprise_ids: string[]
+  reactions_enabled: boolean
+  show_thinking: boolean
+}
+
+/** Writable Slack config fields sent to PUT /api/slack/config. */
+export interface SlackConfigSave {
+  bot_token: string
+  bot_token_clear: boolean
+  app_token: string
+  app_token_clear: boolean
+  owner_id: string
+  command: string
+  allowed_enterprise_ids: string[]
+  reactions_enabled: boolean
+  show_thinking: boolean
+}
+
 let _sessionExpiredShown = false
 
 /**
@@ -809,6 +839,10 @@ export const api = {
   browserAuthRetry: () => post('/api/browser-auth-retry', {}).then(j),
   getBrowserConfig: () => get('/api/browser/config').then(j) as Promise<{extension_mode: boolean; token: boolean}>,
   saveBrowserConfig: (body: {extension_mode: boolean; token: string}) => put('/api/browser/config', body).then(j),
+  // Slack integration config
+  getSlackConfig: () => get('/api/slack/config').then(j) as Promise<SlackConfigData>,
+  getSlackManifest: () => get('/api/slack/manifest').then(j) as Promise<{ alias: string; manifest: string; create_url: string }>,
+  saveSlackConfig: (body: Partial<SlackConfigSave>) => put('/api/slack/config', body).then(j) as Promise<{ ok: boolean; restart_required: boolean; verify_warning: string }>,
 
   // Auto-research
   researchValidate: (body: object) => post("/api/apps/auto-research/validate", body).then(j),

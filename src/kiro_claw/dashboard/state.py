@@ -1146,6 +1146,14 @@ class DashboardState:
         self.consolidator = consolidator
         self.task_runner = task_runner
         self.slack_client = slack_client
+        # True only when the Slack socket-mode connect actually succeeded this
+        # session. slack_client being set proves tokens existed at boot, not
+        # that they are valid — the gateway records the real outcome after
+        # _connect_slack(). Read by the Slack settings status badge.
+        self.slack_socket_connected: bool = False
+        # Short reason from the failed connect attempt (e.g. "invalid_auth"),
+        # empty when connected or never attempted. Read by the settings badge.
+        self.slack_connect_error: str = ""
         # Live channel transports (Telegram/WeCom/...) for channel-neutral
         # cross-surface mirror delivery — registered at boot by each channel's
         # gateway via ``register_channel_transport``. Slack keeps its dedicated

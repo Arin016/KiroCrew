@@ -1536,8 +1536,12 @@ async def _dispatch_queued(
             subagent_manager=orch.subagent_mgr,
             task_runner=orch.task_runner,
             cron_service=orch.cron_svc,
-            reactions_enabled=orch._cfg.slack.reactions_enabled,
-            show_thinking=orch._cfg.slack.show_thinking,
+            # Live-read per message (parity with native handle_message, which
+            # loads config at handler.py:2661/2683): orch._cfg is captured at
+            # startup, so reading it here would make settings-UI toggle saves
+            # silently inert until restart.
+            reactions_enabled=KiroClawConfig.load().slack.reactions_enabled,
+            show_thinking=KiroClawConfig.load().slack.show_thinking,
             consolidator=orch.consolidator,
             user_display_name=kwargs.get("user_display_name"),
         )
@@ -2271,10 +2275,12 @@ async def _route_message(
                 task_runner=orch.task_runner,
                 cron_service=orch.cron_svc,
                 # Respect the user's phase-reaction setting, same as native
-                # handle_message (which reads slack.reactions_enabled).
-                reactions_enabled=orch._cfg.slack.reactions_enabled,
+                # handle_message — live-read per message, NOT orch._cfg (which
+                # is captured at startup and would make toggle saves inert
+                # until restart).
+                reactions_enabled=KiroClawConfig.load().slack.reactions_enabled,
                 # Respect slack.show_thinking (surface reasoning as a 💭 reply).
-                show_thinking=orch._cfg.slack.show_thinking,
+                show_thinking=KiroClawConfig.load().slack.show_thinking,
                 # History consolidation + display-name context, same as native
                 # handle_message (parity: don't drop these on the transport path).
                 consolidator=orch.consolidator,

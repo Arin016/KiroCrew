@@ -179,3 +179,33 @@ Full new-path dispatch: fires the ack reaction + working status immediately (con
 ## Testing conventions
 
 The extraction is gated by a **golden-transcript** harness (`test/test_slack_golden_transcript.py`): a `RecordingSlackClient` captures the ordered sequence of Slack-render operations the native `handle_message` emits for a scripted `ScriptedProvider` event stream, establishing the baseline the `TurnDriver` + `SlackRenderer` rewire must reproduce identically. Layer contracts and the Slack impl have dedicated suites: `test_messaging_transport.py`, `test_messaging_driver.py`, `test_slack_renderer.py`, `test_slack_transport.py`, `test_slack_transport_dispatch.py`, `test_slack_transport_integration.py`. Providers are always mocked (scripted event streams) — never spawn a real kiro-cli process.
+
+## Slack settings API
+
+Three dashboard-only endpoints back the `/settings?tab=slack` panel. They are
+registered in the dashboard route block (NOT `_register_mcp_routes`, which is
+also mounted on the token-less API-only server) so they always sit behind
+dashboard token auth.
+
+- `GET /api/slack/config` — masked token previews + presence booleans, owner
+  ID, slash command, enterprise-org allowlist, behavior toggles, and live
+  status: `connected` (recorded socket connect outcome), `connect_error`
+  (short reason, e.g. `invalid_auth`), `read_only` (true unless the request
+  is direct-local). Never returns a raw secret.
+- `PUT /api/slack/config` — requires a direct-local request (loopback peer
+  AND no `Forwarded`/`X-Forwarded-*`/`X-Real-IP` headers); remote gets 403.
+  Validate-first/commit-last. New tokens are verified against Slack before
+  storage (`auth.test` for bot, `apps.connections.open` for app tokens);
+  rejection returns 400 and writes nothing, network failure saves with
+  `verify_warning`. `<field>_clear` must be a strict boolean. Secrets land in
+  `config_dir/.env` via atomic 0600 `mkstemp` + `os.replace`, and
+  `os.environ` is synced afterward. Response `restart_required` is true for
+  actual env changes and boot-read config (`command`,
+  `allowed_enterprise_ids`); `reactions_enabled`/`show_thinking` apply live.
+  An empty `command` resets the slash command to the default.
+- `GET /api/slack/manifest` — public manifest template rendered with
+  `?alias=` (default `kiroclaw`, never `$USER`) plus Slack's one-click
+  create deep link.
+
+`allowed_users` / `open_channels` are intentionally not exposed while the
+runtime enforces owner-only access.

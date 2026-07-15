@@ -167,3 +167,30 @@ your own workspace.
 
 > **Access scoping** — Multi-user access is disabled for security. KiroClaw is
 > restricted to the bot owner only (`KIROCLAW_OWNER_ID`).
+
+## Settings API (dashboard)
+
+The Slack tab at `/settings?tab=slack` is backed by three dashboard-only
+endpoints (registered behind token auth, never on the API-only server):
+
+- `GET /api/slack/config` — masked token previews (`xoxb-••••wxyz`), presence
+  booleans, owner ID, slash command, enterprise-org allowlist, behavior
+  toggles, plus live status: `connected` (real socket outcome recorded at
+  startup), `connect_error` (e.g. `invalid_auth`), and `read_only` (true for
+  any request that is not direct-local).
+- `PUT /api/slack/config` — direct-local only (loopback peer AND no proxy
+  forwarding headers; remote gets 403). Tokens are write-only and verified
+  against Slack before storage (`auth.test` / `apps.connections.open`);
+  rejected tokens return 400 and are never written. Offline saves succeed
+  with `verify_warning`. Clearing a token requires a strict boolean
+  `<field>_clear: true`. Response `restart_required` is true for secret/owner
+  changes and boot-read config (`command`, `allowed_enterprise_ids`);
+  `reactions_enabled` / `show_thinking` apply live.
+- `GET /api/slack/manifest` — renders the bundled app manifest (alias from
+  `?alias=`, defaulting to `kiroclaw`, never `$USER`) and Slack's one-click
+  create deep link. Public template only.
+
+Secrets land in `config_dir/.env` via atomic 0600 writes; `os.environ` is
+synced after saves so status reads stay truthful. `allowed_users` /
+`open_channels` are intentionally not exposed while the runtime enforces
+owner-only access.

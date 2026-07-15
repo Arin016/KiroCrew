@@ -61,6 +61,46 @@ def is_loopback(host: str) -> bool:
         return False
 
 
+#: Headers that proxies/tunnels attach when forwarding a request. Browsers
+#: never send these themselves, so their presence on a loopback-peer request
+#: means the true client is somewhere else (tunnel, nginx, Caddy, ALB, …).
+_PROXY_FORWARD_HEADERS = (
+    "Forwarded",
+    "X-Forwarded-For",
+    "X-Forwarded-Host",
+    "X-Forwarded-Proto",
+    "X-Real-IP",
+)
+
+
+def is_direct_local_request(request: web.Request) -> bool:
+    """Return ``True`` only for a request made directly from this machine.
+
+    A loopback TCP peer alone is NOT sufficient: the gateway binds loopback
+    and remote access is delivered via a same-host tunnel or reverse proxy,
+    so a forwarded remote request also arrives from 127.0.0.1. Standard
+    proxies (including the AEA tunnel path, nginx, Caddy, ALB) attach
+    ``Forwarded``/``X-Forwarded-*``/``X-Real-IP`` headers; a browser talking
+    to localhost directly never does. So: loopback peer AND no forwarding
+    headers ⇒ direct local. Anything else is treated as remote (fail-closed
+    for the secret-reveal and config-write gates).
+
+    Known limits: an SSH port-forward (``ssh -L``), socat relay, or a proxy
+    that strips all forwarding headers is indistinguishable from a local
+    client at this layer. Establishing any of those requires SSH credentials
+    or code execution on this host, which already grants direct read/write
+    access to ``.env`` and config.json — so the gate is not the protection
+    boundary against host-level actors and does not try to be. Its job is to
+    stop a dashboard-token-only attacker arriving through the product's
+    remote paths (tunnel, reverse proxy), which all attach forwarding
+    headers. Hosted/multi-user deployments should force read-only via a
+    server-side policy regardless of request origin.
+    """
+    if not is_loopback(request.remote or ""):
+        return False
+    return not any(h in request.headers for h in _PROXY_FORWARD_HEADERS)
+
+
 def is_https_request(request: web.Request) -> bool:
     """Return ``True`` when the browser reached the dashboard over HTTPS.
 

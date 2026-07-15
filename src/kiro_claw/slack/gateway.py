@@ -3781,7 +3781,18 @@ class GatewayOrchestrator:
             await self._socket_client.connect()
             print("🐾 KiroClaw gateway connected to Slack")
             return True
-        except Exception:
+        except Exception as exc:
+            # Keep a short reason for status surfaces (settings badge). Slack
+            # API errors carry a stable code like "invalid_auth"; anything
+            # else (network/proxy) falls back to the exception class name.
+            reason = ""
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                try:
+                    reason = str(resp.get("error", "") or "")
+                except Exception:
+                    reason = ""
+            self._slack_connect_error = (reason or type(exc).__name__)[:120]
             logger.warning(
                 "Slack socket-mode connect failed — continuing in "
                 "dashboard-only mode (Slack DM disabled this session)",
@@ -4001,7 +4012,15 @@ class GatewayOrchestrator:
         print("🐾 KiroClaw gateway starting…")
         print(f"\n{DATA_WARNING}\n")
 
-        await self._connect_slack()
+        connected = await self._connect_slack()
+        # Record the real socket outcome so status surfaces (e.g. the Slack
+        # settings badge) can distinguish "connected" from "tokens present
+        # but connect failed" — slack_client alone only proves the latter.
+        if self.dashboard_state:
+            self.dashboard_state.slack_socket_connected = connected
+            self.dashboard_state.slack_connect_error = getattr(
+                self, "_slack_connect_error", ""
+            )
 
         # Block until shutdown
         await shutdown_event.wait()
