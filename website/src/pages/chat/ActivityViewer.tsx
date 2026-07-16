@@ -486,6 +486,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
     refetchInterval: 2500,
   })
   const wfRunsForSlot = wfRuns.filter(r => runBelongsToSlot(r.session_key, slot))
+  const wfRunningCount = wfRunsForSlot.filter(r => r.status === 'running').length
 
   const visibleLog = toolLog.filter(e => e.type !== 'reasoning')
 
@@ -516,6 +517,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
     { key: 'files', label: 'Files', icon: <FileText size={13} />, count: files?.length || 0 },
     { key: 'subagents', label: 'Subagents', icon: <Bot size={13} />, count: ids.length + visibleLog.filter(isSpawnApproval).length },
+    { key: 'workflows', label: 'Workflows', icon: <Workflow size={13} />, count: wfRunningCount },
     { key: 'logs', label: 'Logs', icon: <ScrollText size={13} /> },
     { key: 'side', label: 'Side', icon: <MessageSquare size={13} /> },
   ]
