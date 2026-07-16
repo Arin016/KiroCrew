@@ -65,11 +65,13 @@ export function prepareSendPayload(raw: string, pendingFiles: string[]): SendPay
   // may not be monotonically increasing in the rendered text if @-mentions
   // appear in a different order than the upload order.
   const referencedPaths = new Set([...relMap.values()])
-  const idxMap = new Map<string, number>()
-  let n = 1
-  // Assign indices in upload order: referenced files first, then unreferenced
-  for (const p of filePaths) { if (referencedPaths.has(p) && !idxMap.has(p)) idxMap.set(p, n++) }
-  for (const p of filePaths) { if (!referencedPaths.has(p) && !idxMap.has(p)) idxMap.set(p, n++) }
+  // Keep metadata in the same order as token numbers so backend consumers can
+  // resolve [attached_file N] directly without scanning every path.
+  const indexedFilePaths = [
+    ...filePaths.filter(p => referencedPaths.has(p)),
+    ...filePaths.filter(p => !referencedPaths.has(p)),
+  ]
+  const idxMap = new Map(indexedFilePaths.map((p, i) => [p, i + 1]))
 
   const llmRaw = replaceTokens(
     replaceTokens(raw, imgPaths, relMap, () => ''),
@@ -96,7 +98,7 @@ export function prepareSendPayload(raw: string, pendingFiles: string[]): SendPay
   return {
     txt: [imgMd, textBody].filter(Boolean).join('\n\n'),
     displayTxt: [imgMd, displayRaw].filter(Boolean).join('\n\n'),
-    filePaths,
+    filePaths: indexedFilePaths,
     imgPaths,
   }
 }

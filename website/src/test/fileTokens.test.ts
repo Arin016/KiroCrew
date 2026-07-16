@@ -99,5 +99,8 @@ describe('prepareSendPayload', () => {
     const indices = [...result.txt.matchAll(/\[attached_file (\d+)\]/g)].map(m => m[1])
     expect(indices.length).toBe(2)
     expect(new Set(indices).size).toBe(indices.length)
+    expect(result.txt).toContain('[attached_file 1] /tmp/data.csv')
+    expect(result.txt).toContain('[attached_file 2] /tmp/extra.log')
+    expect(result.filePaths).toEqual(['/tmp/data.csv', '/tmp/extra.log'])
   })
 })

@@ -79,8 +79,104 @@ class TestFallbackTitle:
         msgs = [{"role": "user", "content": "[BROWSE] check something"}]
         assert _fallback_title_from_messages(msgs) == "check something"
 
+    def test_strips_image_attachment_and_keeps_user_text(self):
+        attachment = f"![image](/Users/example/.kiroclaw/uploads/{'b' * 240}.jpg)"
+        msgs = [{"role": "user", "content": f"{attachment}\n\nsubagents seem to be failing"}]
+        assert _fallback_title_from_messages(msgs) == "subagents seem to be failing"
+
+    def test_attachment_only_returns_new_session_label(self):
+        msgs = [{"role": "user", "content": "![image](/tmp/screenshot.jpg)"}]
+        assert _fallback_title_from_messages(msgs) == NEW_SESSION_TITLE
+
+    def test_strips_non_image_attachment_and_keeps_user_text(self):
+        msgs = [
+            {
+                "role": "user",
+                "content": "[attached_file 1] /tmp/report.txt\nreview report findings",
+            }
+        ]
+        assert _fallback_title_from_messages(msgs) == "review report findings"
+
+    def test_non_image_attachment_only_returns_new_session_label(self):
+        msgs = [{"role": "user", "content": "[attached_file 1] /tmp/report.txt"}]
+        assert _fallback_title_from_messages(msgs) == NEW_SESSION_TITLE
+
+    def test_skips_attachment_only_message_for_later_user_text(self):
+        msgs = [
+            {"role": "user", "content": "![image](/tmp/screenshot.jpg)"},
+            {"role": "user", "content": "fix title generation"},
+        ]
+        assert _fallback_title_from_messages(msgs) == "fix title generation"
+
     def test_no_user_text_returns_label(self):
         assert _fallback_title_from_messages([]) == NEW_SESSION_TITLE
+
+
+class TestManualTitleFallback:
+    def test_generation_failure_uses_sanitized_fallback(self):
+        import asyncio
+
+        from kiro_claw.dashboard import chat_title
+
+        state = _fake_state()
+        slot = _ChatSlot("chat-4-1783603256")
+        slot.messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "![image](/tmp/screenshot.png)\n\n"
+                    "fix title generation\n"
+                    "[attached_file 1] /tmp/debug.log"
+                ),
+            }
+        )
+        state._slots = {slot.key: slot}
+        request = MagicMock()
+        request.app = {"state": state}
+        request.match_info = {"slot": slot.key}
+
+        async def _fail(*_args, **_kwargs):
+            raise RuntimeError("title service unavailable")
+
+        original = chat_title._generate_title_via_kiro
+        chat_title._generate_title_via_kiro = _fail  # type: ignore[assignment]
+        try:
+            response = asyncio.run(chat_title.api_chat_slot_generate_title(request))
+        finally:
+            chat_title._generate_title_via_kiro = original  # type: ignore[assignment]
+
+        assert response.status == 200
+        assert slot.title == "fix title generation"
+        assert slot._titled is True
+
+    def test_attachment_only_failure_keeps_auto_title_unlocked(self):
+        import asyncio
+
+        from kiro_claw.dashboard import chat_title
+
+        state = _fake_state()
+        slot = _ChatSlot("chat-4-1783603257")
+        slot.messages.append({"role": "user", "content": "![image](/tmp/screenshot.png)"})
+        state._slots = {slot.key: slot}
+        request = MagicMock()
+        request.app = {"state": state}
+        request.match_info = {"slot": slot.key}
+
+        async def _fail(*_args, **_kwargs):
+            raise RuntimeError("title service unavailable")
+
+        original = chat_title._generate_title_via_kiro
+        chat_title._generate_title_via_kiro = _fail  # type: ignore[assignment]
+        try:
+            response = asyncio.run(chat_title.api_chat_slot_generate_title(request))
+        finally:
+            chat_title._generate_title_via_kiro = original  # type: ignore[assignment]
+
+        assert response.status == 200
+        assert response.text == '{"ok": true, "title": ""}'
+        assert slot.display_title == NEW_SESSION_TITLE
+        assert slot._titled is False
+        state.push_slot_title.assert_not_called()
 
 
 class TestAutoTitleInFlightGuard:
@@ -112,6 +208,95 @@ class TestAutoTitleInFlightGuard:
 
         assert called is False  # guard prevented the LLM call
         assert slot._titled is False
+
+    def test_end_of_turn_retry_waits_for_send_time_attempt(self):
+        import asyncio
+
+        from kiro_claw.dashboard import chat_title
+
+        async def _scenario():
+            state = _fake_state()
+            slot = _ChatSlot("chat-4-1783603256")
+            slot.messages.append({"role": "user", "content": "debug my flaky test"})
+            first_started = asyncio.Event()
+            release_first = asyncio.Event()
+            attempts = []
+
+            async def _generate(_state, messages):
+                attempts.append(list(messages))
+                if len(attempts) == 1:
+                    first_started.set()
+                    await release_first.wait()
+                    return ""
+                return "Debug flaky test"
+
+            original = chat_title._generate_title_via_kiro
+            chat_title._generate_title_via_kiro = _generate  # type: ignore[assignment]
+            try:
+                send_attempt = asyncio.create_task(chat_title._maybe_auto_title(state, slot))
+                await first_started.wait()
+                slot.messages.append({"role": "assistant", "content": "I found the race."})
+
+                # Simulate chat_done arriving while the on-send attempt is active.
+                await chat_title._maybe_auto_title(state, slot)
+                assert slot._title_retry_pending is True
+
+                release_first.set()
+                await send_attempt
+            finally:
+                chat_title._generate_title_via_kiro = original  # type: ignore[assignment]
+
+            assert len(attempts) == 2
+            assert all(m["role"] != "assistant" for m in attempts[0])
+            assert any(m["role"] == "assistant" for m in attempts[1])
+            assert slot.title == "Debug flaky test"
+            assert slot._titled is True
+            assert slot._title_retry_pending is False
+
+        asyncio.run(_scenario())
+
+
+class TestAutoTitleCancellation:
+    def test_cancellation_does_not_start_pending_retry(self):
+        import asyncio
+
+        from kiro_claw.dashboard import chat_title
+
+        async def _scenario():
+            state = _fake_state()
+            slot = _ChatSlot("chat-4-1783603258")
+            slot.messages.extend(
+                [
+                    {"role": "user", "content": "name this session"},
+                    {"role": "assistant", "content": "working on it"},
+                ]
+            )
+            slot._title_retry_pending = True
+            attempts = 0
+
+            async def _cancel(*_args, **_kwargs):
+                nonlocal attempts
+                attempts += 1
+                raise asyncio.CancelledError
+
+            original = chat_title._generate_title_via_kiro
+            chat_title._generate_title_via_kiro = _cancel  # type: ignore[assignment]
+            try:
+                try:
+                    await chat_title._maybe_auto_title(state, slot)
+                except asyncio.CancelledError:
+                    pass
+                else:
+                    raise AssertionError("cancellation should propagate")
+            finally:
+                chat_title._generate_title_via_kiro = original  # type: ignore[assignment]
+
+            assert attempts == 1
+            assert slot._title_in_flight is False
+            assert slot._title_retry_pending is False
+            assert slot._titled is False
+
+        asyncio.run(_scenario())
 
 
 class TestSkipFallbackBranch:

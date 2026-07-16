@@ -585,6 +585,7 @@ class _ChatSlot:
         "_trusted_patterns",
         "_titled",
         "_title_in_flight",
+        "_title_retry_pending",
         "_resumed_count",
         "_on_message",
         "_has_reader",
@@ -675,6 +676,8 @@ class _ChatSlot:
         # Guards against concurrent LLM auto-title attempts (on-send trigger vs
         # the end-of-turn chat_done trigger racing on the same slot).
         self._title_in_flight: bool = False
+        # Records a chat_done retry that arrived during the on-send attempt.
+        self._title_retry_pending: bool = False
         self._resumed_count: int = 0  # messages loaded from history on resume
         # Callback for broadcasting messages via global SSE
         self._on_message: object | None = None  # Callable[[str, dict], None] | None

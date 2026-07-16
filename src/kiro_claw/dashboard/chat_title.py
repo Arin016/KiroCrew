@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from aiohttp import web
 
@@ -20,6 +21,16 @@ logger = logging.getLogger(__name__)
 
 # Max turns to attempt auto-titling before giving up
 _TITLE_MAX_ATTEMPTS = 5
+
+# Only a small amount of user text can influence a 200-character title prompt.
+# Allow enough bounded source for every dashboard attachment to precede it, then
+# cap the retained text separately after generated references are removed.
+_TITLE_TEXT_LIMIT = 16_384
+_TITLE_MAX_ATTACHMENT_FILES = 20
+_TITLE_MAX_ATTACHMENT_PATH_LENGTH = 4_096
+_TITLE_SOURCE_SCAN_LIMIT = _TITLE_TEXT_LIMIT + _TITLE_MAX_ATTACHMENT_FILES * (
+    _TITLE_MAX_ATTACHMENT_PATH_LENGTH + 32
+)
 
 # Titling is a trivial 3-6 word task, so run it on the cheapest/fastest model
 # (Haiku) rather than the kiroclaw-lite default (Opus 4.6 on the kiro-cli path).
@@ -46,12 +57,164 @@ _TITLE_PROMPT_TEMPLATE = (
 )
 
 
-def _build_title_prompt(messages: list[dict[str, str]]) -> str | None:
+def _strip_markdown_images(content: str, *, drop_trailing_partial: bool = False) -> str:
+    """Remove dashboard-generated image blocks in one forward pass.
+
+    Dashboard image references use the fixed ``![image](path)`` form on their
+    own lines. Requiring that shape preserves escaped and code-quoted Markdown
+    written by the user while balanced-parenthesis tracking handles filenames
+    such as ``screenshot(1).jpg`` without regex backtracking.
+    """
+    prefix = "![image]("
+    chunks: list[str] = []
+    cursor = 0
+    while True:
+        image_start = content.find(prefix, cursor)
+        if image_start < 0:
+            chunks.append(content[cursor:])
+            break
+
+        if image_start > 0 and content[image_start - 1] != "\n":
+            chunks.append(content[cursor : image_start + 1])
+            cursor = image_start + 1
+            continue
+
+        index = image_start + len(prefix)
+        depth = 1
+        while index < len(content) and depth and content[index] not in "\r\n":
+            char = content[index]
+            if char == "\\" and index + 1 < len(content):
+                index += 2
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+
+        if depth or (index < len(content) and content[index] not in "\r\n"):
+            if drop_trailing_partial and index == len(content):
+                chunks.append(content[cursor:image_start])
+                break
+            chunks.append(content[cursor : image_start + 1])
+            cursor = image_start + 1
+            continue
+
+        chunks.append(content[cursor:image_start])
+        chunks.append(" ")
+        cursor = index
+
+    return "".join(chunks)
+
+
+def _strip_attached_file_tokens(
+    content: str,
+    attached_files: tuple[str, ...] = (),
+    *,
+    drop_trailing_partial: bool = False,
+) -> str:
+    """Remove dashboard-generated ``[attached_file N] path`` references.
+
+    Current dashboard messages store paths in token-index order, making each
+    lookup constant-time. The whitespace-delimited fallback preserves support
+    for older messages without metadata.
+    """
+    prefix = "[attached_file "
+    chunks: list[str] = []
+    cursor = 0
+    while True:
+        token_start = content.find(prefix, cursor)
+        if token_start < 0:
+            chunks.append(content[cursor:])
+            break
+
+        if token_start > 0 and not content[token_start - 1].isspace():
+            chunks.append(content[cursor : token_start + 1])
+            cursor = token_start + 1
+            continue
+
+        index = token_start + len(prefix)
+        digits_start = index
+        while index < len(content) and content[index].isdigit():
+            index += 1
+        digit_count = index - digits_start
+        if not 1 <= digit_count <= 2 or not content.startswith("] ", index):
+            chunks.append(content[cursor : token_start + 1])
+            cursor = token_start + 1
+            continue
+
+        token_index = int(content[digits_start:index])
+        path_start = index + 2
+        expected_path = (
+            attached_files[token_index - 1] if 1 <= token_index <= len(attached_files) else ""
+        )
+        path_end = path_start
+        if expected_path and content.startswith(expected_path, path_start):
+            candidate_end = path_start + len(expected_path)
+            if candidate_end == len(content) or content[candidate_end].isspace():
+                path_end = candidate_end
+        elif (
+            drop_trailing_partial
+            and expected_path
+            and expected_path.startswith(content[path_start:])
+        ):
+            path_end = len(content)
+
+        if path_end == path_start:
+            while path_end < len(content) and not content[path_end].isspace():
+                path_end += 1
+        if path_end == path_start:
+            chunks.append(content[cursor : token_start + 1])
+            cursor = token_start + 1
+            continue
+
+        chunks.append(content[cursor:token_start])
+        chunks.append(" ")
+        cursor = path_end
+
+    return "".join(chunks)
+
+
+def _message_attachment_paths(message: dict[str, Any]) -> tuple[str, ...]:
+    """Return bounded, index-preserving paths from dashboard message metadata."""
+    meta = message.get("meta")
+    if not isinstance(meta, dict):
+        return ()
+    files = meta.get("files")
+    if not isinstance(files, list):
+        return ()
+    return tuple(
+        path if isinstance(path, str) and 0 < len(path) <= _TITLE_MAX_ATTACHMENT_PATH_LENGTH else ""
+        for path in files[:_TITLE_MAX_ATTACHMENT_FILES]
+    )
+
+
+def _title_text(content: str, attached_files: tuple[str, ...] = ()) -> str:
+    """Return bounded message text suitable for title generation.
+
+    A bounded allowance large enough for every accepted attachment is sanitized
+    first, so generated paths cannot crowd later user text out of the retained
+    title input. The normalized user text is capped separately.
+    """
+    source_was_truncated = len(content) > _TITLE_SOURCE_SCAN_LIMIT
+    content = content[:_TITLE_SOURCE_SCAN_LIMIT]
+    if content.startswith("[BROWSE] "):
+        content = content[len("[BROWSE] ") :]
+    content = _strip_markdown_images(content, drop_trailing_partial=source_was_truncated)
+    content = _strip_attached_file_tokens(
+        content,
+        attached_files,
+        drop_trailing_partial=source_was_truncated,
+    )
+    return " ".join(content.split())[:_TITLE_TEXT_LIMIT]
+
+
+def _build_title_prompt(messages: list[dict[str, Any]]) -> str | None:
     """Build a title generation prompt from conversation messages."""
     lines: list[str] = []
     for m in messages[:10]:
         role = m.get("role", "")
-        content = m.get("content", "")
+        content = _title_text(m.get("content", ""), _message_attachment_paths(m))
         if role in ("user", "assistant") and content:
             lines.append(f"{role}: {content[:200]}")
     if not lines:
@@ -141,7 +304,7 @@ async def _reveal_title(state: DashboardState, slot: _ChatSlot, title: str) -> N
 
 async def _generate_title_via_kiro(
     state: DashboardState,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
 ) -> str:
     """Generate a title using the shared background kiro-cli session."""
 
@@ -194,7 +357,7 @@ def _persist_title(state: DashboardState, slot: _ChatSlot) -> None:
             logger.debug("Failed to persist title for slot %s", slot.key)
 
 
-def _fallback_title_from_messages(messages: list[dict[str, str]]) -> str:
+def _fallback_title_from_messages(messages: list[dict[str, Any]]) -> str:
     """Fallback title used only when the LLM can't title the chat: the first
     user message, cleaned and truncated to ~60 chars with an ellipsis.
 
@@ -203,11 +366,14 @@ def _fallback_title_from_messages(messages: list[dict[str, str]]) -> str:
     usable user text, so the caller always has something to show.
     """
     first = next(
-        (m.get("content", "") for m in messages if m.get("role") == "user" and m.get("content")),
+        (
+            text
+            for m in messages
+            if m.get("role") == "user"
+            and (text := _title_text(m.get("content", ""), _message_attachment_paths(m)))
+        ),
         "",
     )
-    if first.startswith("[BROWSE] "):
-        first = first[len("[BROWSE] ") :]
     first, _ = redact_exfiltration_urls(first)
     first, _ = redact_credentials(first)
     first = " ".join(first.split())
@@ -237,7 +403,10 @@ async def _maybe_auto_title(state: DashboardState, slot: _ChatSlot) -> None:
     if slot._titled:
         return
     if slot._title_in_flight:
-        # An on-send / prior trigger is already generating a title for this slot.
+        # Preserve the end-of-turn retry if the on-send attempt is still
+        # running. The active attempt will consume it after releasing the guard.
+        if any(m.get("role") == "assistant" and m.get("content") for m in slot.messages):
+            slot._title_retry_pending = True
         return
     if slot.blocks_reads:
         return
@@ -252,10 +421,13 @@ async def _maybe_auto_title(state: DashboardState, slot: _ChatSlot) -> None:
             state.push_slot_title(slot.key, slot.title)
         return
     slot._title_in_flight = True
+    messages = list(slot.messages)
+    attempt_has_assistant = any(m.get("role") == "assistant" and m.get("content") for m in messages)
     logger.info("Auto-title: attempting for slot %s (turn %d)", slot.key, user_count)
 
+    cancelled = False
     try:
-        title = await _generate_title_via_kiro(state, slot.messages)
+        title = await _generate_title_via_kiro(state, messages)
         logger.info("Auto-title: kiro returned %r for slot %s", title, slot.key)
         if title:
             # Animate the title in word-by-word, then finalize with the
@@ -274,22 +446,26 @@ async def _maybe_auto_title(state: DashboardState, slot: _ChatSlot) -> None:
             # definitive failure); on the on-send attempt leave it unlocked so
             # the end-of-turn retry can still upgrade the truncation to a real
             # LLM title.
-            has_assistant = any(
-                m.get("role") == "assistant" and m.get("content") for m in slot.messages
-            )
             slot.title = _fallback_title_from_messages(slot.messages)
-            slot._titled = has_assistant
+            slot._titled = attempt_has_assistant
             _persist_title(state, slot)
             state.push_slot_title(slot.key, slot.title)
             logger.info(
                 "Auto-title: fell back to truncated message for slot %s (locked=%s)",
                 slot.key,
-                has_assistant,
+                attempt_has_assistant,
             )
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except Exception:
         logger.warning("Auto-title failed for slot %s", slot.key, exc_info=True)
     finally:
         slot._title_in_flight = False
+        retry_pending = slot._title_retry_pending
+        slot._title_retry_pending = False
+        if retry_pending and not slot._titled and not cancelled:
+            await _maybe_auto_title(state, slot)
 
 
 async def api_chat_slot_generate_title(request: web.Request) -> web.Response:
@@ -301,20 +477,21 @@ async def api_chat_slot_generate_title(request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
 
     logger.info("Manual title generation requested for slot %s", name)
+    fallback_is_placeholder = False
     try:
         title = await _generate_title_via_kiro(state, slot.messages)
     except Exception:
         logger.debug("Title generation failed for slot %s", name, exc_info=True)
-        user_msgs = [m for m in slot.messages if m.get("role") == "user"]
-        title = user_msgs[0].get("content", "")[:60] if user_msgs else ""
+        title = _fallback_title_from_messages(slot.messages)
+        fallback_is_placeholder = title == NEW_SESSION_TITLE
 
-    if title:
+    if title and not fallback_is_placeholder:
         slot.title = title
         slot._titled = True
         _persist_title(state, slot)
         state.push_slot_title(slot.key, title)
 
-    return web.json_response({"ok": True, "title": title})
+    return web.json_response({"ok": True, "title": "" if fallback_is_placeholder else title})
 
 
 async def api_chat_slot_rename(request: web.Request) -> web.Response:
