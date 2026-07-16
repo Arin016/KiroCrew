@@ -39,6 +39,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Load AUTOSDE rules from the BASE commit, not the PR HEAD, so a PR
+      # cannot weaken the rules that govern it (a malicious PR editing
+      # AUTOSDE.yaml to drop `blocking: true` would otherwise bypass the gate).
+      - name: Extract base-ref AUTOSDE rules
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p .review-base-rules
+          git show "$BASE_SHA:AUTOSDE.yaml" > .review-base-rules/AUTOSDE.yaml 2>/dev/null || echo "# (no backend AUTOSDE rules on base)" > .review-base-rules/AUTOSDE.yaml
+          git show "$BASE_SHA:website/AUTOSDE.yaml" > .review-base-rules/website-AUTOSDE.yaml 2>/dev/null || echo "# (no frontend AUTOSDE rules on base)" > .review-base-rules/website-AUTOSDE.yaml
+
       # Finding 1 (HIGH): install and configure Codex BEFORE assuming the AWS
       # role, so the npm install never runs with the Bedrock credentials in its
       # environment (a compromised package could otherwise exfiltrate them).
@@ -81,6 +92,16 @@ jobs:
           3. Performance issues (unnecessary allocations, O(N^2) loops, missing indexes)
           4. API design issues (breaking changes, missing error handling)
           5. Test coverage gaps (untested branches, missing edge case tests)
+
+          Also enforce this repo's own rules. Read the BASE-branch rule
+          snapshots at .review-base-rules/AUTOSDE.yaml (backend Python) and
+          .review-base-rules/website-AUTOSDE.yaml (frontend) -- these are the
+          rules as they exist on the base branch, so a PR cannot weaken the
+          rules that govern it. For any rule with "blocking: true" whose
+          file-patterns match a changed file, report a violation as
+          Severity: HIGH. If this PR modifies AUTOSDE.yaml or
+          website/AUTOSDE.yaml, scrutinize the change and report any weakening
+          or removal of a blocking rule as Severity: HIGH.
 
           Focus on substantive issues. Ignore style, formatting, and naming opinions.
 

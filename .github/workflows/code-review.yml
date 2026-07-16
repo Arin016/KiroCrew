@@ -144,7 +144,7 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           git diff "$BASE".."$HEAD" --unified=0 --diff-filter=ACMR \
-            -- ':(exclude)THIRD-PARTY-NOTICES' ':(exclude)CHANGELOG.md' ':(exclude)*.lock' ':(exclude).woke.yml' \
+            -- ':(exclude)THIRD-PARTY-NOTICES' ':(exclude)CHANGELOG.md' ':(exclude)*.lock' ':(exclude).woke.yml' ':(exclude)AUTOSDE.yaml' ':(exclude)website/AUTOSDE.yaml' \
             | grep '^+[^+]' | sed 's/^+//' > /tmp/diff-added-lines.txt
 
           if [ ! -s /tmp/diff-added-lines.txt ]; then

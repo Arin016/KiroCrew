@@ -29,6 +29,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Load AUTOSDE rules from the BASE commit, not the PR HEAD, so a PR
+      # cannot weaken the rules that govern it. Claude reads these snapshots
+      # (its restricted toolset can Read files but not run git).
+      - name: Extract base-ref AUTOSDE rules
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p .review-base-rules
+          git show "$BASE_SHA:AUTOSDE.yaml" > .review-base-rules/AUTOSDE.yaml 2>/dev/null || echo "# (no backend AUTOSDE rules on base)" > .review-base-rules/AUTOSDE.yaml
+          git show "$BASE_SHA:website/AUTOSDE.yaml" > .review-base-rules/website-AUTOSDE.yaml 2>/dev/null || echo "# (no frontend AUTOSDE rules on base)" > .review-base-rules/website-AUTOSDE.yaml
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_BEDROCK_ROLE_ARN }}
@@ -49,8 +60,9 @@ jobs:
           # marker), so the gate can never fire. `gh pr comment` is the
           # single-operation form — `gh pr review --comment` trips the
           # "multiple operations require approval" guard.
-          # Read/Grep let the review load the authoritative website/AUTOSDE.yaml
-          # rule set (and any file it needs for context); the gh commands let it
+          # Read/Grep let the review load the authoritative base-branch rule
+          # snapshots (.review-base-rules/AUTOSDE.yaml + website-AUTOSDE.yaml)
+          # and any file it needs for context; the gh commands let it
           # post findings.
           claude_args: |
             --model us.anthropic.claude-opus-4-8
@@ -67,12 +79,18 @@ jobs:
 
             Review ONLY the PR diff. Post specific, actionable inline comments.
 
-            AUTHORITATIVE RULE SET: read website/AUTOSDE.yaml. It is the single
-            source of truth for this repo's review rules, built up over months.
-            Enforce every rule with `blocking: true` whose `file-patterns` match
-            the changed files — treat a violation as a CRITICAL/HIGH finding.
+            AUTHORITATIVE RULE SET: read the BASE-branch rule snapshots at
+            `.review-base-rules/AUTOSDE.yaml` (backend Python) and
+            `.review-base-rules/website-AUTOSDE.yaml` (frontend). These are the
+            rules as they exist on the base branch, so a PR cannot weaken the
+            rules that govern it. Together they are the single source of truth
+            for this repo's review rules, built up over months. Enforce every
+            rule with `blocking: true` whose `file-patterns` match the changed
+            files — treat a violation as a CRITICAL/HIGH finding. If this PR
+            modifies AUTOSDE.yaml or website/AUTOSDE.yaml, scrutinize the change
+            and treat any weakening or removal of a blocking rule as CRITICAL/HIGH.
             The concerns listed below are a non-exhaustive reminder of the
-            judgement-based rules; AUTOSDE.yaml is what governs.
+            judgement-based rules; the AUTOSDE.yaml files govern.
 
             Additional blocking concerns (they mirror the AutoSDE rules that a
             grep cannot catch):
