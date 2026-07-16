@@ -2697,6 +2697,22 @@ class TestTaskRunGitFields:
 
 @requires_git
 class TestGitCoord:
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        """TestGitCoord spawns REAL git via ``git_coord._git`` →
+        ``sandboxed_spawn_argv`` → ``wrap_argv``, which raises when no OS-level
+        sandbox backend is available. These tests exercise git coordination, not
+        sandbox availability, so run the command unwrapped in-test."""
+        import os as _os
+
+        from kiro_claw import git_coord
+
+        monkeypatch.setattr(
+            git_coord,
+            "sandboxed_spawn_argv",
+            lambda argv, *a, **k: (list(argv), dict(_os.environ), None),
+        )
+
     @pytest.mark.asyncio
     async def test_init_workspace_no_repo(self, tmp_path: Path) -> None:
         """init_workspace in non-git dir → git init + branch."""

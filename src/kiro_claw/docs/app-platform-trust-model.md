@@ -33,6 +33,23 @@ code itself.
   receives.
 - **SEL audit** — every module load is recorded in the Security Event Log with its
   trust class (`builtin` / `third_party`), so app-code execution is auditable.
+- **Hard off switch** — set `agent.apps_allow_third_party=false` (in
+  `~/.kiroclaw/config.json` or the config modal) to refuse running any app whose
+  Python lives outside `apps/builtins/`. Both app-**Python** execution paths
+  consult the switch: `module_loader` raises `ImportError` before `exec_module`
+  (in-process hooks), and `backend._start_app_backend_body` returns `None` before
+  `Popen` (the out-of-process app backend), each recording a `denied` SEL entry —
+  so untrusted app **Python** never runs, in-process or out. Defaults to `true`
+  (apps are operator-installed).
+
+  > **Scope (known gap):** this switch gates only app **Python** (the in-process
+  > module loads and the out-of-process backend). It does **not** gate
+  > app-authored lifecycle *shell* scripts (`setup.onInstall` / `onEnable` /
+  > etc., run via `_run_lifecycle_script` → `/bin/bash -c`). Those still run when
+  > the switch is off; they are gated instead by the admission policy
+  > (`apps/admission.py`) and OS-sandbox wrapping, not by
+  > `apps_allow_third_party`. Disabling the switch is therefore not a substitute
+  > for not installing an untrusted app.
 
 ### App-token scope confinement (CWE-269)
 
@@ -58,4 +75,7 @@ True isolation (running app code in a separate sandboxed subprocess rather than
 in-process) is intentionally **out of scope** for now — the open-source app
 registry ships empty and all installs are operator-consented. Process isolation
 is tracked as a separate design to be revisited if/when a public app store lands.
-(Corresponds to CSE finding SEC-012.)
+Until then, operators who install no apps (or run untrusted ones) can set
+`agent.apps_allow_third_party=false` to block third-party execution entirely —
+both in-process module loads and out-of-process backend spawns. (Corresponds to
+CSE finding SEC-012.)

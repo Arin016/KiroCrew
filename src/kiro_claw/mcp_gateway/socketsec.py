@@ -18,8 +18,9 @@ Two narrow, self-contained primitives:
   handler as a belt-and-braces check after the directory-permission
   gate.
 
-Pure stdlib (``socket``, ``struct``, ``os``, ``logging``); no asyncio
-imports so this module is safe to call from synchronous setup paths
+Stdlib-only (``socket``, ``struct``, ``os``, ``logging``) plus the
+``platform_compat`` leaf (itself stdlib-only); no asyncio imports so this
+module is safe to call from synchronous setup paths
 (:func:`run_gatewayd` startup) as well as from async connection
 handlers.
 """
@@ -34,6 +35,8 @@ import stat
 import struct
 from pathlib import Path
 from typing import Any
+
+from kiro_claw import platform_compat
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +83,10 @@ def chmod_socket_0600(path: Path) -> None:
     to ``0700``) is the primary access boundary; this is defense in
     depth.
     """
-    try:
-        os.chmod(path, 0o600)
-    except OSError as exc:
-        logger.warning("chmod 0600 on %s failed: %s (continuing)", path, exc)
+    # chmod_safe already logs + swallows OSError internally (and is a no-op on
+    # Windows), so no try/except wrapper here — this is best-effort defense in
+    # depth, not a fail-loud boundary (the 0700 home-dir gate is the primary one).
+    platform_compat.chmod_safe(path, 0o600)
 
 
 def socket_owner_only(path: Path) -> bool:

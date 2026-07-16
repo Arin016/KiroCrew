@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from kiro_claw import __version__
+from kiro_claw import __version__, platform_compat
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import (
     _DEFAULT_PORT,
@@ -216,22 +216,27 @@ def _stop(cli_port: int | None = None) -> None:
         print("✅ Stopped kiroclaw service. To remove it: kiroclaw service uninstall")
         return
 
-    try:
-        out = subprocess.check_output(
-            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"], text=True
-        ).strip()
-    except FileNotFoundError:
-        sel().log_api_access(
-            caller="cli", operation="gateway_stop", outcome="error",
-            source="cli", resources=f"port={port} reason=lsof_not_found",
-        )
-        print("❌ `lsof` not found — cannot look up gateway process. "
-              f"Install lsof or use `ss -tlnp | grep {port}` to find the PID manually.")
-        sys.exit(1)
-    except subprocess.CalledProcessError:
-        out = ""
+    # Cross-platform port -> listening PID lookup (lsof on POSIX, netstat -ano
+    # on Windows — there is no lsof there, which previously made `kiroclaw stop`
+    # a no-op on Windows).
+    pids = platform_compat.find_listening_pids(port)
 
-    if not out:
+    if not pids:
+        # Distinguish "lookup tool absent" from "genuinely no listener":
+        # find_listening_pids folds a missing lsof into an empty list, so without
+        # this a running gateway would be mis-reported as stopped (and _restart
+        # would then double-spawn). Restores the pre-shim dedicated diagnostic.
+        if not platform_compat.listening_pid_tool_available():
+            _tool = platform_compat.listening_pid_tool()
+            sel().log_api_access(
+                caller="cli", operation="gateway_stop", outcome="no_target",
+                source="cli", resources=f"port={port} reason={_tool}_not_found",
+            )
+            print(
+                f"`{_tool}` not found — cannot look up the gateway process on "
+                f"port {port}. Install {_tool} and retry."
+            )
+            sys.exit(1)
         sel().log_api_access(
             caller="cli", operation="gateway_stop", outcome="no_target",
             source="cli", resources=f"port={port}",
@@ -239,21 +244,10 @@ def _stop(cli_port: int | None = None) -> None:
         print(f"No KiroClaw gateway currently running on port {port}.")
         sys.exit(1)
 
-    pids = list(dict.fromkeys(int(p) for p in out.splitlines() if p.strip().isdigit()))
-
     # Only kill processes that are actually KiroClaw gateways.
-    # Note: TOCTOU race exists between this check and os.kill — the PID could be
+    # Note: TOCTOU race exists between this check and the kill — the PID could be
     # recycled. Acceptable risk for an interactive CLI tool with low blast radius.
-    try:
-        pids = [p for p in pids if _is_kiroclaw_process(p)]
-    except FileNotFoundError:
-        sel().log_api_access(
-            caller="cli", operation="gateway_stop", outcome="error",
-            source="cli", resources=f"port={port} reason=ps_not_found",
-        )
-        print("❌ `ps` not found — cannot verify gateway process. "
-              "Install procps or manually kill the process.")
-        sys.exit(1)
+    pids = [p for p in pids if _is_kiroclaw_process(p)]
     if not pids:
         sel().log_api_access(
             caller="cli", operation="gateway_stop", outcome="no_target",
@@ -265,6 +259,26 @@ def _stop(cli_port: int | None = None) -> None:
     sent: set[int] = set()
     denied: list[int] = []
     for pid in pids:
+        if platform_compat.IS_WINDOWS:
+            # No POSIX signals or graceful shutdown for a detached console-less
+            # gateway: kill_process_tree uses `taskkill /T /F` so the gateway's
+            # detached kiro-cli / MCP-server children are reaped too (a single-PID
+            # kill_pid would orphan them). kill_process_tree raises
+            # ProcessLookupError / PermissionError / OSError on non-zero
+            # taskkill exit — same shape POSIX uses.
+            try:
+                platform_compat.kill_process_tree(pid, platform_compat.SIGTERM)
+                sent.add(pid)
+            except ProcessLookupError:
+                pass  # already gone
+            except PermissionError:
+                denied.append(pid)
+            except OSError:
+                # Generic taskkill failure — re-check liveness rather than
+                # guessing whether the pid is denied vs really gone.
+                if platform_compat.pid_exists(pid):
+                    denied.append(pid)
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
             sent.add(pid)
@@ -285,7 +299,8 @@ def _stop(cli_port: int | None = None) -> None:
             caller="cli", operation="gateway_stop", outcome="allowed",
             source="cli", resources=f"pids={sorted(sent)} port={port}",
         )
-        print(f"✅ Sent SIGTERM to gateway (pid {', '.join(str(p) for p in sorted(sent))}).")
+        _verb = "Terminated" if platform_compat.IS_WINDOWS else "Sent SIGTERM to"
+        print(f"✅ {_verb} gateway (pid {', '.join(str(p) for p in sorted(sent))}).")
     if denied:
         sel().log_api_access(
             caller="cli", operation="gateway_stop", outcome="denied",
@@ -345,13 +360,33 @@ def _args_look_like_kiroclaw(args: str) -> bool:
         >>> _args_look_like_kiroclaw("vim /tmp/kiroclaw-notes.txt")
         False
     """
-    # ``ps -o args=`` returns a shell-style string; tokenize it the way a shell
-    # would. Fall back to a naive split on a malformed string (e.g. an odd quote)
-    # so this best-effort identity check never raises.
+    # ``ps -o args=`` (POSIX) / Win32_Process.CommandLine (Windows WMI) return a
+    # shell-style string; tokenize it the way the host shell would. On Windows
+    # use posix=False so backslash path separators survive (default posix=True
+    # eats them: ``C:\Py\python.exe`` -> ``C:Pypython.exe``, breaking the
+    # interpreter/basename checks below). Fall back to a naive split on a
+    # malformed string (e.g. an odd quote) so this best-effort check never raises.
     try:
-        tokens = shlex.split(args)
+        tokens = shlex.split(args, posix=not platform_compat.IS_WINDOWS)
     except ValueError:
         tokens = args.split()
+
+    def _basename_stem(tok: str) -> str:
+        # Basename without a Windows ``.exe`` suffix, so the venv launchers
+        # ``python.exe`` / ``kiroclaw.exe`` match the same checks as their POSIX
+        # ``python`` / ``kiroclaw`` counterparts. posix=False leaves quotes on
+        # some tokens, so strip them too.
+        #
+        # Split on BOTH separators explicitly rather than os.path.basename:
+        # os.path.basename is host-dependent (posixpath on Linux does NOT split
+        # backslashes), so a Windows cmdline classified on the Linux CI fleet
+        # would keep its full ``D:\...\kiroclaw.exe`` path and never match. This
+        # is host-independent — a basename is whatever follows the last / or \.
+        cleaned = tok.strip('"')
+        base = cleaned.replace("\\", "/").rsplit("/", 1)[-1]
+        if base.lower().endswith(".exe"):
+            base = base[:-4]
+        return base
 
     for index, token in enumerate(tokens):
         # --- Module form: "<python> -m kiro_claw <subcmd>" / "-m kiro_claw.<subcmd>"
@@ -360,7 +395,7 @@ def _args_look_like_kiroclaw(args: str) -> bool:
             # precedes it; otherwise an unrelated tool's "-m" option could be
             # misread (e.g. "grep -m kiro_claw gateway file").
             interpreter_seen = any(
-                os.path.basename(t).startswith("python") for t in tokens[:index]
+                _basename_stem(t).startswith("python") for t in tokens[:index]
             )
             if interpreter_seen:
                 # "kiro_claw.gateway" -> ("kiro_claw", "gateway"); a bare
@@ -382,9 +417,9 @@ def _args_look_like_kiroclaw(args: str) -> bool:
                     ):
                         return True
 
-        # --- Console-script form: ".../kiroclaw <subcmd>"
+        # --- Console-script form: ".../kiroclaw <subcmd>" (or kiroclaw.exe on Win)
         if (
-            os.path.basename(token) == "kiroclaw"
+            _basename_stem(token) == "kiroclaw"
             and index + 1 < len(tokens)
             and tokens[index + 1] in _KIROCLAW_SERVER_SUBCOMMANDS
         ):
@@ -396,30 +431,30 @@ def _args_look_like_kiroclaw(args: str) -> bool:
 def _is_kiroclaw_process(pid: int) -> bool:
     """Return ``True`` if *pid* looks like a KiroClaw gateway process.
 
-    Resolves the process command line via ``ps`` and defers classification to
-    :func:`_args_look_like_kiroclaw`. ``FileNotFoundError`` (``ps`` not installed)
-    is intentionally **propagated** so :func:`_stop` can surface its
-    ``ps_not_found`` branch; ``CalledProcessError`` (the PID has already exited)
-    is treated as "not a match".
+    Resolves the process command line cross-platform via
+    :func:`platform_compat.process_command_line` (Linux ``/proc``, macOS ``ps``,
+    Windows ``Win32_Process`` WMI — the venv ``kiroclaw.exe`` re-execs
+    ``python.exe`` so the image name alone is ambiguous there) and defers
+    classification to :func:`_args_look_like_kiroclaw`.
+
+    ``process_command_line`` returns ``""`` on any failure (dead PID, missing
+    ``ps``, WMI error), which classifies as "not a match" — _stop()'s separate
+    ``listening_pid_tool_available()`` check already surfaces the tool-absent
+    case, so this never needs to raise.
     """
-    try:
-        out = subprocess.check_output(
-            ["ps", "-p", str(pid), "-o", "args="], text=True
-        ).strip()
-    except subprocess.CalledProcessError:
+    out = platform_compat.process_command_line(pid)
+    if not out:
         return False
     return _args_look_like_kiroclaw(out)
 
 
 def _pid_exited(pid: int) -> bool:
-    """Return True if *pid* no longer exists."""
-    try:
-        os.kill(pid, 0)
-        return False
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False  # still alive, just can't signal
+    """Return True if *pid* no longer exists.
+
+    Routes through ``platform_compat.pid_exists`` — a raw ``os.kill(pid, 0)``
+    would TERMINATE the process on Windows instead of probing it.
+    """
+    return not platform_compat.pid_exists(pid)
 
 
 def _spawn_detached_gateway() -> int:
@@ -457,14 +492,24 @@ def _spawn_detached_gateway() -> int:
         # (e.g. running from an unactivated checkout).
         argv = [sys.executable, "-m", "kiro_claw", "gateway"]
 
-    proc = subprocess.Popen(  # noqa: S603 — argv is built from trusted sources
+    # Detach so closing the calling terminal doesn't take the gateway with it.
+    # Pass both flags explicitly (NOT **dict unpack — that breaks mypy's Popen
+    # overload resolution on the build fleet). POSIX: start_new_session=True (own
+    # session/group, immune to SIGHUP); creationflags resolves to 0 (no-op).
+    # Windows: there is no setsid (start_new_session is silently ignored), so
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP gives the child its own
+    # console-less process group that survives the parent. The flags come from
+    # platform_compat (getattr) so referencing them doesn't fail mypy's
+    # [attr-defined] check on Linux where subprocess.* lacks them.
+    proc = subprocess.Popen(  # noqa: S603 — argv from trusted sources
         argv,
         stdin=subprocess.DEVNULL,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
         close_fds=True,
         cwd=str(Path.home()),
+        start_new_session=platform_compat.IS_POSIX,
+        creationflags=(platform_compat.DETACHED_PROCESS | platform_compat.CREATE_NEW_PROCESS_GROUP),
     )
     return proc.pid
 
@@ -537,19 +582,17 @@ def _restart(cli_port: int | None = None) -> None:
     # when no gateway is running, which is wrong for restart: a user running
     # `kiroclaw restart` after the gateway crashed should still get a fresh
     # gateway. Detect that case up-front instead of letting _stop() exit.
-    try:
-        out = subprocess.check_output(
-            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"], text=True
-        ).strip()
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        out = ""
-    if out:
-        # TOCTOU: the gateway can exit between the lsof check above and
-        # _stop()'s own lookup. _stop() raises SystemExit(1) when it
-        # finds nothing — for restart that's the wrong behavior. Swallow
-        # SystemExit so we always proceed to spawn a fresh gateway. The
-        # user asked for a restart; an exit-before-spawn here would
-        # leave them with no running gateway at all.
+    # Also enter _stop() when the lookup tool is absent: find_listening_pids()
+    # returns [] both when nothing listens AND when lsof is missing, so guarding
+    # only on a truthy result would skip the stop and double-spawn a second
+    # gateway on a lsof-less POSIX host. _stop() surfaces the distinct
+    # "lsof not found" diagnostic (and exits) in that case.
+    if platform_compat.find_listening_pids(port) or not platform_compat.listening_pid_tool_available():
+        # TOCTOU: the gateway can exit between the check above and _stop()'s own
+        # lookup. _stop() raises SystemExit(1) when it finds nothing — for restart
+        # that's the wrong behavior. Swallow SystemExit so we always proceed to
+        # spawn a fresh gateway. The user asked for a restart; an exit-before-spawn
+        # here would leave them with no running gateway at all.
         try:
             _stop(cli_port)
         except SystemExit:

@@ -424,7 +424,14 @@ endpoints. Apps can also call them directly via `fetch()`.
 
 ### Reverse Proxy Authentication
 
-The gateway signs each proxied request with `X-KiroClaw-Proxy: <timestamp>:<hmac-sha256>`. Python app backends verify this with `kiroclaw-client`:
+The gateway signs each proxied request with `X-KiroClaw-Proxy: <timestamp>:<hmac-sha256>`. The
+HMAC is computed over the message `timestamp:method:/api/path[?query]:sha256(body)` using the
+app secret as the key, where `sha256(body)` is the hex SHA-256 digest of the raw request body
+(an empty body hashes the empty byte string, `e3b0c442...`). Binding the body hash means a
+tampered body invalidates the signature. Backends verify with a constant-time comparison and
+reject requests whose timestamp is not within ±60s of now.
+
+Python app backends verify this with `kiroclaw-client`:
 
 ```python
 from kiroclaw_client import verify_proxy_request
@@ -432,5 +439,11 @@ if not verify_proxy_request(request, 'my-app'): return Response(status=401)
 ```
 
 Node.js app backends can verify the signature directly: compute
-`HMAC-SHA256(timestamp + path, app_secret)` and compare against the value in the
-`X-KiroClaw-Proxy` header (constant-time), rejecting stale timestamps.
+`HMAC-SHA256(timestamp:method:/api/path[?query]:sha256(body), app_secret)` and compare against
+the value in the `X-KiroClaw-Proxy` header (constant-time), rejecting stale timestamps.
+
+> **Breaking change (body-bound signature):** `verify_proxy_request` /
+> `verify_proxy_request_raw` in the `kiroclaw-client` package MUST be regenerated in lockstep
+> to bind `sha256(body)` while keeping the constant-time compare and ±60s freshness. A gateway
+> that signs body-bound HMACs will fail verification against any deployed old verifier, so the
+> client release must ship together with this change.

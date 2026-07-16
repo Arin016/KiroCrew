@@ -221,6 +221,171 @@ class TestBackendLifecycle:
         result = start_app_backend("bad-entry")
         assert result is None
 
+    def test_backend_entrypoint_escapes_app_root(self, tmp_path, app_env, caplog):
+        # The boot path (start_installed_backends) spawns persisted manifests
+        # WITHOUT re-running validate(), so a manifest whose backend.entryPoint
+        # resolves outside the app root (via a symlink target) must be rejected
+        # by the runtime backstop in _start_app_backend_body. We materialize the
+        # app dir directly (bypassing install-time validation) to exercise the
+        # boot-time guard — never spawning a real process.
+        from kiro_claw.apps.backend import _start_app_backend_body
+        from kiro_claw.apps.manager import app_dir, get_app_manifest
+
+        root = app_dir("escape-app")
+        root.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.py").write_text("import time; time.sleep(60)\n")
+        # A symlink inside the app root pointing outside it — is_file() is True,
+        # so only the resolve()+is_relative_to backstop catches the escape.
+        (root / "server.py").symlink_to(outside / "evil.py")
+        (root / APP_MANIFEST_FILENAME).write_text(json.dumps({
+            "name": "escape-app", "version": "1.0.0",
+            "displayName": "Escape", "description": "escapes app root",
+            "backend": {"entryPoint": "server.py", "port": "auto"},
+        }))
+        manifest = get_app_manifest("escape-app")
+        assert manifest is not None
+        result = _start_app_backend_body("escape-app", manifest)
+        assert result is None
+        assert any("escapes app root" in r.message for r in caplog.records)
+
+    def test_third_party_backend_refused_when_gate_off(self, tmp_path, app_env, monkeypatch, caplog):
+        # Talos P472043259: the apps_allow_third_party off-switch must also block
+        # the OUT-OF-PROCESS backend spawn, not just in-process module loads. A
+        # file-path (third-party) backend must be refused (None, before any Popen)
+        # when the switch is off.
+        import logging
+
+        import kiro_claw.apps.backend as bmod
+        from kiro_claw.apps.manager import app_dir, get_app_manifest
+
+        root = app_dir("third-party-backend")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "server.py").write_text("x = 1\n")
+        (root / APP_MANIFEST_FILENAME).write_text(
+            json.dumps(
+                {
+                    "name": "third-party-backend",
+                    "version": "1.0.0",
+                    "displayName": "TP",
+                    "description": "third-party backend",
+                    "backend": {"entryPoint": "server.py", "port": "auto"},
+                }
+            )
+        )
+        monkeypatch.setattr(
+            "kiro_claw.apps.module_loader._third_party_apps_allowed", lambda: False
+        )
+        monkeypatch.setattr(
+            bmod.subprocess, "Popen", lambda *a, **k: pytest.fail("spawned despite gate off")
+        )
+        manifest = get_app_manifest("third-party-backend")
+        assert manifest is not None
+        with caplog.at_level(logging.WARNING):
+            result = bmod._start_app_backend_body("third-party-backend", manifest)
+        assert result is None
+        assert any("Refusing to spawn third-party app" in r.message for r in caplog.records)
+
+    def test_builtin_module_backend_not_blocked_by_gate(self, tmp_path, app_env, monkeypatch):
+        # The gate must NOT block a builtin backend even when the switch is off.
+        # Builtin-ness is the installed record's origin == "builtin" (the trusted
+        # provenance signal), NOT the manifest entry format — so we persist an
+        # installed record with origin="builtin". Reaching the spawn sentinel proves
+        # the gate let it through.
+        import kiro_claw.apps.backend as bmod
+        from kiro_claw.apps.manager import (
+            InstalledApp,
+            _write_installed,
+            app_dir,
+            get_app_manifest,
+        )
+
+        root = app_dir("builtin-module-app")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / APP_MANIFEST_FILENAME).write_text(
+            json.dumps(
+                {
+                    "name": "builtin-module-app",
+                    "version": "1.0.0",
+                    "displayName": "Builtin",
+                    "description": "module-style builtin backend",
+                    "backend": {"entryPoint": "kiro_claw.apps.builtins.x.server", "port": "auto"},
+                }
+            )
+        )
+        _write_installed(
+            "builtin-module-app",
+            InstalledApp(name="builtin-module-app", origin="builtin", enabled=True),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.apps.module_loader._third_party_apps_allowed", lambda: False
+        )
+
+        class _ReachedSpawn(Exception):
+            pass
+
+        def _sentinel(*a, **k):
+            raise _ReachedSpawn()
+
+        # Neutralize the OS-sandbox wrap so the test isolates the third-party
+        # GATE (its purpose) from sandbox availability: on a host without a
+        # sandbox backend, wrap_argv now fails closed before Popen, which would
+        # mask whether the gate let the builtin through.
+        monkeypatch.setattr(bmod, "wrap_argv", lambda cmd, **k: (cmd, None))
+        monkeypatch.setattr(bmod.subprocess, "Popen", _sentinel)
+        manifest = get_app_manifest("builtin-module-app")
+        assert manifest is not None
+        # Reaching the spawn sentinel proves the gate did NOT block the builtin.
+        with pytest.raises(_ReachedSpawn):
+            bmod._start_app_backend_body("builtin-module-app", manifest)
+
+    def test_third_party_dotted_entry_refused_when_gate_off(
+        self, tmp_path, app_env, monkeypatch, caplog
+    ):
+        # Talos P472043259 bypass: a third-party app (origin != builtin) must NOT
+        # escape the off-switch by declaring a dotted module-style entryPoint. The
+        # gate keys on provenance, not entry format, so this is DENIED before any spawn.
+        import logging
+
+        import kiro_claw.apps.backend as bmod
+        from kiro_claw.apps.manager import (
+            InstalledApp,
+            _write_installed,
+            app_dir,
+            get_app_manifest,
+        )
+
+        root = app_dir("evil-dotted")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / APP_MANIFEST_FILENAME).write_text(
+            json.dumps(
+                {
+                    "name": "evil-dotted",
+                    "version": "1.0.0",
+                    "displayName": "Evil",
+                    "description": "third-party with a dotted entryPoint",
+                    "backend": {"entryPoint": "kiro_claw.cli_server", "port": "auto"},
+                }
+            )
+        )
+        _write_installed(
+            "evil-dotted",
+            InstalledApp(name="evil-dotted", origin="registry", enabled=True),
+        )
+        monkeypatch.setattr(
+            "kiro_claw.apps.module_loader._third_party_apps_allowed", lambda: False
+        )
+        monkeypatch.setattr(
+            bmod.subprocess, "Popen", lambda *a, **k: pytest.fail("spawned despite gate off")
+        )
+        manifest = get_app_manifest("evil-dotted")
+        assert manifest is not None
+        with caplog.at_level(logging.WARNING):
+            result = bmod._start_app_backend_body("evil-dotted", manifest)
+        assert result is None
+        assert any("Refusing to spawn third-party app" in r.message for r in caplog.records)
+
     def test_immediate_exit_is_not_reported_as_started(self, tmp_path, app_env, monkeypatch):
         # A backend that dies right away (e.g. EADDRINUSE port collision) must NOT be
         # reported as started — otherwise the gateway proxies to a dead port (502) and
@@ -330,6 +495,93 @@ class TestBackendLifecycle:
         assert result is None
         # The stale placeholder is gone, so a fresh start_app_backend can spawn again.
         assert "wedged-app" not in bmod._processes
+
+
+class TestBootAdmissionRevet:
+    """start_enabled_app_backends re-vets admission at boot (KiroClaw parity).
+
+    An app enabled before a policy tightened (banned / now-unsigned) must NOT
+    keep running across restarts, but builtins (origin == "builtin") are exempt
+    so trusted first-party apps still boot under require_signature.
+    """
+
+    def _boot_env(self, monkeypatch):
+        import kiro_claw.apps.backend as bmod
+
+        monkeypatch.setattr(bmod, "_reap_stale_app_backends", lambda: 0)
+        started: list[str] = []
+
+        def _fake_start(name):
+            started.append(name)
+            return None  # no real spawn; skip the health-gate branch
+
+        monkeypatch.setattr(bmod, "start_app_backend", _fake_start)
+        monkeypatch.setattr(bmod, "get_app_manifest", lambda name: None)
+        return bmod, started
+
+    def test_banned_third_party_skipped_at_boot(self, tmp_path, app_env, monkeypatch):
+        bmod, started = self._boot_env(monkeypatch)
+        (app_env / "app_admission.json").write_text(
+            json.dumps({"mode": "enforce", "banned": ["evil-app"]})
+        )
+        apps = [{
+            "name": "evil-app", "enabled": True, "origin": "registry",
+            "manifest": {"backend": {"entryPoint": "server.py"}},
+        }]
+        monkeypatch.setattr(bmod, "list_apps", lambda: apps)
+        result = bmod.start_enabled_app_backends()
+        assert "evil-app" not in result
+        assert "evil-app" not in started
+
+    def test_builtin_still_boots_under_require_signature(self, tmp_path, app_env, monkeypatch):
+        bmod, started = self._boot_env(monkeypatch)
+        (app_env / "app_admission.json").write_text(
+            json.dumps({
+                "mode": "enforce", "require_signature": True,
+                "approved": [], "trust_keys": {},
+            })
+        )
+        apps = [{
+            "name": "core-builtin", "enabled": True, "origin": "builtin",
+            "manifest": {"backend": {"entryPoint": "server.py"}},
+        }]
+        monkeypatch.setattr(bmod, "list_apps", lambda: apps)
+        bmod.start_enabled_app_backends()
+        # Builtin is exempt from the gate — start_app_backend was invoked for it.
+        assert "core-builtin" in started
+
+    def test_spawn_exception_isolated_and_boot_continues(self, tmp_path, app_env, monkeypatch):
+        """A per-app spawn failure (e.g. sandbox.wrap_argv fail-closing on macOS 26
+        where sandbox-exec is gone) must NOT crash the whole gateway — the loop logs,
+        skips the failing app, and still boots the healthy one."""
+        import kiro_claw.apps.backend as bmod
+
+        monkeypatch.setattr(bmod, "_reap_stale_app_backends", lambda: 0)
+        monkeypatch.setattr(bmod, "get_app_manifest", lambda name: None)
+        started: list[str] = []
+
+        def _fake_start(name):
+            if name == "boom-app":
+                raise RuntimeError(
+                    "Sandbox backend unavailable and allow_unsandboxed_exec is not set."
+                )
+            started.append(name)
+            return None
+
+        monkeypatch.setattr(bmod, "start_app_backend", _fake_start)
+        apps = [
+            {"name": "boom-app", "enabled": True, "origin": "builtin",
+             "manifest": {"backend": {"entryPoint": "server.py"}}},
+            {"name": "ok-app", "enabled": True, "origin": "builtin",
+             "manifest": {"backend": {"entryPoint": "server.py"}}},
+        ]
+        monkeypatch.setattr(bmod, "list_apps", lambda: apps)
+        # Must not raise despite boom-app's spawn raising.
+        result = bmod.start_enabled_app_backends()
+        # boom-app was skipped; ok-app still got its spawn attempt.
+        assert "boom-app" not in started
+        assert "ok-app" in started
+        assert "boom-app" not in result
 
 
 class _FakeHealthResp:

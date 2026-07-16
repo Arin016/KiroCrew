@@ -406,6 +406,30 @@ class AgentConfig:
             "the risk and it is logged at info level.",
         ),
     )
+    sandbox_allow_unsandboxed_exec: bool = field(
+        default=False,
+        metadata=_meta(
+            "Allow Unsandboxed Execution",
+            "When true, allow agent subprocesses to execute without any sandbox "
+            "backend (fail-open). When false (default), wrap_argv raises a "
+            "RuntimeError if no sandbox backend is available and mode is not 'off', "
+            "preventing unsandboxed execution entirely (fail-closed). This is "
+            "distinct from sandbox_allow_no_isolation which only controls warning "
+            "severity — this field controls whether execution proceeds at all.",
+        ),
+    )
+    apps_allow_third_party: bool = field(
+        default=True,
+        metadata=_meta(
+            "Allow Third-Party Apps",
+            "Allow running third-party (non-builtin) app Python. App code runs with "
+            "FULL gateway privileges (filesystem, network, in-memory credentials) and "
+            "is NOT sandboxed — the permission system gates only the SDK tool surface. "
+            "Defaults to true (apps are operator-installed). Set false to refuse both "
+            "in-process module loads AND out-of-process backend spawns for any app "
+            "outside apps/builtins/ until out-of-process isolation ships (CSE SEC-012).",
+        ),
+    )
     jail: str = field(
         default=JAIL_MODE_AUTO,
         metadata=_meta(
@@ -2577,6 +2601,12 @@ class KiroClawConfig:
                 sandbox=agent_data.get("sandbox", "auto"),
                 sandbox_allow_no_isolation=bool(
                     agent_data.get("sandbox_allow_no_isolation", False)
+                ),
+                sandbox_allow_unsandboxed_exec=bool(
+                    agent_data.get("sandbox_allow_unsandboxed_exec", False)
+                ),
+                apps_allow_third_party=bool(
+                    agent_data.get("apps_allow_third_party", True)
                 ),
                 jail=_normalize_jail(agent_data.get("jail", "auto")),
                 yolo=agent_data.get("yolo", False),

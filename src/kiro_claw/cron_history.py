@@ -20,10 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
-# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
-# gateway/cron machinery that actually locks runs only on macOS/Linux.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.config.paths import config_dir
 
 logger = logging.getLogger(__name__)
@@ -91,11 +88,11 @@ class CronHistoryStore:
     def _lock(self) -> int:
         """Acquire advisory lock, return fd."""
         fd = os.open(str(self._lock_path()), os.O_WRONLY | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        platform_compat.acquire_lock(fd, exclusive=True)
         return fd
 
     def _unlock(self, fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        platform_compat.release_lock(fd)
         os.close(fd)
 
     async def append(self, record: CronRunRecord) -> None:

@@ -26,7 +26,7 @@ kiroclaw setup                # interactive wizard
 kiroclaw gateway              # open http://localhost:5476
 ```
 
-> **Windows is not currently supported.** The OS-level sandbox relies on Linux namespaces or macOS Seatbelt, so KiroClaw runs on macOS and Linux. Use a macOS machine or a Linux host for full features.
+> **Windows is supported natively** (via `kiro_claw.platform_compat`), alongside macOS and Linux. Note the **OS-level sandbox** is POSIX-only — it relies on Linux namespaces or macOS Seatbelt — so on Windows that isolation layer is unavailable; the core gateway, chat, cron, and dashboard all work. See [WINDOWS_INSTALL.md](WINDOWS_INSTALL.md) for per-feature status.
 >
 > **Vector memory** uses Ollama for embeddings. Install via `brew install ollama` (recommended on all platforms). Markdown memory works without Ollama.
 >

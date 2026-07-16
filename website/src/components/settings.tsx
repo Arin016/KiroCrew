@@ -1,4 +1,5 @@
 import React from 'react'
+import Clickable from './Clickable'
 import InfoTip from './InfoTip'
 import StyledSelect from './StyledSelect'
 import { Input, Toggle } from './ui'
@@ -27,12 +28,7 @@ interface SettingsToggleProps {
 
 export function SettingsToggle({ label, description, checked, onChange, disabled }: SettingsToggleProps) {
   return (
-    // The whole row is a mouse-only click convenience that mirrors the inner
-    // <Toggle> (role="switch", tabIndex, keyboard handler, aria-label). Keyboard
-    // and screen-reader users operate the Toggle directly; adding a second
-    // keyboard target on the row would create a redundant, confusing focus stop.
-    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-    <div className={`flex items-center justify-between py-1.5 group ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`} onClick={() => !disabled && onChange(!checked)}>
+    <Clickable data-setting-label={label} className={`flex items-center justify-between py-1.5 group ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`} onClick={() => onChange(!checked)} disabled={disabled}>
       <div className="flex-1 min-w-0 mr-4">
         <div className="text-[13px] font-semibold text-text group-hover:text-text-strong transition-colors">{label}</div>
         {description && <div className="text-[12px] text-muted mt-0.5">{description}</div>}
@@ -43,7 +39,7 @@ export function SettingsToggle({ label, description, checked, onChange, disabled
       <div onClick={e => e.stopPropagation()}>
         <Toggle checked={checked} onChange={onChange} disabled={disabled} label={label} />
       </div>
-    </div>
+    </Clickable>
   )
 }
 
@@ -53,7 +49,7 @@ export function SettingsToggle({ label, description, checked, onChange, disabled
 /** Shared field wrapper: label + optional hint + optional description */
 function SettingsField({ label, description, hint, children }: { label: string; description?: string; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1.5 py-1.5">
+    <div data-setting-label={label} className="flex flex-col gap-1.5 py-1.5">
       <div className="flex items-center gap-1.5">
         <span className="text-[13px] font-semibold text-text">{label}</span>
         {hint && <InfoTip text={hint} />}

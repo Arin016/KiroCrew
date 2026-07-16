@@ -25,7 +25,6 @@ import functools
 import json
 import logging
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -33,6 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from kiro_claw import platform_compat
 from kiro_claw.platform import current_context
 
 logger = logging.getLogger(__name__)
@@ -167,22 +167,24 @@ def _probe_sandbox_exec() -> bool:
     """Return True if macOS ``sandbox-exec`` actually works.
 
     Uses a file-based profile and targets kiro-cli (or /usr/bin/true as
-    fallback) to match the real sandbox_exec_argv() invocation.  macOS ≥ 26
-    refuses sandbox_apply() for third-party binaries, so probing with just
-    ``true`` gives false positives.
+    fallback) to match the real sandbox_exec_argv() invocation.  The probe
+    tests with an ``(allow default)`` profile and a representative binary
+    to detect any kernel-level rejection (not just sandbox-exec presence).
     """
     if sys.platform != "darwin":
         return False
-    # macOS 26+ refuses sandbox_apply() for third-party callers entirely.
-    try:
-        mac_ver = platform.mac_ver()[0]
-        if mac_ver:
-            major = int(mac_ver.split(".")[0])
-            if major >= 26:
-                logger.info("sandbox-exec unavailable: macOS %s denies sandbox_apply for third-party binaries", mac_ver)
-                return False
-    except (ValueError, IndexError):
-        pass
+    # Decide empirically — do NOT hard-code a macOS version cutoff. An earlier
+    # `major >= 26 → return False` gate was wrong: sandbox-exec + the Seatbelt
+    # kernel subsystem still work on macOS 26 (Tahoe) — verified that the real
+    # generated profile compiles, runs kiro-cli, AND enforces (a strict profile
+    # denies `cat ~/.aws/config`). The gate disabled a working sandbox and forced
+    # the agent onto the fail-closed no-isolation path. The probe below already
+    # detects a genuinely-broken sandbox-exec on any host/version, so trust it.
+    # Note: sandbox-exec / sandbox_init() are marked "deprecated" in headers
+    # since macOS 10.8, but the Seatbelt kernel subsystem they use is NOT
+    # deprecated — it's the same enforcement layer that backs App Sandbox and
+    # iOS. All major AI CLIs (Claude Code, Codex, Gemini) rely on it.
+    # Rather than hard-coding version checks, we probe empirically below.
     sb = shutil.which("sandbox-exec")
     if sb is None:
         return False
@@ -195,12 +197,14 @@ def _probe_sandbox_exec() -> bool:
         os.close(fd)
         r = subprocess.run(
             [sb, "-f", profile_path, target, *target_arg],
-            capture_output=True, timeout=5,
+            capture_output=True,
+            timeout=5,
         )
         if r.returncode != 0:
             logger.warning(
                 "sandbox-exec probe failed (exit %d): %s",
-                r.returncode, r.stderr.decode(errors="replace").strip(),
+                r.returncode,
+                r.stderr.decode(errors="replace").strip(),
             )
         return r.returncode == 0
     except Exception as exc:
@@ -351,6 +355,10 @@ _libc.mount.argtypes = [
 _libc.mount.restype = ctypes.c_int
 _libc.unshare.argtypes = [ctypes.c_int]
 _libc.unshare.restype = ctypes.c_int
+_libc.prctl = _libc.prctl if hasattr(_libc, "prctl") else None
+if _libc.prctl:
+    _libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    _libc.prctl.restype = ctypes.c_int
 
 REAL_UID = {uid}
 REAL_GID = {gid}
@@ -460,6 +468,12 @@ def main():
                 dest = os.path.join(parent, filename)
                 with open(dest, "wb") as fh:
                     fh.write(expose_data[src_path])
+                # NOTE: this runs inside the embedded Linux-only namespace
+                # launcher script (a standalone /tmp file that imports only
+                # stdlib — sys/ctypes/os/tempfile — and never kiro_claw), so it
+                # must stay a raw os.chmod, NOT platform_compat.chmod_safe
+                # (which is undefined in that process). The launcher never runs
+                # on Windows, so there is no portability loss.
                 os.chmod(dest, 0o444)
 
         # Bind-mount empty files over individual sensitive files. Source the
@@ -505,6 +519,154 @@ def main():
                 "{strict_host_key_opt}"
             )
 
+        # ── Step 5: Drop capabilities + set NO_NEW_PRIVS (P472042955) ──
+        # Inside the user namespace, the child has CAP_SYS_ADMIN (owner of the
+        # NS) which lets it umount the credential bind-mounts. Drop ALL
+        # capabilities from the bounding set and set NO_NEW_PRIVS before exec.
+        import struct as _struct
+
+        _PR_SET_NO_NEW_PRIVS = 38
+        _PR_CAPBSET_DROP = 24
+        if _libc.prctl:
+            # Linux CAP_LAST_CAP is currently 41 (kernel 6.x); iterate 0..63 for
+            # forward-compatibility — dropping a non-existent cap just returns -1.
+            for _cap in range(64):
+                _libc.prctl(_PR_CAPBSET_DROP, _cap, 0, 0, 0)
+            # NO_NEW_PRIVS: prevents regaining caps via exec of setuid/setcap bins
+            _ret = _libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+            if _ret != 0:
+                sys.exit("sandbox: BLOCKED — failed to set NO_NEW_PRIVS (prctl returned %d)" % _ret)
+
+        # ── Step 6: Install seccomp-BPF filter (P472042955) ──
+        # Deny mount/umount2/unshare/setns/pivot_root/link/linkat to prevent
+        # the sandboxed process from undoing bind-mounts or creating hardlinks
+        # to protected credential inodes (P472042777).
+        if _libc.prctl:
+            _PR_SET_SECCOMP = 22
+            _SECCOMP_MODE_FILTER = 2
+            _SECCOMP_RET_ALLOW = 0x7FFF0000
+            _SECCOMP_RET_ERRNO = 0x00050000
+            _EPERM = 1
+            _BPF_LD = 0x00
+            _BPF_W = 0x00
+            _BPF_ABS = 0x20
+            _BPF_JMP = 0x05
+            _BPF_JEQ = 0x10
+            _BPF_K = 0x00
+            _BPF_RET = 0x06
+            # Syscall numbers (x86_64): mount=165, umount2=166, unshare=272,
+            # setns=308, pivot_root=155, link=86, linkat=265
+            # aarch64: mount=40, umount2=39, unshare=97, setns=268,
+            # pivot_root=41, link=N/A(use linkat=37), linkat=37
+            import platform as _plat
+            _machine = _plat.machine()
+            if _machine == "x86_64":
+                _DENY_SYSCALLS = (165, 166, 272, 308, 155, 86, 265)
+            elif _machine == "aarch64":
+                _DENY_SYSCALLS = (40, 39, 97, 268, 41, 37)
+            else:
+                _DENY_SYSCALLS = ()  # unknown arch — skip seccomp
+
+            if _DENY_SYSCALLS:
+                # Architecture constants for seccomp arch validation
+                _AUDIT_ARCH_X86_64 = 0xC000003E
+                _AUDIT_ARCH_AARCH64 = 0xC00000B7
+                _SECCOMP_RET_KILL = 0x00000000
+                _expected_arch = _AUDIT_ARCH_X86_64 if _machine == "x86_64" else _AUDIT_ARCH_AARCH64
+
+                # BPF program: validate arch, load syscall number, compare
+                # against deny list, return ERRNO(EPERM) on match, ALLOW otherwise.
+                _insns = []
+                # Load arch: BPF_LD | BPF_W | BPF_ABS, offset=4 (seccomp_data.arch)
+                _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 4))
+                # If arch == expected, skip next insn (jt=1); else fall through to kill
+                _insns.append(_struct.pack("<HBBI", _BPF_JMP | _BPF_JEQ | _BPF_K, 1, 0, _expected_arch))
+                # Kill on unexpected arch (blocks i386 int 0x80 bypass)
+                _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_KILL))
+                # Load syscall number: BPF_LD | BPF_W | BPF_ABS, offset=0
+                _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 0))
+                # For each denied syscall: JEQ -> deny
+                _n_deny = len(_DENY_SYSCALLS)
+                for _i, _nr in enumerate(_DENY_SYSCALLS):
+                    _jt = _n_deny - _i  # jumps to the DENY RET
+                    _insns.append(_struct.pack("<HBBI",
+                        _BPF_JMP | _BPF_JEQ | _BPF_K, _jt, 0, _nr))
+                # ALLOW: return SECCOMP_RET_ALLOW
+                _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_ALLOW))
+                # DENY: return SECCOMP_RET_ERRNO | EPERM
+                _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_ERRNO | _EPERM))
+
+                _prog_bytes = b"".join(_insns)
+                _n_insns = len(_insns)
+
+                # struct sock_fprog {{ unsigned short len; struct sock_filter *filter; }}
+                class _SockFprog(ctypes.Structure):
+                    _fields_ = [("len", ctypes.c_ushort),
+                                ("filter", ctypes.c_char_p)]
+
+                _fprog = _SockFprog()
+                _fprog.len = _n_insns
+                _fprog.filter = _prog_bytes
+                _ret = _libc.prctl(_PR_SET_SECCOMP, _SECCOMP_MODE_FILTER,
+                                   ctypes.addressof(_fprog), 0, 0)
+                if _ret != 0:
+                    sys.exit("sandbox: BLOCKED — failed to install seccomp-BPF filter (prctl returned %d)" % _ret)
+
+        # ── Step 7: Pre-exec hardlink scan (P472042777) ──
+        # Scan the agent workspace + /tmp for hardlinks (nlink > 1) whose
+        # inode matches a protected credential file. If found, refuse to exec.
+        _protected_inodes = set()
+        for _pd in SENSITIVE_DIRS:
+            if os.path.isdir(_pd):
+                for _root, _dirs_scan, _files_scan in os.walk(_pd):
+                    for _fname in _files_scan:
+                        try:
+                            _st = os.stat(os.path.join(_root, _fname))
+                            _protected_inodes.add((_st.st_dev, _st.st_ino))
+                        except OSError:
+                            pass
+                    break  # depth=1 for credential dirs
+        for _pf in SENSITIVE_FILES:
+            try:
+                _st = os.stat(_pf)
+                _protected_inodes.add((_st.st_dev, _st.st_ino))
+            except OSError:
+                pass
+
+        if _protected_inodes:
+            _scan_count = 0
+            _MAX_SCAN = 10000
+            _dangerous_links = []
+            _cwd = os.getcwd()
+            for _scan_root in (_cwd, "/tmp"):
+                if not os.path.isdir(_scan_root):
+                    continue
+                for _root2, _dirs2, _files2 in os.walk(_scan_root):
+                    # Depth limit: max 5 levels
+                    _depth = _root2[len(_scan_root):].count(os.sep)
+                    if _depth > 5:
+                        _dirs2.clear()
+                        continue
+                    for _fn2 in _files2:
+                        _scan_count += 1
+                        if _scan_count > _MAX_SCAN:
+                            break
+                        _fp2 = os.path.join(_root2, _fn2)
+                        try:
+                            _st2 = os.lstat(_fp2)
+                            if _st2.st_nlink > 1:
+                                if (_st2.st_dev, _st2.st_ino) in _protected_inodes:
+                                    _dangerous_links.append(_fp2)
+                        except OSError:
+                            pass
+                    if _scan_count > _MAX_SCAN:
+                        break
+            if _dangerous_links:
+                sys.exit(
+                    f"sandbox: BLOCKED — found hardlink(s) to protected credential "
+                    f"inodes: {{_dangerous_links[:5]}}. Remove them before running."
+                )
+
         os.execvp(argv[0], argv)
 
 if __name__ == "__main__":
@@ -532,7 +694,7 @@ def namespace_argv(
     fd, path = tempfile.mkstemp(suffix=".py", prefix="kiroclaw_sandbox_")
     os.write(fd, script.encode())
     os.close(fd)
-    os.chmod(path, 0o700)
+    platform_compat.chmod_safe(path, 0o700)
 
     return [sys.executable, path, *real_argv]
 
@@ -665,7 +827,7 @@ def cleanup_stale_sandbox_profiles() -> None:
         if not entry.startswith("kiroclaw_sandbox_") or not entry.endswith(".sb"):
             continue
         # Extract PID from kiroclaw_sandbox_{pid}_{random}.sb
-        middle = entry[len("kiroclaw_sandbox_"):-len(".sb")]
+        middle = entry[len("kiroclaw_sandbox_") : -len(".sb")]
         pid_str = middle.split("_", 1)[0]
         if not pid_str.isdigit():
             continue
@@ -697,6 +859,26 @@ def _allow_no_isolation() -> bool:
         )
 
         return bool(getattr(KiroClawConfig.load().agent, "sandbox_allow_no_isolation", False))
+    except Exception:
+        return False
+
+
+def _allow_unsandboxed_exec() -> bool:
+    """Whether the operator has explicitly opted into allowing execution
+    without ANY sandbox backend (fail-open behavior).
+
+    When False (default), wrap_argv will RAISE instead of returning unmodified
+    argv when no sandbox backend is available. This is the fail-closed behavior
+    required by pentest finding P472042906.
+
+    Read lazily from config to avoid an import cycle with the config loader.
+    """
+    try:
+        from kiro_claw.config.loader import (
+            KiroClawConfig,  # circular import: sandbox is a low-level dep of config.loader
+        )
+
+        return bool(getattr(KiroClawConfig.load().agent, "sandbox_allow_unsandboxed_exec", False))
     except Exception:
         return False
 
@@ -837,6 +1019,12 @@ def wrap_argv(
         *cleanup_path* is a temp file to delete after the child exits
         (macOS seatbelt profile or Linux launcher script).
         ``None`` when no cleanup is needed.
+
+    Raises:
+        RuntimeError: When no sandbox backend is available, mode is not "off",
+            and ``agent.sandbox_allow_unsandboxed_exec`` is False (default).
+            This is the fail-closed behavior — the agent subprocess is NOT
+            allowed to run without OS-level isolation unless explicitly opted in.
     """
     # Governance ordinal floor: a policy/profile may require a MINIMUM sandbox
     # tier (off < standard < cc < strict).  Clamp the requested mode up to that
@@ -867,5 +1055,113 @@ def wrap_argv(
         return sandbox_exec_argv(argv, sandbox_level, strip_python_env=strip_python_env)
 
     if backend == "none":
+        # FAIL-CLOSED: refuse to execute without sandbox unless explicitly opted in.
+        # This addresses pentest finding P472042906 — the previous behavior silently
+        # returned unmodified argv, allowing the agent subprocess to access all
+        # credential paths without any OS-level isolation.
+        if not _allow_unsandboxed_exec():
+            # Emit SEL audit event for this security-relevant denial so it
+            # appears in the tamper-evident audit log (AutoSDE requirement).
+            try:
+                from kiro_claw.sel import sel  # circular import: sandbox is low-level
+
+                sel().log_tool_invocation(
+                    session_key="sandbox",
+                    agent="system",
+                    source="sandbox.wrap_argv",
+                    tool_name=argv[0] if argv else "unknown",
+                    tool_kind="subprocess",
+                    outcome="denied",
+                    error="No sandbox backend available and allow_unsandboxed_exec is not set",
+                )
+            except Exception:
+                logger.warning("Failed to emit SEL audit event for sandbox denial", exc_info=True)
+            raise RuntimeError(
+                "Sandbox backend unavailable and allow_unsandboxed_exec is not set. "
+                "No OS-level sandbox backend is available on this host, and the "
+                "agent subprocess cannot be safely isolated. Set "
+                "agent.sandbox_allow_unsandboxed_exec=true in ~/.kiroclaw/config.json "
+                "to explicitly allow unsandboxed execution, or install a supported "
+                "sandbox backend (Linux user namespaces, or macOS sandbox-exec)."
+            )
+        # Opted in: warn (or info) and return unmodified argv
         _warn_no_isolation(mode)
     return argv, None
+
+
+# Environment keys always scrubbed from an agent-influenced subprocess'
+# environment, regardless of sandbox backend. These are the credential-bearing
+# names that must never reach a spawn whose command, arguments, or working
+# directory the agent (or a hostile MCP-config / repo) can influence. The OS
+# sandbox launcher already drops these when a backend is present (see
+# ``ENV_PREFIXES`` in ``namespace_argv`` / ``sandbox_exec_argv``), but scrubbing
+# at the parent level too means the guarantee holds even on the opted-in
+# ``sandbox_allow_unsandboxed_exec`` fail-open path where no launcher runs.
+# Prefix match via ``startswith`` (mirrors the launcher's ENV_PREFIXES check).
+_SPAWN_SCRUB_ENV_PREFIXES: list[str] = list(_SENSITIVE_ENV_PREFIXES) + list(_AGENT_DENIED_ENV_KEYS)
+
+
+def scrub_env(
+    env: dict[str, str] | None = None,
+    *,
+    extra_prefixes: list[str] | None = None,
+) -> dict[str, str]:
+    """Return a copy of *env* (default ``os.environ``) with credential-bearing
+    keys removed.
+
+    Drops every key whose name starts with one of ``_SPAWN_SCRUB_ENV_PREFIXES``
+    (AWS secret/session vars, SSH_AUTH_SOCK, GNUPGHOME, GIT_ASKPASS, and the
+    Slack/owner tokens seeded into ``os.environ`` for trusted children). Used to
+    build the environment for agent-influenced spawns so a spawned process
+    cannot read secrets straight out of the inherited environment.
+
+    *extra_prefixes* adds more name prefixes to drop (e.g.
+    ``_PYTHON_ENV_PREFIXES`` when the spawn is a foreign Python child).
+    """
+    prefixes = _SPAWN_SCRUB_ENV_PREFIXES + (extra_prefixes or [])
+    src = os.environ if env is None else env
+    return {k: v for k, v in src.items() if not any(k.startswith(p) for p in prefixes)}
+
+
+def sandboxed_spawn_argv(
+    argv: list[str],
+    mode: str = "standard",
+    *,
+    env: dict[str, str] | None = None,
+    strip_python_env: bool = False,
+) -> tuple[list[str], dict[str, str], str | None]:
+    """Single chokepoint for agent-influenced subprocess spawns.
+
+    Wraps *argv* with the OS-level sandbox (:func:`wrap_argv`) AND returns a
+    credential-scrubbed environment (:func:`scrub_env`), so every caller gets
+    both the filesystem-isolation and the environment-hiding layer without
+    having to remember to apply each separately. This is the wrapper the
+    subprocess-spawn audit test (``test/test_spawn_audit.py``) requires every
+    agent-influenced spawn in ``src/kiro_claw`` to route through.
+
+    Args:
+        argv: Original command + args.
+        mode: Sandbox mode passed to :func:`wrap_argv` (default ``"standard"``:
+            hides non-workflow credential dirs while leaving git-over-SSH and
+            the AWS CLI usable).
+        env: Base environment to scrub (default ``os.environ``). Pass a
+            pre-augmented env (e.g. with a resolved ``PATH``) to have the scrub
+            applied on top of it.
+        strip_python_env: Strip ``PYTHONPATH``/``PYTHONHOME`` so a foreign
+            Python child does not inherit KiroClaw's interpreter paths. Applied
+            BOTH inside :func:`wrap_argv`'s launcher AND to the returned env, so
+            the strip holds even on the fail-open path where no launcher runs.
+
+    Returns:
+        ``(wrapped_argv, scrubbed_env, cleanup_path_or_None)``. The caller MUST
+        pass *scrubbed_env* as the subprocess ``env=`` and unlink *cleanup_path*
+        (a temp launcher/profile) after the child exits.
+    """
+    wrapped, cleanup = wrap_argv(argv, mode=mode, strip_python_env=strip_python_env)
+    # ``wrap_argv`` only strips PYTHONPATH/PYTHONHOME inside the launcher script,
+    # so on the fail-open path (no sandbox backend, opted-in unsandboxed exec) it
+    # returns argv unmodified and the strip never happens. Apply the same strip
+    # to the scrubbed env here so ``strip_python_env=True`` holds regardless of
+    # whether a backend is available.
+    extra = _PYTHON_ENV_PREFIXES if strip_python_env else None
+    return wrapped, scrub_env(env, extra_prefixes=extra), cleanup

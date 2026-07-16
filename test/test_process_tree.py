@@ -1,6 +1,6 @@
 """Tests for process tree tracking, recursive kill, and session cleanup."""
 
-import signal
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +12,9 @@ from kiro_claw.acp.client import (
     _is_our_child,
     _kill_escaped_children,
 )
+
+if sys.platform != "win32":
+    import signal
 
 # ── 1. _get_child_pids: visited-set prevents infinite loops ──
 
@@ -56,6 +59,16 @@ class TestGetChildPidsVisitedSet:
 # ── 2. _kill_escaped_children: handles dead PIDs and kills bottom-up ──
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only sweep: _kill_escaped_children returns immediately on Windows"
+        " (kill_process_tree already walked the tree via taskkill /T), so patching"
+        " os.kill / asserting a signal-order never fires. signal.SIGKILL is also"
+        " undefined on Windows. The Windows no-op contract is exercised in"
+        " test_kill_escaped_children_windows_noop below."
+    ),
+)
 class TestKillEscapedChildren:
     def test_already_dead_pid(self):
         with patch("os.kill", side_effect=ProcessLookupError):
@@ -322,3 +335,14 @@ class TestPidTracking:
             assert "200" not in content
             assert "100" in content
             assert "300" in content
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only no-op contract")
+def test_kill_escaped_children_windows_noop():
+    """On Windows the sweep is a no-op — kill_process_tree already walked the
+    tree via taskkill /T. Verify os.kill is never called even when the caller
+    passes non-empty child_pids."""
+    called = []
+    with patch("os.kill", side_effect=lambda *a, **k: called.append(a)):
+        _kill_escaped_children({10: 1, 20: 2, 30: 3})
+    assert called == []

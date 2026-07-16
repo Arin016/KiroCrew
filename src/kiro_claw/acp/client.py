@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import glob
 import json
 import logging
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess as subprocess_mod
 import sys
 import time
@@ -32,7 +34,7 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import AsyncGenerator, AsyncIterator
 
-from kiro_claw import model_registry
+from kiro_claw import model_registry, platform_compat
 from kiro_claw.acp.types import (
     ACP_BACKEND_CLAUDE,
     EVENT_AGENT_SWITCHED,
@@ -192,6 +194,28 @@ def _is_safe_oauth_url(url: str) -> bool:
     return lower.startswith("https://") or lower.startswith("http://")
 
 
+def _normalize_exe_casing(path: str | None) -> str | None:
+    """On Windows, return *path* with its TRUE on-disk casing (via realpath).
+
+    The Builder Toolbox ``kiro-cli.exe`` is a multiplexer shim that derives which
+    tool to run from its own ``argv[0]`` basename, CASE-SENSITIVELY. But
+    ``shutil.which`` builds the resolved name's extension from ``PATHEXT``, which
+    lists ``.EXE`` upper-case — so it returns ``...\\kiro-cli.EXE`` even though the
+    file on disk is ``kiro-cli.exe``. Spawned under that name the shim fails with
+    "Command 'kiro-cli.EXE' doesn't appear to be associated with any tool", exits
+    instantly, and the ACP pipe breaks → the dashboard shows "session stuck".
+    ``os.path.realpath`` resolves to the real directory-entry casing, fixing it.
+    No-op on POSIX (case-sensitive FS; realpath only follows symlinks). Returns
+    None unchanged.
+    """
+    if path is None or not platform_compat.IS_WINDOWS:
+        return path
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
 def _resolve_kiro_bin() -> str | None:
     """Find the kiro-cli binary, or None when it is not installed.
 
@@ -200,13 +224,15 @@ def _resolve_kiro_bin() -> str | None:
     executable; ignored otherwise), then resolves from PATH (augmented with the
     usual local bin dirs so a non-login gateway still finds a user install) and
     returns ``None`` rather than raising when it is absent, so the caller can
-    surface a clear "install kiro-cli" error instead of crashing.
+    surface a clear "install kiro-cli" error instead of crashing. Windows: the
+    returned path is realpath-cased so the case-sensitive toolbox shim
+    dispatches correctly (see :func:`_normalize_exe_casing`).
     """
     env_bin = os.environ.get("KIROCLAW_KIRO_BIN")
-    if env_bin and Path(env_bin).is_file() and os.access(env_bin, os.X_OK):
-        return env_bin
+    if env_bin and platform_compat.is_executable_file(env_bin):
+        return _normalize_exe_casing(env_bin)
     search_path = augmented_path(os.environ.get("PATH", ""))
-    return shutil.which(KIRO_CLI_BIN, path=search_path)
+    return _normalize_exe_casing(shutil.which(KIRO_CLI_BIN, path=search_path))
 
 
 def _mise_which(tool: str) -> str | None:
@@ -256,7 +282,7 @@ def _resolve_node_for_script(script_path: str) -> str | None:
         rel = resolved.relative_to(mise_installs)
         version_dir = mise_installs / rel.parts[0]
         node_bin = version_dir / "bin" / "node"
-        if node_bin.is_file() and os.access(node_bin, os.X_OK):
+        if platform_compat.is_executable_file(node_bin):
             return str(node_bin)
     except (ValueError, IndexError):
         pass
@@ -373,8 +399,14 @@ def _resolve_claude_acp_bin() -> list[str] | None:
         node = _resolve_node_for_script(resolved)
         if node:
             return [node, resolved]
-        if os.access(script, os.X_OK):
-            return [script]
+        # Directly runnable (a real executable on POSIX; a .exe/.cmd/etc. on
+        # Windows)? Run it as-is. A bare .js is NOT directly runnable on Windows
+        # (is_executable_file excludes it), so it correctly falls through to be
+        # wrapped with node below — matching the POSIX no-x-bit behavior.
+        # Casing-normalize (Windows): a `which`-resolved .EXE must reach a
+        # toolbox-style shim with its true on-disk name (see _normalize_exe_casing).
+        if platform_compat.is_executable_file(script):
+            return [_normalize_exe_casing(script) or script]
         node_on_path = shutil.which("node", path=search_path)
         if node_on_path:
             return [node_on_path, resolved]
@@ -410,7 +442,9 @@ def _resolve_claude_code_executable() -> str | None:
         return mise_resolved
 
     search_path = augmented_path(os.environ.get("PATH", ""))
-    return shutil.which(CLAUDE_CODE_BIN, path=search_path)
+    # Casing-normalize (Windows): a `which`-resolved .EXE reaches the toolbox shim
+    # with its true on-disk name (see _normalize_exe_casing).
+    return _normalize_exe_casing(shutil.which(CLAUDE_CODE_BIN, path=search_path))
 
 
 def _resolve_ssh_auth_sock(env: dict[str, str]) -> None:
@@ -421,10 +455,13 @@ def _resolve_ssh_auth_sock(env: dict[str, str]) -> None:
 
     - macOS: launchd listener path changes on reboot
     - Linux: ssh-agent sockets live under /tmp/ssh-*/agent.*
+    - Windows: no-op — there is no ``SSH_AUTH_SOCK`` (Win32 OpenSSH agent uses a
+      named pipe, which needs no repair). Bare ``os.getuid()`` below would also
+      ``AttributeError`` on win32, so return early; this function runs in the
+      spawn prelude for BOTH ACP backends.
     """
-    import glob
-    import stat
-    import sys
+    if platform_compat.IS_WINDOWS:
+        return
 
     current = env.get("SSH_AUTH_SOCK", "")
     if current and os.path.exists(current):
@@ -924,7 +961,14 @@ def _get_child_pids(parent_pid: int | None, _visited: set[int] | None = None) ->
 
 
 def _direct_children(pid: int) -> list[int]:
-    """Return direct child PIDs. Uses /proc on Linux, pgrep elsewhere."""
+    """Return direct child PIDs. Uses /proc on Linux, pgrep on other POSIX.
+
+    Windows: returns ``[]`` — there is no pgrep, and the tree kill goes through
+    ``kill_process_tree`` (``taskkill /T``), which walks descendants itself, so
+    the escaped-child sweep this feeds is a POSIX-only concern.
+    """
+    if platform_compat.IS_WINDOWS:
+        return []
     if sys.platform == "linux":
         try:
             children: list[int] = []
@@ -951,7 +995,14 @@ def _direct_children(pid: int) -> list[int]:
 
 
 def _get_start_time(pid: int) -> int | None:
-    """Read process start time to detect PID recycling."""
+    """Read process start time to detect PID recycling.
+
+    Windows: returns ``None``. It feeds the POSIX-only escaped-child sweep
+    (a no-op on win32, where ``taskkill /T`` already walks the tree), so a
+    missing start time has no effect there and avoids spawning a failing ``ps``.
+    """
+    if platform_compat.IS_WINDOWS:
+        return None
     try:
         if sys.platform == "linux":
             stat = Path(f"/proc/{pid}/stat").read_text()
@@ -967,7 +1018,14 @@ def _get_start_time(pid: int) -> int | None:
 
 
 def _read_basename(pid: int) -> bytes | None:
-    """Read the executable basename for a PID (platform-aware)."""
+    """Read the executable basename for a PID (platform-aware).
+
+    POSIX only in practice — the escaped-child sweep that consumes this value is a
+    Windows no-op — but the helper still short-circuits on win32 (returning None)
+    so a stray future caller doesn't crash trying to invoke ``ps`` / read /proc.
+    """
+    if platform_compat.IS_WINDOWS:
+        return None
     try:
         if sys.platform == "linux":
             cmdline_path = Path(f"/proc/{pid}/cmdline")
@@ -1051,7 +1109,16 @@ def _is_our_child(
 
 
 def _kill_escaped_children(child_pids: dict[int, int | None] | dict[int, ChildRecord]) -> None:
-    """SIGKILL descendants that survived killpg (different PGID). Kills leaf-first."""
+    """SIGKILL descendants that survived killpg (different PGID). Kills leaf-first.
+
+    POSIX-only sweep: it cleans up children that reparented out of the killed
+    process group (e.g. MCP servers). On Windows there are no process groups —
+    ``kill_process_tree`` already used ``taskkill /T`` to walk the whole child
+    tree — so there is nothing left to sweep, and the raw ``os.kill`` /
+    ``signal.SIGKILL`` below are unavailable there. No-op on win32.
+    """
+    if platform_compat.IS_WINDOWS:
+        return
     for cpid in reversed(list(child_pids.keys())):
         try:
             os.kill(cpid, 0)  # still alive?
@@ -1510,7 +1577,8 @@ class AcpClient:
             argv, mode=self._sandbox_mode, strip_python_env=True
         )
 
-        # Process group isolation: start_new_session=True (calls setsid, enables killpg)
+        # Build the child environment (process-group isolation flags are set on
+        # the spawn kwargs below, per-platform).
         env = {**os.environ}
         if self._extra_env:
             env.update(self._extra_env)
@@ -1548,19 +1616,25 @@ class AcpClient:
         # all ACP-provider subagents, which spawn through this same path.
         resolve_krb5_ccname(env)
 
-        kwargs: dict = {
-            "stdin": asyncio.subprocess.PIPE,
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-            "cwd": str(self._work_dir),
-            "limit": _STDOUT_BUFFER_LIMIT,
-            "start_new_session": True,
-            "env": env,
-        }
-
+        # Process-group isolation for clean tree-kill. Pass both flags explicitly
+        # (NOT via **dict unpack — that breaks mypy's Popen overload resolution on
+        # the build fleet). POSIX: start_new_session=True calls setsid so
+        # _kill_process can killpg the whole group; creationflags resolves to 0
+        # (no-op). Windows: no setsid (start_new_session is silently ignored), so
+        # CREATE_NEW_PROCESS_GROUP makes the child tree taskkill /T-reapable and
+        # stops an inherited Ctrl-C propagating into the gateway. The flag comes
+        # from platform_compat (getattr) so referencing it doesn't fail mypy's
+        # [attr-defined] check on Linux where subprocess.* lacks it.
         self._process = await asyncio.create_subprocess_exec(
             *argv,
-            **kwargs,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self._work_dir),
+            limit=_STDOUT_BUFFER_LIMIT,
+            env=env,
+            start_new_session=platform_compat.IS_POSIX,
+            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
         )
         self._pid = self._process.pid
         self._start_time = await asyncio.get_running_loop().run_in_executor(
@@ -1707,7 +1781,10 @@ class AcpClient:
 
         if not force:
             try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)  # type: ignore[arg-type]
+                # POSIX: killpg(getpgid) tears down the whole group (setsid at
+                # spawn). Windows: taskkill /T /F walks the child tree instead
+                # (no process groups) — platform_compat dispatches both.
+                platform_compat.kill_process_tree(pid, platform_compat.SIGTERM)  # type: ignore[arg-type]
             except (ProcessLookupError, OSError):
                 pass
             try:
@@ -1722,7 +1799,7 @@ class AcpClient:
                 pass
         # Force kill
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)  # type: ignore[arg-type]
+            platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)  # type: ignore[arg-type]
         except (ProcessLookupError, OSError):
             try:
                 self._process.kill()

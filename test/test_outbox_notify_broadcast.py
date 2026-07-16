@@ -6,6 +6,7 @@ so the frontend receives the file card in real-time via the existing WebSocket h
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -131,7 +132,11 @@ def mock_sel():
 
 @pytest.fixture
 def outbox(tmp_path):
-    odir = tmp_path / "outbox"
+    # Use /tmp as a stable base — macOS tmp_path contains high-entropy directory
+    # IDs that trigger the bare-secret heuristic in redact_credentials(), causing
+    # api_outbox_notify to reject the path with 400 before any test logic runs.
+    import tempfile
+    odir = Path(tempfile.mkdtemp(dir="/tmp")) / "outbox"
     odir.mkdir()
     with patch("kiro_claw.config.loader.outbox_dir", return_value=odir):
         yield odir

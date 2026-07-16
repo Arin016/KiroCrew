@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 from collections import deque
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+
+from kiro_claw import platform_compat
 
 
 @pytest.fixture()
@@ -75,9 +78,7 @@ class TestTrackUntrack:
         _untrack_session_pid(999)  # should not crash on missing file
         assert not session_pid_file.exists()
 
-    def test_untrack_session_pid_other_gateway_untouched(
-        self, session_pid_file: Path
-    ) -> None:
+    def test_untrack_session_pid_other_gateway_untouched(self, session_pid_file: Path) -> None:
         """Untracking our PID must NOT remove other gateways' entries for same child PID."""
         from kiro_claw.session_pid import _track_session_pid, _untrack_session_pid
 
@@ -141,14 +142,10 @@ class TestCleanupOrphanedMcpServers:
         child_pid = 77777
         pid_file.write_text(f"{child_pid}:{my_pid}\n")
 
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == child_pid and sig == 0:
-                return  # child alive
-            if pid == my_pid and sig == 0:
-                return  # parent alive
-            raise ProcessLookupError
+        def fake_pid_exists(pid: int) -> bool:
+            return pid in (child_pid, my_pid)  # both alive
 
-        with patch("os.kill", side_effect=fake_kill):
+        with patch("kiro_claw.session_pid.platform_compat.pid_exists", side_effect=fake_pid_exists):
             killed = _cleanup_orphaned_mcp_servers()
 
         assert killed == 0
@@ -160,48 +157,14 @@ class TestCleanupOrphanedMcpServers:
 
         pid_file.write_text("77777:99999\n")  # parent 99999 is dead
 
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == 77777 and sig == 0:
-                return  # child alive
-            if pid == 99999 and sig == 0:
-                raise ProcessLookupError  # parent dead
-            # SIGKILL on child — allow
-
-        orig_read = Path.read_text
-
-        def patched_read(self_path: Path, *a: object, **kw: object) -> str:
-            if "proc" in str(self_path) and "status" in str(self_path):
-                return "Name:\tkiro-cli\nPPid:\t1\n"
-            return orig_read(self_path, *a, **kw)  # type: ignore[arg-type]
+        def fake_pid_exists(pid: int) -> bool:
+            return pid == 77777  # child alive, parent dead
 
         with (
-            patch("os.kill", side_effect=fake_kill),
-            patch.object(Path, "read_text", patched_read),
-            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch("kiro_claw.session_pid.platform_compat.pid_exists", side_effect=fake_pid_exists),
+            patch("kiro_claw.session_pid.platform_compat.kill_pid"),
+            patch("kiro_claw.platform_compat.get_ppid", return_value=1),
         ):
-            mock_sys.platform = "linux"
-            killed = _cleanup_orphaned_mcp_servers()
-
-        assert killed == 1
-
-    def test_alive_child_with_dead_parent_killed_macos(self, pid_file: Path) -> None:
-        """macOS: orphan detected via libproc ppid lookup."""
-        from kiro_claw.session_pid import _cleanup_orphaned_mcp_servers
-
-        pid_file.write_text("77777:99999\n")
-
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == 77777 and sig == 0:
-                return  # child alive
-            if pid == 99999 and sig == 0:
-                raise ProcessLookupError  # parent dead
-
-        with (
-            patch("os.kill", side_effect=fake_kill),
-            patch("kiro_claw.session_pid.sys") as mock_sys,
-            patch("kiro_claw.session_pid._get_ppid_libproc", return_value=1),
-        ):
-            mock_sys.platform = "darwin"
             killed = _cleanup_orphaned_mcp_servers()
 
         assert killed == 1
@@ -212,52 +175,17 @@ class TestCleanupOrphanedMcpServers:
 
         pid_file.write_text("77777:99999\n")
 
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == 77777 and sig == 0:
-                return  # child alive (reused PID)
-            if pid == 99999 and sig == 0:
-                raise ProcessLookupError  # parent dead
-
-        orig_read = Path.read_text
-
-        def patched_read(self_path: Path, *a: object, **kw: object) -> str:
-            if "proc" in str(self_path) and "status" in str(self_path):
-                return "Name:\tvim\nPPid:\t5555\n"
-            return orig_read(self_path, *a, **kw)  # type: ignore[arg-type]
+        def fake_pid_exists(pid: int) -> bool:
+            return pid == 77777  # child alive (reused PID), parent dead
 
         with (
-            patch("os.kill", side_effect=fake_kill),
-            patch.object(Path, "read_text", patched_read),
-            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch("kiro_claw.session_pid.platform_compat.pid_exists", side_effect=fake_pid_exists),
+            patch("kiro_claw.platform_compat.get_ppid", return_value=5555),
         ):
-            mock_sys.platform = "linux"
             killed = _cleanup_orphaned_mcp_servers()
 
         assert killed == 0
         assert "77777" not in pid_file.read_text()  # stale entry pruned
-
-    def test_alive_child_with_dead_parent_pid_reused_macos(self, pid_file: Path) -> None:
-        """macOS: reused PID detected via libproc returning unrelated PPid."""
-        from kiro_claw.session_pid import _cleanup_orphaned_mcp_servers
-
-        pid_file.write_text("77777:99999\n")
-
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == 77777 and sig == 0:
-                return
-            if pid == 99999 and sig == 0:
-                raise ProcessLookupError
-
-        with (
-            patch("os.kill", side_effect=fake_kill),
-            patch("kiro_claw.session_pid.sys") as mock_sys,
-            patch("kiro_claw.session_pid._get_ppid_libproc", return_value=5555),
-        ):
-            mock_sys.platform = "darwin"
-            killed = _cleanup_orphaned_mcp_servers()
-
-        assert killed == 0
-        assert "77777" not in pid_file.read_text()
 
     def test_bare_pid_dead_pruned(self, pid_file: Path) -> None:
         """Dead bare PIDs should be pruned from the file."""
@@ -265,12 +193,7 @@ class TestCleanupOrphanedMcpServers:
 
         pid_file.write_text("99999\n")
 
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == 99999 and sig == 0:
-                raise ProcessLookupError
-            raise ProcessLookupError
-
-        with patch("os.kill", side_effect=fake_kill):
+        with patch("kiro_claw.session_pid.platform_compat.pid_exists", return_value=False):
             killed = _cleanup_orphaned_mcp_servers()
         assert killed == 0
         assert "99999" not in pid_file.read_text()
@@ -281,11 +204,7 @@ class TestCleanupOrphanedMcpServers:
 
         pid_file.write_text("88888\n")
 
-        def fake_kill(pid: int, sig: int) -> None:
-            if pid == 88888 and sig == 0:
-                return  # alive
-
-        with patch("os.kill", side_effect=fake_kill):
+        with patch("kiro_claw.session_pid.platform_compat.pid_exists", return_value=True):
             killed = _cleanup_orphaned_mcp_servers()
         assert killed == 0
         assert "88888" in pid_file.read_text()
@@ -309,14 +228,25 @@ class TestCleanupOrphanedSessions:
 
         session_pid_file.write_text("99998\n99999\n")
 
-        def fake_kill(pid: int, sig: int) -> None:
-            if sig == 0:
-                return  # pretend both are alive
-
+        # Both PIDs must read as ALIVE so the sweep reaches the managed/kill
+        # decision (the liveness gate is pid_liveness(), tri-state). Without this
+        # the real os.kill(pid,0) on the fleet returns DEAD and both are pruned as
+        # dead — the test would pass vacuously without exercising the kill path.
+        # kill_pid is patched so _kill_pid_tree reports the managed PID killed
+        # (root_killed=True -> pruned); the non-managed one is pruned via the
+        # _is_managed_agent_process(False) branch.
         with (
-            patch("kiro_claw.session_pid._is_managed_agent_process", side_effect=lambda p: p == 99998),
+            patch(
+                "kiro_claw.session_pid._is_managed_agent_process", side_effect=lambda p: p == 99998
+            ),
             patch("kiro_claw.session_pid._cleanup_orphaned_mcp_servers", return_value=0),
-            patch("os.kill", side_effect=fake_kill),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
+            patch(
+                "kiro_claw.session_pid.platform_compat.pid_liveness",
+                return_value=platform_compat.PID_ALIVE,
+            ),
+            patch("kiro_claw.session_pid.platform_compat.pid_exists", return_value=True),
+            patch("kiro_claw.session_pid.platform_compat.kill_pid"),
         ):
             cleanup_orphaned_sessions()
 
@@ -337,12 +267,21 @@ class TestCleanupOrphanedSessions:
 
         with (
             patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
-            patch("os.kill", side_effect=fake_kill),
+            # The sweep's liveness gate is pid_liveness() (tri-state), not pid_exists();
+            # ALIVE -> falls through to the kill path. pid_exists is still patched for
+            # the post-kill re-probe branch.
+            patch(
+                "kiro_claw.session_pid.platform_compat.pid_liveness",
+                return_value=platform_compat.PID_ALIVE,
+            ),
+            patch("kiro_claw.session_pid.platform_compat.pid_exists", return_value=True),
+            patch("kiro_claw.session_pid.platform_compat.kill_pid", side_effect=fake_kill),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
             patch("kiro_claw.session_pid._cleanup_orphaned_mcp_servers", return_value=0),
         ):
             cleanup_orphaned_sessions()
 
-        assert (99998, signal.SIGKILL) in kills
+        assert (99998, platform_compat.SIGKILL) in kills
 
     def test_malformed_pid_files_deleted(
         self, tmp_path: Path, session_pid_file: Path, monkeypatch: pytest.MonkeyPatch
@@ -441,10 +380,10 @@ class TestFindOrphanMcpCandidates:
         """PIDs present in active_pids are never returned as candidates."""
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[100, 200]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"kiroclaw_sandbox_abc.py"
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[100, 200]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"kiroclaw_sandbox_abc.py"),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids={100, 200})
@@ -455,12 +394,14 @@ class TestFindOrphanMcpCandidates:
         """Orphans without known MCP entrypoint markers are skipped."""
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[300]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"/usr/bin/python3\x00some_other_script.py"
-        ), patch("os.getpid", return_value=1), patch(
-            "kiro_claw.session_pid._linux_pid_age", return_value=300.0
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[300]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(
+                Path, "read_bytes", return_value=b"/usr/bin/python3\x00some_other_script.py"
+            ),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid._linux_pid_age", return_value=300.0),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids=set())
@@ -471,12 +412,12 @@ class TestFindOrphanMcpCandidates:
         """Non-Python processes mentioning kiroclaw in args (e.g. vim, grep) are skipped."""
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[350]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"vim\x00/tmp/kiroclaw_sandbox_abc.log"
-        ), patch("os.getpid", return_value=1), patch(
-            "kiro_claw.session_pid._linux_pid_age", return_value=300.0
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[350]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"vim\x00/tmp/kiroclaw_sandbox_abc.log"),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid._linux_pid_age", return_value=300.0),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids=set())
@@ -492,16 +433,19 @@ class TestFindOrphanMcpCandidates:
         """
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[360]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes",
-            return_value=(
-                b"python3\x00-m\x00kiro_claw.mcp_gateway.gatewayd"
-                b"\x00--socket\x00/tmp/gw.sock"
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[360]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(
+                Path,
+                "read_bytes",
+                return_value=(
+                    b"python3\x00-m\x00kiro_claw.mcp_gateway.gatewayd"
+                    b"\x00--socket\x00/tmp/gw.sock"
+                ),
             ),
-        ), patch("os.getpid", return_value=1), patch(
-            "kiro_claw.session_pid._linux_pid_age", return_value=300.0
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid._linux_pid_age", return_value=300.0),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids=set())
@@ -512,13 +456,16 @@ class TestFindOrphanMcpCandidates:
         """Orphaned process with sandbox wrapper entrypoint and not in active set is a candidate."""
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[400]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes",
-            return_value=b"python3\x00/tmp/kiroclaw_sandbox_xyz.py",
-        ), patch("os.getpid", return_value=1), patch(
-            "kiro_claw.session_pid._linux_pid_age", return_value=300.0
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[400]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(
+                Path,
+                "read_bytes",
+                return_value=b"python3\x00/tmp/kiroclaw_sandbox_xyz.py",
+            ),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid._linux_pid_age", return_value=300.0),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids=set())
@@ -529,9 +476,10 @@ class TestFindOrphanMcpCandidates:
         """The gateway's own PID is never returned."""
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[999]
-        ), patch("os.getpid", return_value=999):
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[999]),
+            patch("os.getpid", return_value=999),
+        ):
             result = find_orphan_mcp_candidates(active_pids=set())
 
         assert result == []
@@ -547,12 +495,12 @@ class TestFindOrphanMcpCandidates:
         """
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[410]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"builder-mcp\x00--stdio"
-        ), patch("os.getpid", return_value=1), patch(
-            "kiro_claw.session_pid._linux_pid_age", return_value=300.0
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[410]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"builder-mcp\x00--stdio"),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid._linux_pid_age", return_value=300.0),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids=set())
@@ -569,11 +517,15 @@ class TestFindOrphanMcpCandidates:
                 return b"   05:00 python3 /tmp/kiroclaw_sandbox_xyz.py"
             return b""
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[420]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch(
-            "subprocess.check_output", side_effect=mock_check_output,
-        ), patch("os.getpid", return_value=1):
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[420]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch(
+                "subprocess.check_output",
+                side_effect=mock_check_output,
+            ),
+            patch("os.getpid", return_value=1),
+        ):
             mock_sys.platform = "darwin"
             result = find_orphan_mcp_candidates(active_pids=set())
 
@@ -583,13 +535,16 @@ class TestFindOrphanMcpCandidates:
         """Processes younger than _ORPHAN_MIN_AGE_SECONDS are never candidates."""
         from kiro_claw.session_pid import find_orphan_mcp_candidates
 
-        with patch(
-            "kiro_claw.session_pid._our_orphan_pids", return_value=[450]
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes",
-            return_value=b"python3\x00/tmp/kiroclaw_sandbox_new.py",
-        ), patch("os.getpid", return_value=1), patch(
-            "kiro_claw.session_pid._linux_pid_age", return_value=50.0
+        with (
+            patch("kiro_claw.session_pid._our_orphan_pids", return_value=[450]),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(
+                Path,
+                "read_bytes",
+                return_value=b"python3\x00/tmp/kiroclaw_sandbox_new.py",
+            ),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid._linux_pid_age", return_value=50.0),
         ):
             mock_sys.platform = "linux"
             result = find_orphan_mcp_candidates(active_pids=set())
@@ -604,12 +559,13 @@ class TestKillOrphanMcps:
         """If orphan is its own group leader, kill via killpg."""
         from kiro_claw.session_pid import kill_orphan_mcps
 
-        with patch("os.getpgrp", return_value=1000), patch(
-            "os.getpgid", return_value=500
-        ), patch("os.killpg") as mock_killpg, patch(
-            "os.getpid", return_value=1
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"
+        with (
+            patch("os.getpgrp", return_value=1000),
+            patch("os.getpgid", return_value=500),
+            patch("os.killpg") as mock_killpg,
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"),
         ):
             mock_sys.platform = "linux"
             killed = kill_orphan_mcps([500])
@@ -621,12 +577,13 @@ class TestKillOrphanMcps:
         """If orphan shares our pgid, use direct os.kill (not _kill_pid_tree)."""
         from kiro_claw.session_pid import kill_orphan_mcps
 
-        with patch("os.getpgrp", return_value=1000), patch(
-            "os.getpgid", return_value=1000
-        ), patch("os.kill") as mock_kill, patch(
-            "os.getpid", return_value=1
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"
+        with (
+            patch("os.getpgrp", return_value=1000),
+            patch("os.getpgid", return_value=1000),
+            patch("os.kill") as mock_kill,
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"),
         ):
             mock_sys.platform = "linux"
             killed = kill_orphan_mcps([600])
@@ -638,12 +595,13 @@ class TestKillOrphanMcps:
         """ProcessLookupError on direct kill is handled gracefully."""
         from kiro_claw.session_pid import kill_orphan_mcps
 
-        with patch("os.getpgrp", return_value=1000), patch(
-            "os.getpgid", return_value=1000
-        ), patch("os.kill", side_effect=ProcessLookupError), patch(
-            "os.getpid", return_value=1
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"
+        with (
+            patch("os.getpgrp", return_value=1000),
+            patch("os.getpgid", return_value=1000),
+            patch("os.kill", side_effect=ProcessLookupError),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"),
         ):
             mock_sys.platform = "linux"
             killed = kill_orphan_mcps([600])
@@ -655,12 +613,13 @@ class TestKillOrphanMcps:
         from kiro_claw.session_pid import _ORPHAN_SWEEP_MAX_KILLS, kill_orphan_mcps
 
         pids = list(range(1000, 1000 + _ORPHAN_SWEEP_MAX_KILLS + 10))
-        with patch("os.getpgrp", return_value=1), patch(
-            "os.getpgid", side_effect=lambda pid: pid
-        ), patch("os.killpg"), patch(
-            "os.getpid", return_value=1
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"
+        with (
+            patch("os.getpgrp", return_value=1),
+            patch("os.getpgid", side_effect=lambda pid: pid),
+            patch("os.killpg"),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"python3\x00kiroclaw_sandbox_x.py"),
         ):
             mock_sys.platform = "linux"
             killed = kill_orphan_mcps(pids)
@@ -671,8 +630,9 @@ class TestKillOrphanMcps:
         """ProcessLookupError during kill is silently handled."""
         from kiro_claw.session_pid import kill_orphan_mcps
 
-        with patch("os.getpgrp", return_value=1000), patch(
-            "os.getpgid", side_effect=ProcessLookupError
+        with (
+            patch("os.getpgrp", return_value=1000),
+            patch("os.getpgid", side_effect=ProcessLookupError),
         ):
             killed = kill_orphan_mcps([700])
 
@@ -682,11 +642,14 @@ class TestKillOrphanMcps:
         """If cmdline no longer matches at kill time, PID is skipped (TOCTOU)."""
         from kiro_claw.session_pid import kill_orphan_mcps
 
-        with patch("os.getpgrp", return_value=1000), patch(
-            "os.getpid", return_value=1
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch.object(
-            Path, "read_bytes", return_value=b"/usr/bin/bash\x00script.sh"
-        ), patch("os.killpg") as mock_killpg, patch("os.kill") as mock_kill:
+        with (
+            patch("os.getpgrp", return_value=1000),
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch.object(Path, "read_bytes", return_value=b"/usr/bin/bash\x00script.sh"),
+            patch("os.killpg") as mock_killpg,
+            patch("os.kill") as mock_kill,
+        ):
             mock_sys.platform = "linux"
             killed = kill_orphan_mcps([800])
 
@@ -710,12 +673,13 @@ class TestKillOrphanMcps:
                 raise subprocess.CalledProcessError(1, cmd)
             return b"python3 /tmp/kiroclaw_sandbox_x.py"
 
-        with patch("os.getpgrp", return_value=1000), patch(
-            "os.getpgid", side_effect=lambda p: p
-        ), patch("os.killpg") as mock_killpg, patch(
-            "os.getpid", return_value=1
-        ), patch("kiro_claw.session_pid.sys") as mock_sys, patch(
-            "subprocess.check_output", side_effect=mock_check_output
+        with (
+            patch("os.getpgrp", return_value=1000),
+            patch("os.getpgid", side_effect=lambda p: p),
+            patch("os.killpg") as mock_killpg,
+            patch("os.getpid", return_value=1),
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch("subprocess.check_output", side_effect=mock_check_output),
         ):
             mock_sys.platform = "darwin"
             killed = kill_orphan_mcps([700, 701])
@@ -730,22 +694,27 @@ class TestParseEtime:
 
     def test_minutes_seconds(self) -> None:
         from kiro_claw.session_pid import _parse_etime
+
         assert _parse_etime("05:30") == 330.0
 
     def test_hours_minutes_seconds(self) -> None:
         from kiro_claw.session_pid import _parse_etime
+
         assert _parse_etime("01:05:30") == 3930.0
 
     def test_days_hours_minutes_seconds(self) -> None:
         from kiro_claw.session_pid import _parse_etime
+
         assert _parse_etime("2-01:00:00") == 2 * 86400 + 3600
 
     def test_invalid_returns_zero(self) -> None:
         from kiro_claw.session_pid import _parse_etime
+
         assert _parse_etime("garbage") == 0.0
 
     def test_empty_returns_zero(self) -> None:
         from kiro_claw.session_pid import _parse_etime
+
         assert _parse_etime("") == 0.0
 
 
@@ -775,32 +744,32 @@ class TestOurOrphanPids:
                 if child == "comm":
                     node.read_text.return_value = self._comm + "\n"
                 else:  # "status"
-                    node.read_text.return_value = (
-                        f"Name:\t{self._comm}\nPPid:\t{self._ppid}\n"
-                    )
+                    node.read_text.return_value = f"Name:\t{self._comm}\nPPid:\t{self._ppid}\n"
                 return node
 
         my_uid = 1000
         entries = [
-            _FakeProcEntry("100", my_uid, "python3", "1"),    # init-reparented
-            _FakeProcEntry("200", my_uid, "bash", "50"),      # live child, excluded
-            _FakeProcEntry("300", my_uid, "systemd", "1"),    # --user subreaper
-            _FakeProcEntry("400", my_uid, "worker", "300"),   # child of subreaper
-            _FakeProcEntry("500", 9999, "python3", "1"),      # other uid, excluded
-            _FakeProcEntry("self", my_uid, "x", "1"),         # non-numeric, skipped
+            _FakeProcEntry("100", my_uid, "python3", "1"),  # init-reparented
+            _FakeProcEntry("200", my_uid, "bash", "50"),  # live child, excluded
+            _FakeProcEntry("300", my_uid, "systemd", "1"),  # --user subreaper
+            _FakeProcEntry("400", my_uid, "worker", "300"),  # child of subreaper
+            _FakeProcEntry("500", 9999, "python3", "1"),  # other uid, excluded
+            _FakeProcEntry("self", my_uid, "x", "1"),  # non-numeric, skipped
         ]
         proc_root = MagicMock()
         proc_root.iterdir.return_value = entries
 
-        with patch("kiro_claw.session_pid.sys") as mock_sys, patch(
-            "kiro_claw.session_pid.Path", return_value=proc_root
-        ), patch("os.getuid", return_value=my_uid):
+        with (
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch("kiro_claw.session_pid.Path", return_value=proc_root),
+            patch("os.getuid", return_value=my_uid),
+        ):
             mock_sys.platform = "linux"
             result = _our_orphan_pids()
 
-        assert 100 in result   # ppid == init
-        assert 300 in result   # subreaper itself is ppid == init
-        assert 400 in result   # ppid == detected systemd subreaper
+        assert 100 in result  # ppid == init
+        assert 300 in result  # subreaper itself is ppid == init
+        assert 400 in result  # ppid == detected systemd subreaper
         assert 200 not in result  # ppid is a live process, not orphaned
         assert 500 not in result  # different uid
 
@@ -813,25 +782,30 @@ class TestOurOrphanPids:
         """
         from kiro_claw.session_pid import _our_orphan_pids
 
-        with patch("kiro_claw.session_pid.sys") as mock_sys, patch(
-            "subprocess.check_output",
-            return_value=b"  500    42\n  600     1\n",
-        ), patch("os.getuid", return_value=1000), patch(
-            "os.getppid", return_value=42
+        with (
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch(
+                "subprocess.check_output",
+                return_value=b"  500    42\n  600     1\n",
+            ),
+            patch("os.getuid", return_value=1000),
+            patch("os.getppid", return_value=42),
         ):
             mock_sys.platform = "darwin"
             result = _our_orphan_pids()
 
         assert 500 not in result  # launcher child — excluded after the fix
-        assert 600 in result      # init-reparented orphan — included
+        assert 600 in result  # init-reparented orphan — included
 
     def test_returns_empty_on_exception(self) -> None:
         """Returns empty list on failure, does not raise."""
         from kiro_claw.session_pid import _our_orphan_pids
 
-        with patch("kiro_claw.session_pid.sys") as mock_sys, patch(
-            "subprocess.check_output", side_effect=OSError("ps failed")
-        ), patch("os.getuid", return_value=1000):
+        with (
+            patch("kiro_claw.session_pid.sys") as mock_sys,
+            patch("subprocess.check_output", side_effect=OSError("ps failed")),
+            patch("os.getuid", return_value=1000),
+        ):
             mock_sys.platform = "darwin"
             result = _our_orphan_pids()
 
@@ -875,9 +849,148 @@ class TestLinuxPidAge:
         """Too-few fields → IndexError → 0.0 fail-safe (min-age guard skips)."""
         from kiro_claw.session_pid import _linux_pid_age
 
-        with self._patch_proc("999 (proc) S 1 1\n"), patch(
-            "os.sysconf", return_value=100
-        ):
+        with self._patch_proc("999 (proc) S 1 1\n"), patch("os.sysconf", return_value=100):
             age = _linux_pid_age(999, now=123456.0)
 
         assert age == 0.0
+
+
+class TestIsManagedAgentProcess:
+    def test_self_pid_not_managed(self) -> None:
+        """Our own test PID's cmdline lacks kiro-cli/claude → not managed.
+
+        Exercises the platform_compat.process_matches call (the real
+        /proc/<pid>/cmdline read on Linux) without killing anything.
+        """
+        from kiro_claw.session_pid import _is_managed_agent_process
+
+        assert _is_managed_agent_process(os.getpid()) is False
+
+
+class TestSyncKillProvider:
+    def test_no_pid_returns_early(self) -> None:
+        """Provider with no client/_proc/_active_proc PID → early return."""
+        from kiro_claw.session_pid import _sync_kill_provider
+
+        provider = MagicMock(spec=["_client", "_proc", "_active_proc"])
+        provider._client = None
+        provider._proc = None
+        provider._active_proc = None
+
+        with patch("kiro_claw.session_pid.platform_compat.kill_pid") as mock_kill:
+            _sync_kill_provider(provider)
+
+        mock_kill.assert_not_called()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX SIGTERM→SIGKILL escalation; Windows uses single SIGKILL",
+    )
+    def test_posix_sigterm_then_sigkill(self) -> None:
+        """POSIX path: real child reaped via SIGTERM→waitpid→SIGKILL loop.
+
+        Spawns a real short-lived sleep subprocess, drives _sync_kill_provider
+        through the POSIX escalation loop (kill_pid is recorded, not real, so
+        the loop runs both iterations deterministically), then reaps the child.
+        """
+        from kiro_claw.session_pid import _sync_kill_provider
+
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            provider = MagicMock(spec=["_client", "_proc", "_active_proc"])
+            provider._client = None
+            provider._proc = MagicMock()
+            provider._proc.returncode = None
+            provider._proc.pid = proc.pid
+            provider._active_proc = None
+
+            sigs: list[int] = []
+
+            def fake_kill(pid: int, sig: int) -> bool:
+                sigs.append(sig)
+                return True
+
+            with patch(
+                "kiro_claw.session_pid.platform_compat.kill_pid",
+                side_effect=fake_kill,
+            ):
+                _sync_kill_provider(provider)
+
+            # POSIX loop hits both SIGTERM and SIGKILL for our child PID
+            assert sigs == [platform_compat.SIGTERM, platform_compat.SIGKILL]
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX SIGTERM path; Windows takes the single-SIGKILL branch",
+    )
+    def test_posix_already_dead_on_sigterm(self) -> None:
+        """ProcessLookupError on first signal → early return (already dead)."""
+        from kiro_claw.session_pid import _sync_kill_provider
+
+        provider = MagicMock(spec=["_client", "_proc", "_active_proc"])
+        provider._client = None
+        provider._proc = None
+        provider._active_proc = MagicMock()
+        provider._active_proc.returncode = None
+        provider._active_proc.pid = 99999
+
+        sigs: list[int] = []
+
+        def fake_kill(pid: int, sig: int) -> bool:
+            sigs.append(sig)
+            raise ProcessLookupError()
+
+        with patch(
+            "kiro_claw.session_pid.platform_compat.kill_pid",
+            side_effect=fake_kill,
+        ):
+            _sync_kill_provider(provider)
+
+        # Loop stops after the first (SIGTERM) signal raises ProcessLookupError
+        assert sigs == [platform_compat.SIGTERM]
+
+
+class TestCleanupOrphanedMcpServersExtra:
+    def test_bare_pid_non_numeric_skipped(self, pid_file: Path) -> None:
+        """A bare (no-colon) line that is not an int is skipped via ValueError."""
+        from kiro_claw.session_pid import _cleanup_orphaned_mcp_servers
+
+        pid_file.write_text("not_a_number\n")
+
+        killed = _cleanup_orphaned_mcp_servers()
+
+        assert killed == 0
+        # Malformed bare line is left in place (continue, not pruned)
+        assert "not_a_number" in pid_file.read_text()
+
+    def test_orphan_kill_oserror_swallowed(self, pid_file: Path) -> None:
+        """kill_pid raising OSError on an orphaned child is swallowed; entry pruned."""
+        from kiro_claw.session_pid import _cleanup_orphaned_mcp_servers
+
+        pid_file.write_text("77777:99999\n")  # parent 99999 dead
+
+        def fake_pid_exists(pid: int) -> bool:
+            return pid == 77777  # child alive, parent dead
+
+        def fake_kill(pid: int, sig: int) -> bool:
+            raise OSError("kill failed")
+
+        with (
+            patch(
+                "kiro_claw.session_pid.platform_compat.pid_exists",
+                side_effect=fake_pid_exists,
+            ),
+            patch("kiro_claw.platform_compat.get_ppid", return_value=1),
+            patch(
+                "kiro_claw.session_pid.platform_compat.kill_pid",
+                side_effect=fake_kill,
+            ),
+        ):
+            killed = _cleanup_orphaned_mcp_servers()
+
+        # kill raised → not counted, but the entry is still pruned
+        assert killed == 0
+        assert "77777" not in pid_file.read_text()

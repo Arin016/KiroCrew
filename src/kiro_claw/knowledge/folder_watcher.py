@@ -186,7 +186,11 @@ class FolderWatcher:
         skip_dirs = HARD_SKIP_DIRS | extra_skip_dirs
 
         for dirpath, dirnames, filenames in os.walk(root):
-            # Prune skip dirs in-place
+            # Prune skip dirs in-place.
+            # Windows: the `.`-prefix hidden check is POSIX-centric — Windows marks
+            # hidden via the NTFS hidden attribute, not a dotfile name, so some
+            # dirs that are hidden on Windows aren't pruned (benign over-ingestion).
+            # Tracked in Mesh-2364 (https://taskei.amazon.dev/tasks/Mesh-2364).
             dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
 
             rel_dir = os.path.relpath(dirpath, root)

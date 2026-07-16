@@ -6,10 +6,7 @@ import asyncio
 import json
 import logging
 import os
-import pty as _pty
-import signal
 import struct
-import termios
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -17,13 +14,23 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-# fcntl via flock_compat: POSIX-only, shimmed on Windows so the CLI (and
-# thus `kiroclaw cloud` on Windows) can import this module. This code runs
-# only on the macOS/Linux gateway.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.config.loader import config_path
 from kiro_claw.executors import subprocess_executor
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
+
+# PTY support is POSIX-only (openpty/fork/ioctl/termios). On Windows these
+# modules do not exist; the web-terminal panel degrades to a clear error.
+if platform_compat.IS_POSIX:
+    import fcntl
+    import pty as _pty
+    import signal
+    import termios
+else:  # pragma: no cover — Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    _pty = None  # type: ignore[assignment]
+    signal = None  # type: ignore[assignment]
+    termios = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from kiro_claw.dashboard.state import DashboardState
@@ -131,8 +138,14 @@ async def _kill_session(sess: _TerminalSession) -> None:
         except (asyncio.CancelledError, Exception):
             pass
     if sess.proc is not None and sess.proc.returncode is None:
+        # Route through platform_compat.kill_process_tree so the whole terminal
+        # handler stays platform-portable (killpg on POSIX, taskkill /T on
+        # Windows). This PTY teardown is POSIX-only in practice — api_terminal_
+        # ws returns an error on Windows before any session is created — but
+        # keeping a single shim call site avoids a raw-os.killpg vs shim
+        # inconsistency across the module, and the tests all patch the shim.
         try:
-            os.killpg(sess.proc.pid, signal.SIGTERM)
+            platform_compat.kill_process_tree(sess.proc.pid, platform_compat.SIGTERM)
         except (ProcessLookupError, PermissionError):
             # PermissionError (EPERM): the child made the PTY its controlling
             # terminal (TIOCSCTTY) and leads a session/group we can't signal.
@@ -142,7 +155,7 @@ async def _kill_session(sess: _TerminalSession) -> None:
             await asyncio.wait_for(sess.proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             try:
-                os.killpg(sess.proc.pid, signal.SIGKILL)
+                platform_compat.kill_process_tree(sess.proc.pid, platform_compat.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
             try:
@@ -245,6 +258,22 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
             source="dashboard",
             resources=f"session={session_id},pid={sess.proc.pid}",
         )
+    elif not platform_compat.IS_POSIX:
+        # PTY/fork are POSIX-only; the web terminal is unavailable on Windows.
+        if placeholder:
+            registry.pop(session_id, None)  # type: ignore[arg-type]
+        _sel().log_api_access(
+            caller=caller, operation="terminal.ws.open",
+            outcome="denied", source="dashboard",
+            resources="unsupported_platform",
+        )
+        if not ws.closed:
+            await ws.send_str(json.dumps({
+                "type": "error",
+                "message": "The web terminal is not supported on Windows.",
+            }))
+            await ws.close()
+        return ws
     else:
         # Spawn new PTY
         master_fd, worker_fd = _pty.openpty()

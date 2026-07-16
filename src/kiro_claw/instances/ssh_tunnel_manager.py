@@ -176,6 +176,9 @@ def _build_ssh_tunnel_argv(
     is highly compressible; the gateway does not gzip at the HTTP layer, so this
     is the only compression in the path. See ``instances.ssh_compression``.
     """
+    # Windows: not yet supported — requires the OpenSSH client (`ssh`) on PATH,
+    # which isn't guaranteed; ssh-process kill handling also needs a Windows audit.
+    # Tracked in Mesh-2364 (https://taskei.amazon.dev/tasks/Mesh-2364).
     forward = f"{_LOOPBACK}:{local_port}:{_LOOPBACK}:{remote_port}"
     argv = [
         "ssh",

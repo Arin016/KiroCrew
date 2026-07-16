@@ -38,10 +38,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kiro_claw import agent_state
+from kiro_claw import agent_state, platform_compat
 from kiro_claw.aim_agents import installed_kiro_packages_missing_from_cc
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config import config_path as _mc_config_path
+from kiro_claw.env import augmented_path
 from kiro_claw.mcp_utils import mcp_server_alias
 from kiro_claw.platform import current_context
 from kiro_claw.platform import redact_via_context as redact
@@ -73,7 +74,7 @@ def _atomic_json_write(path: Path, data: dict) -> None:
                 mode = stat.S_IMODE(path.stat().st_mode)
             except FileNotFoundError:
                 mode = 0o644
-            os.fchmod(f.fileno(), mode)
+            platform_compat.fchmod_safe(f.fileno(), mode)
             json.dump(data, f, indent=2)
             f.write("\n")
         os.replace(tmp_name, path)
@@ -152,6 +153,21 @@ def _bin_is_usable(path: Path) -> bool:
         return False
 
 
+def _kiroclaw_bin_subpath(root: Path) -> Path:
+    """The console-script path under an install ``root`` for this OS.
+
+    A venv exposes its entry points under ``bin/kiroclaw`` on POSIX but
+    ``Scripts/kiroclaw.exe`` on Windows — pip generates a ``.exe`` launcher
+    there from the ``console_scripts`` entry point. Resolving the POSIX layout
+    on Windows finds nothing, which silently drops the built-in
+    ``kiroclaw-cron`` / ``kiroclaw-core`` MCP servers (``command not found:
+    .../bin/kiroclaw``). Branch on the platform so both layouts resolve.
+    """
+    if platform_compat.IS_WINDOWS:
+        return root / "Scripts" / "kiroclaw.exe"
+    return root / "bin" / "kiroclaw"
+
+
 def _resolve_kiroclaw_bin() -> str:
     """Resolve the absolute path of the ``kiroclaw`` executable.
 
@@ -208,7 +224,7 @@ def _resolve_kiroclaw_bin() -> str:
 
         pkg_dir = Path(_mc.__file__).resolve().parent
         for parent in pkg_dir.parents:
-            venv_candidate = parent / ".venv" / "bin" / "kiroclaw"
+            venv_candidate = _kiroclaw_bin_subpath(parent / ".venv")
             if _usable(venv_candidate):
                 _KIROCLAW_BIN = str(venv_candidate)
                 return _KIROCLAW_BIN
@@ -223,7 +239,7 @@ def _resolve_kiroclaw_bin() -> str:
 
         pkg_dir = Path(_mc.__file__).resolve().parent
         for parent in pkg_dir.parents:
-            candidate = parent / "bin" / "kiroclaw"
+            candidate = _kiroclaw_bin_subpath(parent)
             if _usable(candidate):
                 _KIROCLAW_BIN = str(candidate)
                 return _KIROCLAW_BIN
@@ -587,7 +603,19 @@ def _all_skill_paths() -> list[str]:
 _aim_skill_paths = _all_skill_paths
 
 
-_SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9/_.\-]+$")
+# Allowlist for hook-command paths (config.json is LLM-writable, so this guards
+# against indirect command injection). The intent is to reject shell
+# metacharacters (; | & $ ` spaces quotes ( ) etc.) — the path is later exec'd as
+# an argv element, never through a shell. On Windows an absolute path is
+# `D:\Users\...`, so backslash and the drive-letter colon MUST be allowed there or
+# EVERY Windows hook path is rejected (autoimport silently loads nothing). `\` and
+# `:` are not shell-injection vectors for an argv path, and the is_sensitive_path
+# + absolute-path + resolve() checks below still apply. POSIX keeps the original,
+# tighter allowlist (no backslash/colon).
+if platform_compat.IS_WINDOWS:
+    _SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9/_.\-\\:]+$")
+else:
+    _SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9/_.\-]+$")
 _SAFE_MATCHER_RE = re.compile(r"^[a-zA-Z0-9_.*\-]+$")
 _MAX_MATCHER_LEN = 200
 
@@ -822,12 +850,17 @@ def _autoimport_kiro_hooks(hooks_dir: Path) -> dict[str, list[dict[str, str]]]:
             continue
 
         try:
-            mode = resolved_entry.stat().st_mode
+            resolved_entry.stat()  # surface a stat error (broken symlink, perms) as a skip
         except OSError:
             logger.warning("kiro_hooks_autoimport: cannot stat %s, skipping", entry)
             _sel_hook_rejected("autoimport", str(entry), "cannot stat entry")
             continue
-        if not (mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        # Executable check is platform-aware: POSIX requires the execute bit (so
+        # `chmod -x` disables a hook); Windows has no execute bit, so requiring
+        # X_OK there would skip EVERY hook and silently break the whole autoimport
+        # — instead a known script extension (.sh/.ps1/.cmd/...) is treated as
+        # runnable. See platform_compat.is_executable_file.
+        if not platform_compat.is_executable_file(resolved_entry):
             logger.info("kiro_hooks_autoimport: %s is not executable, skipping", entry)
             # Audit parity with the other rejection branches
             # (symlink-escape, cannot-resolve, cannot-stat,
@@ -1649,23 +1682,32 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # spec from the other sources before dropping it, in priority order
     # (kiroclaw > kiro-global > cc-global).  This prevents one source's
     # unresolvable command from killing a server another source can resolve.
-    aim_path = str(Path.home() / ".aim" / "mcp-servers")
-
     def _resolve_command(cmd: str, env: dict | None) -> str | None:
         """Resolve an MCP command to an absolute path, or None if not found.
 
         Accepts an absolute path directly when the file exists and is
         executable — shutil.which can fail inside user-namespace sandboxes
         even when the file is fine.
+
+        Searches the server's own env.PATH first, then the same augmented
+        PATH the MCP probe uses (mcp_discovery.probe_server →
+        env.augmented_path). Sharing augmented_path — instead of a hand-built
+        dir list — keeps agent-config-build resolution and probe resolution
+        from diverging: a divergence previously let a server probe healthy on
+        the dashboard while being silently dropped from the generated agent
+        config ("command not found: kiroclaw", Mesh-2329). augmented_path
+        covers ~/.aim/mcp-servers and ~/.toolbox/bin (previously hardcoded
+        here) and appends the running interpreter's console-scripts dir
+        (venv ``Scripts\\`` on Windows, ``bin/`` on POSIX) as a last-resort
+        fallback for pip-generated wrappers like ``kiroclaw``.
         """
         if not cmd:
             return None
         if os.path.isabs(cmd) and os.path.isfile(cmd) and os.access(cmd, os.X_OK):
             return cmd
         env_path = (env or {}).get("PATH", "")
-        extra = os.pathsep.join(filter(None, [env_path, aim_path]))
-        search_path = extra + os.pathsep + os.environ.get("PATH", "")
-        return shutil.which(cmd, path=search_path)
+        base = os.pathsep.join(filter(None, [env_path, os.environ.get("PATH", "")]))
+        return shutil.which(cmd, path=augmented_path(base))
 
     valid_servers: dict[str, Any] = {}
     for name, spec in config.get("mcpServers", {}).items():

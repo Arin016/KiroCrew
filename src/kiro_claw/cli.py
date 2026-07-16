@@ -38,7 +38,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import NoReturn
 
-from kiro_claw import __version__
+from kiro_claw import __version__, platform_compat
 from kiro_claw.apps.builtins import BUILTIN_NAMES as _BUILTIN_NAMES
 from kiro_claw.browser.cli import run_browse
 from kiro_claw.config import KiroClawConfig, config_dir
@@ -646,6 +646,13 @@ def _consolidate_cmd(args) -> None:
 
 def main() -> None:
     """Entry point — parse args and dispatch to the appropriate subcommand."""
+    # On Windows, force stdout/stderr to UTF-8 BEFORE anything prints — KiroClaw's
+    # non-ASCII output otherwise raises UnicodeEncodeError under the cp1252
+    # default when stdout is a pipe (detached gateway, KiroClawHub client). No-op
+    # on POSIX. Must be the first statement: the KIROCLAW_PORT error below prints
+    # non-ASCII glyphs.
+    platform_compat.ensure_utf8_console()
+
     # Validate KIROCLAW_PORT early — fail fast before anything else loads.
     _raw_port = os.environ.get("KIROCLAW_PORT")
     if _raw_port is not None:
@@ -1659,6 +1666,12 @@ Examples:
     # On startup, rotate gateway.log → gateway.log.prev so a crash's final
     # lines are never lost (Lorikeets-3929 D3).  Only for `gateway` subcommand
     # to avoid renaming the file while the gateway is actively writing.
+    # encoding="utf-8" is REQUIRED on Windows: KiroClaw logs non-ASCII glyphs and
+    # the default file encoding there is cp1252, so a RotatingFileHandler without
+    # it raises UnicodeEncodeError on the first non-ASCII log record (logging
+    # swallows it, but it spams "--- Logging error ---" tracebacks and drops the
+    # line). ensure_utf8_console() only fixes the console streams, not this file
+    # handler.
     _log_file = config_dir() / "gateway.log"
     if args.command == "gateway":
         _prev_log = _log_file.with_suffix(".log.prev")
@@ -1667,7 +1680,9 @@ Examples:
                 _log_file.rename(_prev_log)
             except OSError:
                 pass  # race or permission — keep going
-    _fh = RotatingFileHandler(_log_file, maxBytes=2 * 1024 * 1024, backupCount=3)
+    _fh = RotatingFileHandler(
+        _log_file, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
     _fh.setLevel(level)
     _fh.setFormatter(
         logging.Formatter(

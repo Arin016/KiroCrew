@@ -16,7 +16,6 @@ import os
 import platform
 import shlex
 import shutil
-import signal
 import socket
 import time
 import urllib.parse
@@ -25,6 +24,7 @@ from pathlib import Path
 
 import aiohttp
 
+from kiro_claw import platform_compat
 from kiro_claw.config.loader import KiroClawConfig, config_dir, config_path
 from kiro_claw.constants import OLLAMA_DOCKER_CONTAINER
 from kiro_claw.platform import current_context, safe_context_call
@@ -551,7 +551,13 @@ class OllamaManager:
         return await _ollama_has_model(self._url, self._model)
 
     async def install_ollama(self) -> bool:
-        """Install Ollama via platform package manager. Docker fallback if _use_docker is set."""
+        """Install Ollama via platform package manager. Docker fallback if _use_docker is set.
+
+        Windows: local Ollama auto-install is not yet supported (only the
+        brew/curl/docker branches below). Vector memory still works on Windows
+        via a remote embedding endpoint or Docker; only the local auto-install
+        is missing. Tracked in Mesh-2364 (https://taskei.amazon.dev/tasks/Mesh-2364).
+        """
 
         if self._use_docker:
             return await self._install_docker_ollama()
@@ -800,12 +806,15 @@ class OllamaManager:
             return False
         logger.info("Starting Ollama server...")
         try:
+            # Process-group isolation so _stop() can tree-kill. Pass both flags
+            # EXPLICITLY (not via **dict unpack, which breaks mypy's Popen overload
+            # resolution on the build fleet): start_new_session=True is silently
+            # ignored on Windows, and creationflags resolves to 0 (no-op) on POSIX.
             self._process = await asyncio.create_subprocess_exec(
                 binary,
                 "serve",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
                 env={
                     **os.environ,
                     "OLLAMA_HOST": "127.0.0.1:11434",
@@ -815,6 +824,8 @@ class OllamaManager:
                         else {}
                     ),
                 },
+                start_new_session=platform_compat.IS_POSIX,
+                creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             )
             for _ in range(_HEALTH_TIMEOUT):
                 await asyncio.sleep(1)
@@ -1019,11 +1030,13 @@ class OllamaManager:
             pid = self._process.pid
             logger.info("Stopping Ollama server (pid %d)", pid)
             try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                # killpg(getpgid) on POSIX, taskkill /T on Windows — via
+                # platform_compat (os.getpgid/os.killpg are POSIX-only).
+                platform_compat.kill_process_tree(pid, platform_compat.SIGTERM)
                 try:
                     await asyncio.wait_for(self._process.wait(), timeout=5)
                 except asyncio.TimeoutError:
-                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
                     await self._process.wait()
             except (ProcessLookupError, OSError):
                 pass

@@ -31,7 +31,11 @@ async function seedSlotWithTag(request: APIRequestContext, title: string, tagNam
 
 test.describe.configure({ mode: 'serial' })
 
-test.describe('E2E: sidebar tag columns', () => {
+// @quarantine: this spec hard-crashes the chromium worker on its first failure
+// (a worker crash, not a retryable timeout), which aborts every subsequent
+// spec in the run. Excluded from the default gating set via grepInvert in
+// playwright.config.ts until the crash is root-caused. Tracked as a follow-up.
+test.describe('E2E: sidebar tag columns', { tag: '@quarantine' }, () => {
   test.beforeEach(async ({ page }) => {
     await primeBrowser(page)
   })

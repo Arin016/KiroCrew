@@ -27,11 +27,7 @@ import logging
 import os
 from pathlib import Path
 
-# ``flock_compat`` shims POSIX-only fcntl so this module imports on Windows (the
-# `kiroclaw cloud` thin-client imports the whole CLI, incl. this module; the
-# gateway that actually locks runs only on macOS/Linux). Same call surface as
-# fcntl — ``flock`` is a no-op on Windows.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +75,13 @@ class GatewayLock:
         # O_RDWR | O_CREAT without truncation: a failed acquire must leave the
         # incumbent holder's pid intact so we can name it in the error.
         fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        # platform_compat.try_acquire_lock: fcntl.flock LOCK_EX|LOCK_NB on
+        # POSIX; msvcrt.locking LK_NBLCK on Windows. Returns True iff acquired.
+        # Both kernel primitives release automatically on process death, so a
+        # crashed gateway never wedges the home — the automatic stale-lock
+        # reclaim the docstring above depends on works uniformly on both
+        # platforms.
+        if not platform_compat.try_acquire_lock(fd, exclusive=True):
             # Held by a live process -- the kernel would have released a dead
             # holder's lock. Read its pid for the message, then refuse.
             holder = _read_pid(fd)
@@ -108,10 +108,7 @@ class GatewayLock:
         """Release the lock if held. Idempotent."""
         if self._fd is None:
             return
-        try:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
+        platform_compat.release_lock(self._fd)
         try:
             os.close(self._fd)
         except OSError:

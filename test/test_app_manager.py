@@ -336,6 +336,202 @@ class TestUninstall:
 
 
 # ---------------------------------------------------------------------------
+# App admission gate (P472043308)
+# ---------------------------------------------------------------------------
+
+class TestAppAdmission:
+    def _write_policy(self, app_home, policy):
+        (app_home / "app_admission.json").write_text(json.dumps(policy))
+
+    def test_install_allowed_when_absent_policy(self, tmp_path, app_home):
+        # No app_admission.json → open default → admit (preserves current behavior).
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert result.ok
+
+    def test_install_denied_when_banned(self, tmp_path, app_home):
+        self._write_policy(app_home, {"mode": "enforce", "banned": ["test-app"]})
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+        # Nothing landed on disk.
+        assert not (app_home / "apps" / "test-app" / APP_MANIFEST_FILENAME).exists()
+
+    def test_install_denied_when_banned_open_mode(self, tmp_path, app_home):
+        # Kill-switch wins even in open mode.
+        self._write_policy(app_home, {"mode": "open", "banned": ["test-app"]})
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+
+    def test_install_denied_when_not_approved(self, tmp_path, app_home):
+        self._write_policy(app_home, {"mode": "enforce", "approved": ["other-app"]})
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+
+    def test_install_allowed_when_approved(self, tmp_path, app_home):
+        self._write_policy(app_home, {"mode": "enforce", "approved": ["test-app"]})
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert result.ok
+
+    def test_unreadable_policy_fails_closed(self, tmp_path, app_home):
+        (app_home / "app_admission.json").write_text("{not valid json")
+        src = _make_app_source(tmp_path)
+        result = install_app(src)
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+
+    def test_enable_denied_when_banned(self, tmp_path, app_home):
+        # Install with an open policy, then ban and confirm enable is gated.
+        src = _make_app_source(tmp_path)
+        assert install_app(src).ok
+        self._write_policy(app_home, {"mode": "enforce", "banned": ["test-app"]})
+        result = enable_app("test-app")
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+
+    def test_register_external_denied_when_banned(self, tmp_path, app_home):
+        from kiro_claw.apps.manager import register_external_app
+
+        self._write_policy(app_home, {"mode": "enforce", "banned": ["ext-app"]})
+        result = register_external_app("ext-app", "1.0.0", "Ext App")
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+        # The HTTP-reachable register path must not write enabled metadata.
+        assert _read_installed("ext-app") is None
+
+    def test_register_external_admits_signed_manifest(self, tmp_path, app_home):
+        # register_external_app now passes its self-reported manifest to
+        # admission, so a correctly-signed app self-registers under
+        # require_signature (previously denied because no manifest was passed).
+        import hashlib
+        import hmac
+
+        from kiro_claw.apps.manager import register_external_app
+        from kiro_claw.apps.manifest import AppManifest
+
+        secret = "s3cr3t"
+        manifest_data = {
+            "name": "ext-signed", "version": "1.0.0",
+            "displayName": "Ext Signed", "description": "signed external app",
+            "author": "tester", "signer": "acme",
+        }
+        m = AppManifest.from_dict(manifest_data)
+        manifest_data["signature"] = hmac.new(
+            secret.encode(), m.signing_payload(), hashlib.sha256
+        ).hexdigest()
+        self._write_policy(app_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["ext-signed"], "trust_keys": {"acme": secret},
+        })
+        result = register_external_app(
+            "ext-signed", "1.0.0", "Ext Signed", manifest_data=manifest_data,
+        )
+        assert result.ok
+        assert _read_installed("ext-signed") is not None
+
+    def test_register_external_denies_unsigned_manifest(self, tmp_path, app_home):
+        from kiro_claw.apps.manager import register_external_app
+
+        self._write_policy(app_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["ext-unsigned"], "trust_keys": {"acme": "s3cr3t"},
+        })
+        result = register_external_app(
+            "ext-unsigned", "1.0.0", "Ext Unsigned",
+            manifest_data={"name": "ext-unsigned", "version": "1.0.0"},
+        )
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+        assert _read_installed("ext-unsigned") is None
+
+    def test_signature_required_admits_valid_signature(self, tmp_path, app_home):
+        import hashlib
+        import hmac
+
+        from kiro_claw.apps.manifest import AppManifest
+
+        secret = "s3cr3t"
+        m = AppManifest.from_dict({
+            "name": "signed-app", "version": "1.0.0",
+            "displayName": "Signed", "description": "signed app",
+            "author": "tester", "signer": "acme",
+        })
+        sig = hmac.new(secret.encode(), m.signing_payload(), hashlib.sha256).hexdigest()
+        self._write_policy(app_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["signed-app"], "trust_keys": {"acme": secret},
+        })
+        src = _make_app_source(
+            tmp_path, name="signed-app", signer="acme", signature=sig,
+        )
+        result = install_app(src)
+        assert result.ok
+
+    def test_signature_required_denies_missing_signature(self, tmp_path, app_home):
+        self._write_policy(app_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["test-app"], "trust_keys": {"acme": "s3cr3t"},
+        })
+        src = _make_app_source(tmp_path)  # no signer/signature
+        result = install_app(src)
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+
+    def test_enable_builtin_exempt_under_require_signature(self, tmp_path, app_home):
+        # Builtins ship unsigned with defaultEnabled=False; a require_signature
+        # policy must NOT strand them (they are trusted first-party code). The
+        # admission gate governs third-party enable, not builtins.
+        from kiro_claw.apps.manager import _write_installed
+        src = _make_app_source(tmp_path, name="builtin-app")
+        assert install_app(src).ok
+        meta = _read_installed("builtin-app")
+        assert meta is not None
+        meta.origin = "builtin"
+        _write_installed("builtin-app", meta)
+        self._write_policy(app_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": [], "trust_keys": {},
+        })
+        result = enable_app("builtin-app")
+        assert result.ok
+        assert _read_installed("builtin-app").enabled is True
+
+    def test_enable_third_party_still_denied_under_require_signature(self, tmp_path, app_home):
+        # A non-builtin (unsigned) app is still denied under require_signature.
+        src = _make_app_source(tmp_path)  # origin defaults to non-builtin
+        assert install_app(src).ok
+        self._write_policy(app_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["test-app"], "trust_keys": {"acme": "s3cr3t"},
+        })
+        result = enable_app("test-app")
+        assert not result.ok
+        assert "blocked by admission policy" in result.error
+
+    def test_non_ascii_signature_is_clean_deny(self):
+        # A non-ASCII signature (attacker-controlled) must NOT raise TypeError out
+        # of hmac.compare_digest — it must be a clean deny (no unhandled 500 DoS).
+        from kiro_claw.apps.admission import AppAdmissionPolicy, _signature_valid
+        from kiro_claw.apps.manifest import AppManifest
+
+        policy = AppAdmissionPolicy(
+            mode="enforce", require_signature=True, trust_keys={"acme": "s3cr3t"}
+        )
+        m = AppManifest.from_dict({
+            "name": "evil-app", "version": "1.0.0", "displayName": "Evil",
+            "description": "d", "author": "tester", "signer": "acme",
+            "signature": "é" * 64,  # non-ASCII, would crash bytes-less compare
+        })
+        assert _signature_valid(m, policy) is False
+
+
+# ---------------------------------------------------------------------------
 # Enable / Disable
 # ---------------------------------------------------------------------------
 

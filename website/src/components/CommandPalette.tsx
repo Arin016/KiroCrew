@@ -20,6 +20,7 @@ import { useSkillsProvider } from './commandPalette/providers/skillsProvider'
 import { usePromptsProvider } from './commandPalette/providers/promptsProvider'
 import { useArtifactsProvider } from './commandPalette/providers/artifactsProvider'
 import { useRecentsProvider } from './commandPalette/providers/recentsProvider'
+import { useSettingsProvider } from './commandPalette/providers/settingsProvider'
 
 /**
  * Search Everywhere command palette (Mesh-2151).
@@ -160,12 +161,14 @@ export default function CommandPalette({
   const artifacts = useArtifactsProvider()
   // Recent-sessions quick-switcher for the unscoped empty state (not a tab).
   const recents = useRecentsProvider()
+  // Settings — instant client-side search over the codegen settings registry.
+  const settings = useSettingsProvider()
 
   // Tab strip order (Mesh-2151 §1): All · Sessions · Knowledge · Skills ·
   // Prompts, with Artifacts + Pages + Actions riding along after the v1 corpus.
   const tabs = useMemo<ResourceProvider[]>(
-    () => [all, sessions, knowledge, skills, prompts, artifacts, pages, actions],
-    [all, sessions, knowledge, skills, prompts, artifacts, pages, actions],
+    () => [all, sessions, knowledge, skills, prompts, artifacts, pages, actions, settings],
+    [all, sessions, knowledge, skills, prompts, artifacts, pages, actions, settings],
   )
 
   // Make the per-category providers discoverable by the All aggregator, which
@@ -182,7 +185,8 @@ export default function CommandPalette({
     registerProvider(artifacts)
     registerProvider(pages)
     registerProvider(actions)
-  }, [sessions, prompts, artifacts, pages, actions])
+    registerProvider(settings)
+  }, [sessions, prompts, artifacts, pages, actions, settings])
 
   const [query, setQuery] = useState('')
   const [scope, setScope] = useState<string | null>(null)

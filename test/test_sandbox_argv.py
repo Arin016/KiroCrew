@@ -77,8 +77,9 @@ class TestDetectBackend:
 
 
 class TestWrapArgv:
+    @patch("kiro_claw.sandbox._allow_unsandboxed_exec", return_value=True)
     @patch("kiro_claw.sandbox.detect_backend", return_value="none")
-    def test_no_sandbox_returns_original(self, mock_detect):
+    def test_no_sandbox_returns_original(self, mock_detect, mock_allow):
         argv = ["kiro-cli", "acp"]
         result, cleanup = wrap_argv(argv, mode="auto")
         assert result == argv
@@ -435,9 +436,10 @@ class TestSandboxNoWarningWhenExpected:
     this preserves Mesh-2054's "don't spam on expected states" intent.
     """
 
+    @patch("kiro_claw.sandbox._allow_unsandboxed_exec", return_value=True)
     @patch("kiro_claw.sandbox._allow_no_isolation", return_value=True)
     @patch("kiro_claw.sandbox.detect_backend", return_value="none")
-    def test_no_sandbox_opted_in_logs_info_not_warning(self, mock_detect, mock_optin, caplog):
+    def test_no_sandbox_opted_in_logs_info_not_warning(self, mock_detect, mock_optin, mock_allow, caplog):
         import logging
         if hasattr(wrap_argv, "_warned"):
             del wrap_argv._warned  # type: ignore[attr-defined]

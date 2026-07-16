@@ -4,12 +4,12 @@ test.describe('Navigation E2E Tests', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' })
     // Wait for app to load by checking sidebar
-    await expect(page.locator('aside')).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('nav[aria-label="Main navigation"]')).toBeVisible({ timeout: 10000 })
   })
 
   test('loads the homepage and displays navigation', async ({ page }) => {
     // Redirects to /chat by default - check that sidebar navigation exists
-    const sidebar = page.locator('aside')
+    const sidebar = page.locator('nav[aria-label="Main navigation"]')
     await expect(sidebar).toBeVisible({ timeout: 10000 })
     
     // Just verify sidebar is visible - the text "Chat" appears in many places
@@ -21,15 +21,15 @@ test.describe('Navigation E2E Tests', () => {
     // Navigate to Overview via URL (navigation items are divs, not links)
     await page.goto('/overview', { waitUntil: 'domcontentloaded' })
     // Check for Memory tab button specifically
-    await expect(page.getByRole('button', { name: 'Memory' })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: 'Memory', exact: true })).toBeVisible({ timeout: 10000 })
 
-    // Navigate to Chat  
+    // Navigate to Chat
     await page.goto('/chat', { waitUntil: 'domcontentloaded' })
     await expect(page.getByPlaceholder(/message|type|chat/i)).toBeVisible({ timeout: 10000 })
 
     // Go back to Overview
     await page.goto('/overview', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('button', { name: 'Memory' })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: 'Memory', exact: true })).toBeVisible({ timeout: 10000 })
   })
 
   test('theme toggle works', async ({ page }) => {
@@ -55,12 +55,12 @@ test.describe('Navigation E2E Tests', () => {
 
   test('all main navigation links are clickable', async ({ page }) => {
     const navPages = [
-      { name: 'Overview', path: '/overview' },
       { name: 'Chat', path: '/chat' },
-      { name: 'System', path: '/system' },
-      { name: 'Hooks', path: '/hooks' }
+      { name: 'Developer', path: '/developer' },
+      { name: 'Hooks', path: '/hooks' },
+      { name: 'Schedule', path: '/schedule' }
     ]
-    
+
     for (const { path } of navPages) {
       // Navigate directly to the page
       await page.goto(path, { waitUntil: 'domcontentloaded' })
@@ -77,10 +77,11 @@ test.describe('Navigation E2E Tests', () => {
   test('sidebar navigation persists across pages', async ({ page }) => {
     // Navigation should be visible on Overview page - use sidebar locator
     await page.goto('/overview', { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('aside').getByText('Chat')).toBeVisible()
-    
-    // Navigation should be visible on System page
-    await page.goto('/system', { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('aside').getByText('Overview')).toBeVisible()
+    await expect(page.locator('nav[aria-label="Main navigation"]').getByText('Chat')).toBeVisible()
+
+    // Navigation should be visible on the Developer page (was /system, now
+    // /developer?tab=system — kept consistent with system.spec.ts).
+    await page.goto('/developer?tab=system', { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('nav[aria-label="Main navigation"]').getByText('Schedule')).toBeVisible()
   })
 })

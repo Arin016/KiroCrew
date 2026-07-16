@@ -16,6 +16,95 @@
 #                so frontend sync is by CONTENT within the post-snapshot window, not a
 #                clean SHA range. This SHA records the upstream tip last triaged.
 
+# --- Batch-36 addendum (folded into PR #92 / branch sync/beta-2026-07-15-batch35) ---
+# After batch-35's ports landed, a third upstream wave arrived (backend
+# 3cae0aad..f9b37d8c = 9 commits; frontend 340cfa9..e7c1de9 = 3). Folded into the
+# SAME PR. Tally: 7 backend PORTED + 2 backend SKIP_INTERNAL; 1 frontend PORTED +
+# 2 frontend ALREADY_PRESENT/no-op.
+# BACKEND PORTED (7):
+#   ff921945 isolate per-app spawn failures at gateway boot (try/except so one
+#     app's fail-closed sandbox error doesn't crash boot); ca356e53 fold playwright
+#     e2e suite (de-Amazoned harness, dropped @amzn/chromium/brazil machinery);
+#     a6c1680e [SECURITY] sandbox agent-influenced spawns (Talos 92e24570) —
+#     sandboxed_spawn_argv chokepoint (wrap_argv + scrub_env) routing
+#     mcp_discovery.probe_server/git_coord/task_executor; 8993ac32 grill skill
+#     facts-vs-decisions (dropped _GRILL_CHALLENGE_PROMPT, absent); 689fe139
+#     orphan-sweep spawn-grace + dead-runtime respawn (dropped doc-links-gated
+#     chat_handlers/knowledge hunks); f9b37d8c macOS-26 sandbox-exec — REMOVES the
+#     >=26 version gate again (empirical probe trusted), superseding batch-35's
+#     interim ef4f05b gate re-add.
+#   549fd384 (zero-CLI Slack settings API + subagent approval-slot routing) was
+#     FULLY ALREADY_PRESENT (fork PRs #65/#68) — nothing ported, boundary advances.
+# BACKEND SKIP_INTERNAL (2):
+#   88e703ab (register Dev Fleet in app-registry) — internal MeshClawApp-DevFleet
+#     GitFarm app; fork registry is []. 38b4fb97 (auto-ingest Chorus/Pippin/Quip
+#     doc links) — entirely internal doc sources (chorus.aws.dev/pippin.amazon.dev/
+#     quip-amazon.com) via the stubbed ReadInternalWebsites bridge.
+# FRONTEND: 273cb0e playwright load-stability PORTED (re-anchored to fork IA);
+#   c0fb568 (Slack panel + conversation-map close-on-click-away) ALREADY_PRESENT
+#   (fork PR #65/#84); e7c1de9 registry regen a no-op.
+# Codex findings from this + batch-35 remain tracked as inherited fix-in-both below;
+# a6c1680e/ff921945/f9b37d8c RESOLVE several of them (wrap_argv-raises boot crash,
+# macOS-26 hard-fail, unscrubbed agent-spawn env).
+#
+# --- Batch-35 (dual-repo beta sync 2026-07-15, SECURITY-FIRST round) ---
+# Branch sync/beta-2026-07-15-batch35 off origin/main. Backend window
+# a7736388..3cae0aad (5 commits), frontend window 4b9d6255..340cfa9 (4 commits).
+# User directive this round: make sure ALL security commits are synced; two
+# mid-round upstream waves were folded into the SAME PR. Tally: 9 PORTED =
+# 5 backend + 4 frontend. ZERO SKIP — every candidate landed. SECURITY
+# COVERAGE: no hardening silently dropped.
+# BACKEND 5th commit (folded after the first 4):
+#   3cae0aad -> "fix(sandbox): restore macOS-26 sandbox-exec gate + macOS test
+#     fixes" — upstream fixup to THIS batch's platform_compat/Talos-sandbox work:
+#     re-adds the platform.mac_ver() macOS-26 (Darwin 25/Tahoe) short-circuit that
+#     383eae45 had dropped (+ restores module-level `import platform` and the
+#     test_sandbox_probe macOS-26 assertions), plus macOS-only test hardening
+#     (tmp_path->/tmp, passthrough fixtures, PEERCRED mocks, numpy skipif).
+#     session_pid.get_ppid / acp isort were already at parity. Upstream-CR
+#     CR-289598418.
+# FRONTEND 4 (window 4b9d6255..340cfa9, all KEEP):
+#   3c290bb command-palette Settings provider (codegen registry + deep-link +
+#     useSettingHighlight; adapted to the fork's KiroACP-only tab set, dropped
+#     absent Provider/Secretary/Sync/TaskKeeper panels); 8345970 sidebar
+#     folder drag-move (collectFolderSubtreeIds cycle-safe reparent; dropped the
+#     Radix submenu affordance the fork's inline-toolbar sidebar lacks); d29d798
+#     Semantic Memory table render cap (100 rows + filter); 340cfa9 store
+#     per-slot cache eviction on sseSlots + 200-notification ring cap.
+# PORTED (4 backend, chronological / parent-first):
+#   eaf62582 -> "feat: native Windows support via platform_compat shim" — the
+#     fork ADOPTS Windows support (user reversed the prior macOS+Linux-only stance).
+#     NEW src/kiro_claw/platform_compat.py (cross-platform file-lock/process/signal/
+#     chmod/resource/strftime/console shim) + routing ~50 live modules through it;
+#     replaces the dangerous os.kill(pid,0) liveness probe with pid_exists. PARTIAL:
+#     dropped hunks for fork-absent modules (providers/claude_code.py, cc_agent.py,
+#     aim_cli.py, secretary.py, knowledge/connectors/quip.py). Docs flipped to
+#     "macOS, Linux, and Windows" (CLAUDE.md/AGENTS.md/README/INSTALL/FEATURES +
+#     cli/session/acp-client specs) + new docs/WINDOWS_INSTALL.md. macOS/Linux
+#     behavior byte-for-byte unchanged (Windows branches added, not substituted).
+#     Task Mesh-2329.
+#   383eae45 -> "fix(security): remediate 10 Talos AppSec pentest findings" —
+#     [SECURITY] sandbox launcher hardening (CAP_SYS_ADMIN drop + NO_NEW_PRIVS,
+#     seccomp-BPF, hardlink inode scan), fail-closed unsandboxed-exec gate
+#     (agent.sandbox_allow_unsandboxed_exec opt-in), quote-evasion-resistant
+#     git-publish detection, IMDS/env-credential access detection, command-path
+#     normalization, apply_resource_limits, SEL 0o600, snapshot sel_hmac.key
+#     exclusion, orphaned-session-root sweep. Kept the fork's STRICTER fail-closed
+#     git-push gate (did not graft upstream's looser quoted-feature-branch allow).
+#     Keystone floor preserved.
+#   e99840c3 -> "fix(vector-memory): guard FAISS dedup against writes without
+#     embeddings" — correctness guard (emoji stripped from subject).
+#   1b0585bb -> "fix(security): port Talos OSR AppSec (app admission, HMAC, host)"
+#     — [SECURITY] NEW apps/admission.py App-Kit admission gate (banned/approved,
+#     optional-HMAC signature, fail-closed), backend.entryPoint path-containment,
+#     third-party load gate (apps_allow_third_party opt-in), body-bound App-Kit
+#     HMAC, added ~/.kiroclaw/app_admission.json to the sensitive floor. DISTINCT
+#     from + does NOT weaken the CPP platform/admission.py plugin gate
+#     (CONTRACT_VERSION stays 1). Dropped the publish_sync.py hunk (internal
+#     Artifactory engine, absent from fork).
+# INHERITED-UPSTREAM findings from PR #88 remain fix-in-both (see left-out.md);
+# NOT re-addressed here. KiroACP invariant HELD; de-Amazon audit clean.
+#
 # --- Batch-34 addendum (folded into PR #88 / branch sync/beta-2026-07-15-batch33) ---
 # After the batch-33 ports landed, three more backend commits appeared upstream
 # (d757fd9d..a7736388) plus the batch-33 DEFER (ed984a05) was resolved. Triaged
@@ -107,8 +196,8 @@
 #   + builder-mcp test-fixture string only). Verify: per-commit pytest (touched files) + flake8 +
 #   isort all green; frontend tsc -b clean + touched vitest green.
 
-beta a7736388bf4885d75c3c93ad6c6b7b25fbd220e7      # 2026-07-15 MeshClaw backend triaged tip (batch-34 addendum; advanced from batch-33 d757fd9d). Window 84d8abf3..d757fd9d triaged by content; 5 backend KEEP ported (36527cd3 Heimdall pentest security.py hardening, 7cc8217d Talos redaction/SSRF/XPIA follow-ups, 82560fb7 exfil-URL path/raw-IP + bash-egress gate, 56fbb774 mcp-gateway claim-push caller identity, 0917c9aa queue chat during sub-agent runs). 791c0cb5 (Board removal / Channels hide) ALREADY_PRESENT (merged fork PR #78). SKIP: cdb2d135 (CC deny union-merge — SKIP_NONKIROACP, confined to deleted cc_agent.py), d757fd9d (brazil ws-create timeout — SKIP_INTERNAL, Brazil installer path absent from fork). DEFER: ed984a05 (Talos legacy-HTML-dashboard removal — KEEP-worthy generic-core XSS-surface reduction, but a 16-file behavior-changing removal that landed after the batch verdicts were verified; held for the next verified batch — see left-out.md).
-frontend-beta 4b9d6255dbb63391f58fdd23f987241d00cf433e  # 2026-07-15 MeshClawWebsite triaged tip (batch-33). Window ab0d8d2c..4b9d6255 triaged by content; 1 frontend KEEP ported (4b9d6255 reflect sub-agent runs in composer busy state — selectComposerBusy/selectSlotSubagentsActive). c64af69 (Board removal frontend) ALREADY_PRESENT (merged fork PR #78). No frontend SKIP/DEFER this batch.
+beta f9b37d8c20fe75ce268c9eb356ce5bfd2a909e72      # 2026-07-16 MeshClaw backend triaged tip (batch-36 addendum, folded into PR #92; advanced from batch-35 3cae0aad). Window 3cae0aad..f9b37d8c (9 commits): 7 PORTED + 2 SKIP_INTERNAL — see batch-36 note above. Window 84d8abf3..d757fd9d triaged by content; 5 backend KEEP ported (36527cd3 Heimdall pentest security.py hardening, 7cc8217d Talos redaction/SSRF/XPIA follow-ups, 82560fb7 exfil-URL path/raw-IP + bash-egress gate, 56fbb774 mcp-gateway claim-push caller identity, 0917c9aa queue chat during sub-agent runs). 791c0cb5 (Board removal / Channels hide) ALREADY_PRESENT (merged fork PR #78). SKIP: cdb2d135 (CC deny union-merge — SKIP_NONKIROACP, confined to deleted cc_agent.py), d757fd9d (brazil ws-create timeout — SKIP_INTERNAL, Brazil installer path absent from fork). DEFER: ed984a05 (Talos legacy-HTML-dashboard removal — KEEP-worthy generic-core XSS-surface reduction, but a 16-file behavior-changing removal that landed after the batch verdicts were verified; held for the next verified batch — see left-out.md).
+frontend-beta e7c1de9ca2535a198ca1a3057a83271fb6998664  # 2026-07-16 MeshClawWebsite triaged tip (batch-36 addendum; advanced from batch-35 340cfa9). Window 340cfa9..e7c1de9 (3 commits): 273cb0e playwright load-stability PORTED, c0fb568 Slack panel + conversation-map ALREADY_PRESENT (fork PR #65/#84), e7c1de9 registry regen no-op. Window 4b9d6255..340cfa9 (4 commits) all PORTED (store cache-evict/notif-cap, semantic-memory render cap, sidebar folder drag-move, command-palette Settings provider). See batch-35 note above. Window ab0d8d2c..4b9d6255 triaged by content; 1 frontend KEEP ported (4b9d6255 reflect sub-agent runs in composer busy state — selectComposerBusy/selectSlotSubagentsActive). c64af69 (Board removal frontend) ALREADY_PRESENT (merged fork PR #78). No frontend SKIP/DEFER this batch.
 mainline 45dcb603f117886648d79c7dde05e82d2d8cda2d  # 2026-07-15 MeshClaw mainline tip (upstream), unchanged since batch-27 (batch-33 re-confirmed). No NEW mainline-only content to port (all in-window candidates reached the fork via beta-braveheart; every mainline-only delta is a release-merge or already triaged via beta).
 # NOTE: this 'mainline' SHA is the UPSTREAM MeshClaw mainline tip (for the mainline-only
 # candidate check), NOT the fork's mainline — batch-12 mistakenly recorded the fork SHA

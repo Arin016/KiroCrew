@@ -15,6 +15,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from kiro_claw import platform_compat
 from kiro_claw.platform import current_context
 from kiro_claw.security import (
     audit_bash_exfiltration,
@@ -725,16 +726,25 @@ async def run_script_hook(
         from kiro_claw.sandbox import wrap_argv
 
         env = {**os.environ, "KIROCLAW_HOOK_EVENT": hook.event, "KIROCLAW_HOOK_CONTEXT": context}
-        argv = ["/bin/sh", "-c", hook.command]
+        # Shell per platform: POSIX /bin/sh -c, Windows cmd /c (no /bin/sh there).
+        if platform_compat.IS_WINDOWS:
+            argv = ["cmd", "/c", hook.command]
+        else:
+            argv = ["/bin/sh", "-c", hook.command]
         wrapped_argv, cleanup_path = wrap_argv(argv)
-        # Process group isolation: start_new_session=True enables killpg (same as AcpClient)
+        # Process-group isolation for clean tree-kill on timeout. Pass both flags
+        # explicitly (NOT **dict unpack — breaks mypy's Popen overload resolution
+        # on the build fleet): start_new_session=True is a no-op on Windows,
+        # creationflags resolves to 0 (no-op) on POSIX. The Windows flag makes the
+        # tree taskkill /T-reapable; POSIX setsid -> killpg.
         proc = await asyncio.create_subprocess_exec(
             *wrapped_argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
-            start_new_session=True,
+            start_new_session=platform_compat.IS_POSIX,
+            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -761,12 +771,12 @@ async def run_script_hook(
             duration_ms=elapsed,
         )
     except asyncio.TimeoutError:
-        # Kill entire process group (shell + grandchildren) to prevent orphaned processes
-        import signal
-
+        # Kill the whole process tree (shell + grandchildren) to prevent orphans.
+        # platform_compat: killpg on POSIX, taskkill /T on Windows (os.killpg /
+        # signal.SIGKILL are POSIX-only and would AttributeError on win32).
         try:
             if proc.returncode is None:
-                os.killpg(proc.pid, signal.SIGKILL)
+                platform_compat.kill_process_tree(proc.pid, platform_compat.SIGKILL)
                 await proc.communicate()
         except Exception:
             pass

@@ -6,8 +6,12 @@ desktop app). All builds are driven by the repo-root [`Makefile`](../Makefile)
 and use plain `pip` + `npm`/Vite + `pytest` — there is no proprietary build
 tooling.
 
-> **Windows is not supported.** The `kiro-cli` backend only runs on macOS and
-> Linux.
+> **Platforms: macOS, Linux, and Windows.** macOS/Linux use the `Makefile` +
+> `setup.sh` path below; Windows runs natively from a Python source install
+> (`pip install -e . tzdata`, launched via `python -m kiro_claw gateway`). All
+> POSIX-only process/signal/file-lock/metrics calls are routed through
+> `kiro_claw.platform_compat`. See
+> [WINDOWS_INSTALL.md](WINDOWS_INSTALL.md) for the Windows setup steps.
 
 ## Prerequisites
 

@@ -10,6 +10,7 @@ Covers Mesh-734 / supersedes CR-268592581:
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -313,18 +314,14 @@ class TestHeartbeatApproval:
         real_sel = SecurityEventLog(base_dir=tmp_path)
         monkeypatch.setattr("kiro_claw.slack.gateway.sel", lambda: real_sel)
 
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
-            if str(path).endswith("security_events.jsonl") and "a" in (
-                a[0] if a else k.get("mode", "")
-            ):
+            if str(path).endswith("security_events.jsonl"):
                 raise PermissionError("SEL file unwritable (chmod 000)")
-            return real_open(path, *a, **k)
+            return real_os_open(path, *a, **k)
 
-        import builtins
-
-        monkeypatch.setattr(builtins, "open", _boom)
+        monkeypatch.setattr(os, "open", _boom)
         try:
             event = _make_event("WorkspaceSearch")
             assert await orchestrator._heartbeat_approval(event) is False

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -168,6 +169,7 @@ def _clean_index() -> Any:
 
 
 def _patch_env(monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeBackend, list[dict[str, Any]]]:
+    monkeypatch.setattr(socketsec, "PEERCRED_SUPPORTED", True)
     monkeypatch.setattr(
         socketsec, "check_peer_uid", lambda _w, _uid: socketsec.PeerCredResult.MATCH
     )
@@ -363,11 +365,12 @@ def test_classify_session_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_claim_roundtrip(tmp_path: Path) -> None:
+async def test_send_claim_roundtrip() -> None:
     """The sender round-trips a claim frame over a real unix socket and treats
     a ``claimed`` ack as success, anything else as failure."""
     received: list[dict[str, Any]] = []
-    sock = tmp_path / "gw.sock"
+    # Use /tmp directly — macOS tmp_path exceeds the 104-char AF_UNIX sun_path limit.
+    sock = Path(tempfile.mkdtemp(dir="/tmp")) / "gw.sock"
 
     async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         raw = await reader.readline()
@@ -389,11 +392,13 @@ async def test_send_claim_roundtrip(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_claim_failure_paths(tmp_path: Path) -> None:
+async def test_send_claim_failure_paths() -> None:
     """A missing socket or a non-ack response returns False without raising."""
-    assert await claim_mod.send_claim(str(tmp_path / "absent.sock"), 7, "dashboard:x") is False
+    # Use /tmp directly — macOS tmp_path exceeds the 104-char AF_UNIX sun_path limit.
+    base = Path(tempfile.mkdtemp(dir="/tmp"))
+    assert await claim_mod.send_claim(str(base / "absent.sock"), 7, "dashboard:x") is False
 
-    sock = tmp_path / "nak.sock"
+    sock = base / "nak.sock"
 
     async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readline()
@@ -411,13 +416,14 @@ async def test_send_claim_failure_paths(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_claim_aggregate_timeout_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A gatewayd that accepts but never responds is bounded by ONE aggregate
     budget — not one budget per phase (connect/drain/readline), which would
     triple the worst-case stall (AutoSDE finding f-d76c6f17)."""
     monkeypatch.setattr(claim_mod, "_CLAIM_TIMEOUT_SECS", 0.3)
-    sock = tmp_path / "stall.sock"
+    # Use /tmp directly — macOS tmp_path exceeds the 104-char AF_UNIX sun_path limit.
+    sock = Path(tempfile.mkdtemp(dir="/tmp")) / "stall.sock"
     stalled = asyncio.Event()
 
     async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

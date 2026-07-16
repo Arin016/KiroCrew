@@ -25,6 +25,8 @@ import logging
 import os
 import threading
 
+from kiro_claw import platform_compat
+
 logger = logging.getLogger(__name__)
 
 _SECRET_KEY_FILE = "token_signing.key"
@@ -53,10 +55,17 @@ def _load_or_create_secret() -> bytes:
                 # have been relaxed since (backup restore, manual edit, migration)
                 # and this key signs all auth tokens/cookies.
                 try:
-                    os.chmod(key_path, 0o600)
+                    # restrict_to_owner (fail-loud), NOT chmod_safe: chmod_safe
+                    # swallows OSError, which would make this security-warning
+                    # handler dead code (AutoSDE). POSIX applies ``chmod 0o600``;
+                    # Windows applies an owner-only DACL via icacls — no NTFS
+                    # posture regression from the earlier IS_POSIX no-op, which
+                    # left the key signing all auth tokens/cookies world-readable.
+                    platform_compat.restrict_to_owner(key_path)
                 except OSError:
-                    logger.warning(
-                        "failed to enforce 0600 permissions on token signing key %s; "
+                    # Logs the key file PATH (key_path), never the key bytes.
+                    logger.warning(  # nosemgrep: python-logger-credential-disclosure
+                        "failed to enforce owner-only permissions on token signing key %s; "
                         "file may be readable by other users",
                         key_path,
                         exc_info=True,
@@ -64,19 +73,33 @@ def _load_or_create_secret() -> bytes:
                 return existing
         key = os.urandom(32)
         key_path.parent.mkdir(parents=True, exist_ok=True)
-        key_path.write_bytes(key)
+        # Lock the DACL down BEFORE writing the secret bytes: on Windows
+        # restrict_to_owner shells out to icacls (subprocess), which is a
+        # measurable window (dozens to hundreds of ms). If we wrote the secret
+        # first, another local principal that can enumerate ~/.kiroclaw could
+        # slurp it during that window. Create empty → tighten DACL → write.
+        # On POSIX the equivalent gap collapses to an in-process os.chmod
+        # syscall, but the same order is fine.
+        fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            # Security-sensitive: this key signs all auth tokens/cookies, so a
-            # world-readable key file is a real exposure. Warn loudly rather
-            # than failing — the secret still works for signing this session.
-            logger.warning(
-                "failed to set 0600 permissions on token signing key %s; "
-                "file may be readable by other users",
-                key_path,
-                exc_info=True,
-            )
+            try:
+                platform_compat.restrict_to_owner(key_path)
+            except OSError:
+                # Security-sensitive: this key signs all auth tokens/cookies,
+                # so a world-readable key file is a real exposure. Warn loudly
+                # rather than failing — the secret still works for signing this
+                # session, and the caller falls back to the ephemeral path only
+                # on unwritable file, not on chmod failure.
+                # Logs the key file PATH (key_path), never the key bytes.
+                logger.warning(  # nosemgrep: python-logger-credential-disclosure
+                    "failed to set owner-only permissions on token signing key %s; "
+                    "file may be readable by other users",
+                    key_path,
+                    exc_info=True,
+                )
+            os.write(fd, key)
+        finally:
+            os.close(fd)
         return key
     except OSError:
         # Fall back to an ephemeral secret if the key file is unwritable.

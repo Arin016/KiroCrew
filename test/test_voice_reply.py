@@ -581,6 +581,15 @@ class TestSynthesizePiper:
 
 
 class TestSynthesizePolly:
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        # _synthesize_polly() calls wrap_argv before create_subprocess_exec.
+        # On macOS 26 wrap_argv raises, which is caught and returns None.
+        # Patch to passthrough so the existing create_subprocess_exec mocks run.
+        monkeypatch.setattr(
+            "kiro_claw.voice_reply.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
+
     @pytest.mark.asyncio
     async def test_invalid_engine_falls_back_to_default(self, tmp_path) -> None:
         proc = _mock_subprocess(returncode=0)
@@ -961,6 +970,13 @@ class TestStreamingVoiceReply:
 
 class TestTextTypeAutoDetection:
     """Tests for --text-type dynamic selection (ssml vs text)."""
+
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        # See TestSynthesizePolly._passthrough_sandbox.
+        monkeypatch.setattr(
+            "kiro_claw.voice_reply.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
 
     @pytest.mark.asyncio
     async def test_ssml_input_uses_ssml_text_type(self, tmp_path) -> None:

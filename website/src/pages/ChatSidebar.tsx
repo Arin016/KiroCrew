@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } fro
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
 import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw, Bot, ExternalLink, Cpu } from 'lucide-react'
-import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent } from '@dnd-kit/core'
+import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDroppable, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -31,7 +31,8 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent } from '../utils/folderAgent'
 import SessionActionsMenu from '../components/SessionActionsMenu'
-import { folderAwareCollision, DndDraggable, DndDroppable } from '../components/dnd'
+import { DndDraggable, DndDroppable } from '../components/dnd'
+import { collectFolderSubtreeIds } from '../utils/folderTree'
 import type { ChatFolder, ChatTag, TagColumn, TagColumnMode, SubagentActivity } from '../types'
 import { decideUnreadDrain } from './unreadDrain'
 import { loadChatConfig, saveChatConfig } from './chat/ChatSettings'
@@ -56,13 +57,83 @@ function fmtRelativeTime(ts: string | number | undefined): string {
 }
 
 /** Sortable wrapper for a folder block — enables drag-to-reorder */
-// Folder reordering and session-to-folder assignment share one DndContext but
-// want different collision behavior — see `folderAwareCollision` in
-// components/dnd.tsx (shared with the artifact library, Mesh-2720).
-const sidebarCollision = folderAwareCollision
+/**
+ * Folder reordering and session-to-folder assignment share one DndContext but
+ * want different collision behavior:
+ *  - Dragging a folder: restrict collisions to folder sortable containers so
+ *    verticalListSortingStrategy animates cleanly and `over.id` is a folder id.
+ *  - Dragging a session: prefer the innermost droppable under the pointer
+ *    (folder/root drop target), falling back to closestCenter.
+ */
+const sidebarCollision: CollisionDetection = (args) => {
+  const activeData = args.active?.data?.current as { type?: string; nested?: boolean; subtree?: string[] } | undefined
+  const activeType = activeData?.type
+  if (activeType === 'folder') {
+    const subtree = new Set(activeData?.subtree ?? [])
+    if (activeData?.nested) {
+      // Nested subfolder drag: the gesture is re-parenting, not reordering.
+      // Target the innermost folder-drop zone under the pointer (or the root
+      // lane to move to top level), excluding the dragged folder's own
+      // subtree so it can never be dropped into itself or a descendant.
+      const dropContainers = args.droppableContainers.filter(c => {
+        const d = c.data?.current as { type?: string; folderId?: string | null } | undefined
+        return d?.type === 'folder-drop' && !(d.folderId && subtree.has(d.folderId))
+      })
+      return pointerWithin({ ...args, droppableContainers: dropContainers })
+    }
+    // Root folder drag: two gestures share the drag, disambiguated by where
+    // the pointer sits on the target — the "thirds" pattern from VS Code /
+    // Notion tree DnD. The MIDDLE band of another folder's header row
+    // re-parents INTO it (folder-drop collision, ring highlight); the
+    // header's top/bottom edges and everything below fall through to the
+    // sortable reorder, so even a collapsed folder (whose whole block is
+    // just the header) can still be reordered against at its edges.
+    if (args.pointerCoordinates) {
+      const dropContainers = args.droppableContainers.filter(c => {
+        const d = c.data?.current as { type?: string; folderId?: string | null } | undefined
+        return d?.type === 'folder-drop' && !!d.folderId && !subtree.has(d.folderId)
+      })
+      const within = pointerWithin({ ...args, droppableContainers: dropContainers })
+      const first = within[0]
+      const rect = first?.data?.droppableContainer?.rect?.current
+      if (rect) {
+        const offsetY = args.pointerCoordinates.y - rect.top
+        if (offsetY >= FOLDER_HEADER_DROP_BAND * 0.25 && offsetY <= FOLDER_HEADER_DROP_BAND * 0.75) {
+          return [first]
+        }
+      }
+    }
+    const folderContainers = args.droppableContainers.filter(
+      c => (c.data?.current as { type?: string } | undefined)?.type === 'folder'
+    )
+    return closestCenter({ ...args, droppableContainers: folderContainers })
+  }
+  const within = pointerWithin(args)
+  return within.length ? within : closestCenter(args)
+}
 
-function SortableFolderBlock({ folder, renderFolderBlock }: { folder: ChatFolder; renderFolderBlock: (f: ChatFolder, depth: number, visited?: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed?: boolean) => React.ReactNode[] }) {
-  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id, data: { type: 'folder' } })
+/** Approximate height (px) of a folder header row. For root folder drags the
+ *  MIDDLE 25%–75% of this band re-parents INTO the folder; the top/bottom
+ *  edges (and everything below the header) stay sortable-reorder gestures —
+ *  the VS Code / Notion "thirds" tree-DnD pattern. */
+const FOLDER_HEADER_DROP_BAND = 34
+
+
+/** Dashed always-reachable drop target shown in the root lane while dragging
+ *  a foldered item — the explicit escape hatch out of a folder. Shared by
+ *  session drags and nested-folder drags so the affordance (and wording)
+ *  stays identical for both. */
+function RootDropHint() {
+  const { setNodeRef, isOver } = useDroppable({ id: 'root-unnest-hint', data: { type: 'folder-drop', folderId: null } })
+  return (
+    <div ref={setNodeRef} className={`m-1 min-h-[72px] flex items-center justify-center rounded-md border border-dashed transition-all ${isOver ? 'border-accent bg-accent/10 ring-2 ring-accent text-accent' : 'border-border text-muted'}`}>
+      <span className="text-[12px]">Drop here to remove from folder</span>
+    </div>
+  )
+}
+
+function SortableFolderBlock({ folder, subtree, renderFolderBlock }: { folder: ChatFolder; subtree?: readonly string[]; renderFolderBlock: (f: ChatFolder, depth: number, visited?: Set<string>, dragHandleProps?: React.HTMLAttributes<HTMLElement>, forceCollapsed?: boolean) => React.ReactNode[] }) {
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id, data: { type: 'folder', subtree } })
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, position: 'relative' as const }
   // The whole folder header is the drag handle (pointer + touch): dragging the
   // row reorders the folder — no grip, consistent with session-card drag. Only
@@ -1050,6 +1121,26 @@ function ChatSidebar({
     // Persist
     changes.forEach(c => api.updateChatFolder(c.id, { order: c.order }))
   }, [queryClient])
+  // Re-parent a folder: move it into `parentId`, or to the top level (null).
+  // Client-side guards mirror the server (self/descendant targets rejected)
+  // so an invalid pick or drop is a silent no-op instead of a 400 round-trip.
+  const moveFolderTo = useCallback((folderId: string, parentId: string | null) => {
+    const current = queryClient.getQueryData<ChatFolder[]>(['chat-folders']) ?? []
+    const folder = current.find(f => f.id === folderId)
+    if (!folder) return
+    const target = parentId ?? ''
+    if ((folder.parent_id || '') === target) return
+    if (target && collectFolderSubtreeIds(current, folderId).has(target)) return
+    updateFolderMutation.mutate({ id: folderId, body: { parent_id: target } })
+  }, [queryClient, updateFolderMutation])
+  // Subtree sets for every folder, recomputed only when the folder list
+  // changes — the render paths below (menu target filters + drag data)
+  // do map lookups instead of re-walking the tree on every render pass.
+  const folderSubtrees = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const f of folders) m.set(f.id, collectFolderSubtreeIds(folders, f.id))
+    return m
+  }, [folders])
 
   // Reveal-in-sidebar: expand parent folder(s) then scroll to the slot
   useEffect(() => {
@@ -1103,13 +1194,23 @@ function ChatSidebar({
     if (dragExpandTimer.current) { clearTimeout(dragExpandTimer.current.timer); dragExpandTimer.current = null }
     const { active, over } = event
     if (!over) return
-    const a = active.data.current as { type?: string; key?: string } | undefined
+    const a = active.data.current as { type?: string; key?: string; nested?: boolean } | undefined
     const o = over.data.current as { type?: string; folderId?: string | null } | undefined
     if (a?.type === 'folder') {
-      // over may be a sortable folder (over.id = folder id) or a folder-drop
-      // droppable (use its folderId) — resolve to a folder id either way.
-      const overId = o?.type === 'folder-drop' && o.folderId ? o.folderId : (over.id as string)
-      reorderFolders(active.id as string, overId)
+      if (a.nested) {
+        // Nested subfolder drag = re-parent: into the folder-drop target, or
+        // to the top level when dropped on the root lane (folderId null).
+        if (o?.type === 'folder-drop') moveFolderTo(active.id as string, o.folderId ?? null)
+        return
+      }
+      // Root folder drag: a folder-drop hit only occurs via the header-band
+      // gesture in sidebarCollision = re-parent INTO that folder. A sortable
+      // hit (over.id = folder id) is the reorder-among-siblings gesture.
+      if (o?.type === 'folder-drop') {
+        if (o.folderId) moveFolderTo(active.id as string, o.folderId)
+        return
+      }
+      reorderFolders(active.id as string, over.id as string)
       return
     }
     if (a?.type === 'session' && a.key) {
@@ -1119,7 +1220,7 @@ function ChatSidebar({
       if (o?.type === 'folder-drop') assignToFolder(a.key, o.folderId ?? null)
       else if (o?.type === 'folder') assignToFolder(a.key, over.id as string)
     }
-  }, [reorderFolders, assignToFolder])
+  }, [reorderFolders, assignToFolder, moveFolderTo])
   const handleSidebarDragCancel = useCallback(() => { setActiveDrag(null); if (dragExpandTimer.current) { clearTimeout(dragExpandTimer.current.timer); dragExpandTimer.current = null } }, [])
   // Auto-expand collapsed folders when a dragged item hovers over them for 500ms.
   const dragExpandTimer = useRef<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null)
@@ -1207,11 +1308,13 @@ function ChatSidebar({
 
   // ── Session row (reference-style: color palette, memory_mode, rename on right-click) ──
   // Does any descendant (direct or nested) of `folderId` contain a slot from `slots`?
-  function descendantMatch(fs: ChatFolder[], folderId: string, slots: Slot[], slotFolderMap: Record<string, string>): boolean {
+  function descendantMatch(fs: ChatFolder[], folderId: string, slots: Slot[], slotFolderMap: Record<string, string>, visited = new Set<string>()): boolean {
+    if (visited.has(folderId)) return false // cycle guard
+    visited.add(folderId)
     for (const child of fs) {
       if (child.parent_id !== folderId) continue
       if (slots.some(s => slotFolderMap[s.key] === child.id)) return true
-      if (descendantMatch(fs, child.id, slots, slotFolderMap)) return true
+      if (descendantMatch(fs, child.id, slots, slotFolderMap, visited)) return true
     }
     return false
   }
@@ -1583,7 +1686,31 @@ function ChatSidebar({
     const childFolders = folders.filter(f => f.parent_id === folder.id)
     const childSlots = filteredSlots.filter(s => slotFolders[s.key] === folder.id)
     const childNodes: React.ReactNode[] = []
-    for (const cf of childFolders.filter(cf => !isFolderHidden(cf))) childNodes.push(...renderFolderBlock(cf, depth + 1, visited))
+    // Nested subfolders are plain draggables (not sortables): dragging one
+    // re-parents it — drop on another folder to move inside, or on the root
+    // lane to move to the top level. The subtree ids ride along in the drag
+    // data so collision detection can exclude self/descendants as targets.
+    for (const cf of childFolders.filter(cf => !isFolderHidden(cf))) {
+      childNodes.push(
+        <DndDraggable key={`subfolder-drag-${cf.id}`} id={cf.id}
+          data={{ type: 'folder', nested: true, subtree: [...(folderSubtrees.get(cf.id) ?? collectFolderSubtreeIds(folders, cf.id))] }}
+          disabled={editingId === cf.id}>
+          {({ setNodeRef, listeners, isDragging }) => (
+            <div ref={setNodeRef} style={{ opacity: isDragging ? 0.5 : 1 }}>
+              {/* This children function runs during DndDraggable's OWN render —
+               *  deferred and re-invoked (StrictMode, isDragging flips). Pass a
+               *  CLONE of the ancestor path: sharing the mutated `visited` set
+               *  makes the second invocation hit the cycle guard and render the
+               *  subfolder as [] (folder vanishes; drags die at drag-start).
+               *  The source collapses while dragging (same UX as root-folder
+               *  reorder); the layout shift this causes is compensated by the
+               *  drag-scoped droppable re-measure polling on the DndContext. */}
+              {renderFolderBlock(cf, depth + 1, new Set(visited), listeners as unknown as React.HTMLAttributes<HTMLElement>, isDragging)}
+            </div>
+          )}
+        </DndDraggable>
+      )
+    }
     // New-subfolder name input sits after the existing subfolders, just above the
     // sessions — a new folder is appended (order = folder count), so it lands at the
     // bottom of the sibling folders, above the chats. The placeholder matches that.
@@ -1657,6 +1784,9 @@ function ChatSidebar({
   // Used to reveal the empty-state drop placeholder inside the "No folder"
   // group so there's always a reachable ungroup target.
   const draggingFolderedSession = activeDrag?.type === 'session' && !!slotFolders[activeDrag.id]
+  // True while dragging a folder that currently has a parent — the only case
+  // where "drop on the root lane to move to top level" applies.
+  const draggingNestedFolder = activeDrag?.type === 'folder' && !!folders.find(f => f.id === activeDrag.id)?.parent_id
 
   // Narrow-sidebar header responsiveness: below ~256px the full "New chat"
   // label no longer fits next to the label + kebab, so collapse the create
@@ -1943,14 +2073,26 @@ function ChatSidebar({
           <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col">
             {/* One DndContext owns folder reorder (sortable) + session drag-to-
              *  assign (draggable rows + droppable folder/root targets). */}
-            <DndContext sensors={dndSensors} collisionDetection={sidebarCollision} measuring={{ droppable: { strategy: MeasuringStrategy.Always } }} onDragStart={handleSidebarDragStart} onDragOver={handleSidebarDragOver} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
+            <DndContext sensors={dndSensors} collisionDetection={sidebarCollision}
+              // Droppable rects are normally snapshotted once at drag-start, but
+              // this tree ANIMATES during drags (the dragged folder's body
+              // collapses over 150ms; hovered collapsed folders auto-expand), so
+              // the snapshot goes stale and drop targets diverge from the
+              // cursor. While a drag is live, poll re-measurement (dnd-kit's
+              // numeric `frequency` self-reschedules a measure loop) so rects
+              // track the animating layout. Idle sessions keep the plain
+              // strategy — no background measuring.
+              measuring={activeDrag
+                ? { droppable: { strategy: MeasuringStrategy.Always, frequency: 100 } }
+                : { droppable: { strategy: MeasuringStrategy.Always } }}
+              onDragStart={handleSidebarDragStart} onDragOver={handleSidebarDragOver} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
               {/* Root lane is the fallback drop target: dropping a session on
                *  empty space (not over a folder) ungroups it (folderId: null). */}
               <DndDroppable id="root-lane" data={{ type: 'folder-drop', folderId: null }}>
                 {({ setNodeRef }) => (
                   <div ref={setNodeRef} className="flex flex-col flex-1 min-h-0">
                     <SortableContext items={rootFolderIds} strategy={verticalListSortingStrategy}>
-                      {visibleRootFolders.map(f => <SortableFolderBlock key={f.id} folder={f} renderFolderBlock={renderFolderBlock} />)}
+                      {visibleRootFolders.map(f => <SortableFolderBlock key={f.id} folder={f} subtree={[...(folderSubtrees.get(f.id) ?? collectFolderSubtreeIds(folders, f.id))]} renderFolderBlock={renderFolderBlock} />)}
                     </SortableContext>
                     {creatingIn === '__root__' && (
                       <div className="px-2 py-1">
@@ -1965,7 +2107,12 @@ function ChatSidebar({
                     {(rootFolders.length > 0 || ungroupedSlots.length > 0) && (
                       <DndDroppable id="root-group" data={{ type: 'folder-drop', folderId: null }}>
                         {({ setNodeRef: setRootGroupRef, isOver }) => (
-                          <div ref={setRootGroupRef} className={`flex flex-col flex-1 min-h-0 rounded-md transition-all ${isOver && draggingFolderedSession ? 'ring-1 ring-accent' : ''}`}>
+                          <div ref={setRootGroupRef} className={`flex flex-col flex-1 min-h-0 rounded-md transition-all ${isOver && (draggingFolderedSession || draggingNestedFolder) ? 'ring-1 ring-accent' : ''}`}>
+                            {/* Explicit un-nest target while dragging a subfolder —
+                             *  same escape hatch (and wording) as the session zone
+                             *  below, always reachable even when the root lane has
+                             *  no empty space. */}
+                            {draggingNestedFolder && <RootDropHint />}
                             {ungroupedSlots.map((s, i) => {
                               const nextIsActive = i < ungroupedSlots.length - 1 && activeSlot === ungroupedSlots[i + 1].key
                               const isActive = activeSlot === s.key
@@ -1984,11 +2131,7 @@ function ChatSidebar({
                                 Show all older sessions
                               </button>
                             )}
-                            {ungroupedSlots.length === 0 && draggingFolderedSession && (
-                              <div className="m-1 min-h-[72px] flex items-center justify-center rounded-md border border-dashed border-border text-[12px] text-muted">
-                                Drop here to remove from folder
-                              </div>
-                            )}
+                            {ungroupedSlots.length === 0 && draggingFolderedSession && <RootDropHint />}
                           </div>
                         )}
                       </DndDroppable>

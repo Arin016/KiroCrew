@@ -1,0 +1,211 @@
+import { describe, it, expect, vi } from 'vitest'
+import type { NavigateFunction } from 'react-router-dom'
+import type { Result } from '../types'
+
+/**
+ * Unit tests for the Settings provider (Mesh-2151 Search Everywhere).
+ */
+
+import { createSettingsProvider, resolveTabPrefix } from './settingsProvider'
+
+function navigate(): { nav: NavigateFunction; spy: ReturnType<typeof vi.fn> } {
+  const spy = vi.fn()
+  return { nav: spy as unknown as NavigateFunction, spy }
+}
+
+async function run(p: ReturnType<typeof createSettingsProvider>, q: string): Promise<Result[]> {
+  return Promise.resolve(p.search(q))
+}
+
+describe('createSettingsProvider — identity', () => {
+  it('exposes settings provider id, label, and icon', () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    expect(p.id).toBe('settings')
+    expect(p.label).toBe('Settings')
+    expect(p.icon).toBeTruthy()
+  })
+})
+
+describe('createSettingsProvider — search', () => {
+  it('finds settings by label match', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'dark mode')
+    // Should find Mode (display tab) via keyword synonyms
+    const hit = arr.find(r => r.title === 'Mode')
+    expect(hit).toBeDefined()
+    expect(hit!.providerId).toBe('settings')
+  })
+
+  it('finds settings by keyword synonym', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'theme')
+    expect(arr.length).toBeGreaterThan(0)
+    // Should match Color Theme or Mode via synonyms
+    const titles = arr.map(r => r.title)
+    expect(titles.some(t => t.includes('Theme') || t === 'Mode')).toBe(true)
+  })
+
+  it('shows breadcrumb subtitle in "Tab › Label" format', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'zoom')
+    const hit = arr.find(r => r.title === 'Zoom Level')
+    expect(hit).toBeDefined()
+    expect(hit!.subtitle).toBe('Display › Zoom Level')
+  })
+
+  it('navigates to /settings?tab=...&highlight=... on activate', async () => {
+    const { nav, spy } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'zoom')
+    const hit = arr.find(r => r.title === 'Zoom Level')
+    expect(hit).toBeDefined()
+    hit!.onActivate()
+    expect(spy).toHaveBeenCalledTimes(1)
+    const url = spy.mock.calls[0][0] as string
+    expect(url).toContain('/settings?tab=display')
+    expect(url).toContain('highlight=')
+  })
+
+  it('returns empty results for empty query', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, '')
+    expect(arr).toEqual([])
+  })
+
+  it('returns empty results for no match', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'zzzzqqqq')
+    expect(arr).toEqual([])
+  })
+
+  it('results are sorted by score descending', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'font')
+    expect(arr.length).toBeGreaterThan(1)
+    for (let i = 1; i < arr.length; i++) {
+      expect(arr[i - 1].score).toBeGreaterThanOrEqual(arr[i].score)
+    }
+  })
+
+  it('enter action uses navigate kind', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'zoom')
+    const hit = arr.find(r => r.title === 'Zoom Level')
+    expect(hit?.enter?.kind).toBe('navigate')
+  })
+})
+
+describe('createSettingsProvider — tab filter', () => {
+  it('voice: alone lists only voice-tab entries', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'voice:')
+    expect(arr.length).toBeGreaterThan(0)
+    // Every result must be from voice tab
+    for (const r of arr) {
+      expect(r.subtitle).toMatch(/^Voice ›/)
+    }
+    // Sorted alphabetically by label (title)
+    for (let i = 1; i < arr.length; i++) {
+      expect(arr[i - 1].title.localeCompare(arr[i].title)).toBeLessThanOrEqual(0)
+    }
+  })
+
+  it('voice: aws narrows within voice tab; other-tab AWS entries excluded', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'voice: aws')
+    // All results in voice tab
+    for (const r of arr) {
+      expect(r.subtitle).toMatch(/^Voice ›/)
+    }
+    // Now search unfiltered for "aws" and check we'd get results from non-voice tabs too
+    const unfilteredArr = await run(p, 'aws')
+    const nonVoice = unfilteredArr.filter(r => !r.subtitle?.startsWith('Voice'))
+    // If there happen to be AWS entries in other tabs, they must NOT appear in the filtered result
+    if (nonVoice.length > 0) {
+      const filteredIds = new Set(arr.map(r => r.id))
+      for (const other of nonVoice) {
+        expect(filteredIds.has(other.id)).toBe(false)
+      }
+    }
+  })
+
+  it('unambiguous prefix disp: mode works like display: mode', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const full = await run(p, 'display: mode')
+    const prefix = await run(p, 'disp: mode')
+    // Same results (same IDs, same tab scope)
+    expect(prefix.length).toBe(full.length)
+    const fullIds = new Set(full.map(r => r.id))
+    for (const r of prefix) {
+      expect(fullIds.has(r.id)).toBe(true)
+    }
+    // All from display tab
+    for (const r of prefix) {
+      expect(r.subtitle).toMatch(/^Display ›/)
+    }
+  })
+
+  it('unknown prefix zzz: foo falls back to normal search (non-crash, sensible results)', async () => {
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    // "zzz:" is unknown; should fall through to normal full-corpus search of "zzz: foo"
+    const arr = await run(p, 'zzz: foo')
+    // Should not throw. May be empty (no match for "zzz: foo") or partial — just ensure no crash.
+    expect(Array.isArray(arr)).toBe(true)
+  })
+
+  it('ambiguous prefix falls back to normal search', async () => {
+    // Among the real fork tabs: browser, chat, developer, display, notifications, slack, voice
+    // "d:" is ambiguous (developer, display) — should fall back to normal search.
+    const { nav } = navigate()
+    const p = createSettingsProvider(nav)
+    const arr = await run(p, 'd: mode')
+    // Fallback means normal search of "d: mode" — may have results from any tab.
+    // Key assertion: does NOT crash and does NOT restrict to just one tab.
+    expect(Array.isArray(arr)).toBe(true)
+  })
+})
+
+describe('resolveTabPrefix — unit', () => {
+  // Real fork tabs (KiroACP-only + de-Amazoned): no provider/secretary/tasks tabs.
+  const tabs = ['browser', 'chat', 'developer', 'display', 'notifications', 'slack', 'voice']
+
+  it('exact match returns tab key', () => {
+    expect(resolveTabPrefix('voice', tabs)).toBe('voice')
+    expect(resolveTabPrefix('VOICE', tabs)).toBe('voice')
+    expect(resolveTabPrefix('Chat', tabs)).toBe('chat')
+  })
+
+  it('unambiguous prefix resolves', () => {
+    expect(resolveTabPrefix('vo', tabs)).toBe('voice')
+    expect(resolveTabPrefix('bro', tabs)).toBe('browser')
+    expect(resolveTabPrefix('not', tabs)).toBe('notifications')
+    expect(resolveTabPrefix('disp', tabs)).toBe('display')
+    expect(resolveTabPrefix('sl', tabs)).toBe('slack')
+  })
+
+  it('ambiguous prefix returns null', () => {
+    // "d" matches developer, display
+    expect(resolveTabPrefix('d', tabs)).toBeNull()
+    // "s" matches only slack — so that's unambiguous
+    expect(resolveTabPrefix('s', tabs)).toBe('slack')
+    // "c" matches only chat — unambiguous
+    expect(resolveTabPrefix('c', tabs)).toBe('chat')
+  })
+
+  it('unknown prefix returns null', () => {
+    expect(resolveTabPrefix('zzz', tabs)).toBeNull()
+    expect(resolveTabPrefix('xyz', tabs)).toBeNull()
+  })
+})

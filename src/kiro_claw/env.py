@@ -123,11 +123,25 @@ def augmented_path(base_path: str = "") -> str:
     ``~/.aim/mcp-servers``.  Both the MCP-probe code and the kiro-cli
     spawn code need the same augmentation — this helper keeps them in
     sync.
+
+    On Windows a launched (non-shell) gateway inherits a ``PATH`` that does
+    not include the venv's ``Scripts\\`` directory, so ``shutil.which`` fails
+    to resolve the ``kiroclaw`` / ``kiroclaw-core`` console-script wrappers
+    pip generated for MCP-server spawn. Append ``sys.executable``'s parent
+    directory as the LAST entry so the running interpreter's own
+    console-scripts (``Scripts\\`` on Windows, ``bin/`` on POSIX) are always
+    discoverable. Last, not first: the interpreter dir also contains
+    ``python``/``pip``, and placing it ahead of ``base_path`` would silently
+    rebind a user MCP spec's bare ``"command": "python"`` (and the spawned
+    agent's own ``python``/``pip`` shell calls) to the gateway's venv
+    interpreter. As a pure fallback it resolves only names found nowhere
+    else — exactly the console-script-wrapper case.
     """
     home = os.path.expanduser("~")
     extra = [d.format(home=home) for d in _EXTRA_PATH_DIRS]
     extra += _node_version_manager_bins(home)
     parts = extra + ([base_path] if base_path else [])
+    parts.append(str(Path(sys.executable).parent))
     return os.pathsep.join(parts)
 
 

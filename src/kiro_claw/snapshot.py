@@ -11,7 +11,9 @@ import socket
 import tarfile
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from kiro_claw import platform_compat
 
 try:
     import pysqlite3 as sqlite3
@@ -25,24 +27,57 @@ except Exception:  # pragma: no cover - optional during early/standalone import
 
 VALID_COMPONENTS = ("memory", "crons", "config", "skills", "workspace", "notifications", "security")
 
+# Files that must always have 0o600 permissions in snapshots and on restore.
+SECURITY_SENSITIVE_FILES: frozenset = frozenset({"sel_hmac.key", "telemetry_salt"})
+
 
 def _data_filter(info: tarfile.TarInfo, _dest: str = "") -> tarfile.TarInfo | None:
     """Equivalent to tarfile ``"data"`` filter (Python 3.12+), with 3.10 fallback.
 
     Also rejects path traversal, symlinks, and hardlinks to eliminate TOCTOU
     race between pre-scan and extraction.
+    Excludes sel_hmac.key (must be regenerated on restore, not shipped).
+    Security-sensitive files get 0o600 permissions.
     """
-    # Reject path traversal
-    if ".." in PurePosixPath(info.name).parts or info.name.startswith("/"):
+    # Reject path traversal. POSIX checks apply everywhere; the Windows-syntax
+    # checks (backslash separators, drive letters — incl. the drive-RELATIVE
+    # `C:foo` form is_absolute() misses, which resolves against the drive CWD
+    # at extraction) apply ONLY when extracting on Windows, where tarfile
+    # honors '\' as a native separator. They must NOT run on POSIX: ':' and
+    # '\' are legal characters in Linux/macOS filenames, so a workspace file
+    # named `a:1` or `notes..\old` would be silently dropped from a
+    # Linux-to-Linux restore.
+    name = info.name
+    traversal = (
+        name.startswith("/")
+        or ".." in PurePosixPath(name).parts
+        or PurePosixPath(name).is_absolute()
+    )
+    if not traversal and platform_compat.IS_WINDOWS:
+        traversal = (
+            name.startswith("\\")
+            or ".." in PureWindowsPath(name).parts
+            or PureWindowsPath(name).is_absolute()
+            or bool(PureWindowsPath(name).drive)
+        )
+    if traversal:
         print(f"⚠️  Rejecting path traversal entry: {info.name}")
         return None
     # Reject symlinks and hardlinks
     if info.issym() or info.islnk():
         print(f"⚠️  Rejecting symlink/hardlink entry: {info.name}")
         return None
+    # Exclude sel_hmac.key — must be regenerated on restore, never shipped
+    basename = PurePosixPath(info.name).name
+    if basename == "sel_hmac.key":
+        return None
     info.uid = info.gid = 0
     info.uname = info.gname = ""
-    info.mode = 0o755 if info.isdir() else 0o644
+    # Security-sensitive files get restricted permissions
+    if not info.isdir() and basename in SECURITY_SENSITIVE_FILES:
+        info.mode = 0o600
+    else:
+        info.mode = 0o755 if info.isdir() else 0o644
     return info
 
 
@@ -83,7 +118,7 @@ CORE_FILES: dict[str, tuple[str, ...]] = {
     "crons": ("crons.json",),
     "config": ("config.json", "session_map.json", "hooks.json", "project_dir", "workspace_dir"),
     "notifications": ("notifications.jsonl",),
-    "security": ("sel_hmac.key", "telemetry_salt"),
+    "security": ("telemetry_salt",),  # sel_hmac.key excluded — regenerated on restore
 }
 
 COMPONENT_HELP = {
@@ -93,7 +128,7 @@ COMPONENT_HELP = {
     "skills": "skills/ directory",
     "workspace": "workspace/, plan_memory/ directories",
     "notifications": "notifications.jsonl (notification history)",
-    "security": "sel_hmac.key, telemetry_salt",
+    "security": "telemetry_salt (sel_hmac.key excluded — regenerated on restore)",
 }
 
 
@@ -279,15 +314,24 @@ def snapshot_main(argv: list[str] | None = None, *, parsed: argparse.Namespace |
             tmp_tar.unlink(missing_ok=True)
             raise
 
-        has_hmac_key = (stage / "sel_hmac.key").exists()
-
     sz = outfile.stat().st_size
-    os.chmod(str(outfile), 0o600)  # contains sel_hmac.key — restrict access
+    # restrict_to_owner (fail-loud), NOT chmod_safe: this tarball can contain
+    # sel_hmac.key (see the warning below). chmod_safe swallows OSError and
+    # would let the snapshot land group/world-readable while still printing
+    # success (AutoSDE). Fail loudly instead — better to abort than ship a
+    # secret-bearing archive under-protected. POSIX applies chmod 0o600;
+    # Windows applies an owner-only DACL via icacls (previously an
+    # IS_POSIX-gated no-op that left the archive readable by other users).
+    # Unlink+reraise on failure so the "abort" the comment promises actually
+    # removes the exposed artifact — otherwise the tarball would sit on disk
+    # with the destination's inherited DACL after a Python traceback.
+    try:
+        platform_compat.restrict_to_owner(str(outfile))
+    except OSError:
+        outfile.unlink(missing_ok=True)
+        raise
     human = f"{sz // 1024}K" if sz < 1024 * 1024 else f"{sz / 1024 / 1024:.1f}M"
     print(f"✅ Snapshot created: {outfile} ({human})")
-    if has_hmac_key:
-        print("⚠️  Snapshot contains sel_hmac.key — treat this file as sensitive. "
-              "An attacker with access to it could forge SEL audit entries.")
 
     _audit("snapshot_created", f"{outfile} ({human})")
 
@@ -448,7 +492,21 @@ def _backup_and_copy(mc: Path, backup: Path, snap: Path, component: str) -> None
                 continue
             shutil.copy2(str(snap / f), str(mc / f))
             if component == "security":
-                os.chmod(str(mc / f), 0o600)
+                # restrict_to_owner (fail-loud), NOT chmod_safe (swallows OSError):
+                # security files include sel_hmac.key. Mirrors the create path's
+                # deliberate fail-loud lockdown — better to abort than silently
+                # land a restored secret group/world-readable. POSIX applies
+                # chmod 0o600; Windows applies an owner-only DACL via icacls
+                # (previously an IS_POSIX-gated no-op). Unlink the freshly
+                # copied file on failure so the "abort" the comment promises
+                # actually removes the exposed artifact — otherwise the
+                # restored secret would sit under the destination-inherited
+                # DACL after the OSError propagates out of _do_replace.
+                try:
+                    platform_compat.restrict_to_owner(str(mc / f))
+                except OSError:
+                    (mc / f).unlink(missing_ok=True)
+                    raise
 
 
 def _do_replace(snap: Path, mc: Path, components: list[str] | None) -> None:
@@ -538,7 +596,17 @@ def _do_merge(snap: Path, mc: Path, components: list[str] | None) -> None:
             s, d = snap / f, mc / f
             if s.is_file() and not d.is_file():
                 shutil.copy2(str(s), str(d))
-                os.chmod(str(d), 0o600)
+                # restrict_to_owner (fail-loud), NOT chmod_safe — security
+                # files include sel_hmac.key; mirror the create path. Windows
+                # applies an owner-only DACL via icacls (previously an
+                # IS_POSIX-gated no-op). Unlink the freshly copied file on
+                # failure so an icacls error doesn't leave a restored secret
+                # under the destination-inherited DACL.
+                try:
+                    platform_compat.restrict_to_owner(str(d))
+                except OSError:
+                    d.unlink(missing_ok=True)
+                    raise
                 print(f"  {f}: restored (was missing)")
         print("  ✅ security")
 

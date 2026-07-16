@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiohttp import web
 
+from kiro_claw import platform_compat
 from kiro_claw.dashboard.handlers import terminal
 
 
@@ -106,7 +107,7 @@ class TestKillSession:
         task.cancel = MagicMock()
         sess = _make_session()
         sess.reader_task = task
-        with patch("os.close"), patch("os.killpg"):
+        with patch("os.close"), patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"):
             await terminal._kill_session(sess)
         task.cancel.assert_called_once()
 
@@ -114,7 +115,7 @@ class TestKillSession:
     async def test_closes_master_fd(self):
         sess = _make_session()
         sess.master_fd = 42
-        with patch("os.close") as mock_close, patch("os.killpg"):
+        with patch("os.close") as mock_close, patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"):
             await terminal._kill_session(sess)
         mock_close.assert_called_with(42)
         assert sess.master_fd == -1
@@ -123,50 +124,54 @@ class TestKillSession:
     async def test_skips_close_when_fd_negative(self):
         sess = _make_session()
         sess.master_fd = -1
-        with patch("os.close") as mock_close, patch("os.killpg"):
+        with patch("os.close") as mock_close, patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"):
             await terminal._kill_session(sess)
         mock_close.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sends_sigterm_to_process_group(self):
-        import signal
-
+        # _kill_session routes the tree-kill through platform_compat.kill_process_tree
+        # (killpg on POSIX, taskkill /T on Windows), so patch + assert against the
+        # shim rather than os.killpg directly.
         sess = _make_session(alive=True)
-        with patch("os.close"), patch("os.killpg") as mock_killpg:
+        with patch("os.close"), \
+                patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree") as mock_kill:
             await terminal._kill_session(sess)
-        mock_killpg.assert_any_call(12345, signal.SIGTERM)
+        mock_kill.assert_any_call(12345, platform_compat.SIGTERM)
 
     @pytest.mark.asyncio
     async def test_skips_kill_when_process_already_exited(self):
         sess = _make_session(alive=False)
-        with patch("os.close"), patch("os.killpg") as mock_killpg:
+        with patch("os.close"), \
+                patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree") as mock_kill:
             await terminal._kill_session(sess)
-        mock_killpg.assert_not_called()
+        mock_kill.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_handles_process_lookup_error_on_sigterm(self):
         sess = _make_session(alive=True)
-        with patch("os.close"), patch("os.killpg", side_effect=ProcessLookupError):
+        with patch("os.close"), \
+                patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree",
+                      side_effect=ProcessLookupError):
             await terminal._kill_session(sess)
         # Should not raise
 
     @pytest.mark.asyncio
     async def test_sigkill_on_timeout(self):
-        import signal
-
         sess = _make_session(alive=True)
         sess.proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError, None])
-        with patch("os.close"), patch("os.killpg") as mock_killpg:
+        with patch("os.close"), \
+                patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree") as mock_kill:
             await terminal._kill_session(sess)
-        calls = [c.args for c in mock_killpg.call_args_list]
-        assert (12345, signal.SIGTERM) in calls
-        assert (12345, signal.SIGKILL) in calls
+        calls = [c.args for c in mock_kill.call_args_list]
+        assert (12345, platform_compat.SIGTERM) in calls
+        assert (12345, platform_compat.SIGKILL) in calls
 
     @pytest.mark.asyncio
     async def test_handles_os_error_on_close(self):
         sess = _make_session()
         sess.master_fd = 42
-        with patch("os.close", side_effect=OSError), patch("os.killpg"):
+        with patch("os.close", side_effect=OSError), patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"):
             await terminal._kill_session(sess)
         assert sess.master_fd == -1
 
@@ -184,7 +189,9 @@ class TestKillSession:
 
         sess = _make_session()
         sess.master_fd = 42
-        with patch("os.close", side_effect=_record_close), patch("os.killpg"):
+        with patch("os.close", side_effect=_record_close), patch(
+            "kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"
+        ):
             await terminal._kill_session(sess)
         assert close_threads, "os.close must have run"
         assert close_threads[0] is not loop_thread, "close ran on the event-loop thread"
@@ -205,7 +212,7 @@ class TestKillSession:
         sess.master_fd = 42
         with patch.object(
             asyncio.get_event_loop(), "run_in_executor", side_effect=_hang
-        ), patch("os.killpg"):
+        ), patch("kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"):
             task = asyncio.ensure_future(terminal._kill_session(sess))
             await asyncio.sleep(0)  # let it reach the await
             task.cancel()
@@ -224,11 +231,13 @@ class TestKillSession:
             asyncio.get_event_loop(),
             "run_in_executor",
             side_effect=RuntimeError("cannot schedule new futures after shutdown"),
-        ), patch("os.killpg") as mock_killpg:
+        ), patch(
+            "kiro_claw.dashboard.handlers.terminal.platform_compat.kill_process_tree"
+        ) as mock_kill:
             await terminal._kill_session(sess)
-        # The close error was swallowed and teardown continued to the killpg step.
+        # The close error was swallowed and teardown continued to the tree-kill.
         assert sess.master_fd == -1
-        mock_killpg.assert_any_call(12345, __import__("signal").SIGTERM)
+        mock_kill.assert_any_call(12345, platform_compat.SIGTERM)
 
 
 # ── api_terminal_create ──
@@ -447,6 +456,60 @@ class TestApiTerminalWs:
         mock_kill.assert_awaited_once_with(dead_sess)
         # Dead session killed; placeholder reserved for new spawn
         assert registry.get("abc123") is not dead_sess
+
+    @pytest.mark.asyncio
+    async def test_refuses_new_session_on_non_posix(self, monkeypatch):
+        """On a non-POSIX host, a new WS session is refused (no PTY spawned).
+
+        PTY/fork are POSIX-only, so the ``elif not platform_compat.IS_POSIX``
+        branch pops the reserved placeholder, logs the denial, sends an error
+        frame, closes the socket, and returns it. ``WebSocketResponse`` is
+        mocked so ``return ws`` is exercised deterministically.
+        """
+        registry: dict = {}
+        req = _make_request(registry=registry, session_id="win-sess")
+
+        ws = AsyncMock()
+        ws.closed = False
+
+        with patch.object(terminal.platform_compat, "IS_POSIX", False), \
+             patch.object(terminal, "_get_config", return_value={"enabled": True}), \
+             patch.object(terminal.web, "WebSocketResponse", return_value=ws), \
+             patch.object(terminal, "_sel") as mock_sel:
+            mock_sel.return_value.log_api_access = MagicMock()
+            resp = await terminal.api_terminal_ws(req)
+
+        assert resp is ws
+        # Placeholder reservation was rolled back; no PTY session registered.
+        assert "win-sess" not in registry
+        ws.prepare.assert_awaited_once()
+        ws.send_str.assert_awaited_once()
+        sent = json.loads(ws.send_str.call_args.args[0])
+        assert sent["type"] == "error"
+        assert "not supported on Windows" in sent["message"]
+        ws.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_posix_skips_send_when_ws_already_closed(self, monkeypatch):
+        """If the socket is already closed, the non-POSIX branch skips the
+        error frame and close (covers the ``if not ws.closed`` false path)."""
+        registry: dict = {}
+        req = _make_request(registry=registry, session_id="win-closed")
+
+        ws = AsyncMock()
+        ws.closed = True
+
+        with patch.object(terminal.platform_compat, "IS_POSIX", False), \
+             patch.object(terminal, "_get_config", return_value={"enabled": True}), \
+             patch.object(terminal.web, "WebSocketResponse", return_value=ws), \
+             patch.object(terminal, "_sel") as mock_sel:
+            mock_sel.return_value.log_api_access = MagicMock()
+            resp = await terminal.api_terminal_ws(req)
+
+        assert resp is ws
+        assert "win-closed" not in registry
+        ws.send_str.assert_not_awaited()
+        ws.close.assert_not_awaited()
 
 
 # ── scrollback ring buffer + redaction ──
@@ -817,6 +880,45 @@ class TestTerminalWsIntegration:
                 await ws.close()
 
             await terminal._kill_session(registry["json-sess"])
+
+    @pytest.mark.asyncio
+    async def test_ws_unsupported_platform_on_non_posix(self, monkeypatch, tmp_path):
+        """When the platform is not POSIX, opening a new WS session is refused.
+
+        Exercises the ``elif not platform_compat.IS_POSIX`` branch by forcing
+        ``IS_POSIX`` False (PTY/fork are POSIX-only). No PTY is spawned: the
+        handler pops the reserved placeholder, emits an error frame, and closes
+        the socket. Runs on a real TestServer so ``ws.prepare`` succeeds.
+        """
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"dashboard": {"terminal": {"enabled": True}}}))
+        monkeypatch.setattr(terminal, "config_path", lambda: cfg_file)
+        monkeypatch.setattr(terminal, "_sel", lambda: MagicMock())
+        monkeypatch.setattr(terminal.platform_compat, "IS_POSIX", False)
+
+        registry: dict = {}
+        app = _make_app(registry=registry)
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/api/ws/terminal/winnope-sess") as ws:
+                # First frame is the JSON error message.
+                msg = await ws.receive(timeout=5)
+                assert msg.type == web.WSMsgType.TEXT
+                data = json.loads(msg.data)
+                assert data["type"] == "error"
+                assert "not supported on Windows" in data["message"]
+                # Server closes the socket after sending the error.
+                closing = await ws.receive(timeout=5)
+                assert closing.type in (
+                    web.WSMsgType.CLOSE,
+                    web.WSMsgType.CLOSING,
+                    web.WSMsgType.CLOSED,
+                )
+
+            # No PTY session was registered; the reserved placeholder was popped.
+            assert "winnope-sess" not in registry
 
     @pytest.mark.asyncio
     async def test_ws_ctrl_c_delivers_sigint(self, monkeypatch, tmp_path):

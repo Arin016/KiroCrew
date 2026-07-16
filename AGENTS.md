@@ -101,6 +101,12 @@ Frontend code lives in the `website/` directory.
 See `website/README.md` for integration test (MSW) and E2E test (Playwright) instructions.
 All integration tests MUST pass before committing frontend changes.
 
+### Browser E2E gate — `python setup.py test_e2e`
+
+`python setup.py test_e2e` (defined in `setup.py::E2eTestCommand`, folds `test/test_playwright_e2e.py`) is the offline browser-E2E gate. It boots a real gateway wired to the packaged fake ACP backend (`kiro_claw.testing.fake_acp_backend`, `KIROCLAW_KIRO_BIN`) and shells the in-tree `website/playwright` suite against it — no model, no network. It uses Playwright's own bundled Chromium and runs serially with a long per-test timeout, so it is **not** part of the default `pytest` unit run (too slow for the per-commit gate).
+
+- The test skips gracefully when the `website` dir or its Playwright CLI can't be resolved (a python-only checkout). Set `KIROCLAW_E2E_REQUIRE=1` on a CI job to turn an environment-resolution miss into a hard failure so drift is caught at PR time rather than going green on zero specs.
+
 ## Git Conventions
 
 - **This repo lives on GitHub; `main` is the default branch.** Changes land through the standard GitHub Pull Request flow — branch off `main`, push, open a PR, let CI + review pass, then merge. See [CONTRIBUTING.md](CONTRIBUTING.md) → "Pull Request Workflow" for the full steps. This is a public OSS project — there is no Brazil/GitFarm or `cr` review path.
@@ -307,21 +313,52 @@ React + TypeScript SPA in the `website/` directory. Built assets are bundled int
 
 ### Platform Support
 
-KiroClaw runs on macOS and Linux (x86_64 and ARM/Graviton). Windows is not supported.
+KiroClaw runs on macOS, Linux (x86_64 and ARM/Graviton), and **Windows** (native, Mesh-2329).
+macOS/Linux install via the `bin/kiroclaw` launcher; **Windows runs natively from a Python
+source install** — CPython 3.12 + a venv + `pip install -e .`, launched as `python -m
+kiro_claw gateway`. See `docs/WINDOWS_INSTALL.md`.
 
-**All code changes MUST be verified for macOS + Linux compatibility:**
-- **Backend**: macOS, Linux — file paths, process management, signal handling
+**All code changes MUST be verified for macOS + Linux + Windows compatibility:**
+- **Backend**: macOS, Linux, Windows — route POSIX-only calls through `platform_compat`
 - **Frontend**: Chrome, Firefox, Safari, Edge — use standard Web APIs only, guard browser-specific APIs (e.g. `typeof Notification !== 'undefined'`)
 
-Platform-specific patterns:
+**`platform_compat.py` is the cross-platform shim — use it instead of raw POSIX calls.**
+POSIX-only modules (`fcntl`, `termios`, `resource`, `pty`) do not exist on Windows, and
+some `os` calls behave DIFFERENTLY there — most dangerously **`os.kill(pid, 0)` TERMINATES
+the process on Windows** (it is not a liveness probe). Always go through the shim:
 
-- **Process management** (`acp/client.py`): uses `start_new_session` + `killpg(SIGTERM/SIGKILL)`
-- **Signal handling** (`slack/gateway.py`): uses `loop.add_signal_handler()`
-- **File locking** (`cron.py`): uses `fcntl.flock()`
-- **System metrics** (`handlers_system.py`): macOS uses `sysctl`/`vm_stat`; Linux uses `/proc/*`
-- **Frontend build** (`setup.py`): uses `/bin/bash build-frontend.sh`
-- **Launcher scripts**: `bin/kiroclaw` (POSIX sh)
-- **Setup scripts**: `setup.sh` (bash/zsh)
+| Need | Use (`platform_compat`) | NOT |
+|------|--------------------------|-----|
+| File lock | `file_lock(fd, exclusive=)` / `acquire_lock`+`release_lock` / `try_acquire_lock` | `fcntl.flock` |
+| Liveness probe | `pid_exists(pid)` / `pid_liveness(pid)` | `os.kill(pid, 0)` (kills on Windows!) |
+| Kill a process | `kill_pid(pid, sig)` | `os.kill(pid, sig)` |
+| Kill a tree | `kill_process_tree(pid, sig)` | `os.killpg(os.getpgid(pid), sig)` |
+| Parent PID | `get_ppid(pid)` | `/proc` read / libproc |
+| Match process cmdline | `process_matches(pid, needles)` | `/proc/<pid>/cmdline` / `ps` |
+| Signals | `platform_compat.SIGKILL` / `SIGTERM` | `signal.SIGKILL` (undefined on Windows) |
+| Spawn isolation | `start_new_session=IS_POSIX` + `creationflags=CREATE_NEW_PROCESS_GROUP` | bare `start_new_session=True` |
+| File mode | `chmod_safe(path, mode)` / `fchmod_safe(fd, mode)` | `os.chmod` / `os.fchmod` (no `os.fchmod` on Windows) |
+| Owner-only secret (fail-loud) | `restrict_to_owner(path)` | `os.chmod(path, 0o600)` under `if IS_POSIX` (silent no-op on Windows) |
+| Process RSS / CPU | `proc_rss_bytes()` / `proc_cpu_seconds()` | `resource.getrusage` |
+| FD soft limit | `raise_nofile_soft_limit(n)` | `resource.setrlimit` |
+| Port -> PID | `find_listening_pids(port)` / `listening_pid_tool_available()` | `lsof` directly |
+| strftime no-pad | `strftime(dt, "%-I")` | bare `dt.strftime("%-I")` (`ValueError` on Windows) |
+
+Other Windows specifics:
+- **tzdata**: Windows ships no system IANA tz database, so `zoneinfo.ZoneInfo(...)` raises —
+  `tzdata` is declared in `setup.cfg` under a `platform_system == "Windows"` marker.
+- **UTF-8 console**: `platform_compat.ensure_utf8_console()` runs first in `cli.main()` /
+  `__main__` so non-ASCII output can't crash a cp1252 stdout; the gateway log handler is
+  opened `encoding="utf-8"`.
+- **Signal handling** (`slack/gateway.py`): `loop.add_signal_handler()` raises
+  `NotImplementedError` on the Windows ProactorEventLoop — fall back to `signal.signal(SIGINT)`.
+- **Web terminal / interactive mwinit PTY** (`dashboard/handlers/terminal.py`): rely on
+  `pty`/`fork`/`termios` — POSIX-only; they degrade to a clear "not supported on Windows"
+  response rather than crashing.
+- **System metrics** (`handlers_system.py`): macOS `sysctl`/`vm_stat`; Linux `/proc/*`;
+  Windows via `platform_compat` ctypes helpers.
+- **Frontend build** (`setup.py`): uses `/bin/bash build-frontend.sh`.
+- **Launcher scripts**: `bin/kiroclaw` (POSIX sh); Windows uses the pip console script.
 
 ### Skills & MCP Tools for the LLM
 

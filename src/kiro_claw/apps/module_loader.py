@@ -53,6 +53,38 @@ def _warn_third_party_execution(app_name: str) -> None:
     )
 
 
+def _third_party_apps_allowed() -> bool:
+    """Whether the operator permits running third-party (non-builtin) app Python.
+    Defaults to True (apps are operator-installed and consented); set
+    ``agent.apps_allow_third_party=false`` to refuse third-party app code
+    entirely — both in-process module loads (here) and out-of-process backend
+    spawns (see backend._start_app_backend_body) consult this switch (CSE
+    SEC-012 interim hardening — a hard off switch until out-of-process isolation
+    lands).
+
+    Read lazily from config to avoid an import cycle with the config loader.
+    On a config-load failure this fails CLOSED (returns False, deny): this is a
+    security off-switch, so an unreadable policy must not silently re-enable
+    third-party code the operator disabled. Failing closed is safe because only
+    third-party apps consult this gate — builtins skip it entirely (see
+    load_app_module and backend._start_app_backend_body), so a config error
+    declines untrusted app code without bricking first-party apps.
+    """
+    try:
+        # circular import: config.loader imports module_loader indirectly, so the
+        # import is deferred to call time rather than module top.
+        from kiro_claw.config.loader import KiroClawConfig
+
+        return bool(getattr(KiroClawConfig.load().agent, "apps_allow_third_party", True))
+    except Exception as exc:  # noqa: BLE001 — config load must never hard-fail app loading
+        logger.error(
+            "apps_allow_third_party: config load failed (%s); failing closed "
+            "(refusing third-party app code)",
+            exc,
+        )
+        return False
+
+
 def _module_namespace(app_name: str, dotted_path: str) -> str:
     """Build a unique sys.modules key for an app module."""
     return f"_kiroclaw_app_{app_name}.{dotted_path}"
@@ -116,9 +148,26 @@ def load_app_module(app_name: str, app_dir: Path, module_path: str) -> Callable[
     unique_name = _module_namespace(app_name, dotted_path)
 
     # CSE SEC-012: third-party (operator-installed) app code executes unsandboxed
-    # in the gateway process. Surface that trust boundary explicitly + auditably.
+    # in the gateway process. Surface that trust boundary explicitly + auditably,
+    # and let the operator refuse it entirely via config.
     third_party = not _is_builtin_app(app_resolved)
     if third_party:
+        # Check the off-switch BEFORE warning, so a denied load does not emit a
+        # log line asserting execution is happening right before the denial.
+        if not _third_party_apps_allowed():
+            sel().log_api_access(
+                caller="gateway",
+                operation="app_module_load",
+                outcome="denied",
+                resources=f"{app_name}:{module_path} (third_party)",
+            )
+            raise ImportError(
+                f"Refusing to load third-party app {app_name!r} module "
+                f"{module_path!r}: in-process execution of untrusted app code is "
+                f"disabled by agent.apps_allow_third_party=false. Set it to true in "
+                f"~/.kiroclaw/config.json to re-enable (accepting that app code runs "
+                f"with full gateway privileges)."
+            )
         _warn_third_party_execution(app_name)
 
     # Load the module

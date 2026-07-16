@@ -13,7 +13,6 @@ import asyncio
 import logging
 import math
 import os
-import signal
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -28,6 +27,7 @@ if TYPE_CHECKING:
     from kiro_claw.acp.runtime import AcpRuntime
     from kiro_claw.providers.base import LLMProvider
 
+from kiro_claw import platform_compat
 from kiro_claw.config.loader import KiroClawConfig
 from kiro_claw.context import ContextBuilder, window_for_provider_client
 from kiro_claw.context_management import (
@@ -856,15 +856,8 @@ class SubagentManager:
     @staticmethod
     def _is_pid_alive(pid: int) -> bool:
         """Check if a PID is still running."""
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True  # process exists, we just can't signal it
-        except OSError:
-            return False
+        # os.kill(pid, 0) would terminate the process on Windows — probe instead.
+        return platform_compat.pid_exists(pid)
 
     @staticmethod
     def _is_orphan_process(pid: int, spawned_at: float) -> bool:
@@ -885,7 +878,7 @@ class SubagentManager:
     def _kill_orphan_pid(pid: int) -> None:
         """Best-effort SIGKILL of an orphaned process."""
         try:
-            os.kill(pid, signal.SIGKILL)
+            platform_compat.kill_pid(pid, platform_compat.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
 
@@ -1247,10 +1240,10 @@ class SubagentManager:
                 session_key,
             )
             try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
             except (ProcessLookupError, OSError):
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    platform_compat.kill_pid(pid, platform_compat.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass
             # Sweep children that escaped to different PGIDs

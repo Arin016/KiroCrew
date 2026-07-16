@@ -80,8 +80,12 @@ test.describe('session tags (column sidebar)', () => {
     await request.delete(`/api/chat/tag-columns/${col.id}`)
   })
 
-  test('UI: board-toggle button appears in sidebar', async ({ page }) => {
+  test('UI: board view toggle is available in the sidebar header menu', async ({ page }) => {
     await page.goto('/chat')
-    await page.waitForSelector('[data-testid="board-toggle"]', { timeout: 15_000 })
+    // The board/list view toggle moved into the sidebar header "More options" menu.
+    const headerMenu = page.locator('button[aria-haspopup="menu"][aria-label="More options"]').first()
+    await headerMenu.waitFor({ timeout: 15_000 })
+    await headerMenu.click()
+    await expect(page.getByRole('menuitem', { name: /switch to (board|list) view/i })).toBeVisible({ timeout: 5000 })
   })
 })

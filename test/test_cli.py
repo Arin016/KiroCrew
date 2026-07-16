@@ -1,6 +1,7 @@
 """Tests for CLI module."""
 
 import argparse
+import contextlib
 import json
 import subprocess
 import sys
@@ -1293,59 +1294,85 @@ class TestStatus:
 
 
 class TestIsKiroclawProcess:
-    """Tests for _is_kiroclaw_process helper."""
+    """Tests for _is_kiroclaw_process helper.
+
+    It now verifies via ``platform_compat.process_command_line`` (cross-platform:
+    Linux /proc, macOS ps, Windows WMI) rather than calling ``ps`` directly, so a
+    process whose image name is ``python``/``python.exe`` (the venv kiroclaw.exe
+    re-exec) is still classified by its command line.
+    """
+
+    def _cmdline(self, value):
+        return patch("kiro_claw.cli_server.platform_compat.process_command_line",
+                     return_value=value)
 
     def test_returns_true_for_kiroclaw(self):
         from kiro_claw.cli_server import _is_kiroclaw_process
 
-        with patch("subprocess.check_output", return_value="python3 -m kiro_claw.dashboard\n"):
+        with self._cmdline("python3 -m kiro_claw.dashboard"):
             assert _is_kiroclaw_process(1234) is True
 
     def test_returns_true_for_kiroclaw_binary(self):
         from kiro_claw.cli_server import _is_kiroclaw_process
 
-        with patch("subprocess.check_output", return_value="/usr/bin/kiroclaw start\n"):
+        with self._cmdline("/usr/bin/kiroclaw start"):
             assert _is_kiroclaw_process(1234) is True
 
     def test_returns_true_for_module_gateway_form(self):
         """Regression: the real service launch form
         ``python -m kiro_claw gateway`` must be recognized. Previously the
         matcher only accepted the dotted ``kiro_claw.gateway`` form, so
-        ``kiroclaw stop`` no-op'd on service installs (P459471197)."""
+        ``kiroclaw stop`` no-op'd on service installs (P459471197).
+
+        Patched through the cross-platform ``process_command_line`` seam (the
+        Windows port routes _is_kiroclaw_process through platform_compat rather
+        than calling ``subprocess.check_output`` directly)."""
         from kiro_claw.cli_server import _is_kiroclaw_process
 
         real = (
             "/Users/x/.toolbox/tools/kiroclaw/3.1.0/bin/../python3.10/bin/"
             "python3.10 -m kiro_claw gateway\n"
         )
-        with patch("subprocess.check_output", return_value=real):
+        with self._cmdline(real):
             assert _is_kiroclaw_process(54842) is True
+
+    def test_returns_true_for_windows_python_reexec(self):
+        # The venv kiroclaw.exe re-execs python.exe, so the gateway cmdline reads
+        # `python.exe ...\Scripts\kiroclaw.exe gateway` (or `-m kiro_claw gateway`).
+        # The token-parser (_args_look_like_kiroclaw) recognizes the console-script
+        # basename ("kiroclaw"/"kiroclaw.exe") and the "-m kiro_claw gateway" module
+        # form; assert both Windows re-exec shapes match.
+        from kiro_claw.cli_server import _is_kiroclaw_process
+
+        with patch("kiro_claw.cli_server.platform_compat.IS_WINDOWS", True):
+            with self._cmdline(
+                r'"C:\Program Files\Python312\python.exe" '
+                r'"D:\U\.kiroclaw\.venv\Scripts\kiroclaw.exe" gateway --no-open'
+            ):
+                assert _is_kiroclaw_process(1234) is True
+            with self._cmdline(r'C:\Python312\python.exe -m kiro_claw gateway'):
+                assert _is_kiroclaw_process(1234) is True
 
     def test_returns_false_for_unrelated(self):
         from kiro_claw.cli_server import _is_kiroclaw_process
 
-        with patch("subprocess.check_output", return_value="nginx: worker process\n"):
+        with self._cmdline("nginx: worker process"):
             assert _is_kiroclaw_process(1234) is False
 
     def test_returns_false_for_broad_match(self):
         """Editing a kiroclaw file should NOT match — only gateway entry points."""
         from kiro_claw.cli_server import _is_kiroclaw_process
 
-        with patch("subprocess.check_output", return_value="vim /tmp/kiroclaw-notes.txt\n"):
+        with self._cmdline("vim /tmp/kiroclaw-notes.txt"):
             assert _is_kiroclaw_process(1234) is False
 
-    def test_returns_false_on_process_exit(self):
+    def test_returns_false_when_cmdline_unavailable(self):
+        # process_command_line returns "" on any failure (dead PID, WMI/ps error);
+        # _is_kiroclaw_process must then fail closed (False), never raise.
         from kiro_claw.cli_server import _is_kiroclaw_process
 
-        with patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "ps")):
+        with self._cmdline(""):
             assert _is_kiroclaw_process(1234) is False
-
-    def test_raises_on_missing_ps(self):
-        from kiro_claw.cli_server import _is_kiroclaw_process
-
-        with patch("subprocess.check_output", side_effect=FileNotFoundError):
-            with pytest.raises(FileNotFoundError):
-                _is_kiroclaw_process(1234)
 
 
 class TestArgsLookLikeKiroclaw:
@@ -1430,101 +1457,101 @@ class TestStop:
         # when a systemd/launchd service is active on the host. Force the
         # SIGTERM-by-port path so tests don't flake based on whether the
         # test host happens to have ``kiroclaw.service`` installed.
+        #
+        # Also force the port-lookup tool to report AVAILABLE: ``_stop`` now
+        # distinguishes "no listener" from "lsof/netstat missing" and prints a
+        # different message + SEL outcome for the tool-absent case. These tests
+        # exercise the genuine-no-listener path, so pin availability True instead
+        # of depending on whether ``lsof`` happens to be installed on the build
+        # host.
         with patch(
             "kiro_claw.cli_server.service_controller.stop_service", return_value=False
+        ), patch(
+            "kiro_claw.cli_server.platform_compat.listening_pid_tool_available",
+            return_value=True,
         ):
             yield
 
-    def test_lsof_not_found(self, capsys):
-        from kiro_claw.cli_server import _stop
+    def _ports(self, pids):
+        return patch("kiro_claw.cli_server.platform_compat.find_listening_pids",
+                     return_value=pids)
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=FileNotFoundError
-        ):
-            with pytest.raises(SystemExit) as exc:
-                _stop(5476)
-            assert exc.value.code == 1
-        assert "lsof" in capsys.readouterr().out
+    def _cmdline(self, value):
+        # Same cmdline for any PID queried.
+        return patch("kiro_claw.cli_server.platform_compat.process_command_line",
+                     return_value=value)
 
     def test_no_process_on_port(self, capsys):
+        # No listener on the port (lsof empty / netstat no match) → nothing to stop.
         from kiro_claw.cli_server import _stop
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "lsof")
-        ):
+        with self._mock_sel(), self._ports([]):
             with pytest.raises(SystemExit) as exc:
                 _stop(5476)
             assert exc.value.code == 1
         assert "No KiroClaw gateway" in capsys.readouterr().out
 
     def test_no_kiroclaw_process(self, capsys):
+        # A listener exists but its cmdline isn't a kiroclaw gateway → refuse to kill.
         from kiro_claw.cli_server import _stop
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\n",  # lsof returns a PID
-                "nginx: worker\n",  # ps shows non-kiroclaw
-            ]
-        ):
+        with self._mock_sel(), self._ports([1234]), self._cmdline("nginx: worker"):
             with pytest.raises(SystemExit) as exc:
                 _stop(5476)
             assert exc.value.code == 1
         assert "No KiroClaw gateway" in capsys.readouterr().out
 
-    def test_ps_not_found(self, capsys):
-        from kiro_claw.cli_server import _stop
-
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\n",  # lsof returns a PID
-                FileNotFoundError,  # ps not found
-            ]
-        ):
-            with pytest.raises(SystemExit) as exc:
-                _stop(5476)
-            assert exc.value.code == 1
-        assert "ps" in capsys.readouterr().out
-
     def test_successful_stop(self, capsys):
         from kiro_claw.cli_server import _stop
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\n",  # lsof
-                "python3 -m kiro_claw.dashboard\n",  # ps
-            ]
-        ), patch("os.kill"), patch("time.sleep"):
+        # The kill is dispatched per-platform: POSIX os.kill(SIGTERM), Windows
+        # platform_compat.kill_process_tree (taskkill /T /F, so the gateway's
+        # child tree is reaped too). Patch the path the running OS takes so the
+        # fake PID is treated as successfully signaled + exited.
+        ctx = [self._mock_sel(), self._ports([1234]),
+               self._cmdline("python3 -m kiro_claw.dashboard"),
+               patch("time.sleep"),
+               patch("kiro_claw.cli_server.platform_compat.pid_exists", return_value=False)]
+        if sys.platform == "win32":
+            ctx.append(patch("kiro_claw.cli_server.platform_compat.kill_process_tree",
+                             return_value=True))
+        else:
+            ctx.append(patch("os.kill"))
+        with contextlib.ExitStack() as stack:
+            for c in ctx:
+                stack.enter_context(c)
             _stop(5476)
-        assert "SIGTERM" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "SIGTERM" in out or "Terminated" in out
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX SIGTERM/os.kill semantics; Windows uses taskkill")
     def test_permission_denied(self, capsys):
         from kiro_claw.cli_server import _stop
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\n",
-                "python3 -m kiro_claw.dashboard\n",
-            ]
-        ), patch("os.kill", side_effect=PermissionError):
+        with self._mock_sel(), self._ports([1234]), \
+                self._cmdline("python3 -m kiro_claw.dashboard"), \
+                patch("os.kill", side_effect=PermissionError):
             with pytest.raises(SystemExit) as exc:
                 _stop(5476)
             assert exc.value.code == 1
         assert "No permission" in capsys.readouterr().out
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX ProcessLookupError path; Windows liveness via pid_exists")
     def test_process_already_exited(self, capsys):
         from kiro_claw.cli_server import _stop
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\n",
-                "python3 -m kiro_claw.dashboard\n",
-            ]
-        ), patch("os.kill", side_effect=ProcessLookupError):
+        with self._mock_sel(), self._ports([1234]), \
+                self._cmdline("python3 -m kiro_claw.dashboard"), \
+                patch("os.kill", side_effect=ProcessLookupError):
             with pytest.raises(SystemExit) as exc:
                 _stop(5476)
             assert exc.value.code == 1
         assert "already exited" in capsys.readouterr().out
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX SIGTERM/os.kill semantics; Windows uses taskkill")
     def test_partial_permission_denied(self, capsys):
         """One PID succeeds, another is denied — reports both."""
         from kiro_claw.cli_server import _stop
@@ -1533,13 +1560,9 @@ class TestStop:
             if pid == 5678:
                 raise PermissionError
 
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\n5678\n",
-                "python3 -m kiro_claw.dashboard\n",  # ps for 1234
-                "python3 -m kiro_claw.dashboard\n",  # ps for 5678
-            ]
-        ), patch("os.kill", side_effect=kill_side_effect), patch("time.sleep"):
+        with self._mock_sel(), self._ports([1234, 5678]), \
+                self._cmdline("python3 -m kiro_claw.dashboard"), \
+                patch("os.kill", side_effect=kill_side_effect), patch("time.sleep"):
             with pytest.raises(SystemExit) as exc:
                 _stop(5476)
             assert exc.value.code == 1
@@ -1547,37 +1570,22 @@ class TestStop:
         assert "SIGTERM" in out
         assert "No permission" in out
 
-    def test_lsof_with_warnings(self, capsys):
-        """lsof sometimes emits warnings mixed with PIDs — non-digit lines are filtered."""
-        from kiro_claw.cli_server import _stop
-
-        with self._mock_sel(), patch(
-            "subprocess.check_output", side_effect=[
-                "1234\nlsof: WARNING: can't stat() ...\n",
-                "python3 -m kiro_claw.dashboard\n",
-            ]
-        ), patch("os.kill"), patch("time.sleep"):
-            _stop(5476)
-        assert "SIGTERM" in capsys.readouterr().out
-
     def test_explicit_port_bypasses_service_short_circuit(self, capsys):
         # When --port is passed explicitly (cli_port is not None), the
         # systemd/launchd service short-circuit must be bypassed so the
-        # SIGTERM-by-port path can target a non-default dev gateway.
+        # kill-by-port path can target a non-default dev gateway.
         from kiro_claw.cli_server import _stop
 
         with self._mock_sel(), patch(
             "kiro_claw.cli_server.service_controller.stop_service",
             return_value=True,
-        ) as mock_stop_service, patch(
-            "subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "lsof")
-        ):
+        ) as mock_stop_service, self._ports([]):
             with pytest.raises(SystemExit):
                 _stop(8089)
         # Service short-circuit must NOT have been called.
         mock_stop_service.assert_not_called()
-        # And we should have fallen through to the SIGTERM path
-        # (which exits 1 here because lsof finds nothing on 8089).
+        # And we should have fallen through to the kill path
+        # (which exits 1 here because no listener is found on 8089).
         assert "No KiroClaw gateway" in capsys.readouterr().out
 
 
@@ -1607,6 +1615,20 @@ class TestRestart:
         """
         monkeypatch.setattr("kiro_claw.cli_server._RESTART_READY_TIMEOUT", 0)
 
+    @pytest.fixture(autouse=True)
+    def _tool_available(self):
+        # ``_restart`` enters ``_stop`` when the port-lookup tool is ABSENT
+        # (find_listening_pids() returns [] both for "nothing listening" and
+        # "lsof missing", so a missing tool must not be mistaken for a dead
+        # gateway and skipped). These tests drive the tool-present branches, so
+        # pin availability True instead of depending on whether ``lsof`` is
+        # installed on the build host.
+        with patch(
+            "kiro_claw.cli_server.platform_compat.listening_pid_tool_available",
+            return_value=True,
+        ):
+            yield
+
     def _mock_sel(self):
         return patch("kiro_claw.cli_server.sel", return_value=MagicMock())
 
@@ -1619,14 +1641,14 @@ class TestRestart:
         ) as mock_restart, patch(
             "kiro_claw.cli_server._spawn_detached_gateway"
         ) as mock_spawn, patch(
-            "subprocess.check_output"
-        ) as mock_lsof:
+            "kiro_claw.cli_server.platform_compat.find_listening_pids"
+        ) as mock_ports:
             _restart(None)
         mock_restart.assert_called_once()
         # Service path must NOT also spawn — that would race the supervisor.
         mock_spawn.assert_not_called()
-        # And must not poke at lsof at all (no point — the supervisor owns the lifecycle).
-        mock_lsof.assert_not_called()
+        # And must not poke at the port lookup (the supervisor owns the lifecycle).
+        mock_ports.assert_not_called()
         assert "Restarted" in capsys.readouterr().out
 
     def test_no_service_no_running_gateway_spawns_fresh(self, capsys):
@@ -1639,8 +1661,8 @@ class TestRestart:
             "kiro_claw.cli_server.service_controller.restart_service",
             return_value=False,
         ), patch(
-            "subprocess.check_output",
-            side_effect=subprocess.CalledProcessError(1, "lsof"),
+            "kiro_claw.cli_server.platform_compat.find_listening_pids",
+            return_value=[],
         ), patch(
             "kiro_claw.cli_server._spawn_detached_gateway", return_value=4321
         ) as mock_spawn, patch(
@@ -1660,7 +1682,8 @@ class TestRestart:
             "kiro_claw.cli_server.service_controller.restart_service",
             return_value=False,
         ), patch(
-            "subprocess.check_output", return_value="1234\n"
+            "kiro_claw.cli_server.platform_compat.find_listening_pids",
+            return_value=[1234],
         ), patch(
             "kiro_claw.cli_server._stop"
         ) as mock_stop, patch(
@@ -1686,7 +1709,8 @@ class TestRestart:
             "kiro_claw.cli_server.service_controller.restart_service",
             return_value=False,
         ), patch(
-            "subprocess.check_output", return_value="1234\n"
+            "kiro_claw.cli_server.platform_compat.find_listening_pids",
+            return_value=[1234],
         ), patch(
             "kiro_claw.cli_server._stop", side_effect=SystemExit(1)
         ) as mock_stop, patch(
@@ -1716,12 +1740,20 @@ class TestRestart:
         assert pid == 9999
         argv = mock_popen.call_args.args[0]
         assert argv == ["/usr/local/bin/kiroclaw", "gateway"]
-        # Must detach from the controlling terminal — otherwise the
-        # detached process would die when the calling shell exits.
-        assert mock_popen.call_args.kwargs["start_new_session"] is True
+        # Must detach from the controlling terminal — otherwise the detached
+        # process would die when the calling shell exits. POSIX: start_new_session;
+        # Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP creationflags.
+        kw = mock_popen.call_args.kwargs
+        if sys.platform == "win32":
+            flags = kw["creationflags"]
+            assert flags & subprocess.DETACHED_PROCESS
+            assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+            assert "start_new_session" not in kw
+        else:
+            assert kw["start_new_session"] is True
         # Must not inherit stdin from the parent — otherwise reading from
         # a detached terminal would block the new gateway.
-        assert mock_popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
+        assert kw["stdin"] == subprocess.DEVNULL
 
     def test_spawn_detached_gateway_falls_back_to_python_m(self, tmp_path, monkeypatch):
         # Dev/Brazil-workspace installs may not have ``kiroclaw`` on
@@ -1754,8 +1786,8 @@ class TestRestart:
         ) as mock_restart_service, patch(
             "kiro_claw.cli_server._spawn_detached_gateway", return_value=4321
         ) as mock_spawn, patch(
-            "subprocess.check_output",
-            side_effect=subprocess.CalledProcessError(1, "lsof"),
+            "kiro_claw.cli_server.platform_compat.find_listening_pids",
+            return_value=[],
         ):
             _restart(8089)
         # Service short-circuit must NOT have been called.

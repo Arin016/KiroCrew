@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Callable, Iterator, Optional
@@ -515,6 +516,24 @@ def spawn_feature_gateway(
 
         try:
             ready = _wait_for_ready_line(proc, timeout=timeout, stderr_buffer=stderr_buffer)
+            # Drain stdout for the lifetime of the run too. The READY loop
+            # above stops reading stdout once it sees the sentinel, so without
+            # this the gateway blocks on a full stdout pipe buffer partway
+            # through a long run (per-turn logging fills the ~64KB pipe),
+            # stalling the event loop -> connection-refused for every later
+            # request. Mirrors the stderr drainer; reuses the same reader.
+            if proc.stdout is not None:
+                # Bounded ring buffer: drain the pipe (prevents the block-on-
+                # full-pipe deadlock) without retaining the whole multi-minute
+                # run's stdout. deque(maxlen=...) keeps only the last N chunks
+                # for post-mortem diagnostics of a failed run; older chunks are
+                # dropped. A plain ``[]`` (the accumulating _drain_stderr buffer)
+                # grew unbounded for the entire run while never being read.
+                stdout_tail: deque[bytes] = deque(maxlen=256)
+                stdout_drainer = threading.Thread(
+                    target=_drain_stderr, args=(proc.stdout, stdout_tail), daemon=True
+                )
+                stdout_drainer.start()
             port = int(ready["port"])
             token = str(ready["token"])
             url = f"http://localhost:{port}/?token={token}"

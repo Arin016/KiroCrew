@@ -6,6 +6,8 @@ import json
 import os
 import stat
 import subprocess
+import sys
+from pathlib import Path
 
 from kiro_claw.env import (
     _node_version_manager_bins,
@@ -72,8 +74,30 @@ class TestAugmentedPath:
     def test_prepends_aim_mcp_servers(self) -> None:
         result = augmented_path("/usr/bin")
         dirs = result.split(os.pathsep)
-        assert dirs[-1] == "/usr/bin"
+        # base_path sits after the well-known extras but BEFORE the
+        # interpreter-dir fallback (the final entry).
+        assert dirs[-2] == "/usr/bin"
+        assert dirs[-1] == str(Path(sys.executable).parent)
         assert any(".aim/mcp-servers" in d for d in dirs)
+
+    def test_appends_running_interpreter_bin_dir_last(self, monkeypatch) -> None:
+        """The venv's own console-scripts dir must be discoverable — but LAST.
+
+        On Windows a non-shell gateway does not inherit the venv's ``Scripts\\``
+        on ``$PATH``, so ``shutil.which("kiroclaw")`` silently returns ``None``
+        and every user-configured MCP that spawns the ``kiroclaw`` wrapper
+        (e.g. ``kiroclaw-core``) is dropped. Appending ``sys.executable``'s
+        parent restores parity with the POSIX ``bin/`` layout systemd already
+        picks up. It must be the LAST entry: the dir also holds ``python`` /
+        ``pip``, and placing it before base_path would rebind a user MCP's
+        bare ``"command": "python"`` to the gateway's venv interpreter.
+        """
+        fake_exe = "/opt/venv/Scripts/python.exe"
+        monkeypatch.setattr(sys, "executable", fake_exe)
+        dirs = augmented_path("/usr/bin").split(os.pathsep)
+        assert dirs[-1] == str(Path(fake_exe).parent)
+        # base_path still outranks the interpreter dir.
+        assert dirs.index("/usr/bin") < dirs.index(str(Path(fake_exe).parent))
 
     def test_aim_before_toolbox(self) -> None:
         result = augmented_path("")
@@ -99,7 +123,8 @@ class TestAugmentedPath:
         monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path) if p == "~" else p)
 
         dirs = augmented_path("/usr/bin").split(os.pathsep)
-        nvm_bins = [d for d in dirs if ".nvm/versions/node" in d]
+        nvm_marker = os.path.join(".nvm", "versions", "node")
+        nvm_bins = [d for d in dirs if nvm_marker in d]
         assert len(nvm_bins) == 2
         # Newest version first (reverse-sorted).
         assert "v22.5.0" in nvm_bins[0]

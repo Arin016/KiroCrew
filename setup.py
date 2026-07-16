@@ -36,7 +36,7 @@ class E2eTestCommand(Command):
         subprocess gateway is meaningless.
     """
 
-    description = "Run the E2E smoke suite (test/test_e2e_smoke.py)"
+    description = "Run the E2E suite (smoke + Playwright dashboard specs)"
     user_options: list = []
 
     def initialize_options(self) -> None:
@@ -52,12 +52,22 @@ class E2eTestCommand(Command):
         cmd = [
             sys.executable, "-m", "pytest",
             os.path.join("test", "test_e2e_smoke.py"),
+            # Folded in: the dashboard Playwright suite boots the same harness
+            # gateway (wired to the packaged fake ACP backend via
+            # KIROCLAW_KIRO_BIN) and shells `playwright test` against it, so
+            # `test_e2e` is the single offline pre-release E2E gate.
+            os.path.join("test", "test_playwright_e2e.py"),
             # Drop the heavy unit-test addopts (-n auto, --cov, --timeout=120);
-            # the e2e suite runs serially with a longer per-test timeout.
+            # the e2e suite runs serially with a longer per-test timeout. 1800s
+            # gives the Playwright fold headroom: the browser suite runs ~4-5
+            # min per interpreter leg and retries:2 under box contention can
+            # push a retry-heavy run past a 600s cap, which would kill it as a
+            # generic pytest timeout and hide the actual failing specs. Smoke
+            # tests finish in seconds, so the larger cap costs them nothing.
             "-o", "addopts=",
             "-p", "no:cacheprovider",
             "-v",
-            "--timeout=300",
+            "--timeout=1800",
         ]
         print("[test_e2e] KIROCLAW_E2E=1 " + " ".join(cmd))
         rc = subprocess.call(cmd, cwd=base, env=env)

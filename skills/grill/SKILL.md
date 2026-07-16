@@ -24,9 +24,15 @@ description: Structured questioning to reach shared understanding before action.
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
 
-Ask the questions one at a time.
+Ask the questions one at a time, waiting for feedback on each before continuing. Asking multiple questions at once is bewildering — it splits the user's attention and produces shallow answers. One question, one decision, then move on.
 
-If a question can be answered by exploring the codebase or memory, explore instead of asking.
+### Facts vs Decisions
+
+**Facts** you can discover (filesystem, tools, memory, codebase) — look them up silently. For example, don't ask "what does this function do?" or "what's in the config?" — read it yourself.
+
+**Decisions** are mine — put each one to me and wait for my answer.
+
+### Memory integration
 
 Before asking ANY question, check lessons and semantic memory for prior answers. If already decided, confirm rather than re-ask:
 > "Previously you decided X. Still holds?"
@@ -36,4 +42,15 @@ After each answer, save it as a lesson:
 learn_add(rule="<decision>", category="knowledge", scope="workspace")
 ```
 
-If the plan is simple and clear, say so and move on. If user says "enough" or "just do it", summarize decisions and proceed.
+### Document decisions (optional, offer once)
+
+If the grilling session produces 3+ substantive design decisions, offer once:
+> "Want me to capture these decisions in a doc as we go? (I can append to an existing design doc or create a new one.)"
+
+If accepted: after each resolved decision, append it to the agreed doc (inline, not batched). Format: a short heading + the decision + rationale. This builds the design record as a side effect of the grill, not a separate step.
+
+### Exit conditions
+
+- If the plan is simple and clear, say so and move on — don't manufacture questions.
+- If user says "enough" or "just do it", summarize all decisions reached so far and proceed to action.
+- Do not start implementing mid-grill — finish questioning first.

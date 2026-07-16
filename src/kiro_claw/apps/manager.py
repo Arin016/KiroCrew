@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from kiro_claw.apps.admission import app_admission_denied
 from kiro_claw.apps.discovery import discover_builtin_apps
 from kiro_claw.apps.manifest import AppManifest
 from kiro_claw.atomic_write import atomic_write
@@ -234,7 +235,7 @@ def _validate_source_path(source: Path) -> list[str]:
     except (json.JSONDecodeError, ValueError) as exc:
         errors.append(f"invalid {APP_MANIFEST_FILENAME}: {exc}")
         return errors
-    errors.extend(manifest.validate())
+    errors.extend(manifest.validate(app_root=source))
     # Check minKiroClawVersion
     if manifest.minKiroClawVersion:
         ver_err = _check_min_version(manifest.minKiroClawVersion)
@@ -312,6 +313,19 @@ def install_app(source: str | Path) -> AppResult:
             error="unsafe app name (path traversal attempt)",
         )
         return AppResult(ok=False, name=name, error=f"unsafe app name: {name!r}")
+
+    # Admission: the app allowlist/ban/signature gate INSTALL, not just
+    # activation, so a banned / non-allowlisted app never lands on disk.
+    denied = app_admission_denied(name, manifest=manifest, action="install")
+    if denied:
+        sel().log_api_access(
+            caller="app_install",
+            operation="admission",
+            outcome="rejected",
+            resources=f"name={name!r}",
+            error=denied,
+        )
+        return AppResult(ok=False, name=name, error=f"blocked by admission policy: {denied}")
 
     # Check if already installed — reject, use update_app() or uninstall first
     existing = _read_installed(name)
@@ -467,6 +481,19 @@ def update_app(source: str | Path) -> AppResult:
     # Guard against path traversal in manifest name
     if not _check_path_safety(name):
         return AppResult(ok=False, error=f"unsafe app name: {name!r}")
+
+    # Admission: re-gate on update so a policy that tightens after install
+    # (e.g. an app is later banned) blocks a subsequent update in place.
+    denied = app_admission_denied(name, manifest=manifest, action="update")
+    if denied:
+        sel().log_api_access(
+            caller="app_update",
+            operation="admission",
+            outcome="rejected",
+            resources=f"name={name!r}",
+            error=denied,
+        )
+        return AppResult(ok=False, name=name, error=f"blocked by admission policy: {denied}")
 
     existing = _read_installed(name)
     if not existing:
@@ -673,6 +700,27 @@ def enable_app(name: str) -> AppResult:
     gov_denied = _app_activation_denied(name)
     if gov_denied:
         return AppResult(ok=False, name=name, error=f"blocked by governance policy: {gov_denied}")
+
+    # Admission: the ban/allowlist also gates activation so a policy that bans
+    # an already-installed app blocks it from being (re-)enabled. Builtins
+    # (origin == "builtin") are trusted first-party code shipped unsigned with
+    # defaultEnabled=False, so a require_signature / non-empty allowlist policy
+    # would otherwise make every core app permanently un-enableable. The gate
+    # governs third-party install/enable, not first-party code — exempt builtins.
+    if meta.origin != "builtin":
+        denied = app_admission_denied(name, manifest=get_app_manifest(name), action="enable")
+        if denied:
+            sel().log_api_access(
+                caller="app_enable",
+                operation="admission",
+                outcome="rejected",
+                resources=f"name={name!r}",
+                error=denied,
+            )
+            return AppResult(
+                ok=False, name=name, error=f"blocked by admission policy: {denied}"
+            )
+
     if meta.enabled:
         return AppResult(ok=True, name=name, message=f"{name} is already enabled")
 
@@ -846,6 +894,27 @@ def register_external_app(
     """
     if not _check_path_safety(name):
         return AppResult(ok=False, error=f"unsafe app name: {name!r}")
+
+    # Admission: register_external_app writes enabled=True and is HTTP-reachable
+    # (POST /api/apps/register), so it is an install+enable path and MUST be
+    # gated too — otherwise a banned/non-allowlisted app can self-register and
+    # activate with no admission control. Pass the self-reported manifest (when
+    # provided) so a correctly-signed app is admitted under require_signature.
+    admission_manifest = None
+    if manifest_data:
+        admission_manifest = AppManifest.from_dict(manifest_data)
+    denied = app_admission_denied(
+        name, manifest=admission_manifest, action="register_external"
+    )
+    if denied:
+        sel().log_api_access(
+            caller="app_register_external",
+            operation="admission",
+            outcome="rejected",
+            resources=f"name={name!r}",
+            error=denied,
+        )
+        return AppResult(ok=False, name=name, error=f"blocked by admission policy: {denied}")
 
     dest = app_dir(name)
     existing = _read_installed(name)

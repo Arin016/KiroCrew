@@ -1,189 +1,166 @@
 import { test, expect } from '@playwright/test'
 
-test.describe('Cron Tab E2E Tests', () => {
+// Cron management moved from an Overview tab to the standalone /schedule page
+// (SchedulePage). The create/edit form is a slide-out panel opened via "Add
+// Job" rendering JobForm in vertical layout: Name is a labelled <input> and
+// Message a <textarea> (no placeholders), so anchor on their helper spans.
+// Submit is "Create"; pause/resume/delete are per-row panel actions
+// (delete via an arm→Confirm state machine on the same in-row button).
+
+type Page = import('@playwright/test').Page
+
+// Vertical-layout fields have no placeholders — anchor on their unique helper text.
+const nameField = (page: Page) => page.locator('span:has-text("A short label for this job") ~ input')
+const msgField = (page: Page) => page.locator('span:has-text("The prompt or task sent to the agent") ~ textarea')
+// Mode select is not the first <select> (approval precedes it) — target by option text.
+const modeSelect = (page: Page) => page.locator('select').filter({ hasText: 'Weekly schedule' })
+
+const openForm = async (page: Page) => {
+  await page.getByRole('button', { name: /add job/i }).click()
+  await expect(nameField(page)).toBeVisible({ timeout: 5000 })
+}
+
+test.describe('Schedule (Cron) Page E2E Tests', () => {
   test.beforeEach(async ({ page }) => {
-    // Navigate directly to overview page, then click Cron tab
-    await page.goto('/overview', { waitUntil: 'domcontentloaded' })
-    await page.waitForTimeout(500)
-    await page.getByRole('button', { name: 'Cron' }).click()
-    await page.waitForTimeout(500)
+    await page.goto('/schedule', { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('table')).toBeVisible({ timeout: 10000 })
   })
 
-  // Clean up test-created cron jobs after all tests
-  test.afterAll(async ({ browser }) => {
-    const page = await browser.newPage()
-    await page.goto('/overview', { waitUntil: 'domcontentloaded' })
-    await page.waitForTimeout(500)
-    await page.getByRole('button', { name: 'Cron' }).click()
-    await page.waitForTimeout(500)
-
-    // Set up dialog handler ONCE before loops
-    page.on('dialog', dialog => dialog.accept())
-
-    // Delete "Playwright_Test_Job" if it exists
-    const testJobDeleteButtons = page.getByRole('row').filter({ hasText: 'Playwright_Test_Job' }).getByRole('button', { name: /delete|✕/i })
-    const testJobCount = await testJobDeleteButtons.count()
-    for (let i = 0; i < testJobCount; i++) {
-      await testJobDeleteButtons.first().click()
-      await page.waitForTimeout(500)
+  // Failure-path cleanup. Each test deletes its own job inline on the pass path,
+  // but a mid-test failure (plausible under the load this CR hardens against)
+  // aborts before that delete and would leave an armed job firing real agent
+  // turns on a personal :5476 gateway. Sweep any Playwright_*-named job by API so
+  // cleanup runs even when a test body throws -- restores the failure-path
+  // coverage the removed afterAll used to provide, without its cross-test coupling.
+  test.afterEach(async ({ request }) => {
+    // Best-effort teardown. GET /api/crons returns { jobs: [...] } (a wrapped
+    // object, not a bare array like /api/chat/folders). Never let a cleanup
+    // hiccup fail an otherwise-passing test.
+    try {
+      const body = await (await request.get('/api/crons')).json()
+      const jobs = Array.isArray(body) ? body : (body?.jobs ?? [])
+      for (const j of jobs) {
+        if (typeof j?.name === 'string' && j.name.startsWith('Playwright_')) {
+          await request.delete(`/api/crons/${j.id}`)
+        }
+      }
+    } catch {
+      // teardown is best-effort -- ignore cleanup errors
     }
-
-    // Delete "Playwright_Weekly_Report" if it exists
-    const weeklyReportDeleteButtons = page.getByRole('row').filter({ hasText: 'Playwright_Weekly_Report' }).getByRole('button', { name: /delete|✕/i })
-    const weeklyReportCount = await weeklyReportDeleteButtons.count()
-    for (let i = 0; i < weeklyReportCount; i++) {
-      await weeklyReportDeleteButtons.first().click()
-      await page.waitForTimeout(500)
-    }
-
-    // Delete "Playwright_Delete_Test" if it exists (from delete test)
-    const deleteTestJobButtons = page.getByRole('row').filter({ hasText: 'Playwright_Delete_Test' }).getByRole('button', { name: /delete|✕/i })
-    const deleteTestJobCount = await deleteTestJobButtons.count()
-    for (let i = 0; i < deleteTestJobCount; i++) {
-      await deleteTestJobButtons.first().click()
-      await page.waitForTimeout(500)
-    }
-
-    await page.close()
   })
 
   test('displays existing cron jobs', async ({ page }) => {
-    // Should see jobs table
-    await expect(page.getByRole('table')).toBeVisible({ timeout: 5000 })
-    
-    // Should see table headers - use role to be specific
     await expect(page.getByRole('columnheader', { name: 'Name' })).toBeVisible()
     await expect(page.getByRole('columnheader', { name: 'Schedule' })).toBeVisible()
     await expect(page.getByRole('columnheader', { name: 'Message' })).toBeVisible()
   })
 
   test('creates new cron job with interval schedule', async ({ page }) => {
-    // Fill in the cron job form
-    await page.getByPlaceholder(/job name/i).fill('Playwright_Test_Job')
-    await page.getByPlaceholder(/message.*task/i).fill('Run E2E tests every hour')
-
-    // Interval should be selected by default
-    // Set to 2 hours
-    const intervalInput = page.locator('input[type="number"]').first()
-    await intervalInput.fill('2')
-
-    // Select hours
-    const unitSelect = page.locator('select').filter({ hasText: /minutes|hours|days/ })
-    await unitSelect.selectOption('hours')
-
-    // Click Add button
-    await page.getByRole('button', { name: /^add$/i }).click()
-
-    // Verify the job appears in the table - use first() to handle duplicates from previous runs
-    await expect(page.getByText('Playwright_Test_Job').first()).toBeVisible({ timeout: 5000 })
+    // Unique name (avoids strict-mode collisions across retries) + cleanup at
+    // the end: without it the created every-2-hours job stays armed on the
+    // target gateway and, on the documented local workflow (personal gateway
+    // on 5476), would actually fire real agent turns on schedule.
+    const jobName = `Playwright_Test_Job_${Date.now()}`
+    await openForm(page)
+    await nameField(page).fill(jobName)
+    await msgField(page).fill('Run E2E tests every hour')
+    await page.locator('input[type="number"]').first().fill('2')
+    await page.locator('select').filter({ hasText: 'minutes' }).selectOption('hours')
+    await page.getByRole('button', { name: /^create$/i }).click()
+    const row = page.getByRole('row').filter({ hasText: jobName })
+    await expect(row).toBeVisible({ timeout: 5000 })
     await expect(page.getByText('Run E2E tests every hour').first()).toBeVisible()
+    // Cleanup: row-scoped arm→Confirm delete (see 'deletes a cron job').
+    await row.getByRole('button', { name: /^delete$/i }).click()
+    await row.getByRole('button', { name: /^confirm$/i }).click()
+    await expect(page.getByRole('cell', { name: jobName })).toHaveCount(0, { timeout: 5000 })
   })
 
   test('creates cron job with weekly schedule', async ({ page }) => {
-    // Fill in basic info
-    await page.getByPlaceholder(/job name/i).fill('Playwright_Weekly_Report')
-    await page.getByPlaceholder(/message.*task/i).fill('Generate weekly metrics')
-
-    // Switch to weekly mode
-    const modeSelect = page.locator('select').first()
-    await modeSelect.selectOption('weekly')
-
-    // Select Monday and Friday
-    await page.getByRole('button', { name: /mon/i }).click()
-    await page.getByRole('button', { name: /fri/i }).click()
-
-    // Set time
+    const jobName = `Playwright_Weekly_Report_${Date.now()}`
+    await openForm(page)
+    await nameField(page).fill(jobName)
+    await msgField(page).fill('Generate weekly metrics')
+    await modeSelect(page).selectOption('weekly')
+    await page.getByRole('button', { name: /^mon$/i }).click()
+    await page.getByRole('button', { name: /^fri$/i }).click()
     await page.locator('input[type="time"]').fill('09:00')
-
-    // Click Add
-    await page.getByRole('button', { name: /^add$/i }).click()
-
-    // Verify creation - use first() to handle duplicates
-    await expect(page.getByText('Playwright_Weekly_Report').first()).toBeVisible({ timeout: 5000 })
+    await page.getByRole('button', { name: /^create$/i }).click()
+    const row = page.getByRole('row').filter({ hasText: jobName })
+    await expect(row).toBeVisible({ timeout: 5000 })
+    // Cleanup: don't leave a live Mon/Fri 09:00 job armed on the gateway.
+    await row.getByRole('button', { name: /^delete$/i }).click()
+    await row.getByRole('button', { name: /^confirm$/i }).click()
+    await expect(page.getByRole('cell', { name: jobName })).toHaveCount(0, { timeout: 5000 })
   })
 
   test('pauses and resumes a cron job', async ({ page }) => {
-    // Wait for jobs to load
-    await expect(page.getByRole('table')).toBeVisible({ timeout: 5000 })
+    // Self-contained: create a uniquely-named job, then pause/resume/delete
+    // it by name. Targeting a fixture row by index (row.nth(1)) is fragile —
+    // it assumes the fixture seeds jobs AND that ordering is stable across the
+    // pause→reopen cycle; a re-sort would flip a different job and leak state.
+    const jobName = `Playwright_Toggle_${Date.now()}`
+    await openForm(page)
+    await nameField(page).fill(jobName)
+    await msgField(page).fill('Job created for pause/resume test')
+    await page.locator('input[type="number"]').first().fill('1')
+    await page.getByRole('button', { name: /^create$/i }).click()
+    const row = page.getByRole('row').filter({ hasText: jobName })
+    await expect(row).toBeVisible({ timeout: 5000 })
 
-    // Find first Pause button and click it
-    const pauseButton = page.getByRole('button', { name: /pause/i }).first()
-    if (await pauseButton.isVisible()) {
-      await pauseButton.click()
+    // Pause/Resume are inline per-row buttons (SchedulePage renders them in the
+    // row, the label toggled by j.enabled). Scope to this job's row -- the page
+    // renders one such button per enabled row, so an unscoped page-level locator
+    // is ambiguous (strict-mode violation once >1 job exists).
+    await row.getByRole('button', { name: /^pause$/i }).click()
+    await expect(row.getByRole('button', { name: /^resume$/i })).toBeVisible({ timeout: 5000 })
+    await row.getByRole('button', { name: /^resume$/i }).click()
+    await expect(row.getByRole('button', { name: /^pause$/i })).toBeVisible({ timeout: 5000 })
 
-      // Should change to Resume
-      await expect(page.getByRole('button', { name: /resume/i }).first()).toBeVisible({
-        timeout: 3000,
-      })
-
-      // Click Resume
-      await page.getByRole('button', { name: /resume/i }).first().click()
-
-      // Should change back to Pause
-      await expect(page.getByRole('button', { name: /pause/i }).first()).toBeVisible({
-        timeout: 3000,
-      })
-    }
+    // Cleanup: row-scoped arm→Confirm delete.
+    await row.getByRole('button', { name: /^delete$/i }).click()
+    await row.getByRole('button', { name: /^confirm$/i }).click()
+    await expect(page.getByRole('cell', { name: jobName })).toHaveCount(0, { timeout: 5000 })
   })
 
   test('deletes a cron job', async ({ page }) => {
-    // First, create a cron job specifically for deletion testing
-    await page.getByPlaceholder(/job name/i).fill('Playwright_Delete_Test')
-    await page.getByPlaceholder(/message.*task/i).fill('Job created for deletion test')
-    
-    const intervalInput = page.locator('input[type="number"]').first()
-    await intervalInput.fill('1')
-    
-    await page.getByRole('button', { name: /^add$/i }).click()
-    
-    // Verify it was created
-    await expect(page.getByText('Playwright_Delete_Test').first()).toBeVisible({ timeout: 5000 })
-    
-    // Now delete it - find the specific row with our test job
-    const testJobRow = page.getByRole('row').filter({ hasText: 'Playwright_Delete_Test' })
-    const deleteButton = testJobRow.getByRole('button', { name: /delete/i })
-    
-    await deleteButton.click()
-    
-    // Job should be removed
-    await page.waitForTimeout(1000)
-    await expect(page.getByText('Playwright_Delete_Test')).not.toBeVisible()
+    // Unique name: the seeded gateway already ships several jobs, and retries
+    // re-run against the same shared home, so a fixed name collides (multiple
+    // matching cells/rows -> strict-mode violation).
+    const jobName = `Playwright_Delete_${Date.now()}`
+    await openForm(page)
+    await nameField(page).fill(jobName)
+    await msgField(page).fill('Job created for deletion test')
+    await page.locator('input[type="number"]').first().fill('1')
+    await page.getByRole('button', { name: /^create$/i }).click()
+    const row = page.getByRole('row').filter({ hasText: jobName })
+    await expect(row).toBeVisible({ timeout: 5000 })
+
+    // Delete is a two-click arm→confirm on the same in-row button: the first
+    // click re-labels "Delete"→"Confirm", the second commits (see SchedulePage
+    // confirmDeleteId state machine). Scope both clicks to this job's row.
+    await row.getByRole('button', { name: /^delete$/i }).click()
+    await row.getByRole('button', { name: /^confirm$/i }).click()
+    await expect(page.getByRole('cell', { name: jobName })).toHaveCount(0, { timeout: 5000 })
   })
 
   test('filters cron jobs by search term', async ({ page }) => {
-    // Wait for jobs to load
-    await expect(page.getByRole('table')).toBeVisible({ timeout: 5000 })
-
-    // Type in filter
-    const filterInput = page.getByPlaceholder(/filter jobs/i)
-    await filterInput.fill('test')
-
-    // Jobs should still be visible (client-side filtering)
+    await page.getByPlaceholder(/filter jobs/i).fill('test')
     await expect(page.getByRole('table')).toBeVisible()
   })
 
   test('validates required fields', async ({ page }) => {
-    // Try to add without filling anything
-    await page.getByRole('button', { name: /^add$/i }).click()
-
-    // Should show error
-    await expect(page.getByText(/name and message are required/i)).toBeVisible({
-      timeout: 3000,
-    })
+    await openForm(page)
+    await page.getByRole('button', { name: /^create$/i }).click()
+    await expect(page.getByText(/name and message are required/i)).toBeVisible({ timeout: 3000 })
   })
 
   test('validates weekly mode requires day selection', async ({ page }) => {
-    await page.getByPlaceholder(/job name/i).fill('Test')
-    await page.getByPlaceholder(/message.*task/i).fill('Test task')
-
-    // Switch to weekly mode
-    const modeSelect = page.locator('select').first()
-    await modeSelect.selectOption('weekly')
-
-    // Don't select any days
-    await page.getByRole('button', { name: /^add$/i }).click()
-
-    // Should show error
+    await openForm(page)
+    await nameField(page).fill('Test')
+    await msgField(page).fill('Test task')
+    await modeSelect(page).selectOption('weekly')
+    await page.getByRole('button', { name: /^create$/i }).click()
     await expect(page.getByText(/select at least one day/i)).toBeVisible({ timeout: 3000 })
   })
 })

@@ -105,6 +105,10 @@ class TestFetchExternalRegistryValidation:
             "kiro_claw.apps.registry._sel_fn",
             mock_sel_instance,
         )
+        # Bypass OS-sandbox wrap — macOS 26 has no sandbox backend.
+        monkeypatch.setattr(
+            "kiro_claw.apps.registry.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
 
     @pytest.mark.asyncio
     async def test_rejects_repo_with_path_traversal(self):
@@ -177,6 +181,10 @@ class TestFetchExternalRegistryParsing:
         monkeypatch.setattr(
             "kiro_claw.apps.registry._sel_fn",
             mock_sel_instance,
+        )
+        # Bypass OS-sandbox wrap — macOS 26 has no sandbox backend.
+        monkeypatch.setattr(
+            "kiro_claw.apps.registry.wrap_argv", lambda argv, **k: (list(argv), None)
         )
 
     @pytest.mark.asyncio
@@ -558,3 +566,90 @@ class TestExternalRegistryRepos:
         # Distinct from known_registry_repos: the helper falls open to EMPTY,
         # leaving the bundled set as the caller's sole source of truth.
         assert _external_registry_repos() == set()
+
+
+# ---------------------------------------------------------------------------
+# install_from_registry admission — the signed manifest is now passed to the
+# gate (fetched read-only BEFORE clone), so require_signature no longer denies
+# every registry install of a correctly-signed app.
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryInstallAdmission:
+    def _write_policy(self, home, policy):
+        (home / "app_admission.json").write_text(json.dumps(policy))
+
+    @pytest.fixture()
+    def reg_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "kiroclaw-home"
+        home.mkdir()
+        monkeypatch.setenv("KIROCLAW_HOME", str(home))
+        return home
+
+    def _signed_manifest(self, name, secret, signer="acme"):
+        import hashlib
+        import hmac
+
+        from kiro_claw.apps.manifest import AppManifest
+
+        data = {
+            "name": name, "version": "1.0.0", "displayName": name,
+            "description": "d", "author": "tester", "signer": signer,
+        }
+        m = AppManifest.from_dict(data)
+        data["signature"] = hmac.new(
+            secret.encode(), m.signing_payload(), hashlib.sha256
+        ).hexdigest()
+        return data
+
+    @pytest.mark.asyncio
+    async def test_signed_app_admitted_under_require_signature(self, reg_home):
+        from kiro_claw.apps.registry import install_from_registry
+
+        secret = "s3cr3t"
+        self._write_policy(reg_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["signed-reg"], "trust_keys": {"acme": secret},
+        })
+        manifest = self._signed_manifest("signed-reg", secret)
+        with patch(
+            "kiro_claw.apps.registry.get_registry_app",
+            return_value={"name": "signed-reg", "repo": "https://example.com/SignedRepo.git",
+                          "branch": "mainline"},
+        ), patch(
+            "kiro_claw.apps.registry._fetch_app_manifest",
+            new=AsyncMock(return_value=manifest),
+        ), patch(
+            "kiro_claw.apps.registry._clone_build_app",
+            new=AsyncMock(return_value={"ok": False, "error": "stop-after-admission"}),
+        ) as mock_build:
+            result = await install_from_registry("signed-reg")
+        # Admission passed (signed manifest verified) — flow proceeded to the
+        # clone/build step, which we stub to stop right after admission.
+        assert "blocked by admission policy" not in (result.get("error") or "")
+        mock_build.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unsigned_app_denied_under_require_signature(self, reg_home):
+        from kiro_claw.apps.registry import install_from_registry
+
+        self._write_policy(reg_home, {
+            "mode": "enforce", "require_signature": True,
+            "approved": ["unsigned-reg"], "trust_keys": {"acme": "s3cr3t"},
+        })
+        with patch(
+            "kiro_claw.apps.registry.get_registry_app",
+            return_value={"name": "unsigned-reg", "repo": "https://example.com/UnsignedRepo.git",
+                          "branch": "mainline"},
+        ), patch(
+            "kiro_claw.apps.registry._fetch_app_manifest",
+            new=AsyncMock(return_value={"name": "unsigned-reg", "version": "1.0.0"}),
+        ), patch(
+            "kiro_claw.apps.registry._clone_build_app",
+            new=AsyncMock(return_value={"ok": True, "pkg_dir": reg_home}),
+        ) as mock_build:
+            result = await install_from_registry("unsigned-reg")
+        # Denied at the gate — the app is never cloned/built.
+        assert not result["ok"]
+        assert "blocked by admission policy" in result["error"]
+        mock_build.assert_not_awaited()

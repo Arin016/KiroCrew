@@ -361,13 +361,43 @@ class AcpProvider(LLMProvider):
                         else:
                             logger.warning(
                                 "Failed to resume session %s, starting fresh",
-                                resume_sid, exc_info=True,
+                                resume_sid,
+                                exc_info=True,
                             )
                         handle = None
                 else:
                     logger.info("Session file missing for %s, skipping load", resume_sid)
 
             if handle is None:
+                # ── Fix B: respawn if runtime died during resume attempt ──
+                # The orphan sweep may have killed the runtime's PID during the
+                # session/load window (race condition). Calling create_session on
+                # a dead runtime raises AcpRuntimeDead which bubbles to the user.
+                # Instead, detect the dead runtime and transparently respawn.
+                if not runtime.is_alive():
+                    logger.warning(
+                        "runtime died during resume; respawning for fresh start " "(PID was %s)",
+                        runtime.pid,
+                    )
+                    try:
+                        await runtime.kill()
+                    except Exception:
+                        pass
+                    runtime = AcpRuntime(
+                        work_dir=work_dir,
+                        agent=agent or "kiroclaw",
+                        sandbox_mode=sandbox_mode,
+                        extra_env=extra_env,
+                        mcp_gateway_overlay=mcp_gateway_overlay,
+                        mcp_gateway_settings_mcp_json=mcp_gateway_settings_mcp_json,
+                        mcp_gateway_socket=mcp_gateway_socket,
+                    )
+                    try:
+                        await runtime.spawn()
+                    except AcpRuntimeError as exc:
+                        if runtime.saw_not_logged_in():
+                            raise AcpAuthRequired(_NOT_LOGGED_IN_MESSAGE) from exc
+                        raise
                 try:
                     handle = await runtime.create_session(
                         cwd=work_dir,
@@ -387,7 +417,8 @@ class AcpProvider(LLMProvider):
                 except Exception:
                     logger.warning(
                         "Failed to set model %s on kiro runtime session",
-                        configured_model, exc_info=True,
+                        configured_model,
+                        exc_info=True,
                     )
 
             # Replace the placeholder AcpClient with the real AcpSessionProvider
@@ -409,7 +440,9 @@ class AcpProvider(LLMProvider):
             raise
         logger.info(
             "Kiro provider started via AcpRuntime (PID %s, session %s, resumed=%s)",
-            runtime.pid, handle.session_id, resumed,
+            runtime.pid,
+            handle.session_id,
+            resumed,
         )
 
     def available_models(self) -> list[dict[str, str]]:
@@ -506,9 +539,7 @@ class AcpProvider(LLMProvider):
         spam errors and trigger a session reset on every turn.
         """
         if not self._client.supports_config_option("effort"):
-            logger.debug(
-                "claude-agent-acp exposes no 'effort' config option; skipping effort push"
-            )
+            logger.debug("claude-agent-acp exposes no 'effort' config option; skipping effort push")
             return
         # Descend from the requested level through lower levels (e.g.
         # max → xhigh → high). Never escalate above what was asked.
@@ -525,7 +556,9 @@ class AcpProvider(LLMProvider):
                 if candidate != level:
                     logger.info(
                         "CC effort %r unsupported by model %s — applied %r instead",
-                        level, self._client._model, candidate,
+                        level,
+                        self._client._model,
+                        candidate,
                     )
                 return
             except AcpError as exc:
@@ -560,9 +593,7 @@ class AcpProvider(LLMProvider):
         # attempting to push would fail with 'Unknown config option' and reset
         # the session. Report unsupported so the dashboard leaves the UI as-is.
         if self.is_claude_backend and not self._client.supports_config_option("effort"):
-            logger.info(
-                "change_effort skipped — claude-agent-acp build exposes no 'effort' option"
-            )
+            logger.info("change_effort skipped — claude-agent-acp build exposes no 'effort' option")
             return False
         # Accept any level the dynamic validation set knows about — ACP backends
         # can report levels beyond the canonical five (effort.py), and those are
@@ -595,11 +626,16 @@ class AcpProvider(LLMProvider):
             else:
                 self._effort_per_model[model] = _prev
                 self._apply_effort_overlay()
-            logger.warning("ACP effort live push failed (model=%s effort=%s) — rolled back",
-                           model, level)
+            logger.warning(
+                "ACP effort live push failed (model=%s effort=%s) — rolled back", model, level
+            )
             raise
-        logger.info("ACP effort live-changed: model=%s effort=%s backend=%s", model, level,
-                    "claude" if self.is_claude_backend else "kiro")
+        logger.info(
+            "ACP effort live-changed: model=%s effort=%s backend=%s",
+            model,
+            level,
+            "claude" if self.is_claude_backend else "kiro",
+        )
         return True
 
     async def clear_effort(self) -> bool:
@@ -676,11 +712,14 @@ class AcpProvider(LLMProvider):
             return
         try:
             await self._set_claude_effort(level)
-            logger.info("CC initial effort applied: model=%s effort=%s",
-                        self._client._model, level)
+            logger.info("CC initial effort applied: model=%s effort=%s", self._client._model, level)
         except Exception:
-            logger.warning("CC initial effort apply failed (model=%s effort=%s)",
-                           self._client._model, level, exc_info=True)
+            logger.warning(
+                "CC initial effort apply failed (model=%s effort=%s)",
+                self._client._model,
+                level,
+                exc_info=True,
+            )
 
     async def shutdown(self) -> None:
         await self._client.shutdown()
@@ -847,9 +886,7 @@ class AcpProvider(LLMProvider):
             try:
                 target.unlink(missing_ok=True)
             except OSError:
-                logger.warning(
-                    "cleanup_session: failed to delete %s", target, exc_info=True
-                )
+                logger.warning("cleanup_session: failed to delete %s", target, exc_info=True)
 
 
 def is_claude_backend(provider: Any) -> bool:

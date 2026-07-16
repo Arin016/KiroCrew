@@ -23,6 +23,7 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_claw import platform_compat
 from kiro_claw.dashboard.origin import is_https_request, is_loopback
 from kiro_claw.dashboard.refresh_tokens import (
     MAX_REFRESH_TTL_SECS,
@@ -730,14 +731,35 @@ def write_app_secret(app_name: str, secret: str) -> None:
     secret_dir = config_dir() / "apps" / app_name
     secret_dir.mkdir(parents=True, exist_ok=True)
     secret_path = secret_dir / ".app_secret"
+    # os.O_TRUNC truncates any pre-existing file BEFORE the DACL tightens,
+    # then restrict_to_owner locks it down while it is still empty, then we
+    # write the secret bytes. This ordering matters on Windows because
+    # restrict_to_owner shells out to icacls (subprocess) — if we wrote first
+    # the secret would sit under the parent-inherited DACL during the icacls
+    # window. On failure we unlink the just-created empty file (mirroring
+    # dashboard/server.py:_write_secret_file) so we don't leave a zero-byte
+    # .app_secret under the default DACL that a later successful write
+    # (which does not re-inherit on O_TRUNC) could then populate.
     fd = os.open(str(secret_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        # restrict_to_owner (fail-loud), NOT fchmod_safe: fchmod_safe swallows
+        # OSError, which would defeat the cleanup-and-reraise below for this
+        # app secret (AutoSDE). On POSIX applies chmod 0o600 by path; on
+        # Windows an owner-only DACL via icacls (fchmod doesn't exist on
+        # Windows — previously an IS_POSIX no-op that let per-app secrets
+        # land readable by other local users).
+        platform_compat.restrict_to_owner(secret_path)
         with os.fdopen(fd, "w") as f:
+            fd = -1  # fdopen took ownership; skip the redundant close below
             f.write(secret)
     except Exception:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
-            os.close(fd)
+            secret_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise

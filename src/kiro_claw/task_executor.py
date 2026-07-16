@@ -24,6 +24,7 @@ from kiro_claw.providers.base import (
     EVENT_TEXT_CHUNK,
     EVENT_TOOL_CALL,
 )
+from kiro_claw.sandbox import sandboxed_spawn_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 from kiro_claw.sel import sel
 from kiro_claw.task_models import (
@@ -52,7 +53,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _check_error_loop(
-    task: "Task", consecutive: int, on_notify, run: "Project",
+    task: "Task",
+    consecutive: int,
+    on_notify,
+    run: "Project",
 ) -> bool:
     """Return True if the task should fail due to a repeated-error loop."""
     if consecutive >= 2:
@@ -143,11 +147,17 @@ async def execute_single_task(
                 task.error = ""
                 run.status = "paused"
                 run.error = f"Task {task.index} approval denied — paused for editing"
-                await on_notify(f"⏸️ Task {task.index} denied", "Paused for editing. Modify the task and Resume.", run=run)
+                await on_notify(
+                    f"⏸️ Task {task.index} denied",
+                    "Paused for editing. Modify the task and Resume.",
+                    run=run,
+                )
                 return False
         elif task.force_approval:
             # force_approval MUST block — cannot auto-approve
-            logger.error("Task %d has force_approval but no handler — blocking as failed", task.index)
+            logger.error(
+                "Task %d has force_approval but no handler — blocking as failed", task.index
+            )
             sel().log_api_access(
                 caller="taskrunner",
                 operation="task.force_approval",
@@ -162,7 +172,11 @@ async def execute_single_task(
             # Prevent replanning around a security gate
             run.status = "failed"
             run.error = f"Task {task.index} denied: {task.error}"
-            await on_notify(f"❌ Task {task.index} failed", "No approval handler configured for force_approval gate", run=run)
+            await on_notify(
+                f"❌ Task {task.index} failed",
+                "No approval handler configured for force_approval gate",
+                run=run,
+            )
             return False
         else:
             logger.warning("Task %d requires approval but no handler — auto-approving", task.index)
@@ -245,9 +259,14 @@ async def _reject_and_log(client, history, session_key, agent, event, *, metadat
     """Reject a tool call and log the rejection."""
     await client.reject_tool(event.request_id)
     history.log_tool_invocation(
-        session_key=session_key, agent=agent or "kiroclaw", source="taskrunner",
-        tool_name=event.title, tool_kind=event.tool_kind, outcome="rejected",
-        request_id=event.request_id, **({"metadata": metadata} if metadata else {}),
+        session_key=session_key,
+        agent=agent or "kiroclaw",
+        source="taskrunner",
+        tool_name=event.title,
+        tool_kind=event.tool_kind,
+        outcome="rejected",
+        request_id=event.request_id,
+        **({"metadata": metadata} if metadata else {}),
     )
 
 
@@ -306,7 +325,10 @@ async def execute_task(
                 # Off-loop: build_message embeds the episodic query (blocking urllib).
                 full_prompt, _ = await run_in_embed_pool(
                     ctx.build_message,
-                    task_prompt, is_new, session_key, agent=agent or None,
+                    task_prompt,
+                    is_new,
+                    session_key,
+                    agent=agent or None,
                     provider_type=KiroClawConfig.load().agent.provider,
                 )
             else:
@@ -360,8 +382,14 @@ async def execute_task(
                     # would be skipped whenever a tool is about to be rejected.
                     pct = client.context_usage_pct()
                     if pct >= _MID_STREAM_COMPACT_PCT:
-                        await _reject_and_log(client, sel(), session_key, agent, event,
-                                              metadata={"reason": "context_overflow", "pct": pct})
+                        await _reject_and_log(
+                            client,
+                            sel(),
+                            session_key,
+                            agent,
+                            event,
+                            metadata={"reason": "context_overflow", "pct": pct},
+                        )
                         raise _ContextOverflow(pct)
 
                     # Positive-authorization resolution (deny-by-default shape):
@@ -387,8 +415,13 @@ async def execute_task(
                         # override would reintroduce the global-YOLO dependency this
                         # change deliberately avoids.
                         await _reject_and_log(
-                            client, sel(), session_key, agent, event,
-                            metadata={"reason": "headless_no_authorization"})
+                            client,
+                            sel(),
+                            session_key,
+                            agent,
+                            event,
+                            metadata={"reason": "headless_no_authorization"},
+                        )
                         continue
 
                     await client.approve_tool(event.request_id)
@@ -401,8 +434,11 @@ async def execute_task(
                         tool_kind=event.tool_kind,
                         outcome="approved",
                         request_id=event.request_id,
-                        metadata={"task": task.index, "task_id": run.task_id,
-                                  "reason": approve_reason},
+                        metadata={
+                            "task": task.index,
+                            "task_id": run.task_id,
+                            "reason": approve_reason,
+                        },
                     )
                 elif event.kind == EVENT_TOOL_CALL:
                     # Fire PreToolUse hooks for auto-approved tools (informational only)
@@ -515,7 +551,10 @@ async def execute_task(
             if previous_error and task.error == previous_error:
                 consecutive_same_error += 1
                 should_fail = await _check_error_loop(
-                    task, consecutive_same_error, on_notify, run,
+                    task,
+                    consecutive_same_error,
+                    on_notify,
+                    run,
                 )
                 if should_fail:
                     return False
@@ -539,7 +578,9 @@ async def execute_task(
                 # Same retry logic as main task failure above
                 if previous_error and task.error == previous_error:
                     consecutive_same_error += 1
-                    should_fail = await _check_error_loop(task, consecutive_same_error, on_notify, run)
+                    should_fail = await _check_error_loop(
+                        task, consecutive_same_error, on_notify, run
+                    )
                     if should_fail:
                         return False
                 else:
@@ -738,12 +779,17 @@ async def self_review(
 
 async def run_tests(test_cmd: list[str], work_dir: Path) -> tuple[bool, str]:
     """Run the configured test command. Returns (success, output)."""
+    # The test command and its working directory are both agent-influenced, so
+    # route the spawn through the sandbox chokepoint: OS-level isolation plus a
+    # credential-scrubbed environment. See Talos finding 92e24570.
+    argv, env, cleanup = sandboxed_spawn_argv(list(test_cmd))
     try:
         proc = await asyncio.create_subprocess_exec(
-            *test_cmd,
+            *argv,
             cwd=str(work_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=env,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=TEST_TIMEOUT)
         output = stdout.decode(errors="replace") if stdout else ""
@@ -760,3 +806,6 @@ async def run_tests(test_cmd: list[str], work_dir: Path) -> tuple[bool, str]:
     except FileNotFoundError:
         logger.debug("Test command not found, skipping tests")
         return True, "test command not found (skipped)"
+    finally:
+        if cleanup:
+            Path(cleanup).unlink(missing_ok=True)

@@ -42,7 +42,7 @@ from slack_sdk.socket_mode.websockets import SocketModeClient as WSSocketModeCli
 
 import kiro_claw
 import kiro_claw.crash_guard as crash_guard
-from kiro_claw import shutdown_event
+from kiro_claw import platform_compat, shutdown_event
 from kiro_claw.acp.client import AcpError, AcpProcessDied
 from kiro_claw.autonudge import (
     AutoNudgeService,
@@ -3834,16 +3834,8 @@ class GatewayOrchestrator:
 
         # Raise FD limit — each kiro-cli session uses ~6 FDs (3 pipes)
         # plus MCP server subprocesses. Default macOS limit (256) is too low.
-        import resource
-
-        try:
-            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-            target = min(hard, 10240)
-            if soft < target:
-                resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
-                logger.info("Raised FD limit: %d → %d", soft, target)
-        except Exception:
-            pass
+        # No-op on Windows (no per-process descriptor rlimit).
+        platform_compat.raise_nofile_soft_limit(10240)
 
         # Clean up orphaned kiro-cli processes from previous runs
         from kiro_claw.session import cleanup_orphaned_sessions
@@ -3937,6 +3929,20 @@ class GatewayOrchestrator:
             except (RuntimeError, ValueError):
                 # Not in main thread (e.g. pytest-xdist worker) — skip.
                 pass
+            except NotImplementedError:
+                # Windows ProactorEventLoop does not support add_signal_handler.
+                # Fall back to signal.signal for SIGINT so shutdown_event still
+                # gets set; SIGTERM is not meaningfully deliverable on Windows.
+                if sig == signal.SIGINT:
+                    def _sigint_fallback(*_a: object) -> None:
+                        try:
+                            loop.call_soon_threadsafe(_on_signal)
+                        except RuntimeError:
+                            _on_signal()  # loop already closed
+                    try:
+                        signal.signal(sig, _sigint_fallback)
+                    except (ValueError, OSError):
+                        pass  # not in main thread
 
         # Wait for MCP probe to finish before warming sessions —
         # kiro-cli reads MCP config at spawn time, so sessions must

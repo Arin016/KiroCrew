@@ -2,6 +2,7 @@ import { Bell, Code, Globe, Info, LayoutGrid, MessageSquare, Mic, Palette, Serve
 import { SlackIcon } from '../components/SlackIcon'
 import { useAppSelector } from '../store'
 import SidePanelLayout from '../components/SidePanelLayout'
+import { useSettingHighlight } from '../hooks/useSettingHighlight'
 import { BrowserPanel } from './settings/BrowserPanel'
 import { InstancesPanel } from './settings/InstancesPanel'
 import { isEmbeddedPane } from '../lib/embedded'
@@ -31,6 +32,7 @@ const TABS = [
 
 export default function SettingsPage() {
   const version = useAppSelector(s => s.dashboard.status?.version) || '—'
+  useSettingHighlight()
   // An embedded instance pane can't manage remote instances (single-level by
   // design) — hide the Instances tab so a pane can't connect onward.
   const embedded = isEmbeddedPane()

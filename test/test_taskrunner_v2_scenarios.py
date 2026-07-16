@@ -25,6 +25,24 @@ from kiro_claw.taskrunner import (
     TaskRunner,
 )
 
+
+@pytest.fixture(autouse=True)
+def _passthrough_sandbox(monkeypatch):
+    """Several scenarios spawn REAL git via ``git_coord._git`` →
+    ``sandboxed_spawn_argv`` → ``wrap_argv``, which raises when no OS-level
+    sandbox backend is available. These exercise task/git logic, not sandbox
+    availability, so run the command unwrapped in-test."""
+    import os as _os
+
+    from kiro_claw import git_coord
+
+    monkeypatch.setattr(
+        git_coord,
+        "sandboxed_spawn_argv",
+        lambda argv, *a, **k: (list(argv), dict(_os.environ), None),
+    )
+
+
 # ── Helpers ──
 
 

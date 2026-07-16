@@ -6,6 +6,8 @@ setup. These are aiohttp-compatible handler functions.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac as _hmac
 import importlib
 import json
 import logging
@@ -13,7 +15,6 @@ import mimetypes
 import os
 import re
 import shutil
-import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
+from kiro_claw import platform_compat
 from kiro_claw.apps.backend import (
     get_app_backend_port,
     list_app_processes,
@@ -109,13 +111,19 @@ async def _run_lifecycle_script(
     if extra_env:
         env.update(extra_env)
     try:
+        # Process-group isolation for timeout tree-kill. Pass both flags explicitly
+        # (NOT **dict unpack — breaks mypy's Popen overload resolution on the build
+        # fleet): start_new_session=True is a no-op on Windows, creationflags is 0
+        # (no-op) on POSIX. (App lifecycle scripts are bash; on Windows without bash
+        # they fail gracefully rather than crash here.)
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             cwd=str(app_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
-            start_new_session=True,
+            start_new_session=platform_compat.IS_POSIX,
+            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -124,7 +132,8 @@ async def _run_lifecycle_script(
             output = "\n".join(lines[-20:])  # last 20 lines
         except asyncio.TimeoutError:
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
+                # killpg on POSIX, taskkill /T on Windows — via platform_compat.
+                platform_compat.kill_process_tree(proc.pid, platform_compat.SIGTERM)
             except OSError:
                 proc.kill()
             try:
@@ -1661,14 +1670,16 @@ async def handle_app_api_proxy(request: web.Request) -> web.StreamResponse:
         if key.lower() not in _PROXY_STRIP_HEADERS and key.lower() != "host":
             headers[key] = value
 
+    # Read request body first so the HMAC can bind it (integrity: prevents
+    # a MITM/compromised path from swapping the body under a valid signature).
+    body = await request.read() if request.can_read_body else None
+
     # Sign the proxy request with the app's secret so the backend can
     # verify it came from the gateway. Works on loopback and remote.
     # Header format: X-KiroClaw-Proxy: <timestamp>:<hmac-sha256>
-    # The HMAC is computed over "timestamp:method:path" using the app
-    # secret as key. Backend verifies by recomputing with its copy of
-    # the secret and checking the timestamp is recent (±60s).
-    import hashlib
-    import hmac as _hmac
+    # The HMAC is computed over "timestamp:method:path[?query]:sha256(body)"
+    # using the app secret as key. Backend verifies by recomputing with its
+    # copy of the secret and checking the timestamp is recent (±60s).
     try:
         secret = _get_app_secret(name)
         if not secret:
@@ -1677,9 +1688,11 @@ async def handle_app_api_proxy(request: web.Request) -> web.StreamResponse:
                 status=502,
             )
         ts = str(int(time.time()))
+        body_hash = hashlib.sha256(body or b"").hexdigest()
         msg = f"{ts}:{request.method}:/api/{path}"
         if request.query_string:
             msg += f"?{request.query_string}"
+        msg += f":{body_hash}"
         sig = _hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
         headers["X-KiroClaw-Proxy"] = f"{ts}:{sig}"
     except OSError as exc:
@@ -1687,9 +1700,6 @@ async def handle_app_api_proxy(request: web.Request) -> web.StreamResponse:
         return web.json_response(
             {"error": "proxy auth failed: cannot read app secret"}, status=502,
         )
-
-    # Read request body
-    body = await request.read() if request.can_read_body else None
 
     try:
         timeout = aiohttp.ClientTimeout(total=_PROXY_TIMEOUT)

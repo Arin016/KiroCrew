@@ -211,6 +211,8 @@ they go live without waiting for a Gateway restart.
 | `permissions.memory` | string | Memory access: `""` (none), `"app-scoped"`, or `"shared"` |
 | `permissions.network` | boolean | Can make external network requests |
 
+> **Advisory today, not enforced in-process.** These fields are **not** a runtime sandbox. The validator functions in `apps/permissions.py` (`validate_permissions`, `format_permissions_summary`) are currently **not wired into the install or runtime path** — they are only exercised by unit tests — so the manifest `permissions` block is neither enforced nor even surfaced today: `mcpTools` is not gated at tool dispatch and an empty `mcpTools` list is treated as unrestricted. What actually confines an app today is the HTTP app-token scope (`permissions.api` allowlist, deny-by-default — see `security.md`) plus the OS sandbox. Install-time path traversal is blocked separately by `_check_path_safety(name)` + `manifest.validate()`, not by the permission validator. Full in-process enforcement is tracked in [app-sandbox-roadmap.md](./app-sandbox-roadmap.md).
+
 ## Setup Hooks
 
 ### `setup` — Lifecycle Scripts
@@ -351,7 +353,7 @@ the user to run locally instead of executing it on the server.
 
 - `name` must match `/^[a-z0-9]+(?:-[a-z0-9]+)*$/` (kebab-case)
 - `version` must match semver (`X.Y.Z`)
-- Paths in `agents`, `skills`, `sops`, `ui.entry`, `ui.pages[].entryPoint` must not contain `..` (path traversal)
+- Paths in `agents`, `skills`, `sops`, `ui.entry`, `ui.pages[].entryPoint`, and `backend.entryPoint` must be relative and stay inside the app root: absolute paths and `..` traversal are rejected (canonical resolve + containment when the app dir is known). `backend.hooks.*` are format-checked (`module.path:callable`, which cannot express traversal) and containment-checked again at load time. `mcpServers` entries use `command`/`args`/`url`/`env` (not app-relative file paths) and are not path-checked.
 - All required fields must be non-empty strings
 - Each cron entry must specify either `every` or `cron_expr`
 - Each UI page must have `route` and `label`

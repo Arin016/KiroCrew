@@ -178,6 +178,12 @@ class TestScriptHookStore:
 class TestRunScriptHook:
     """Test run_script_hook execution."""
 
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        # run_script_hook uses a lazy `from kiro_claw.sandbox import wrap_argv`
+        # inside the function. Patch the source module so macOS 26 doesn't raise.
+        monkeypatch.setattr("kiro_claw.sandbox.wrap_argv", lambda argv, **k: (list(argv), None))
+
     @pytest.mark.asyncio
     async def test_successful_execution(self):
         hook = ScriptHook(
@@ -289,6 +295,10 @@ class TestRunScriptHook:
 
 class TestScriptHookStoreFire:
     """Test ScriptHookStore.fire() method."""
+
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        monkeypatch.setattr("kiro_claw.sandbox.wrap_argv", lambda argv, **k: (list(argv), None))
 
     @pytest.mark.asyncio
     async def test_fire_enabled_hooks(self, hook_store: ScriptHookStore):

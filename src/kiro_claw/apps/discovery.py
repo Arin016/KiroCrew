@@ -116,7 +116,7 @@ def discover_builtin_apps(builtins_dir: Path | None = None) -> list[dict[str, An
 
         try:
             manifest = AppManifest.from_json_file(manifest_path)
-            errors = manifest.validate()
+            errors = manifest.validate(app_root=entry)
             if errors:
                 logger.warning(
                     "Skipping builtin %s: validation errors: %s",

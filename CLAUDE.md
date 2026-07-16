@@ -160,12 +160,16 @@ bash CLI commands. `kiroclaw-cron` + `kiroclaw-core` are the managed servers
 
 ## Platform support
 
-macOS + Linux (x86_64 and ARM/Graviton). **The KiroClaw backend/gateway is not
-supported on Windows** — verify process management, signal handling, file
-locking, and system-metrics code on both macOS and Linux. (The one Windows
-touchpoint is `install.ps1`, a thin *client-side* bootstrapper for `kiroclaw
-cloud` that installs the `aws` CLI + SSM plugin and hands off to the launcher;
-the gateway itself still runs on the Linux EC2 box, never on Windows.)
+macOS, Linux (x86_64 and ARM/Graviton), **and Windows** (native, Mesh-2329).
+Route every POSIX-only process/signal/metrics/file-lock call through
+`kiro_claw.platform_compat` — never raw `os.getuid`/`os.killpg`/`os.getpgid`/
+`signal.SIG*`/`fcntl`/`os.kill(pid, 0)` (the last *terminates* the target on
+Windows). The shim keeps macOS + Linux behavior byte-for-byte identical while
+adding Windows fallbacks (`taskkill`/`netstat`/`msvcrt.locking`/WMI). See
+`docs/WINDOWS_INSTALL.md` for the Windows install path and AGENTS.md "Platform
+Support" for the full shim table. Verify process management, signal handling,
+file locking, and system-metrics changes on macOS + Linux (Windows-only
+branches don't execute on the Linux CI host — that's expected).
 
 ## Git conventions
 

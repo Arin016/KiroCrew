@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kiro_claw.apps.admission import app_admission_denied
 from kiro_claw.apps.manager import (
     get_app,
     install_app,
@@ -48,12 +49,15 @@ from kiro_claw.apps.manager import (
     set_app_source,
     update_app,
 )
+from kiro_claw.apps.manifest import AppManifest
 from kiro_claw.sandbox import wrap_argv
+from kiro_claw.sel import sel
 
 try:
     from kiro_claw.sel import sel as _sel_fn
 except ImportError:
     _sel_fn = None  # type: ignore[assignment]
+from kiro_claw import platform_compat
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
 from kiro_claw.platform import PlatformCompositionError, current_context
@@ -1032,16 +1036,20 @@ _KILL_GRACE_PERIOD = 5  # seconds to wait after SIGTERM before SIGKILL
 
 
 async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """Send SIGTERM to the process group, escalate to SIGKILL if needed."""
+    """Send SIGTERM to the process group, escalate to SIGKILL if needed.
+
+    Routed through platform_compat (killpg on POSIX, taskkill /T on Windows) so
+    the Brazil app-build timeout path doesn't AttributeError on win32.
+    """
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        platform_compat.kill_process_tree(proc.pid, platform_compat.SIGTERM)
     except OSError:
         pass
     try:
         await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_PERIOD)
     except asyncio.TimeoutError:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            platform_compat.kill_process_tree(proc.pid, platform_compat.SIGKILL)
         except OSError:
             proc.kill()
         await proc.wait()
@@ -1069,7 +1077,8 @@ async def _git_clone_or_pull(
             cwd=str(dest),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=platform_compat.IS_POSIX,
+            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             env=minimal_env(),
         )
         try:
@@ -1103,7 +1112,8 @@ async def _git_clone_or_pull(
         *sandboxed_cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
+        start_new_session=platform_compat.IS_POSIX,
+        creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
         env=minimal_env(),
     )
     try:
@@ -1230,7 +1240,8 @@ async def _run_app_build(
             cwd=str(build_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=platform_compat.IS_POSIX,
+            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             env=minimal_env(),
         )
         assert proc.stdout is not None
@@ -1306,10 +1317,29 @@ async def install_from_registry(
     branch = entry.get("branch", "mainline")
     subdirectory = entry.get("subdirectory", "")
 
-    # Fetch the app's manifest for platform info and install script
+    # Fetch the app's manifest for platform info and install script. This is a
+    # read-only metadata fetch (git archive of app.json), safe to do before the
+    # admission gate so a correctly-signed manifest can be passed to it.
     manifest = await _fetch_app_manifest(
         repo, branch, subdirectory, app_name=name, git_url=git_url
     )
+
+    # Admission: gate AFTER the manifest fetch (so a signed manifest is verified)
+    # but BEFORE the repo is cloned and setup.onInstall runs, so a banned /
+    # non-allowlisted / unsigned app is never cloned nor its install script run.
+    admission_manifest = AppManifest.from_dict(manifest) if manifest else None
+    denied = app_admission_denied(
+        name, manifest=admission_manifest, action="install_from_registry"
+    )
+    if denied:
+        sel().log_api_access(
+            caller="app_install_from_registry",
+            operation="admission",
+            outcome="rejected",
+            resources=f"name={name!r}",
+            error=denied,
+        )
+        return {"ok": False, "name": name, "error": f"blocked by admission policy: {denied}"}
 
     # Platform compatibility check — if the app requires a specific OS and
     # KiroClaw is running on an incompatible platform, return client install
@@ -1428,8 +1458,6 @@ async def install_from_registry(
                 repo,
             )
             try:
-                from kiro_claw.sel import sel
-
                 sel().log_api_access(
                     caller="registry",
                     operation="app_install_script",
@@ -1453,7 +1481,8 @@ async def install_from_registry(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=minimal_env(NONINTERACTIVE="1"),
-                start_new_session=True,  # isolate process group for clean kill
+                start_new_session=platform_compat.IS_POSIX,
+                creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_SCRIPT_TIMEOUT)

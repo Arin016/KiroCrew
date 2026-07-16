@@ -38,8 +38,8 @@ This allows `kiroclaw` to find project-level agent config and skills from any di
 | `kiroclaw manifest` | Generate Slack manifest with user alias auto-populated |
 | `kiroclaw update` | Update to latest version (git pull + rebuild) |
 | `kiroclaw status` | Show runtime stats from running gateway |
-| `kiroclaw stop` | Stop a running gateway (service-aware: stops the systemd/launchd service if active, otherwise SIGTERM via port lookup). Pass `--port N` to bypass the service short-circuit and target a specific gateway. |
-| `kiroclaw restart` | Restart a running gateway (service-aware: restarts the systemd/launchd service if active, otherwise SIGTERMs the foreground gateway and respawns it detached). Pass `--port N` to bypass the service short-circuit and target a specific gateway. |
+| `kiroclaw stop` | Stop a running gateway (service-aware: stops the systemd/launchd service if active, otherwise terminates the gateway found by a cross-platform port lookup — lsof on POSIX, netstat on Windows). Pass `--port N` to bypass the service short-circuit and target a specific gateway. |
+| `kiroclaw restart` | Restart a running gateway (service-aware: restarts the systemd/launchd service if active, otherwise terminates the foreground gateway and respawns it detached). Pass `--port N` to bypass the service short-circuit and target a specific gateway. |
 | `kiroclaw service install` | Install gateway as a system-level systemd service (Linux, requires sudo for `tee` + `systemctl` only) or launchd LaunchAgent (macOS, no sudo). Auto-restarts on crash, auto-starts on boot. |
 | `kiroclaw service uninstall` | Stop and remove the systemd unit / launchd plist. |
 | `kiroclaw service status` | Show service status (`systemctl status` or `launchctl list`). No sudo required. |
@@ -252,10 +252,20 @@ Each step checks if the tool is already installed and skips if present.
    manager and return — without this branch, SIGTERM-by-port would be
    racing the manager's auto-restart.
 2. Otherwise (no service active, or `--port` was passed explicitly to
-   target a non-default dev gateway): `lsof -ti TCP:{port} -sTCP:LISTEN`
-   to find PIDs.
-3. `ps -p {pid} -o args=` to verify it's a KiroClaw process.
-4. `SIGTERM` to each verified PID.
+   target a non-default dev gateway): `platform_compat.find_listening_pids(port)`
+   to find PIDs — `lsof -ti TCP:{port} -sTCP:LISTEN` on POSIX, `netstat -ano`
+   parsing on Windows (there is no `lsof` there; this previously made
+   `kiroclaw stop` a no-op on Windows). `listening_pid_tool_available()`
+   distinguishes "no listener" from "lookup tool missing".
+3. `platform_compat.process_command_line(pid)` to verify it's a KiroClaw process —
+   `/proc/<pid>/cmdline` (Linux), `ps -o command=` (macOS), `Win32_Process.CommandLine`
+   via WMI (Windows). The Windows venv `kiroclaw.exe` re-execs `python.exe`, so the
+   match is on the command line (`-m kiro_claw gateway` / `\Scripts\kiroclaw.exe gateway`),
+   not the image name.
+4. Terminate each verified PID: `os.kill(SIGTERM)` on POSIX; `taskkill /T /F`
+   (via `platform_compat.kill_process_tree`) on Windows so the gateway's detached
+   children are reaped too. Liveness is probed with `platform_compat.pid_exists`
+   (a raw `os.kill(pid, 0)` would *terminate* the process on Windows).
 5. Waits up to 1s for exit.
 6. SEL audit event logged.
 
@@ -275,20 +285,24 @@ Each step checks if the tool is already installed and skips if present.
    like `stop` (SIGTERM + immediate respawn) and never re-reads the plist.
 2. Otherwise (foreground gateway, no service, or `--port` passed
    explicitly to target a non-default dev gateway):
-   - `lsof -ti TCP:{port} -sTCP:LISTEN` to detect a running gateway.
-     If found, run the existing `_stop` SIGTERM-by-port path.
-     If not (e.g. the user runs `restart` after a crash), skip the stop
-     step rather than erroring — the user expects to end up with a
-     running gateway either way. The `_stop` call is wrapped in a
-     `try / except SystemExit` so a TOCTOU race (gateway exits between
-     the lsof check and `_stop`'s own lookup → `_stop` calls
+   - `platform_compat.find_listening_pids(port)` (lsof on POSIX, netstat
+     on Windows) to detect a running gateway. If found — OR if the lookup
+     tool is absent (`not listening_pid_tool_available()`, so a missing
+     tool is not mistaken for a dead gateway) — run the existing `_stop`
+     kill-by-port path. If not (e.g. the user runs `restart` after a
+     crash), skip the stop step rather than erroring — the user expects to
+     end up with a running gateway either way. The `_stop` call is wrapped
+     in a `try / except SystemExit` so a TOCTOU race (gateway exits between
+     the listener check and `_stop`'s own lookup → `_stop` calls
      `sys.exit(1)`) does not abort the restart before the spawn.
-   - Spawn a detached `kiroclaw gateway` via `subprocess.Popen` with
-     `start_new_session=True`, stdin set to `/dev/null`, and stdout +
-     stderr redirected to `~/.kiroclaw/gateway.log` (the same file the
-     `kiroclaw logs` command tails for foreground gateways). The shell
-     returns immediately and the user can follow logs via
-     `kiroclaw logs -f`.
+   - Spawn a detached `kiroclaw gateway` via `subprocess.Popen`, stdin set
+     to `subprocess.DEVNULL`, and stdout + stderr redirected to
+     `~/.kiroclaw/gateway.log` (the same file the `kiroclaw logs` command
+     tails for foreground gateways). Detach is per-platform: POSIX uses
+     `start_new_session=True`; Windows uses `creationflags=DETACHED_PROCESS
+     | CREATE_NEW_PROCESS_GROUP` (there is no setsid) — both via
+     `platform_compat`. The shell returns immediately and the user can
+     follow logs via `kiroclaw logs -f`.
 3. SEL audit event logged with `via=service` or `via=fork pid=<n>` so
    the audit trail distinguishes the two paths.
 

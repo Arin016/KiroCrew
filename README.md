@@ -20,8 +20,17 @@ KiroClaw ships as a Python backend (installed via `pip`) plus a React web
 dashboard (built with `npm`). Memory and the knowledge library use a local
 [Ollama](https://ollama.com) server for embeddings.
 
-> **Windows is not supported.** The `kiro-cli` backend only runs on macOS and
-> Linux.
+> **Platforms: macOS, Linux, and Windows.** macOS/Linux install via `pip` as
+> below. **Windows** runs natively from the same Python **source install** —
+> CPython 3.12 + a venv + `pip install -e . tzdata` (3.12 because numpy 1.x has
+> no 3.13 wheel; `tzdata` because Windows ships no system IANA tz database),
+> launched as `python -m kiro_claw gateway`. Cross-platform process / file-lock
+> / signal / metrics behavior is routed through `kiro_claw.platform_compat`, so
+> macOS + Linux behavior is unchanged. See
+> **[docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md)** for step-by-step Windows
+> setup, per-feature status, and troubleshooting. (`install.ps1` is a separate
+> thin-client bootstrapper for `kiroclaw cloud`, which runs the gateway on a
+> Linux EC2 box — not the native Windows path.)
 
 ### 1. Install the backend (pip)
 

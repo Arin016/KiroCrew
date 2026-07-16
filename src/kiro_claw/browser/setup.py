@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kiro_claw import platform_compat
 from kiro_claw.browser.auth import MIDWAY_COOKIE_PATH, parse_netscape_cookies
 
 
@@ -170,7 +171,7 @@ def patch_mcp_extension(token: str) -> None:
         }
         servers["@playwright/mcp"] = entry
         mcp_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.chmod(str(mcp_json), 0o600)
+        platform_compat.chmod_safe(str(mcp_json), 0o600)
     except (json.JSONDecodeError, OSError):
         pass
 

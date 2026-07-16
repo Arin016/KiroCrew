@@ -29,6 +29,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from kiro_claw import platform_compat
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DIR = Path.home() / ".kiroclaw"
@@ -211,8 +213,21 @@ class SecurityEventLog:
                 lines.append(json.dumps(asdict(event)) + "\n")
                 self._last_hash = event.entry_hash
             try:
-                with open(self._path, "a", encoding="utf-8") as f:
+                # Use os.open with explicit 0o600 mode to prevent other users
+                # from reading the security audit log (pentest finding P472042812).
+                fd = os.open(
+                    self._path,
+                    os.O_CREAT | os.O_APPEND | os.O_WRONLY,
+                    0o600,
+                )
+                with os.fdopen(fd, "a", encoding="utf-8") as f:
                     f.write("".join(lines))
+                # Ensure permissions are correct even if file pre-existed with
+                # wrong mode (e.g. created by an older version).
+                try:
+                    os.chmod(self._path, 0o600)
+                except OSError:
+                    logger.warning("Failed to enforce 0o600 permissions on SEL audit log %s", self._path, exc_info=True)
             except OSError:
                 self._last_hash = prev_last_hash  # nothing persisted — roll back
                 if raise_on_error:
@@ -264,10 +279,13 @@ class SecurityEventLog:
             return key_path.read_bytes()
         key = os.urandom(32)
         key_path.write_bytes(key)
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            pass
+        # chmod_safe (logs + swallows OSError; no-op on Windows) — fail-SOFT by
+        # design: a read-only FS must not crash SecurityEventLog init (see
+        # test_chmod_failure_is_swallowed). The reviewer's note was only that the
+        # old `try: chmod_safe except OSError: pass` wrapper was dead (chmod_safe
+        # never raises) — so drop the wrapper, keep the fail-soft behavior. (Unlike
+        # token_secret.py, which is fail-LOUD; the SEL key tolerates chmod failure.)
+        platform_compat.chmod_safe(key_path, 0o600)
         return key
 
     def _read_last_hash(self) -> str:

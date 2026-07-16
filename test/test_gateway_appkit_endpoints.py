@@ -740,8 +740,9 @@ class TestReverseProxy:
 
             ts, sig = proxy_header.split(":", 1)
             # Verify signature — proxy preserves /api/ prefix in the forwarded
-            # path so the HMAC msg includes it.
-            msg = f"{ts}:GET:/api/test-path"
+            # path so the HMAC msg includes it. GET carries no body, so the
+            # body hash is sha256 of the empty byte string.
+            msg = f"{ts}:GET:/api/test-path:" + hashlib.sha256(b"").hexdigest()
             expected = _hmac.new(
                 self._secret.encode(), msg.encode(), hashlib.sha256
             ).hexdigest()
@@ -789,16 +790,71 @@ class TestReverseProxy:
             # prefix in forwarded path, so msg includes it.
             proxy_header = received_headers.get("x-kiroclaw-proxy", "")
             ts, sig = proxy_header.split(":", 1)
-            msg = f"{ts}:GET:/api/data?user=alice&limit=10"
+            empty_body_hash = hashlib.sha256(b"").hexdigest()
+            msg = f"{ts}:GET:/api/data?user=alice&limit=10:" + empty_body_hash
             expected = _hmac.new(
                 self._secret.encode(), msg.encode(), hashlib.sha256
             ).hexdigest()
             assert sig == expected
 
             # Verify that a signature WITHOUT query string does NOT match
-            msg_no_qs = f"{ts}:GET:/api/data"
+            msg_no_qs = f"{ts}:GET:/api/data:" + empty_body_hash
             wrong_sig = _hmac.new(
                 self._secret.encode(), msg_no_qs.encode(), hashlib.sha256
+            ).hexdigest()
+            assert sig != wrong_sig
+        finally:
+            await runner.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_hmac_covers_body(self, monkeypatch):
+        """HMAC binds sha256 of the request body (integrity)."""
+        import hashlib
+        import hmac as _hmac
+
+        received_headers: dict[str, str] = {}
+
+        async def echo_handler(request: web.Request) -> web.Response:
+            for k, v in request.headers.items():
+                received_headers[k.lower()] = v
+            # Drain the body so the proxied request completes cleanly.
+            await request.read()
+            return web.json_response({"ok": True})
+
+        backend_app = web.Application()
+        backend_app.router.add_route("*", "/{path:.*}", echo_handler)
+        runner = web.AppRunner(backend_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+
+        import kiro_claw.apps.routes as rmod
+        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
+
+        body_bytes = b'{"hello": "world", "n": 42}'
+        try:
+            async with self._make_client() as client:
+                resp = await client.post("/apps/proxy-app/api/echo", data=body_bytes)
+                assert resp.status == 200
+
+            proxy_header = received_headers.get("x-kiroclaw-proxy", "")
+            assert proxy_header, "X-KiroClaw-Proxy header missing"
+            ts, sig = proxy_header.split(":", 1)
+
+            # Signature binds sha256 of the actual (non-empty) body.
+            body_hash = hashlib.sha256(body_bytes).hexdigest()
+            msg = f"{ts}:POST:/api/echo:" + body_hash
+            expected = _hmac.new(
+                self._secret.encode(), msg.encode(), hashlib.sha256
+            ).hexdigest()
+            assert sig == expected
+
+            # A signature computed over the EMPTY-body hash must NOT match,
+            # proving the body is actually bound into the HMAC.
+            msg_empty = f"{ts}:POST:/api/echo:" + hashlib.sha256(b"").hexdigest()
+            wrong_sig = _hmac.new(
+                self._secret.encode(), msg_empty.encode(), hashlib.sha256
             ).hexdigest()
             assert sig != wrong_sig
         finally:

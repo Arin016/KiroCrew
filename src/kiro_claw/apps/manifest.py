@@ -11,6 +11,8 @@ app-specific fields.
 from __future__ import annotations
 
 import json
+import ntpath
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +24,28 @@ from typing import Any
 
 KEBAB_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+([+-]|$)")
+
+
+def _path_escapes_app_root(rel_path: str, app_root: Path | None) -> bool:
+    """Return True if ``rel_path`` is an unsafe app-resource path.
+
+    Unsafe = absolute (POSIX/Windows/UNC), or — resolved against ``app_root`` —
+    escapes ``app_root`` (canonical containment, matching the runtime checks in
+    ``module_loader`` / ``bridges``). When ``app_root`` is None (pure-format
+    validation / round-trip tests) falls back to a lexical check that rejects
+    absolute paths and any ``..`` path segment.
+    """
+    if not rel_path:
+        return False
+    if os.path.isabs(rel_path) or ntpath.isabs(rel_path):
+        return True
+    if app_root is not None:
+        try:
+            resolved = (app_root / rel_path).resolve()
+            return not resolved.is_relative_to(app_root.resolve())
+        except (OSError, ValueError):
+            return True
+    return ".." in Path(rel_path).parts
 
 
 @dataclass
@@ -560,9 +584,9 @@ class PublishProviderConfig:
 # Fields that are parsed into typed dataclass attributes
 _KNOWN_FIELDS = frozenset({
     "name", "version", "displayName", "description", "author", "license",
-    "minKiroClawVersion", "agents", "skills", "sops", "mcpServers", "crons",
-    "ui", "backend", "permissions", "setup", "tags", "jobFamilies", "platform",
-    "dependencies", "publishProvider",
+    "minKiroClawVersion", "signer", "signature", "agents", "skills", "sops",
+    "mcpServers", "crons", "ui", "backend", "permissions", "setup", "tags",
+    "jobFamilies", "platform", "dependencies", "publishProvider",
 })
 
 
@@ -585,6 +609,8 @@ class AppManifest:
     author: str = ""
     license: str = ""
     minKiroClawVersion: str = ""  # noqa: N815
+    signer: str = ""  # publisher/signer id, keyed into the fleet admission trust_keys
+    signature: str = ""  # detached signature over signing_payload() (verified by admission)
 
     # --- Agent resources ---
     agents: list[str] = field(default_factory=list)  # paths to agent JSON files
@@ -627,8 +653,13 @@ class AppManifest:
     # Validation
     # -----------------------------------------------------------------
 
-    def validate(self) -> list[str]:
-        """Return list of validation errors (empty list means valid)."""
+    def validate(self, app_root: Path | None = None) -> list[str]:
+        """Return list of validation errors (empty list means valid).
+
+        When ``app_root`` is provided, resource paths are checked for canonical
+        containment (resolve + is_relative_to) against it; otherwise a lexical
+        check (reject absolute paths and ``..`` segments) is applied.
+        """
         errors: list[str] = []
 
         # Required fields
@@ -650,17 +681,27 @@ class AppManifest:
         if not self.description:
             errors.append("missing required field: description")
 
-        # Path traversal check on all resource paths
+        # Path containment check on all app-root-relative resource paths.
+        # Canonical (resolve + is_relative_to) when app_root is known; lexical
+        # (reject absolute + '..' segments) otherwise. Applied uniformly to
+        # agents/skills/sops, ui.entry, ui.pages[].entryPoint AND
+        # backend.entryPoint. (A module-style dotted backend.entryPoint such as
+        # 'kiro_claw.apps.builtins.x.server' has no '..' and is not absolute, so
+        # the helper never false-positives on it.)
         for path_list_name in ("agents", "skills", "sops"):
             for p in getattr(self, path_list_name):
-                if ".." in str(p):
+                if _path_escapes_app_root(str(p), app_root):
                     errors.append(
                         f"{path_list_name} path contains path traversal: {p!r}"
                     )
 
-        # UI entry path traversal check
-        if self.ui.entry and ".." in self.ui.entry:
+        if self.ui.entry and _path_escapes_app_root(self.ui.entry, app_root):
             errors.append(f"ui.entry contains path traversal: {self.ui.entry!r}")
+
+        if self.backend.entryPoint and _path_escapes_app_root(self.backend.entryPoint, app_root):
+            errors.append(
+                f"backend.entryPoint contains path traversal: {self.backend.entryPoint!r}"
+            )
 
         # UI page validation
         for page in self.ui.pages:
@@ -668,7 +709,7 @@ class AppManifest:
                 errors.append("ui page missing required field: route")
             if not page.label:
                 errors.append("ui page missing required field: label")
-            if page.entryPoint and ".." in page.entryPoint:
+            if page.entryPoint and _path_escapes_app_root(page.entryPoint, app_root):
                 errors.append(
                     f"ui page entryPoint contains path traversal: {page.entryPoint!r}"
                 )
@@ -686,6 +727,18 @@ class AppManifest:
         errors.extend(self.backend.hooks.validate())
 
         return errors
+
+    def signing_payload(self) -> bytes:
+        """Canonical bytes an admission signature covers (manifest minus the
+        signature). Deterministic across field ordering so a future admission
+        verify has a stable payload over name/version/signer/permissions."""
+        body = {
+            "name": self.name,
+            "version": self.version,
+            "signer": self.signer,
+            "permissions": self.permissions.to_dict(),
+        }
+        return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     # -----------------------------------------------------------------
     # Serialization
@@ -705,6 +758,10 @@ class AppManifest:
             d["license"] = self.license
         if self.minKiroClawVersion:
             d["minKiroClawVersion"] = self.minKiroClawVersion
+        if self.signer:
+            d["signer"] = self.signer
+        if self.signature:
+            d["signature"] = self.signature
         if self.agents:
             d["agents"] = self.agents
         if self.skills:
@@ -813,6 +870,8 @@ class AppManifest:
             author=str(data.get("author", "")),
             license=str(data.get("license", "")),
             minKiroClawVersion=str(data.get("minKiroClawVersion", "")),  # noqa: N815
+            signer=str(data.get("signer", "")),
+            signature=str(data.get("signature", "")),
             agents=[str(a) for a in data.get("agents", []) if a],
             skills=[
                 str(s.get("path", s.get("name", "")) if isinstance(s, dict) else s)

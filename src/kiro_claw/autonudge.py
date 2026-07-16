@@ -30,11 +30,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator
 
-# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
-# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
-# gateway/cron machinery that actually locks runs only on macOS/Linux.
-from kiro_claw import flock_compat as fcntl
-from kiro_claw import shutdown_event
+from kiro_claw import platform_compat, shutdown_event
 from kiro_claw.config.loader import config_dir
 
 logger = logging.getLogger(__name__)
@@ -92,13 +88,18 @@ def _locked_file(path: Path, mode: str) -> Iterator[Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     if "r" in mode and not path.exists():
         path.write_text(json.dumps({"version": _STORE_VERSION, "loops": []}))
+    # "r" -> "r+": Windows msvcrt.locking requires WRITE access on the fd — a
+    # read-only handle fails with EACCES, which platform_compat.file_lock
+    # swallows (best-effort), silently degrading the reader's lock to a no-op
+    # and letting a concurrent _save race the read (same fix as
+    # apps/bridges.py:_mcp_lock). The shared/exclusive decision keys off the
+    # ORIGINAL mode so a reader still requests a shared lock.
+    exclusive = "w" in mode or "+" in mode
+    if mode == "r":
+        mode = "r+"
     with open(path, mode, encoding="utf-8") as fh:
-        lock_mode = fcntl.LOCK_EX if "w" in mode or "+" in mode else fcntl.LOCK_SH
-        fcntl.flock(fh.fileno(), lock_mode)
-        try:
+        with platform_compat.file_lock(fh.fileno(), exclusive=exclusive):
             yield fh
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 class AutoNudgeService:

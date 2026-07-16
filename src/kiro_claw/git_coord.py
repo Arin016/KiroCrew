@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kiro_claw.sandbox import sandboxed_spawn_argv
+
 if TYPE_CHECKING:
     from kiro_claw.taskrunner import Project, Task
 
@@ -97,27 +99,40 @@ async def finalize(run: Project) -> str:
 
 
 async def _is_git_repo(path: str) -> bool:
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        "rev-parse",
-        "--is-inside-work-tree",
-        cwd=path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.communicate()
-    return proc.returncode == 0
+    # git runs against an agent-selected repo whose local hooks and config can
+    # execute code, so route through the sandbox chokepoint (OS isolation +
+    # credential-scrubbed env). See Talos finding 92e24570.
+    argv, env, cleanup = sandboxed_spawn_argv(["git", "rev-parse", "--is-inside-work-tree"])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        await proc.communicate()
+        return proc.returncode == 0
+    finally:
+        if cleanup:
+            Path(cleanup).unlink(missing_ok=True)
 
 
 async def _git(work_dir: str, *args: str) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
-        cwd=work_dir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    # Agent-influenced git invocation: sandbox + scrubbed env (Talos 92e24570).
+    argv, env, cleanup = sandboxed_spawn_argv(["git", *args])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=work_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+    finally:
+        if cleanup:
+            Path(cleanup).unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {stderr.decode()}")
     return stdout.decode()

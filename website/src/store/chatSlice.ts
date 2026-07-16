@@ -1,6 +1,6 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit'
 import { api } from '../api/client'
-import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey } from './dashboardSlice'
+import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey, sseSlots } from './dashboardSlice'
 import { resolveDefaultColor } from '../utils/sessionColors'
 import { gcSessionStorage } from '../utils/storageGc'
 import type { RootState } from './index'
@@ -1222,6 +1222,33 @@ const chatSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
+      /** Reconcile per-slot caches against the authoritative slots list.
+       *  Sessions that close/archive/delete vanish from the SSE `slots` REPLACE,
+       *  but their transcripts previously stayed resident for the tab's lifetime
+       *  (only `deleteSlot.fulfilled` evicted) — the dominant retention class
+       *  behind multi-GB heaps on long-lived dashboard tabs (Mesh-2835).
+       *  Guards: an empty payload is a no-op (SSE reconnect can deliver an
+       *  empty frame before the first real snapshot), and the active slot is
+       *  never pruned (its live `messages`/optimistic state must not be
+       *  dropped out from under the open pane). `subagents`/`workflowRuns`
+       *  are intentionally excluded — different keyspaces (dashboard:<slot>,
+       *  run id), not bare slot keys. */
+      .addCase(sseSlots, (state, action) => {
+        if (action.payload.length === 0) return
+        const live = new Set(action.payload.map(s => s.key))
+        if (state.activeSlot) live.add(state.activeSlot)
+        const maps = [
+          state.slotMessages, state.slotActivity, state.slotRun, state.slotHydrated,
+          state.slotSide, state.slotSideClosed, state.slotStatusDetail,
+          state.slotContextPct, state.slotContextTokens, state.stopPressedAt,
+        ].filter(Boolean)
+        const cached = new Set(maps.flatMap(m => Object.keys(m)))
+        for (const key of cached) {
+          if (live.has(key)) continue
+          for (const m of maps) delete m[key]
+        }
+        state.slotHistory = (state.slotHistory ?? []).filter(k => live.has(k))
+      })
       .addCase(fetchHistory.fulfilled, (state, action) => {
         const { sessions, hasMore, offset, append } = action.payload
         state.history = append ? [...state.history, ...sessions] : sessions

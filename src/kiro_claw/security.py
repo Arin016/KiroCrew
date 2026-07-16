@@ -5,14 +5,21 @@ from __future__ import annotations
 import asyncio
 import base64
 import fnmatch
+import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import shlex
 import string
 import uuid
 from collections import Counter
+
+try:
+    import resource as _resource
+except ImportError:
+    _resource = None  # type: ignore[assignment]  # Windows/non-POSIX
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -138,12 +145,70 @@ _GIT_PUBLISH_DENY_LABEL = "git push"
 def _is_git_publish(text_lower: str) -> bool:
     """Return True if *text_lower* invokes ``git push`` (verb-anchored).
 
-    Operates on an already-lowercased string.  Detects both a normal
-    ``git ... push`` invocation (where ``push`` is the subcommand) and the
-    command-substitution glue-evasion forms.  Does NOT match ``git stash
-    push``, ``git commit -m '...push...'``, ``git log --grep push``, etc.
+    Uses a two-pass approach:
+
+    1. **Fast first-pass (regex):** ``_GIT_PUBLISH_RE`` and
+       ``_GIT_PUBLISH_GLUE_RE`` catch normal ``git push`` invocations and
+       command-substitution glue-evasion (e.g. ``git$(echo ' ')push``).
+    2. **Normalizer second-pass:** ``normalize_shell_command`` strips quotes
+       and empty-string concatenation so evasions like ``"git" push``,
+       ``g""it push``, or ``'g'it push`` are resolved to their true tokens.
+
+    Does NOT match ``git stash push``, ``git commit -m '...push...'``,
+    ``git log --grep push``, etc.
+
+    Operates on an already-lowercased string.
     """
-    return bool(_GIT_PUBLISH_RE.search(text_lower) or _GIT_PUBLISH_GLUE_RE.search(text_lower))
+    # Pass 1: regex fast-path
+    if _GIT_PUBLISH_RE.search(text_lower) or _GIT_PUBLISH_GLUE_RE.search(text_lower):
+        return True
+
+    # Pass 2: normalizer-based detection (catches quote evasions like
+    # "git" push, g""it push, 'g'it push)
+    return _is_git_push_via_normalizer(text_lower)
+
+
+# Git global flags that consume a separate argument token (appear between
+# `git` and the subcommand).
+_GIT_ARG_FLAGS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace"})
+
+
+def _is_git_push_via_normalizer(text_lower: str) -> bool:
+    """Normalizer-based git push detection (second pass).
+
+    Tokenizes the command via ``normalize_shell_command``, then checks if
+    any token sequence resolves to ``git`` followed by ``push`` as the
+    subcommand (skipping flags and their arguments).
+
+    Avoids false positives on ``git stash push`` by requiring ``push`` to
+    be the FIRST non-flag token after ``git`` (the subcommand position).
+    """
+    try:
+        tokens = normalize_shell_command(text_lower)
+    except Exception:
+        return False
+
+    if not tokens:
+        return False
+
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        # Check if this token resolves to "git"
+        if os.path.basename(token) == "git" or token == "git":
+            # Skip global flags and their arguments to find the subcommand
+            j = i + 1
+            while j < len(tokens):
+                if tokens[j] in _GIT_ARG_FLAGS:
+                    j += 2  # skip flag + its argument
+                elif tokens[j].startswith("-"):
+                    j += 1  # skip simple flag
+                else:
+                    break
+            if j < len(tokens) and tokens[j] == "push":
+                return True
+        i += 1
+    return False
 
 
 # ── Feature-branch push gate ──
@@ -437,6 +502,18 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     # is documented future work; this closes the read/rewrite path.)
     ".kiroclaw/sel_hmac.key",
     ".kiroclaw/security_events.jsonl",
+    # App admission trust root (keystone invariant). ``apps/admission.py`` loads
+    # ``config_dir()/app_admission.json`` as the SOLE fleet-controlled App Kit
+    # admission ceiling (kill-switch / allowlist / require_signature) — the one
+    # thing an app can never source itself. An absent file falls open (admit), so
+    # a governed agent that could fs_write/tee/rm this file could delete or neuter
+    # its own admission ceiling and re-admit a banned/unsigned app. Like the SEL
+    # trust roots above, it is the governed subject's own ceiling and must never be
+    # readable OR writable through the shared file gate (``is_sensitive_path``).
+    # The gateway's own loader (``apps.admission.load_app_admission_policy``) opens
+    # it directly via ``path.read_text`` and does NOT route through this gate, so
+    # legitimate policy loading still works.
+    ".kiroclaw/app_admission.json",
     # Governance trust-root files (KEYSTONE of the two-level governance model).
     # Under "secure by default, not by mandate" the ONLY thing preventing a
     # prompt-injected agent from rewriting its own ceiling is that it cannot
@@ -472,9 +549,10 @@ _WRITE_PROTECTED_HOME_PATHS: list[str] = [
 ]
 
 # Regex for bash commands that read sensitive paths.
-# Matches: cat, head, tail, less, more, strings, xxd, base64, cp, scp, open
+# Matches: cat, head, tail, less, more, strings, xxd, base64, cp, scp, open,
+# awk, od, nl, sed, perl (read verbs that can access file contents via path args)
 # followed by a path containing any sensitive dir.
-_READ_CMDS = r"(?:cat|head|tail|less|more|strings|xxd|base64|cp|scp|open|vi|vim|nano|code)\s"
+_READ_CMDS = r"(?:cat|head|tail|less|more|strings|xxd|base64|cp|scp|open|vi|vim|nano|code|awk|od|nl|sed|perl)\s"
 
 # Regex for bash commands that WRITE/MODIFY a path argument.  Reads alone were
 # not enough: a prompt-injected agent could rewrite the governance trust-root
@@ -705,11 +783,35 @@ _RELATIVE_SENSITIVE_RE = re.compile(
 )
 
 
+# ── Read verbs for normalizer second-pass ──
+# Programs that can read file contents. Used to detect path-based credential
+# access via the normalizer when the regex first-pass misses obfuscated forms.
+_NORMALIZER_READ_VERBS: frozenset[str] = frozenset({
+    "cat", "head", "tail", "less", "more", "strings", "xxd", "base64",
+    "cp", "scp", "open", "vi", "vim", "nano", "code",
+    # Extended coverage for relative-traversal attacks (pentest finding):
+    "awk", "od", "nl", "sed", "perl",
+    "grep", "egrep", "fgrep", "sort", "uniq", "wc", "cut", "paste",
+    "diff", "tee", "xargs", "file", "stat", "md5sum", "sha256sum",
+    "python", "python3", "ruby", "node",
+})
+
+
 def is_sensitive_bash_command(command: str) -> str | None:
-    """Check if a bash command reads OR writes sensitive paths.
+    """Check if a bash command reads sensitive paths, accesses IMDS, or leaks env creds.
+
+    Uses a two-pass approach:
+    1. **Regex first-pass (fast):** Pattern match against known read-verb + sensitive
+       path combinations. Catches unobfuscated commands instantly.
+    2. **Normalizer second-pass:** Tokenizes the command via
+       ``normalize_shell_command`` (strips shell quoting, expands $HOME/~, resolves
+       relative paths), then routes each path-like token through
+       ``is_sensitive_path()`` to catch obfuscation (e.g. ``ca""t ~/.aws/credentials``,
+       ``awk '{print}' $HOME/.ssh/id_rsa``, ``sed -n p ~/../../etc/shadow``).
 
     Returns denial reason string, or None if clean.
     """
+    # ── Pass 1: regex fast-path ──
     if _get_sensitive_re().search(command):
         return "Blocked: command accesses sensitive credential path"
     if _EXTRACT_INTO_TRUST_ROOT_RE.search(command):
@@ -720,6 +822,80 @@ def is_sensitive_bash_command(command: str) -> str | None:
     # it (was gated on ln/cp only, so dd/base64/xxd/head/tail slipped past).
     if _RELATIVE_SENSITIVE_RE.search(command):
         return "Blocked: command references a sensitive credential path via relative traversal"
+
+    # ── Pass 2: normalizer-based sensitive path detection ──
+    normalizer_result = _check_sensitive_via_normalizer(command)
+    if normalizer_result:
+        return normalizer_result
+
+    # IMDS access via any IP encoding (decimal, hex, octal, IPv6-mapped)
+    imds_result = _check_imds_access(command)
+    if imds_result:
+        return imds_result
+    # Environment credential exfiltration (declare -p, env|grep, printenv, etc.)
+    env_result = _check_env_credential_access(command)
+    if env_result:
+        return env_result
+    return None
+
+
+def _check_sensitive_via_normalizer(command: str) -> str | None:
+    """Normalizer second-pass: tokenize command and route paths through is_sensitive_path.
+
+    Catches obfuscation the regex first-pass cannot:
+    - Quoted command names: ``ca""t ~/.aws/credentials``
+    - Variable expansion: ``$HOME/.ssh/id_rsa``
+    - Relative traversal: ``awk '{print}' ~/../../.aws/credentials``
+    - Mixed evasion: ``"cat" ~/.aws/credentials``
+
+    Only triggers when a recognized read verb is present in the resolved tokens
+    (avoids false positives on write/create commands).
+
+    Returns denial reason string, or None if clean.
+    """
+    try:
+        tokens = normalize_shell_command(command)
+    except Exception:
+        return None
+
+    if not tokens:
+        return None
+
+    # Check if any token resolves to a known read verb (by basename, so
+    # /usr/bin/cat is recognized as "cat").
+    has_read_verb = False
+    for token in tokens:
+        if not token:
+            continue
+        basename = os.path.basename(token).lower()
+        if basename in _NORMALIZER_READ_VERBS:
+            has_read_verb = True
+            break
+
+    if not has_read_verb:
+        return None
+
+    # Route each path-like token through is_sensitive_path()
+    for token in tokens:
+        if not token:
+            continue
+        # Skip flags
+        if token.startswith("-"):
+            continue
+        # Skip tokens that ARE the read verb itself
+        basename = os.path.basename(token).lower()
+        if basename in _NORMALIZER_READ_VERBS:
+            continue
+        # Only check tokens that look like filesystem paths
+        if not _is_path_like(token):
+            continue
+        # is_sensitive_path handles symlink resolution, traversal, ~ expansion,
+        # $HOME expansion, and all sensitive directory checks
+        if is_sensitive_path(token):
+            return (
+                "Blocked: command accesses sensitive credential path "
+                f"(resolved via normalizer: {token[:80]})"
+            )
     return None
 
 
@@ -2089,3 +2265,376 @@ def redact_and_truncate(text: str, max_chars: int = 4000) -> str:
     credential regex and therefore escapes redaction.
     """
     return redact_credentials(redact_exfiltration_urls(text or "")[0])[0][:max_chars]
+
+
+# ── Shell-aware command normalizer ──
+# Strips shell quoting tricks, expands tilde/HOME, and resolves paths so that
+# obfuscated commands (e.g. ca""t ~/.aws/credentials, $HOME/.ssh/id_rsa) are
+# reduced to their canonical form before deny-list matching.
+
+# Regex to strip empty-string concatenation: paired quotes ('' or "") that
+# vanish (e.g. g""it -> git, ca''t -> cat).
+_EMPTY_QUOTE_RE = re.compile(r'""|\'\'')
+
+# Regex for $HOME or ${HOME} variable expansion.
+_HOME_VAR_RE = re.compile(r"\$\{HOME\}|\$HOME", re.IGNORECASE)
+
+
+def normalize_shell_command(cmd: str) -> list[str]:
+    """Normalize a shell command string into a resolved token list.
+
+    Handles:
+    - Shell quoting via shlex.split(posix=True)
+    - Empty-string concatenation (g""it -> git, ca''t -> cat)
+    - Tilde expansion (~/... -> /home/user/...)
+    - $HOME / ${HOME} expansion to actual home directory
+    - Backslash stripping (handled by shlex POSIX mode)
+
+    Returns a list of resolved tokens.  On parse failure (unmatched quotes)
+    falls back to basic whitespace splitting with quote/backslash stripping.
+    """
+    if not cmd or not cmd.strip():
+        return []
+
+    # Pre-process: expand $HOME/${HOME} BEFORE shlex splitting so that
+    # expansion happens even inside quoted strings that shlex won't expand.
+    home = os.path.expanduser("~")
+    preprocessed = _HOME_VAR_RE.sub(home, cmd)
+
+    # Tokenize using POSIX shlex — handles quoting, escaping, etc.
+    try:
+        tokens = shlex.split(preprocessed, posix=True)
+    except ValueError:
+        # Unbalanced quotes or other parse errors — fall back to basic split.
+        tokens = preprocessed.split()
+        tokens = [t.strip("\"'\\") for t in tokens]
+
+    resolved: list[str] = []
+    for token in tokens:
+        # Strip empty-string concatenation artifacts: ca""t -> cat, g''it -> git
+        token = _EMPTY_QUOTE_RE.sub("", token)
+
+        # Expand tilde (shlex doesn't do tilde expansion)
+        if token.startswith("~"):
+            token = os.path.expanduser(token)
+
+        resolved.append(token)
+
+    return resolved
+
+
+def resolve_command_paths(tokens: list[str]) -> list[str]:
+    """Resolve path-like tokens to their canonical absolute form.
+
+    Runs os.path.realpath() on tokens that look like filesystem paths
+    (start with /, ~, ./, or ../) to resolve symlinks and directory traversal.
+    Non-path tokens are returned unchanged.
+
+    Args:
+        tokens: List of shell tokens (typically from normalize_shell_command).
+
+    Returns:
+        New list with path-like tokens resolved to their realpath.
+    """
+    resolved: list[str] = []
+    for token in tokens:
+        if _is_path_like(token):
+            resolved.append(os.path.realpath(token))
+        else:
+            resolved.append(token)
+    return resolved
+
+
+def _is_path_like(token: str) -> bool:
+    """Heuristic: does this token look like a filesystem path?"""
+    if not token:
+        return False
+    # Absolute path
+    if token.startswith("/"):
+        return True
+    # Home-relative (already expanded, but handle edge cases)
+    if token.startswith("~"):
+        return True
+    # Relative with explicit directory prefix
+    if token.startswith("./") or token.startswith("../"):
+        return True
+    # Contains path separator and has directory component (not a flag)
+    if "/" in token and not token.startswith("-"):
+        # Exclude URLs (http://, https://, etc.)
+        if "://" in token:
+            return False
+        return True
+    return False
+
+
+# ── IP Canonicalization (IMDS bypass prevention) ──
+# Attackers bypass IMDS checks by encoding 169.254.169.254 in alternate forms:
+#   - Decimal:   2852039166 (single 32-bit integer)
+#   - Hex:       0xa9fea9fe or 0xa9.0xfe.0xa9.0xfe
+#   - Octal:     0251.0376.0251.0376
+#   - IPv6-mapped: ::ffff:169.254.169.254 or ::ffff:a9fe:a9fe
+#   - Mixed:     169.254.0xa9.0376
+# canonicalize_ip converts ALL these to dotted-quad for uniform matching.
+
+
+def canonicalize_ip(s: str) -> str:
+    """Convert an IP address in any encoding to dotted-quad (a.b.c.d).
+
+    Handles:
+    - Standard dotted-quad (passthrough)
+    - Single decimal integer (e.g. 2852039166)
+    - Hex integer (e.g. 0xa9fea9fe)
+    - Octal/hex per-octet (e.g. 0251.0376.0251.0376 or 0xa9.0xfe.0xa9.0xfe)
+    - IPv6-mapped IPv4 (e.g. ::ffff:169.254.169.254 or ::ffff:a9fe:a9fe)
+
+    Returns the dotted-quad string on success, or the original string unchanged
+    if it cannot be parsed as an IP address.
+    """
+    s = s.strip()
+    if not s:
+        return s
+
+    # Try IPv6-mapped IPv4: ::ffff:... forms
+    if s.startswith("::ffff:") or s.startswith("::FFFF:"):
+        try:
+            addr = ipaddress.ip_address(s)
+            if hasattr(addr, "ipv4_mapped") and addr.ipv4_mapped:
+                return str(addr.ipv4_mapped)
+            if isinstance(addr, ipaddress.IPv6Address):
+                mapped = addr.ipv4_mapped
+                if mapped:
+                    return str(mapped)
+        except (ValueError, AttributeError):
+            pass
+
+    # Try standard dotted-quad with possible hex/octal octets
+    parts = s.split(".")
+    if 1 <= len(parts) <= 4:
+        octets: list[int] = []
+        valid = True
+        for part in parts:
+            try:
+                # Handle C-style octal (0NNN without 'o' prefix) which Python 3
+                # int(x, 0) doesn't recognize. Must check before int(x, 0).
+                if len(part) > 1 and part[0] == "0" and part[1:].isdigit():
+                    # Could be octal (0251) or just "00" etc.
+                    if all(c in "01234567" for c in part[1:]):
+                        val = int(part, 8)
+                    else:
+                        # Has 8 or 9 -- not valid octal, treat as decimal
+                        val = int(part)
+                else:
+                    # int() with base=0 handles: decimal, 0x hex
+                    val = int(part, 0)
+                octets.append(val)
+            except (ValueError, OverflowError):
+                valid = False
+                break
+
+        if valid:
+            if len(octets) == 1:
+                # Single integer: 2852039166 -> 4 octets
+                val = octets[0]
+                if 0 <= val <= 0xFFFFFFFF:
+                    return str(ipaddress.IPv4Address(val))
+            elif len(octets) == 4:
+                # Four octets (each 0-255)
+                if all(0 <= o <= 255 for o in octets):
+                    return f"{octets[0]}.{octets[1]}.{octets[2]}.{octets[3]}"
+
+    # Try parsing as a plain integer (no dots) -- decimal or hex
+    try:
+        val = int(s, 0)
+        if 0 <= val <= 0xFFFFFFFF:
+            return str(ipaddress.IPv4Address(val))
+    except (ValueError, OverflowError):
+        pass
+
+    # Try full ipaddress parsing as fallback
+    try:
+        addr = ipaddress.ip_address(s)
+        if isinstance(addr, ipaddress.IPv4Address):
+            return str(addr)
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+    except ValueError:
+        pass
+
+    return s
+
+
+# ── IMDS Access Detection ──
+# The AWS Instance Metadata Service at 169.254.169.254 (link-local) exposes
+# IAM role credentials via /latest/meta-data/iam/security-credentials/.
+# Any HTTP client (not just curl/wget) hitting this IP must be blocked.
+
+# Regex to extract potential IP addresses from a command string.
+# Captures dotted-quad, hex/octal per-octet, bare integers, IPv6-mapped forms.
+_IP_CANDIDATE_RE = re.compile(
+    r"(?:"
+    r"::ffff:[0-9a-fA-Fx.:]+|"            # IPv6-mapped
+    r"0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-Fx]+)*|"  # Hex (with possible dotted)
+    r"\d{7,10}|"                            # Large decimal (single integer IP)
+    r"(?:0[0-7]+\.){3}0[0-7]+|"            # Octal dotted
+    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"  # Standard dotted-quad
+    r")"
+)
+
+_IMDS_IP = "169.254.169.254"
+
+# HTTP tools that can fetch IMDS -- broader than just curl/wget
+_HTTP_TOOLS_RE = re.compile(
+    r"(?:curl|wget|http|https|fetch|lwp-request|lynx|links|"
+    r"python|ruby|perl|node|nc|ncat|socat|telnet|"
+    r"Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b",
+    re.IGNORECASE,
+)
+
+
+def _check_imds_access(command: str) -> str | None:
+    """Detect attempts to access the IMDS endpoint via any encoding.
+
+    Returns denial reason if IMDS access detected, None otherwise.
+    """
+    # Quick reject: no IP-like candidate in command
+    candidates = _IP_CANDIDATE_RE.findall(command)
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        canonical = canonicalize_ip(candidate)
+        if canonical == _IMDS_IP:
+            # Found IMDS IP -- block regardless of tool since even echo
+            # piped into nc could exfil credentials from the metadata service
+            return (
+                f"Blocked: command accesses IMDS endpoint "
+                f"(169.254.169.254 via encoding '{candidate}')"
+            )
+    return None
+
+
+# ── Environment Credential Exfiltration Detection ──
+# Attackers can read AWS credentials from environment variables without
+# touching the filesystem, bypassing is_sensitive_path/bash checks.
+# Block: declare -p AWS_SECRET*, env | grep AWS_, printenv AWS_,
+#         awk 'ENVIRON["AWS_*"]', export -p | grep AWS_
+
+_ENV_CRED_PATTERNS: list[re.Pattern[str]] = [
+    # declare -p AWS_SECRET_ACCESS_KEY / declare -p AWS_SESSION_TOKEN
+    re.compile(
+        r"declare\s+(?:-[a-zA-Z]+\s+)*-?p\s+AWS_(?:SECRET|SESSION|SECURITY)",
+        re.IGNORECASE,
+    ),
+    # env / printenv / export -p piped through grep for AWS_ vars
+    re.compile(
+        r"(?:env|printenv|export\s+-p|set)\s*(?:\|.*)?(?:grep|awk|sed)\s+.*AWS_",
+        re.IGNORECASE,
+    ),
+    # Direct printenv of sensitive vars
+    re.compile(
+        r"printenv\s+AWS_(?:SECRET_ACCESS_KEY|SESSION_TOKEN|SECURITY_TOKEN)",
+        re.IGNORECASE,
+    ),
+    # echo $AWS_SECRET* / echo ${AWS_SECRET*}
+    re.compile(
+        r"(?:echo|printf|cat)\s+.*\$\{?AWS_(?:SECRET|SESSION|SECURITY)",
+        re.IGNORECASE,
+    ),
+    # awk ENVIRON["AWS_SECRET*"] / awk ENVIRON["AWS_SESSION*"]
+    re.compile(
+        r"awk\s+.*ENVIRON\s*\[\s*[\"']AWS_(?:SECRET|SESSION|SECURITY)",
+        re.IGNORECASE,
+    ),
+    # python/ruby/node reading os.environ for AWS secrets
+    re.compile(
+        r"(?:python|ruby|node|perl)\S*\s+.*(?:os\.environ|ENV|process\.env)"
+        r".*AWS_(?:SECRET|SESSION|SECURITY)",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _check_env_credential_access(command: str) -> str | None:
+    """Detect attempts to read AWS credentials from environment variables.
+
+    Returns denial reason if env credential access detected, None otherwise.
+    """
+    for pattern in _ENV_CRED_PATTERNS:
+        if pattern.search(command):
+            return "Blocked: command reads AWS credentials from environment variables"
+    return None
+
+
+# ── Resource Limits (preexec_fn) ──
+# Applied to sandboxed subprocess spawns to prevent resource exhaustion attacks.
+# Uses POSIX resource limits (setrlimit) to cap memory, CPU, and file descriptors.
+
+
+def apply_resource_limits(config: dict | None = None) -> "Callable[[], None]":
+    """Return a preexec_fn that applies POSIX resource limits to a child process.
+
+    Reads limits from the ``resource_limits`` config section:
+      - ``max_memory_mb``: RLIMIT_AS (virtual address space) in megabytes.
+      - ``max_cpu_seconds``: RLIMIT_CPU in seconds.
+      - ``max_open_files``: RLIMIT_NOFILE (open file descriptors).
+
+    If config is None or missing the ``resource_limits`` key, uses defaults:
+      max_memory_mb=4096, max_cpu_seconds=300, max_open_files=1024.
+
+    The returned callable is intended for use as ``preexec_fn`` in
+    ``subprocess.Popen`` / ``asyncio.create_subprocess_exec``. It runs in the
+    child process after fork but before exec — setrlimit calls here only
+    affect the child.
+
+    Args:
+        config: Full KiroClaw config dict (or subset containing
+            ``resource_limits``). Pass None for defaults.
+
+    Returns:
+        A no-arg callable suitable for ``preexec_fn``.
+    """
+    if _resource is None:
+        return lambda: None
+
+    defaults = {
+        "max_memory_mb": 4096,
+        "max_cpu_seconds": 300,
+        "max_open_files": 1024,
+    }
+
+    limits = defaults.copy()
+    if config and "resource_limits" in config:
+        rl_config = config["resource_limits"]
+        if isinstance(rl_config, dict):
+            for key in defaults:
+                if key in rl_config:
+                    val = rl_config[key]
+                    if isinstance(val, (int, float)) and val > 0:
+                        limits[key] = int(val)
+
+    max_memory_bytes = limits["max_memory_mb"] * 1024 * 1024
+    max_cpu = limits["max_cpu_seconds"]
+    max_files = limits["max_open_files"]
+
+    def _set_limits() -> None:
+        """Apply resource limits in the child process (preexec_fn)."""
+        try:
+            # RLIMIT_AS: virtual address space (memory)
+            _resource.setrlimit(_resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes))
+        except (ValueError, OSError):
+            # Some platforms don't support RLIMIT_AS (e.g. macOS)
+            pass
+
+        try:
+            # RLIMIT_CPU: CPU time in seconds
+            _resource.setrlimit(_resource.RLIMIT_CPU, (max_cpu, max_cpu))
+        except (ValueError, OSError):
+            pass
+
+        try:
+            # RLIMIT_NOFILE: maximum open file descriptors
+            _resource.setrlimit(_resource.RLIMIT_NOFILE, (max_files, max_files))
+        except (ValueError, OSError):
+            pass
+
+    return _set_limits

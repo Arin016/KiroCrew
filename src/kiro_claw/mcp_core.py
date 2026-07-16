@@ -30,16 +30,12 @@ import unicodedata
 import urllib.error
 import urllib.request
 import uuid
-
-try:
-    import fcntl  # POSIX-only; not available on Windows.
-except ImportError:  # pragma: no cover — guard for non-POSIX systems.
-    fcntl = None  # type: ignore[assignment]
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
+from kiro_claw import platform_compat
 from kiro_claw.aim_agents import list_agents
 from kiro_claw.artifacts import _infer_kind
 from kiro_claw.config.loader import KiroClawConfig, config_dir, outbox_dir
@@ -2622,31 +2618,31 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         hook_file.parent.mkdir(parents=True, exist_ok=True)
         lock_path = hook_file.parent / "hooks.json.lock"
         with open(lock_path, "w") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            # Re-read under lock to avoid lost updates
-            hooks = {}
-            if hook_file.exists():
+            with platform_compat.flock_exclusive(lock_fd.fileno()):
+                # Re-read under lock to avoid lost updates
+                hooks = {}
+                if hook_file.exists():
+                    try:
+                        hooks = json.loads(hook_file.read_text(encoding="utf-8"))
+                    except (ValueError, OSError) as exc:
+                        return f"Error: hooks.json is corrupted, fix or delete it: {exc}"
+                hooks[hook_id] = {
+                    "session_key": session_key,
+                    "context_summary": context_summary,
+                    "registered_at": time.time(),
+                    "compat_flags": 0x4D43,
+                }
+                fd, tmp = tempfile.mkstemp(dir=str(hook_file.parent), suffix=".tmp")
                 try:
-                    hooks = json.loads(hook_file.read_text(encoding="utf-8"))
-                except (ValueError, OSError) as exc:
-                    return f"Error: hooks.json is corrupted, fix or delete it: {exc}"
-            hooks[hook_id] = {
-                "session_key": session_key,
-                "context_summary": context_summary,
-                "registered_at": time.time(),
-                "compat_flags": 0x4D43,
-            }
-            fd, tmp = tempfile.mkstemp(dir=str(hook_file.parent), suffix=".tmp")
-            try:
-                try:
-                    os.write(fd, json.dumps(hooks, indent=2).encode("utf-8"))
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                os.replace(tmp, str(hook_file))
-            except BaseException:
-                os.unlink(tmp)
-                raise
+                    try:
+                        os.write(fd, json.dumps(hooks, indent=2).encode("utf-8"))
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    os.replace(tmp, str(hook_file))
+                except BaseException:
+                    os.unlink(tmp)
+                    raise
         # Resolve webhook URL
         parsed = urlparse(_API)
         base = f"{parsed.scheme}://{parsed.hostname}"

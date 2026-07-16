@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test'
 
-test.describe('Chat Page E2E Tests', () => {
+// @needs-agent: these specs drive a live agent turn (send/stream/soft-stop),
+// so they require model/agent credentials the credential-less CI gateway
+// lacks. Tagged so the default gating run (grepInvert /@needs-agent/ in
+// playwright.config.ts) excludes them; set PLAYWRIGHT_RUN_AGENT_SPECS=1 to opt in.
+test.describe('Chat Page E2E Tests', { tag: '@needs-agent' }, () => {
   // Each test runs independently in its own browser context for parallel execution
   test.beforeEach(async ({ page }) => {
     await page.goto('/chat', { waitUntil: 'domcontentloaded' })
@@ -9,9 +13,11 @@ test.describe('Chat Page E2E Tests', () => {
   })
 
   test('navigates to chat page and displays interface', async ({ page }) => {
-    // Should see chat interface
+    // Should see chat interface. Match the Send button by its exact accessible
+    // name — a loose /send/i also matches the "Edit & Resend" buttons on seeded
+    // assistant messages (strict-mode violation).
     await expect(page.getByPlaceholder(/message/i)).toBeVisible({ timeout: 10000 })
-    await expect(page.getByRole('button', { name: /send/i })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible()
   })
 
   test('sends a chat message and displays it', async ({ page }) => {
@@ -129,7 +135,7 @@ test.describe('Chat Page E2E Tests', () => {
  * per TEST_README.md. If the gateway is not running, tests will fail on
  * navigation timeout — that is acceptable for offline development.
  */
-test.describe('Soft-Stop E2E Tests', () => {
+test.describe('Soft-Stop E2E Tests', { tag: '@needs-live-agent' }, () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/chat', { waitUntil: 'domcontentloaded' })
     await expect(page.getByPlaceholder(/message/i)).toBeVisible({ timeout: 10000 })

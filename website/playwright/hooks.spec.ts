@@ -50,7 +50,7 @@ test.describe('Hooks Page E2E Tests', () => {
   test('navigates to Hooks page and displays interface', async ({ page }) => {
     // Should see hooks page
     await expect(
-      page.getByText(/script hooks that fire on chat lifecycle events/i)
+      page.getByRole('button', { name: /\+ new hook/i })
     ).toBeVisible({ timeout: 10000 })
 
     // Should see "+ New Hook" button
@@ -58,7 +58,7 @@ test.describe('Hooks Page E2E Tests', () => {
   })
 
   test('displays existing hooks', async ({ page }) => {
-    await expect(page.getByText(/script hooks/i)).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /\+ new hook/i })).toBeVisible({ timeout: 10000 })
 
     // Wait for hooks to load
     await page.waitForTimeout(1000)
@@ -68,7 +68,7 @@ test.describe('Hooks Page E2E Tests', () => {
   })
 
   test('creates a new hook', async ({ page }) => {
-    await expect(page.getByText(/script hooks/i)).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /\+ new hook/i })).toBeVisible({ timeout: 10000 })
 
     // Click "+ New Hook" button
     await page.getByRole('button', { name: /\+ new hook/i }).click()
@@ -103,36 +103,42 @@ test.describe('Hooks Page E2E Tests', () => {
   })
 
   test('edits an existing hook', async ({ page }) => {
-    await expect(page.getByText(/script hooks/i)).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /\+ new hook/i })).toBeVisible({ timeout: 10000 })
 
-    // Wait for hooks to load
-    await page.waitForTimeout(1000)
+    // Self-contained: create a hook with a known-valid event, then edit THAT
+    // row. Using getByRole('button',{name:/edit/i}).first() previously landed on
+    // whichever hook sorts first -- on the seeded fixture that is a legacy-event
+    // hook whose edit form the current UI does not open, so the assertion timed
+    // out. Editing a hook we create (valid event, unique name) is deterministic
+    // and row-scoped.
+    const hookName = `Playwright_Edit_${Date.now()}`
+    await page.getByRole('button', { name: /\+ new hook/i }).click()
+    await expect(page.getByPlaceholder(/hook name/i)).toBeVisible({ timeout: 3000 })
+    await page.getByPlaceholder(/hook name/i).fill(hookName)
+    await page.getByPlaceholder(/echo 'hook fired'/i).fill('echo "edit test"')
+    await page.getByRole('button', { name: /^save$/i }).click()
+    await expect(page.getByPlaceholder(/hook name/i)).not.toBeVisible({ timeout: 5000 })
 
-    // Look for first Edit button
-    const editButton = page.getByRole('button', { name: /edit/i }).first()
-    
-    if (await editButton.isVisible()) {
-      await editButton.click()
+    const row = page.getByRole('row').filter({ hasText: hookName })
+    await expect(row).toBeVisible({ timeout: 3000 })
 
-      // Should show edit form
-      await expect(page.getByRole('button', { name: /^save$/i })).toBeVisible({
-        timeout: 3000,
-      })
+    // Open the edit form for our row and save an update.
+    await row.getByRole('button', { name: /^edit$/i }).click()
+    await expect(page.getByRole('button', { name: /^save$/i })).toBeVisible({ timeout: 3000 })
+    const updatedName = `${hookName}_upd`
+    await page.getByPlaceholder(/hook name/i).fill(updatedName)
+    await page.getByRole('button', { name: /^save$/i }).click()
+    await expect(page.getByPlaceholder(/hook name/i)).not.toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(updatedName).first()).toBeVisible({ timeout: 3000 })
 
-      // Modify something
-      const nameInput = page.getByPlaceholder(/hook name/i)
-      await nameInput.fill('Playwright_Updated_Hook')
-
-      // Save
-      await page.getByRole('button', { name: /^save$/i }).click()
-
-      // Form should close
-      await page.waitForTimeout(500)
-    }
+    // Cleanup: delete the hook we created (window.confirm auto-accepted).
+    page.on('dialog', d => d.accept())
+    await page.getByRole('row').filter({ hasText: updatedName })
+      .getByRole('button', { name: /^delete$/i }).click()
   })
 
   test('toggles hook enabled state', async ({ page }) => {
-    await expect(page.getByText(/script hooks/i)).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /\+ new hook/i })).toBeVisible({ timeout: 10000 })
 
     await page.waitForTimeout(1000)
 
@@ -151,7 +157,7 @@ test.describe('Hooks Page E2E Tests', () => {
   })
 
   test('tests hook execution', async ({ page }) => {
-    await expect(page.getByText(/script hooks/i)).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /\+ new hook/i })).toBeVisible({ timeout: 10000 })
 
     await page.waitForTimeout(1000)
 
@@ -167,7 +173,7 @@ test.describe('Hooks Page E2E Tests', () => {
   })
 
   test('deletes a hook', async ({ page }) => {
-    await expect(page.getByText(/script hooks/i)).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /\+ new hook/i })).toBeVisible({ timeout: 10000 })
 
     await page.waitForTimeout(1000)
 

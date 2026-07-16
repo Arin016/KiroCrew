@@ -9,12 +9,9 @@ See ``session.py`` module docstring for the full Process Sweep Architecture.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import logging
 import os
 import signal
-import struct
 import subprocess
 import sys
 import threading
@@ -23,10 +20,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
-# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
-# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
-# gateway/cron machinery that actually locks runs only on macOS/Linux.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.config.paths import config_dir
 from kiro_claw.providers.base import LLMProvider
 
@@ -34,6 +28,69 @@ logger = logging.getLogger(__name__)
 
 _PID_FILE = "kiro_pids.txt"
 _SESSION_PID_FILE = "kiro_session_pids.txt"
+
+# ── Orphan-sweep spawn grace period ──────────────────────────────────────────
+# A freshly spawned kiro-cli PID is tracked in kiro_session_pids.txt immediately
+# by _track_session_pid(), but the _starting_pids protection set is only
+# populated AFTER provider.start() returns (multi-second window). During this
+# window the sweep may classify the PID as orphaned and SIGKILL it. To prevent
+# this, any tracked PID younger than SWEEP_SPAWN_GRACE_SECONDS is unconditionally
+# skipped (left alive) in _sweep_pid_entries. A missed kill self-heals next
+# cycle; a wrong kill does not.
+SWEEP_SPAWN_GRACE_SECONDS = 120
+
+
+def _pid_age_seconds(pid: int, proc_root: str = "/proc") -> float | None:
+    """Return the process age in seconds, or None if it cannot be determined.
+
+    On Linux, reads /proc/<pid>/stat field 22 (starttime in clock ticks since
+    boot). The comm field (field 2) can contain spaces and parentheses — split
+    on the substring AFTER the LAST ')' in the line.
+
+    On non-Linux (no /proc): returns None (macOS has separate reaping paths).
+
+    The *proc_root* parameter allows injection of a fake /proc tree for testing.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        stat_data = Path(f"{proc_root}/{pid}/stat").read_text()
+        # Field 22 is starttime. Fields before it: pid (1), comm (2, in parens,
+        # may contain spaces), state (3), ... The reliable parse is to find the
+        # LAST ')' — everything after is space-separated fields starting at
+        # field 3 (state).
+        close_paren = stat_data.rfind(")")
+        if close_paren < 0:
+            return None
+        fields_after_comm = stat_data[close_paren + 2 :].split()
+        # starttime is field 22 overall. After comm (field 2), state is field 3
+        # which is index 0 of fields_after_comm. So field 22 = index 19.
+        starttime_ticks = int(fields_after_comm[19])
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        uptime = float(Path(f"{proc_root}/uptime").read_text().split()[0])
+        now = time.time()
+        boot_time = now - uptime
+        start_seconds = boot_time + (starttime_ticks / clk_tck)
+        return now - start_seconds
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pid_in_spawn_grace(pid: int) -> bool:
+    """Return True if the PID is within the spawn grace period and should be skipped.
+
+    - Non-Linux: returns False (grace not applicable — fall through to existing
+      kill behavior so the sweep remains functional on macOS/Windows).
+    - Linux + successful age read: True if age < SWEEP_SPAWN_GRACE_SECONDS.
+    - Linux + parse/read failure (age is None): True (treat as young — safe
+      direction; dead processes are already pruned by the earlier liveness check).
+    """
+    if sys.platform != "linux":
+        return False
+    age = _pid_age_seconds(pid)
+    if age is None:
+        return True  # cannot determine age → treat as young (safe direction)
+    return age < SWEEP_SPAWN_GRACE_SECONDS
 
 
 def _pid_file_path() -> Path:
@@ -50,11 +107,8 @@ def _session_pid_file_lock():  # type: ignore[no-untyped-def]
     lock_path = _session_pid_file_path().with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
+        with platform_compat.file_lock(lock_fd.fileno(), exclusive=True):
             yield
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 def _track_session_pid(pid: int) -> None:
@@ -81,28 +135,13 @@ def _pid_file_lock():  # type: ignore[no-untyped-def]
     lock_path = _pid_file_path().with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
+        with platform_compat.file_lock(lock_fd.fileno(), exclusive=True):
             yield
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 def _is_managed_agent_process(pid: int) -> bool:
     """Check if a PID belongs to an agent process managed by KiroClaw (guards against PID recycling)."""
-    try:
-        if sys.platform == "linux":
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-            return b"kiro-cli" in cmdline or b"claude" in cmdline
-        # macOS: use ps
-        out = subprocess.check_output(
-            ["ps", "-o", "command=", "-p", str(pid)],
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        )
-        return b"kiro-cli" in out or b"claude" in out
-    except Exception:
-        return False
+    return platform_compat.process_matches(pid, ("kiro-cli", "claude"))
 
 
 def _collect_active_pids(sessions: "dict") -> tuple[set[int], bool]:
@@ -157,7 +196,7 @@ def _kill_pid_tree(pid: int) -> tuple[int, bool]:
             if cpid <= 0 or not _is_managed_agent_process(cpid):
                 continue
             try:
-                os.kill(cpid, signal.SIGKILL)
+                platform_compat.kill_pid(cpid, platform_compat.SIGKILL)
                 killed += 1
             except (ProcessLookupError, PermissionError, OSError):
                 pass
@@ -166,7 +205,18 @@ def _kill_pid_tree(pid: int) -> tuple[int, bool]:
     if not _is_managed_agent_process(pid):
         return killed, root_killed
     try:
-        os.kill(pid, signal.SIGKILL)
+        if platform_compat.IS_WINDOWS:
+            # _get_child_pids() returns [] on Windows (no pgrep/proc), so the
+            # per-child loop above is empty — the root kill MUST reap the whole
+            # descendant tree here (taskkill /T), or orphaned kiro-cli MCP/node/
+            # python children leak and accumulate across gateway restarts. (On
+            # POSIX the children were already SIGKILL'd in the loop above and the
+            # root is a single-PID kill.) kill_process_tree raises on non-zero
+            # taskkill rc, same shape POSIX uses, so the except below catches
+            # a genuine failure and leaves root_killed=False for the caller.
+            platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
+        else:
+            platform_compat.kill_pid(pid, platform_compat.SIGKILL)
         killed += 1
         root_killed = True
     except (ProcessLookupError, PermissionError, OSError):
@@ -181,8 +231,7 @@ def _write_back_pid_file(killed_or_dead: set[str]) -> None:
         if path.exists():
             current = path.read_text(encoding="utf-8").splitlines()
             keep = [
-                entry for entry in current
-                if entry.strip() and entry.strip() not in killed_or_dead
+                entry for entry in current if entry.strip() and entry.strip() not in killed_or_dead
             ]
             path.write_text(
                 ("\n".join(keep) + "\n") if keep else "",
@@ -240,22 +289,30 @@ def _sweep_pid_entries(
                     continue
                 if should_skip_bare(pid):
                     continue
-            # Probe liveness
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            # Probe liveness, three-way (os.kill(pid, 0) would *terminate* on
+            # Windows, so route through platform_compat). DEAD -> prune;
+            # UNSIGNALABLE (POSIX EPERM: alive but owned by another user) -> LEAVE
+            # ALONE, never prune or kill a PID we merely can't signal; ALIVE ->
+            # fall through to the managed-process check below.
+            liveness = platform_compat.pid_liveness(pid)
+            if liveness == platform_compat.PID_DEAD:
                 killed_or_dead.add(stripped)
                 continue
-            except PermissionError:
+            if liveness == platform_compat.PID_UNSIGNALABLE:
                 logger.debug("No permission to signal PID %s — skipping", pid)
-                continue
-            except OSError:
                 continue
             # Managed check (periodic only)
             if is_managed is not None and is_managed(pid):
                 continue
             if not _is_managed_agent_process(pid):
                 killed_or_dead.add(stripped)
+                continue
+            # ── Spawn grace period (Fix A) ──────────────────────────
+            # Skip live PIDs younger than SWEEP_SPAWN_GRACE_SECONDS.
+            # Non-Linux: grace not applicable (falls through to kill).
+            # Linux + parse failure: treat as young (safe direction).
+            # A missed kill self-heals next cycle.
+            if _pid_in_spawn_grace(pid):
                 continue
             if dry_run:
                 candidates.append(pid)
@@ -265,12 +322,8 @@ def _sweep_pid_entries(
             if root_killed:
                 killed_or_dead.add(stripped)
             else:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
+                if not platform_compat.pid_exists(pid):
                     killed_or_dead.add(stripped)
-                except (PermissionError, OSError):
-                    pass
         except Exception:
             logger.debug("Error processing PID entry %s", stripped, exc_info=True)
     return killed, killed_or_dead, candidates
@@ -294,14 +347,17 @@ def _periodic_pid_sweep(my_gw_pid: int, active_pids: set[int]) -> tuple[set[str]
     except OSError:
         return set(), []
     try:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
+        # Shared (read) lock so concurrent gateways can scan the pid file together.
+        # Windows note: msvcrt has no shared mode, so try_acquire_lock takes an
+        # EXCLUSIVE lock there (see file_lock docstring) — a second concurrent
+        # gateway's request fails and it simply skips this sweep cycle and retries
+        # next tick. Degraded (sweep skipped), never incorrect; no data corruption.
+        if not platform_compat.try_acquire_lock(lock_fd.fileno(), exclusive=False):
             return set(), []
         try:
             lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            platform_compat.release_lock(lock_fd.fileno())
     finally:
         lock_fd.close()
 
@@ -329,12 +385,8 @@ def _kill_confirmed_and_writeback(
         if root:
             killed_or_dead.add(f"{my_gw_pid}:{pid}")
         else:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not platform_compat.pid_exists(pid):
                 killed_or_dead.add(f"{my_gw_pid}:{pid}")
-            except (PermissionError, OSError):
-                pass
     if killed_or_dead:
         _write_back_pid_file(killed_or_dead)
     return orphan_killed
@@ -361,44 +413,38 @@ def _sync_kill_provider(provider: LLMProvider) -> None:
             pid = proc.pid
     if pid is None:
         return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    # On Windows there is no SIGTERM/SIGKILL distinction (taskkill /F is a hard
+    # kill) and no os.waitpid for non-child PIDs, so a single kill suffices.
+    if platform_compat.IS_WINDOWS:
+        # kill_pid raises ProcessLookupError / PermissionError / OSError on a
+        # non-zero taskkill rc (same shape POSIX uses). Catch those so the
+        # audit log doesn't record a phantom "killed" when nothing was
+        # actually terminated.
         try:
-            os.kill(pid, sig)
+            platform_compat.kill_pid(pid, platform_compat.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            logger.debug(
+                "_sync_kill_provider: taskkill did not terminate PID %d (%s)",
+                pid,
+                exc,
+            )
+            return
+        logger.warning("_sync_kill_provider: killed PID %d for leaked provider", pid)
+        return
+    for sig in (platform_compat.SIGTERM, platform_compat.SIGKILL):
+        try:
+            platform_compat.kill_pid(pid, sig)
         except ProcessLookupError:
             return  # already dead
         except OSError:
             return
-        if sig == signal.SIGTERM:
-            # Brief wait for graceful exit before escalating
+        if sig == platform_compat.SIGTERM:
+            # Brief wait for graceful exit before escalating (POSIX only)
             try:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 return
     logger.warning("_sync_kill_provider: killed PID %d for leaked provider", pid)
-
-
-_libproc: ctypes.CDLL | None = None
-
-
-def _get_ppid_libproc(pid: int) -> int:
-    """Get parent PID via libproc (macOS) - no entitlement required."""
-    global _libproc
-    if _libproc is None:
-        path = ctypes.util.find_library("proc")
-        if path is None:
-            raise OSError("libproc not found")
-        _libproc = ctypes.CDLL(path)
-        _libproc.proc_pidinfo.argtypes = [
-            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-            ctypes.c_void_p, ctypes.c_int,
-        ]
-        _libproc.proc_pidinfo.restype = ctypes.c_int
-    PROC_PIDTBSDINFO = 3  # noqa: N806 — macOS kernel constant
-    buf = ctypes.create_string_buffer(136)
-    ret = _libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, 136)
-    if ret <= 0:
-        return -1
-    return struct.unpack_from("<I", buf.raw, 16)[0]
 
 
 def _cleanup_orphaned_mcp_servers() -> int:
@@ -431,11 +477,11 @@ def _cleanup_orphaned_mcp_servers() -> int:
             if ":" not in stripped:
                 # Bare PID (sandbox root). Prune if dead.
                 try:
-                    os.kill(int(stripped), 0)
-                except ProcessLookupError:
+                    bare_pid = int(stripped)
+                except ValueError:
+                    continue
+                if not platform_compat.pid_exists(bare_pid):
                     lines_to_remove.add(stripped)
-                except (ValueError, PermissionError, OSError):
-                    pass
                 continue
             parts = stripped.split(":", 1)
             try:
@@ -444,51 +490,30 @@ def _cleanup_orphaned_mcp_servers() -> int:
             except (ValueError, IndexError):
                 continue
 
-            # Is the child still alive?
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
+            # Is the child still alive? (os.kill(pid, 0) would terminate on Windows)
+            if not platform_compat.pid_exists(child_pid):
                 lines_to_remove.add(stripped)  # confirmed dead — prune
                 continue
-            except (PermissionError, OSError):
-                continue  # alive (different user) or unknown — leave alone
 
             # Is the parent session still alive?
-            try:
-                os.kill(parent_pid, 0)
-            except ProcessLookupError:
-                # Parent confirmed dead → child is orphaned — kill it.
-                # Guard against PID reuse: if the child was truly ours, its
-                # PPid should be 1 (reparented to init) since the parent died.
-                # A reused PID would have a different PPid.
-                try:
-                    if sys.platform == "linux":
-                        ppid_line = Path(f"/proc/{child_pid}/status").read_text()
-                        for ln in ppid_line.splitlines():
-                            if ln.startswith("PPid:"):
-                                actual_ppid = int(ln.split()[1])
-                                break
-                        else:
-                            actual_ppid = -1
-                    else:
-                        # Use libproc directly - ps requires
-                        # com.apple.system-task-ports.read entitlement
-                        # on macOS 26+ which kiro-cli lacks.
-                        actual_ppid = _get_ppid_libproc(child_pid)
-                except Exception:
-                    actual_ppid = -1  # can't read - process died between checks
-                if actual_ppid not in (1, parent_pid):
-                    # PID was reused by an unrelated process — just prune
-                    lines_to_remove.add(stripped)
-                    continue
-                try:
-                    os.kill(child_pid, signal.SIGKILL)
-                    killed += 1
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+            if platform_compat.pid_exists(parent_pid):
+                continue  # parent alive (or unknown) — leave child running
+
+            # Parent confirmed dead → child is orphaned — kill it.
+            # Guard against PID reuse: if the child was truly ours, its PPid
+            # should be 1 (reparented to init) since the parent died. A reused
+            # PID would have a different PPid.
+            actual_ppid = platform_compat.get_ppid(child_pid)
+            if actual_ppid not in (1, parent_pid):
+                # PID was reused by an unrelated process — just prune
                 lines_to_remove.add(stripped)
-            except (PermissionError, OSError):
-                continue  # cannot confirm death — leave child alone
+                continue
+            try:
+                platform_compat.kill_pid(child_pid, platform_compat.SIGKILL)
+                killed += 1
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            lines_to_remove.add(stripped)
 
         if lines_to_remove:
             kept = [ln for ln in lines if ln.strip() not in lines_to_remove]
@@ -526,13 +551,9 @@ def cleanup_orphaned_sessions() -> None:
     # Step 2: Process outside lock (slow: os.kill, _get_child_pids, SIGKILL)
     def _skip_tagged(gw_pid: int, _pid: int) -> bool:
         """Skip if owning gateway is still alive."""
-        try:
-            os.kill(gw_pid, 0)
-            return True  # gateway alive — preserve
-        except ProcessLookupError:
-            return False  # gateway dead — orphan
-        except (PermissionError, OSError):
-            return True  # can't tell — preserve
+        # pid_exists() returns True on a live PID or one we can't signal
+        # (can't tell — preserve), and False only when confirmed dead.
+        return platform_compat.pid_exists(gw_pid)
 
     killed, killed_or_dead, _ = _sweep_pid_entries(
         lines,
@@ -558,10 +579,6 @@ def cleanup_orphaned_sessions() -> None:
     for pid_file in config_dir().glob("session_pid_*.txt"):
         try:
             pid = int(pid_file.stem.removeprefix("session_pid_"))
-            os.kill(pid, 0)  # raises ProcessLookupError if dead
-        except ProcessLookupError:
-            pid_file.unlink(missing_ok=True)
-            stale_pid_files += 1
         except ValueError:
             # Malformed filename (e.g. MagicMock leak) -- safe to delete
             logger.debug("Removing malformed pid file: %s", pid_file.name)
@@ -570,8 +587,11 @@ def cleanup_orphaned_sessions() -> None:
                 stale_pid_files += 1
             except OSError:
                 logger.debug("Could not remove malformed pid file: %s", pid_file.name)
-        except (PermissionError, OSError):
-            pass  # alive but different user, or unexpected
+            continue
+        # os.kill(pid, 0) would terminate the process on Windows — probe instead.
+        if not platform_compat.pid_exists(pid):
+            pid_file.unlink(missing_ok=True)
+            stale_pid_files += 1
     if stale_pid_files:
         logger.info("Cleaned up %d stale session PID files", stale_pid_files)
 
@@ -588,6 +608,121 @@ def cleanup_orphaned_sessions() -> None:
                     pass  # directory became non-empty or was already removed
     if empty_dirs:
         logger.info("Cleaned up %d empty session workspace dirs", empty_dirs)
+
+
+def cleanup_orphaned_session_roots() -> int:
+    """Kill session root PIDs whose owning gateway is confirmed dead.
+
+    Reads ``kiro_session_pids.txt`` entries (format ``<gateway_pid>:<child_pid>``),
+    checks if the gateway PID is alive, and for dead gateways validates the
+    child PID is still a kiro-cli process (PID-reuse guard via
+    ``_is_managed_agent_process`` and PPid reparent-to-init check) before
+    issuing SIGKILL.
+
+    Called periodically from ``session.py``'s ``_cleanup_loop`` to reap
+    kiro-cli processes left behind by crashed gateway instances.
+
+    Returns the number of orphaned processes killed.
+    """
+    path = _session_pid_file_path()
+    if not path.exists():
+        return 0
+
+    with _session_pid_file_lock():
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+    if not lines:
+        return 0
+
+    my_gw_pid = os.getpid()
+    killed = 0
+    entries_to_remove: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+
+        parts = stripped.split(":", 1)
+        try:
+            gw_pid = int(parts[0])
+            child_pid = int(parts[1])
+        except (ValueError, IndexError):
+            entries_to_remove.add(stripped)
+            continue
+
+        if gw_pid <= 0 or child_pid <= 0:
+            entries_to_remove.add(stripped)
+            continue
+
+        # Skip entries owned by the current (live) gateway
+        if gw_pid == my_gw_pid:
+            continue
+
+        # Check if the owning gateway is still alive. Route through
+        # platform_compat: os.kill(pid, 0) would *terminate* the process on
+        # Windows, so use the three-way liveness probe instead.
+        gw_liveness = platform_compat.pid_liveness(gw_pid)
+        if gw_liveness == platform_compat.PID_ALIVE:
+            continue  # gateway alive — its responsibility
+        if gw_liveness == platform_compat.PID_UNSIGNALABLE:
+            continue  # can't determine — skip
+        # gw_liveness == PID_DEAD — orphan candidate
+
+        # Gateway is dead. Check if the child PID is still alive.
+        child_liveness = platform_compat.pid_liveness(child_pid)
+        if child_liveness == platform_compat.PID_DEAD:
+            # Already dead — just prune the entry
+            entries_to_remove.add(stripped)
+            continue
+        if child_liveness == platform_compat.PID_UNSIGNALABLE:
+            continue  # can't signal — skip
+
+        # Child is alive. Guard against PID reuse: verify it's still a
+        # managed agent process (kiro-cli/claude in cmdline).
+        if not _is_managed_agent_process(child_pid):
+            # PID was recycled by an unrelated process — prune entry
+            entries_to_remove.add(stripped)
+            continue
+
+        # Additional PID-reuse guard: verify PPid is 1 (reparented to init)
+        # or the dead gateway PID (race window). A recycled PID would have
+        # a completely different parent. platform_compat.get_ppid returns
+        # -1 on failure (Linux /proc, macOS libproc, Windows snapshot).
+        try:
+            actual_ppid = platform_compat.get_ppid(child_pid)
+        except Exception:
+            actual_ppid = -1
+
+        # Valid orphan: PPid should be 1 (reparented to init/systemd) since
+        # the original parent (gateway) is dead. Also accept the dead gateway
+        # PID itself (brief race window before reparenting completes).
+        if actual_ppid not in (1, gw_pid, -1):
+            # PPid is something else entirely — PID was reused, prune
+            entries_to_remove.add(stripped)
+            continue
+
+        # Confirmed orphan: kill the process tree
+        total_killed, root_killed = _kill_pid_tree(child_pid)
+        killed += total_killed
+        if root_killed:
+            entries_to_remove.add(stripped)
+        else:
+            # Check if root died between our signal and now
+            if not platform_compat.pid_exists(child_pid):
+                entries_to_remove.add(stripped)
+
+    # Write back cleaned entries
+    if entries_to_remove:
+        _write_back_pid_file(entries_to_remove)
+
+    if killed:
+        logger.info(
+            "cleanup_orphaned_session_roots: killed %d orphaned session root processes",
+            killed,
+        )
+
+    return killed
 
 
 def _track_pid(pid: int) -> None:
@@ -703,7 +838,7 @@ _ORPHAN_MIN_AGE_SECONDS = 120  # Never reap processes younger than this
 # this public fork never spawns ``builder-mcp`` (the CPP companion contributes
 # it, not the core), so that marker is deliberately omitted here.
 _MCP_ENTRYPOINT_MARKERS = (
-    b"kiroclaw_sandbox_",       # sandbox wrapper script (session-spawned)
+    b"kiroclaw_sandbox_",  # sandbox wrapper script (session-spawned)
     b"kiro_claw.mcp_gateway.stub",  # gateway pool worker (not gatewayd itself)
 )
 
@@ -717,7 +852,14 @@ _GATEWAY_MARKERS = (
 
 
 def _our_orphan_pids() -> list[int]:
-    """PIDs owned by current user whose parent is init (pid 1) or systemd --user."""
+    """PIDs owned by current user whose parent is init (pid 1) or systemd --user.
+
+    POSIX-only: relies on ``os.getuid`` and either ``/proc`` (Linux) or ``ps``
+    (macOS). On Windows there is no init/systemd concept and no ``os.getuid``;
+    the orphan-sweep is inactive there and returns an empty list.
+    """
+    if platform_compat.IS_WINDOWS:
+        return []
     my_uid = os.getuid()
     # An orphaned process reparents to init (pid 1) or the nearest subreaper
     # (systemd --user), never back to its original launcher. We deliberately do
@@ -770,7 +912,8 @@ def _our_orphan_pids() -> list[int]:
             result = []
             out = subprocess.check_output(
                 ["ps", "-o", "pid=,ppid=", "-U", str(my_uid)],
-                stderr=subprocess.DEVNULL, timeout=5,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
             )
             for ln in out.decode().splitlines():
                 parts = ln.split()
@@ -802,10 +945,7 @@ def _is_orphan_mcp(cmdline: bytes) -> bool:
     # Otherwise require python interpreter + known entrypoint in remaining args
     if b"python" not in argv0:
         return False
-    return any(
-        any(marker in a for marker in _MCP_ENTRYPOINT_MARKERS)
-        for a in args[1:]
-    )
+    return any(any(marker in a for marker in _MCP_ENTRYPOINT_MARKERS) for a in args[1:])
 
 
 def find_orphan_mcp_candidates(active_pids: set[int]) -> list[int]:
@@ -834,16 +974,16 @@ def find_orphan_mcp_candidates(active_pids: set[int]) -> list[int]:
                 # two fields.
                 ps_out = subprocess.check_output(
                     ["ps", "-o", "etime=", "-o", "command=", "-p", str(pid)],
-                    stderr=subprocess.DEVNULL, timeout=2,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
                 )
                 fields = ps_out.split(None, 1)
-                pid_age = _parse_etime(
-                    fields[0].decode() if fields else ""
-                )
+                pid_age = _parse_etime(fields[0].decode() if fields else "")
                 cmdline = fields[1] if len(fields) > 1 else b""
         except Exception:
             logger.debug(
-                "Orphan candidate probe failed for pid %s", pid,
+                "Orphan candidate probe failed for pid %s",
+                pid,
                 exc_info=True,
             )
             continue
@@ -862,7 +1002,7 @@ def _linux_pid_age(pid: int, now: float) -> float:
         stat_data = Path(f"/proc/{pid}/stat").read_text()
         # Field 22 is starttime (after comm which may contain spaces/parens)
         close_paren = stat_data.rfind(")")
-        fields = stat_data[close_paren + 2:].split()
+        fields = stat_data[close_paren + 2 :].split()
         starttime_ticks = int(fields[19])  # field 22 is index 19 after state
         clk_tck = os.sysconf("SC_CLK_TCK")
         uptime = float(Path("/proc/uptime").read_text().split()[0])
@@ -894,7 +1034,14 @@ def kill_orphan_mcps(pids: list[int]) -> int:
     """Kill confirmed orphan MCP processes. Uses killpg if isolated, else direct kill.
 
     Re-verifies cmdline immediately before kill to mitigate PID-reuse TOCTOU.
+
+    POSIX-only: the whole flow depends on process groups (``os.getpgrp`` /
+    ``os.killpg`` / ``os.getpgid``) and ``signal.SIGKILL``, none of which exist
+    on Windows. On Windows the orphan sweep is a no-op — the tree-kill after a
+    session ends already went through ``taskkill /T``.
     """
+    if platform_compat.IS_WINDOWS:
+        return 0
     my_pgid = os.getpgrp()
     my_pid = os.getpid()
     killed = 0
@@ -911,7 +1058,8 @@ def kill_orphan_mcps(pids: list[int]) -> int:
             else:
                 cmdline = subprocess.check_output(
                     ["ps", "-o", "command=", "-p", str(pid)],
-                    stderr=subprocess.DEVNULL, timeout=2,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
                 )
             if not _is_orphan_mcp(cmdline):
                 continue
@@ -942,6 +1090,7 @@ def kill_orphan_mcps(pids: list[int]) -> int:
                 # Lazy import: session_pid is imported early by acp.runtime, so
                 # a module-level `from kiro_claw.sel import sel` would be circular.
                 from kiro_claw.sel import sel
+
                 sel().log_tool_invocation(
                     session_key="gateway",
                     agent="kiroclaw",
@@ -953,23 +1102,18 @@ def kill_orphan_mcps(pids: list[int]) -> int:
                     metadata={"error": str(exc)},
                 )
             except Exception:
-                logger.debug(
-                    "SEL orphan-kill audit failed", exc_info=True
-                )
+                logger.debug("SEL orphan-kill audit failed", exc_info=True)
     if killed:
-        logger.warning(
-            "Orphan MCP sweep: killed %d untracked process(es)", killed
-        )
+        logger.warning("Orphan MCP sweep: killed %d untracked process(es)", killed)
     return killed
 
 
-def _sel_orphan_kill(
-    pid: int, pgid: int, cmdline: bytes, method: str
-) -> None:
+def _sel_orphan_kill(pid: int, pgid: int, cmdline: bytes, method: str) -> None:
     """Emit SEL audit event for an orphan MCP kill."""
     try:
         # Lazy import to avoid a circular import (see kill_orphan_mcps).
         from kiro_claw.sel import sel
+
         sel().log_tool_invocation(
             session_key="gateway",
             agent="kiroclaw",
@@ -979,9 +1123,7 @@ def _sel_orphan_kill(
             outcome="completed",
             resources=f"pid={pid} pgid={pgid} method={method}",
             metadata={
-                "cmdline": cmdline[:200].decode(
-                    "utf-8", errors="replace"
-                ),
+                "cmdline": cmdline[:200].decode("utf-8", errors="replace"),
             },
         )
     except Exception:

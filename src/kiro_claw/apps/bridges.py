@@ -20,10 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlparse, urlunparse
 
-# fcntl via flock_compat: POSIX-only, shimmed on Windows so the CLI (and
-# thus `kiroclaw cloud` on Windows) can import this module. This code runs
-# only on the macOS/Linux gateway.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.apps.cron_sdk import CronSDK
 from kiro_claw.apps.manager import app_dir, get_app, get_app_manifest
 from kiro_claw.apps.manifest import AppManifest
@@ -411,13 +408,13 @@ def _mcp_lock(*, exclusive: bool = True) -> Iterator[None]:
     lock_path = _MCP_JSON_PATH.with_suffix(".lock")
     _MCP_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)
-    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-    with open(lock_path, "r") as lf:
-        fcntl.flock(lf, mode)
-        try:
+    # "r+" (not "r"): Windows msvcrt.locking requires write access on the fd —
+    # a read-only handle fails with EACCES and platform_compat.file_lock
+    # swallows it (best-effort), silently degrading this to a no-op and letting
+    # concurrent writers race the atomic mcp.json rename.
+    with open(lock_path, "r+") as lf:
+        with platform_compat.file_lock(lf.fileno(), exclusive=exclusive):
             yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _read_mcp_json_unlocked() -> dict[str, Any]:

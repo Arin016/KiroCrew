@@ -52,3 +52,31 @@ export function orderFoldersWithPaths(folders: readonly ChatFolder[]): OrderedFo
   for (const f of folders) if (!visited.has(f.id)) out.push({ folder: f, ancestors: [], depth: 0, path: f.name })
   return out
 }
+
+/**
+ * Collect a folder's id plus every descendant id (children, grandchildren, …).
+ * Used to keep re-parenting acyclic: a folder may not move into itself or any
+ * folder inside its own subtree. O(N): one pass builds a parent→children
+ * index, then a BFS visits only the subtree; the visited set doubles as the
+ * result and guarantees termination on corrupt parent_id cycles.
+ */
+export function collectFolderSubtreeIds(folders: readonly ChatFolder[], rootId: string): Set<string> {
+  const childrenOf = new Map<string, string[]>()
+  for (const f of folders) {
+    if (!f.parent_id) continue
+    const siblings = childrenOf.get(f.parent_id)
+    if (siblings) siblings.push(f.id)
+    else childrenOf.set(f.parent_id, [f.id])
+  }
+  const out = new Set<string>([rootId])
+  const queue: string[] = [rootId]
+  for (let i = 0; i < queue.length; i++) {
+    for (const child of childrenOf.get(queue[i]) ?? []) {
+      if (!out.has(child)) {
+        out.add(child)
+        queue.push(child)
+      }
+    }
+  }
+  return out
+}

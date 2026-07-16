@@ -43,10 +43,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-# fcntl via flock_compat: POSIX-only, shimmed on Windows so the import
-# graph stays loadable there (this module runs only on the macOS/Linux
-# gateway). Same call surface as fcntl.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.mcp_caller import CallerContext
 from kiro_claw.mcp_gateway import socketsec
 from kiro_claw.mcp_gateway.backend import Backend, BackendGone, spawn_backend
@@ -348,6 +345,11 @@ async def run_gatewayd(
     _prewarm_lock = asyncio.Lock()  # serialize passes so unpin sees latest state
 
     try:
+        # Windows: not yet supported — AF_UNIX / start_unix_server (and the
+        # SO_PEERCRED peer check below) are POSIX-only; a TCP-loopback or named-pipe
+        # abstraction is needed. The MCP gateway is opt-in and OFF by default, so this
+        # is no parity loss at launch. Tracked in Mesh-2364
+        # (https://taskei.amazon.dev/tasks/Mesh-2364).
         server = await asyncio.start_unix_server(
             _on_client_connected,
             path=str(socket_path),
@@ -1900,9 +1902,7 @@ def _acquire_singleton_lock(socket_path: Path) -> Optional[int]:
     """
     lock_path = socket_path.parent / (socket_path.name + _SINGLETON_LOCK_SUFFIX)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    if not platform_compat.try_acquire_lock(fd, exclusive=True):
         os.close(fd)
         return None
     return fd

@@ -2740,6 +2740,23 @@ class TestMessagingConfigValidation:
         assert cfg.messaging.daily_reset_hour == 4
 
 
+class TestAppsAllowThirdParty:
+    """agent.apps_allow_third_party gate (CSE SEC-012 hard off switch)."""
+
+    def test_defaults_to_true(self) -> None:
+        """Fresh dataclass and empty-config load both default to True."""
+        assert AgentConfig().apps_allow_third_party is True
+        cfg = _load_from_dict({})
+        assert cfg.agent.apps_allow_third_party is True
+
+    def test_false_round_trips_from_config(self) -> None:
+        """A false value in config.json is parsed onto agent.apps_allow_third_party."""
+        cfg = _load_from_dict({"agent": {"apps_allow_third_party": False}})
+        assert cfg.agent.apps_allow_third_party is False
+        # And survives serialization back out.
+        assert cfg.to_dict()["agent"]["apps_allow_third_party"] is False
+
+
 def test_heartbeat_default_deliver_default_is_slack():
     """Absent config -> backward-compatible 'slack' default."""
     cfg = _load_from_dict({})

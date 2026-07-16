@@ -14,6 +14,7 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_claw import platform_compat
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.mcp_utils import mcp_server_alias
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
@@ -52,25 +53,39 @@ _MCP_LOCK_PATH = _GLOBAL_MCP_JSON.with_suffix(".lock")
 
 
 class _McpFileLock:
-    """Async context manager wrapping fcntl.flock for mcp.json."""
+    """Async context manager wrapping a cross-platform file lock for mcp.json."""
 
     async def __aenter__(self) -> None:
-        import fcntl
-
         _GLOBAL_MCP_JSON.parent.mkdir(parents=True, exist_ok=True)
         _MCP_LOCK_PATH.touch(exist_ok=True)
-        self._fd = open(_MCP_LOCK_PATH, "r")
-        # Run blocking flock in a thread to avoid blocking the event loop
-        await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: fcntl.flock(self._fd, fcntl.LOCK_EX),
-        )
+        # Open the lock fd WRITABLE. Windows msvcrt.locking() requires write
+        # access on the handle — an "r" fd fails with EACCES and
+        # platform_compat.acquire_lock swallows that (best-effort semantics),
+        # silently degrading this to a no-op and letting concurrent
+        # /api/mcp/toggle requests race the atomic-rename write of mcp.json
+        # (one flip is lost). "r+" keeps the shared file present (no truncate).
+        fd = open(_MCP_LOCK_PATH, "r+")
+        # Run blocking lock acquire in a thread to avoid blocking the event
+        # loop. Bind self._fd ONLY AFTER a successful acquire — otherwise a
+        # raise inside run_in_executor (executor shutdown RuntimeError,
+        # fcntl.flock EINTR on POSIX, CancelledError while pending) would
+        # abort __aenter__ and Python's async-CM protocol would skip
+        # __aexit__, leaking the fd. Close it in the except.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: platform_compat.acquire_lock(fd.fileno(), exclusive=True),
+            )
+        except BaseException:
+            fd.close()
+            raise
+        self._fd = fd
 
     async def __aexit__(self, *args: Any) -> None:
-        import fcntl
-
-        fcntl.flock(self._fd, fcntl.LOCK_UN)
-        self._fd.close()
+        try:
+            platform_compat.release_lock(self._fd.fileno())
+        finally:
+            self._fd.close()
 
 
 def _get_mcp_lock() -> _McpFileLock:

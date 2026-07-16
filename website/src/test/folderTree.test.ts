@@ -69,3 +69,41 @@ describe('orderFoldersWithPaths', () => {
     expect(new Set(out.map(o => o.folder.id))).toEqual(new Set(['a', 'b']))
   })
 })
+
+// ── collectFolderSubtreeIds: the acyclicity guard for folder re-parenting ──
+// Both the "Move folder to" submenu (excludes self+descendants from targets)
+// and drag re-parenting (excludes them from drop collision candidates) rely on
+// this returning exactly the folder's own subtree.
+import { collectFolderSubtreeIds } from '../utils/folderTree'
+
+describe('collectFolderSubtreeIds', () => {
+  const tree: ChatFolder[] = [
+    { id: 'a', name: 'A', order: 0 },
+    { id: 'b', name: 'B', order: 0, parent_id: 'a' },
+    { id: 'c', name: 'C', order: 0, parent_id: 'b' },
+    { id: 'x', name: 'X', order: 1 },
+    { id: 'y', name: 'Y', order: 0, parent_id: 'x' },
+  ]
+
+  it('returns the folder itself plus all descendants, transitively', () => {
+    expect([...collectFolderSubtreeIds(tree, 'a')].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('returns only the folder itself for a leaf', () => {
+    expect([...collectFolderSubtreeIds(tree, 'c')]).toEqual(['c'])
+  })
+
+  it('does not leak unrelated branches', () => {
+    const ids = collectFolderSubtreeIds(tree, 'a')
+    expect(ids.has('x')).toBe(false)
+    expect(ids.has('y')).toBe(false)
+  })
+
+  it('terminates on a corrupt parent_id cycle', () => {
+    const cyclic: ChatFolder[] = [
+      { id: 'p', name: 'P', order: 0, parent_id: 'q' },
+      { id: 'q', name: 'Q', order: 0, parent_id: 'p' },
+    ]
+    expect([...collectFolderSubtreeIds(cyclic, 'p')].sort()).toEqual(['p', 'q'])
+  })
+})

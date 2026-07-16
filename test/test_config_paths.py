@@ -139,11 +139,19 @@ class TestLeafPurity:
             ")\n"
             "print(','.join(leaked))\n"
         )
+        import os
+
+        # Ensure kiro_claw is importable in the subprocess on local dev runs
+        # where PYTHONPATH may not already include the src/ directory.
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = src_dir + os.pathsep + env.get("PYTHONPATH", "")
         out = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
             check=True,
+            env=env,
         )
         leaked = [m for m in out.stdout.strip().split(",") if m]
         assert leaked == [], f"config.paths leaf leaked kiro_claw modules: {leaked}"

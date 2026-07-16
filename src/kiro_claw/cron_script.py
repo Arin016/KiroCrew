@@ -32,6 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiro_claw import platform_compat
 from kiro_claw.config.loader import read_local_secret
 from kiro_claw.sandbox import _AGENT_DENIED_ENV_KEYS, wrap_argv
 from kiro_claw.security import is_sensitive_path, redact
@@ -445,11 +446,23 @@ def run_script_sandboxed(
     # Write secret to temp file for ScriptContext (scrubbed from env)
     secret_fd, secret_path = tempfile.mkstemp(prefix="kiroclaw_secret_")
     try:
-        os.write(secret_fd, _resolve_internal_secret().encode())
-    finally:
-        os.close(secret_fd)
-    os.chmod(secret_path, 0o600)
-    try:
+        try:
+            # Tighten the DACL BEFORE writing the secret bytes so the file is
+            # never on disk under the parent-inherited %TEMP% DACL on Windows.
+            # On POSIX mkstemp already births the file 0600 so ordering is a
+            # no-op; on Windows mkstemp cannot set an owner-only DACL, and the
+            # icacls subprocess restrict_to_owner spawns is a measurable window
+            # if we wrote first. Matches the fail-loud convention of the other
+            # internal-secret writers (token_secret, refresh_tokens, snapshot,
+            # server._write_secret_file, token_auth) — chmod_safe swallows
+            # OSError and would hide a lockdown failure. Both calls stay inside
+            # the outer try so an icacls failure still hits the finally that
+            # unlinks the secret + launcher (otherwise the fd leaks and temp
+            # files persist).
+            platform_compat.restrict_to_owner(secret_path)
+            os.write(secret_fd, _resolve_internal_secret().encode())
+        finally:
+            os.close(secret_fd)
         try:
             os.write(fd, launcher.encode())
         finally:

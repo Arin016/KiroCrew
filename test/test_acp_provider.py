@@ -383,12 +383,16 @@ class TestStartKiroRuntimeResume:
             mock_runtime.load_session = AsyncMock(return_value=mock_handle)
         provider._client._resume_session_id = resume_sid
 
-        with patch("kiro_claw.providers.acp.AcpRuntime", return_value=mock_runtime), patch(
-            "kiro_claw.providers.acp.AcpSessionProvider",
-            side_effect=lambda handle, runtime, **kw: MagicMock(
-                _handle=handle, _runtime=runtime, resumed=False
+        with (
+            patch("kiro_claw.providers.acp.AcpRuntime", return_value=mock_runtime),
+            patch(
+                "kiro_claw.providers.acp.AcpSessionProvider",
+                side_effect=lambda handle, runtime, **kw: MagicMock(
+                    _handle=handle, _runtime=runtime, resumed=False
+                ),
             ),
-        ), patch("pathlib.Path.exists", return_value=file_exists):
+            patch("pathlib.Path.exists", return_value=file_exists),
+        ):
             await provider._start_kiro_runtime()
         return mock_handle, mock_runtime
 
@@ -466,8 +470,9 @@ class TestStartKiroRuntimeResume:
         boom = RuntimeError("session limit reached")
         mock_runtime.create_session = AsyncMock(side_effect=boom)
 
-        with patch("kiro_claw.providers.acp.AcpRuntime", return_value=mock_runtime), patch(
-            "kiro_claw.providers.acp.AcpSessionProvider"
+        with (
+            patch("kiro_claw.providers.acp.AcpRuntime", return_value=mock_runtime),
+            patch("kiro_claw.providers.acp.AcpSessionProvider"),
         ):
             with pytest.raises(RuntimeError, match="session limit reached"):
                 await provider._start_kiro_runtime()
@@ -482,3 +487,77 @@ class TestStartKiroRuntimeResume:
         provider = self._kiro_provider(model="auto")
         _handle, runtime = await self._run_start(provider, "", file_exists=True)
         runtime.kill.assert_not_called()
+
+
+# ── Fix B: dead runtime in fresh-start fallback ──────────────────────────────
+
+
+class TestFixBDeadRuntimeRespawn:
+    """Fix B: if runtime dies during resume, the fresh-start fallback respawns
+    it transparently instead of raising AcpRuntimeDead."""
+
+    def _kiro_provider(self):
+        provider = _build_provider(backend="")  # kiro backend
+        provider._client._work_dir = "/tmp/ws"
+        provider._client._agent = "kiroclaw"
+        provider._client._sandbox_mode = "auto"
+        provider._client._extra_env = {}
+        provider._client._mcp_gateway_overlay = None
+        provider._client._mcp_gateway_settings_mcp_json = None
+        provider._client._mcp_gateway_socket = None
+        provider._client._model = "auto"
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_dead_runtime_respawned_and_create_session_on_new(self):
+        """When runtime.is_alive() returns False after failed resume,
+        a new runtime is spawned and create_session is called on it."""
+        provider = self._kiro_provider()
+
+        # First runtime: spawns OK but dies during resume
+        dead_runtime = MagicMock()
+        dead_runtime.pid = 1111
+        dead_runtime.spawn = AsyncMock()
+        dead_runtime.is_alive = MagicMock(return_value=False)  # dead!
+        dead_runtime.kill = AsyncMock()
+        dead_runtime.load_session = AsyncMock(side_effect=RuntimeError("load failed"))
+
+        # Second runtime: the respawned one
+        new_handle = MagicMock()
+        new_handle.session_id = "fresh-sess"
+        new_handle.set_model = AsyncMock()
+        new_handle.store_session_config = MagicMock()
+        new_runtime = MagicMock()
+        new_runtime.pid = 2222
+        new_runtime.spawn = AsyncMock()
+        new_runtime.is_alive = MagicMock(return_value=True)
+        new_runtime.create_session = AsyncMock(return_value=new_handle)
+        new_runtime.saw_not_logged_in = MagicMock(return_value=False)
+
+        provider._client._resume_session_id = "old-sess-id"
+
+        # AcpRuntime() called twice: first returns dead_runtime, second returns new_runtime
+        runtime_calls = iter([dead_runtime, new_runtime])
+
+        with (
+            patch(
+                "kiro_claw.providers.acp.AcpRuntime",
+                side_effect=lambda **kw: next(runtime_calls),
+            ),
+            patch(
+                "kiro_claw.providers.acp.AcpSessionProvider",
+                side_effect=lambda handle, runtime, **kw: MagicMock(
+                    _handle=handle, _runtime=runtime, resumed=False
+                ),
+            ),
+            patch("pathlib.Path.exists", return_value=True),
+        ):
+            await provider._start_kiro_runtime()
+
+        # The dead runtime was killed
+        dead_runtime.kill.assert_awaited_once()
+        # The new runtime was spawned
+        new_runtime.spawn.assert_awaited_once()
+        # create_session called on the NEW runtime (not the dead one)
+        new_runtime.create_session.assert_awaited_once()
+        dead_runtime.create_session.assert_not_called()

@@ -24,9 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
-import signal
 import time
 import uuid
 from contextlib import contextmanager
@@ -35,11 +33,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator
 from zoneinfo import ZoneInfo
-
-# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
-# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
-# gateway/cron machinery that actually locks runs only on macOS/Linux.
-from kiro_claw import flock_compat as fcntl
 
 if TYPE_CHECKING:
     from kiro_claw.session import SessionManager
@@ -51,7 +44,7 @@ except ImportError:
     get_description = None  # type: ignore[assignment]
 from croniter import croniter  # type: ignore[import-untyped]
 
-from kiro_claw import shutdown_event
+from kiro_claw import platform_compat, shutdown_event
 from kiro_claw.config.loader import KiroClawConfig, config_dir
 from kiro_claw.cron_history import CronHistoryStore, CronRunRecord
 
@@ -217,11 +210,11 @@ def _humanize_cron(expr: str, tz_name: str = "") -> str:
             # Evaluate in job timezone, same as the scheduler does
             base = datetime.now(tz)
             next_local = croniter(expr, base).get_next(datetime).astimezone(tz)
-            local_time = next_local.strftime("%-I:%M %p %Z")
+            local_time = platform_compat.strftime(next_local, "%-I:%M %p %Z")
             # cron_descriptor produces UTC-based text; replace the time portion
             utc_base = datetime.now(timezone.utc)
             next_as_utc = croniter(expr, utc_base).get_next(datetime)
-            utc_time = next_as_utc.strftime("%-I:%M %p")
+            utc_time = platform_compat.strftime(next_as_utc, "%-I:%M %p")
             utc_time_padded = next_as_utc.strftime("%I:%M %p")
             result = desc.replace(f"At {utc_time}", f"At {local_time}")
             if result == desc:
@@ -261,7 +254,7 @@ def format_schedule(schedule: CronSchedule, tz_name: str = "") -> str:
             dt = datetime.fromtimestamp(schedule.at_ts).astimezone()
         if dt.date() == now.date():
             return f"at {dt:%I:%M %p %Z}"
-        return f"at {dt:%I:%M %p %Z}, {dt:%b %-d}"
+        return f"at {dt:%I:%M %p %Z}, {platform_compat.strftime(dt, '%b %-d')}"
     return schedule.kind
 
 
@@ -567,10 +560,13 @@ class CronService:
                 session_key,
             )
             try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                # killpg(getpgid) on POSIX, taskkill /T on Windows — routed through
+                # platform_compat so the reaper doesn't AttributeError on win32
+                # (os.getpgid/os.killpg/signal.SIGKILL are POSIX-only).
+                platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
             except (ProcessLookupError, OSError):
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    platform_compat.kill_pid(pid, platform_compat.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass
             _kill_escaped_children(child_pids)
@@ -1112,10 +1108,9 @@ class CronService:
         lock = self._dir / ".crons.lock"
         fd = lock.open("w")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            with platform_compat.file_lock(fd.fileno(), exclusive=True):
+                yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
             fd.close()
 
     def _sync(self) -> None:

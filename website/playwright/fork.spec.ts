@@ -10,7 +10,7 @@ import { test, expect } from '@playwright/test'
  * the live kiro-cli session may be unavailable in some CI environments.
  */
 
-test.describe('Fork Session E2E', () => {
+test.describe('Fork Session E2E', { tag: '@needs-agent' }, () => {
   test.beforeEach(async ({ page }) => {
     // Auth is handled by the 'setup' project (playwright.config.ts), which
     // exchanges PLAYWRIGHT_TOKEN for a cookie and persists it via storageState.
@@ -53,8 +53,10 @@ test.describe('Fork Session E2E', () => {
     if (process.env.PLAYWRIGHT_VIDEO === '1') await page.waitForTimeout(1500)
     await forkButton.click()
 
-    // New slot should appear with "Fork of " prefix in the title.
-    await expect(page.getByText(/^Fork of /).first()).toBeVisible({ timeout: 10000 })
+    // New slot should appear with a "Fork of " title. The shipped fork-arrow
+    // feature prefixes the title with "↳ " (↳ Fork of <parent>), so match the
+    // "Fork of " substring rather than anchoring at the start of the string.
+    await expect(page.getByText(/Fork of /).first()).toBeVisible({ timeout: 10000 })
     if (process.env.PLAYWRIGHT_VIDEO === '1') await page.waitForTimeout(2000)
   })
 })

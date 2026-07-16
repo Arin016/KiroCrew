@@ -15,7 +15,6 @@ import heapq
 import json
 import logging
 import math
-import os
 import re
 import struct
 import threading
@@ -34,6 +33,7 @@ except ImportError:
     import sqlite3
 import time
 
+from kiro_claw import platform_compat
 from kiro_claw.config.loader import config_dir
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
@@ -393,11 +393,10 @@ class VectorMemoryStore:
                 self._db.commit()
                 logger.info("Applied memory schema migration v%s", ver)
 
-        # Set file permissions (owner-only)
-        try:
-            os.chmod(self._db_path, 0o600)
-        except OSError:
-            pass
+        # Set file permissions (owner-only). chmod_safe already logs+swallows
+        # OSError internally and is a no-op on Windows, so no wrapper needed —
+        # matches the socketsec.py + sel.py chmod_safe call sites in this CR.
+        platform_compat.chmod_safe(self._db_path, 0o600)
 
         # Load persisted FAISS index (or rebuild from SQLite embeddings)
         try:
@@ -936,9 +935,19 @@ class VectorMemoryStore:
         # a reader that sees index.ntotal == N+1 while len(id_map) == N would
         # IndexError (or the concurrent add/search would corrupt the C++ index).
         with self._db_lock:
-            # Dedup via FAISS
-            if self._faiss_index is not None and self._faiss_index.ntotal > 0:  # type: ignore[attr-defined]
-                distances, indices = self._faiss_index.search(vec.reshape(1, -1), 5)  # type: ignore[attr-defined]
+            # Dedup via FAISS — only when THIS write has an embedding. The index
+            # being non-empty says nothing about the current write: with embeddings
+            # disabled (embedding_provider="none") or a transient embed failure,
+            # `embedding_blob` is None and the query vector below would be unbound
+            # (UnboundLocalError), losing the memory entirely. Degrade to a
+            # non-deduped write instead (the text-prefix dedup above still applies).
+            if (
+                embedding_blob is not None
+                and self._faiss_index is not None
+                and self._faiss_index.ntotal > 0  # type: ignore[attr-defined]
+            ):
+                query_vec = np.frombuffer(embedding_blob, dtype=np.float32).reshape(1, -1)
+                distances, indices = self._faiss_index.search(query_vec, 5)  # type: ignore[attr-defined]
                 for dist, idx in zip(distances[0], indices[0]):
                     if idx == -1:
                         break

@@ -96,8 +96,15 @@ def _mock_proc(stdout: bytes):
 
 class TestFetchUsageBg:
     @pytest.fixture(autouse=True)
-    def _reset(self):
+    def _reset(self, monkeypatch):
         _reset_usage_globals()
+        # Bypass OS-sandbox wrap — macOS 26 has no sandbox backend and wrap_argv
+        # raises before the subprocess is spawned, making proc=None and skipping
+        # the reap path that several tests assert on.
+        monkeypatch.setattr(
+            "kiro_claw.dashboard.handlers.sessions.wrap_argv",
+            lambda argv, **k: (list(argv), None),
+        )
         yield
         _reset_usage_globals()
 

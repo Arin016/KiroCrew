@@ -30,6 +30,7 @@ from kiro_claw.knowledge.llm_pool import LLMPool
 
 try:
     from kiro_claw.artifacts import ArtifactNotFoundError, ArtifactStore
+
     _HAS_ARTIFACTS = True
 except ImportError:
     _HAS_ARTIFACTS = False
@@ -209,16 +210,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             # mirror the DEFAULT_* constants above).
             if "execution_mode" not in cols:
                 conn.execute(
-                    "ALTER TABLE campaigns ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'agent'")
+                    "ALTER TABLE campaigns ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'agent'"
+                )
             if "max_subquestions_per_round" not in cols:
                 conn.execute(
                     "ALTER TABLE campaigns ADD COLUMN max_subquestions_per_round "
-                    "INTEGER NOT NULL DEFAULT 3")
+                    "INTEGER NOT NULL DEFAULT 3"
+                )
             if "depth_decay" not in cols:
-                conn.execute("ALTER TABLE campaigns ADD COLUMN depth_decay REAL NOT NULL DEFAULT 0.5")
+                conn.execute(
+                    "ALTER TABLE campaigns ADD COLUMN depth_decay REAL NOT NULL DEFAULT 0.5"
+                )
             if "reserve_fraction" not in cols:
                 conn.execute(
-                    "ALTER TABLE campaigns ADD COLUMN reserve_fraction REAL NOT NULL DEFAULT 0.15")
+                    "ALTER TABLE campaigns ADD COLUMN reserve_fraction REAL NOT NULL DEFAULT 0.15"
+                )
             conn.commit()
             _INITIALIZED_DBS.add(key)
         except Exception:
@@ -491,8 +497,9 @@ def create_campaign(config: dict) -> dict:
     exec_mode = config.get("execution_mode", DEFAULT_EXECUTION_MODE)
     if exec_mode not in VALID_EXECUTION_MODES:
         exec_mode = DEFAULT_EXECUTION_MODE
-    max_subq = max(0, int(config.get("max_subquestions_per_round",
-                                     DEFAULT_MAX_SUBQUESTIONS_PER_ROUND)))
+    max_subq = max(
+        0, int(config.get("max_subquestions_per_round", DEFAULT_MAX_SUBQUESTIONS_PER_ROUND))
+    )
     depth_decay = float(config.get("depth_decay", DEFAULT_DEPTH_DECAY))
     if not 0.0 <= depth_decay <= 1.0:
         depth_decay = DEFAULT_DEPTH_DECAY
@@ -520,7 +527,10 @@ def create_campaign(config: dict) -> dict:
             int(bool(config.get("auto_approve", False))),
             parent_id,
             min(int(config.get("parallel_workers", 1)), _MAX_PARALLEL_WORKERS),
-            exec_mode, max_subq, depth_decay, reserve_fraction,
+            exec_mode,
+            max_subq,
+            depth_decay,
+            reserve_fraction,
             CampaignStatus.READY,
             time.time(),
         ),
@@ -879,9 +889,9 @@ def _write_brief(cid: str, row: Any) -> None:
             text = s.get("text", "") if isinstance(s, dict) else str(s)
             origin = s.get("origin", "grill") if isinstance(s, dict) else "grill"
             tag = (
-                " _(emergent)_" if origin == "emergent"
-                else " _(user guidance)_" if origin == "manual"
-                else ""
+                " _(emergent)_"
+                if origin == "emergent"
+                else " _(user guidance)_" if origin == "manual" else ""
             )
             lines.append(f"- {text}{tag}")
     else:
@@ -898,11 +908,19 @@ def _write_brief(cid: str, row: Any) -> None:
             "",
             "**Questions allowed:** if the goal or scope is genuinely ambiguous in a "
             "way that would materially change your research direction, you MAY ask ONE "
-            "high-leverage clarification question (first-principle: state what you know, "
-            "the specific decision, and the options). Keep the bar high — proceed on a "
-            "best-reasoned assumption for anything minor or self-resolvable. Write "
-            '{"question": ..., "why": ...} to questions.json and end the turn — the '
-            "campaign pauses for the user, who answers via Nudge.",
+            "high-leverage clarification question. Rules:\n"
+            "- Only ask about DECISIONS the user must make — never ask about facts you "
+            "can discover by exploring (filesystem, tools, code, web search).\n"
+            "- Ask exactly ONE focused question per pause — multiple questions at once "
+            "are bewildering and produce shallow answers.\n"
+            "- First-principle: state what you know, the specific decision, and the "
+            "options. Include your recommended answer.\n"
+            "- Keep the bar high — proceed on a best-reasoned assumption for anything "
+            "minor or self-resolvable.\n"
+            "Write "
+            '{"question": ..., "why": ..., "recommended": ...} to '
+            "questions.json and end the turn — the campaign pauses for the user, who "
+            "answers via Nudge.",
         ]
     if row["success_criteria"]:
         lines += [
@@ -912,28 +930,32 @@ def _write_brief(cid: str, row: Any) -> None:
             "when met, set verification.passed=true in the finding.",
         ]
     lines += [
-        "", "**Recursive exploration (emergent sub-questions):** As you research you will "
+        "",
+        "**Recursive exploration (emergent sub-questions):** As you research you will "
         "discover NEW high-value questions not in the initial list. Each cycle, in addition "
         "to your finding, you MAY propose follow-up sub-questions by writing "
         "`emergent_questions.json` in this dir as a JSON array: "
-        "`[{\"text\": \"...\", \"priority\": 0.0-1.0}, ...]` where priority is how valuable "
+        '`[{"text": "...", "priority": 0.0-1.0}, ...]` where priority is how valuable '
         "/ relevant the lead is to the main question. The system ranks them, admits the top "
         "few per round (a budget), de-duplicates against existing questions, and appends the "
         "winners to the checklist above (tagged _(emergent)_) for you to investigate in "
         "later cycles — so you can follow leads BEYOND the initial questions. Do NOT "
         "re-propose questions already on the checklist, and stop proposing once the main "
         "question is sufficiently answered (your Definition of Done / verification).",
-        "", "Each cycle, also read `guidance.txt` in this dir if present and follow any "
+        "",
+        "Each cycle, also read `guidance.txt` in this dir if present and follow any "
         "directive there (e.g. a FINALIZE MODE instruction to stop exploring and "
         "synthesize your final answer).",
-        "", "Adapt direction each cycle from prior findings; pursue the highest-value open "
+        "",
+        "Adapt direction each cycle from prior findings; pursue the highest-value open "
         "lead toward the question.",
     ]
     # Parallel worker instruction
     pw = int(row["parallel_workers"]) if "parallel_workers" in row.keys() else 1
     if pw > 1:
         lines += [
-            "", f"**Parallel execution:** You have {pw} parallel worker slots. Each cycle, "
+            "",
+            f"**Parallel execution:** You have {pw} parallel worker slots. Each cycle, "
             "use `spawn_run` with a `tasks` array to investigate up to "
             f"{pw} open sub-questions simultaneously (one task per sub-question). "
             "Each task should be a self-contained research instruction for that sub-question. "
@@ -1004,12 +1026,10 @@ def _ingest_emergent_questions(campaign_id: str) -> list[dict]:
     )
     decay = float(row["depth_decay"] if row["depth_decay"] is not None else DEFAULT_DEPTH_DECAY)
     existing = json.loads(row["sub_questions"] or "[]")
-    existing_norm = {
-        _sq.normalize(s.get("text", "")) for s in existing if isinstance(s, dict)
-    }
+    existing_norm = {_sq.normalize(s.get("text", "")) for s in existing if isinstance(s, dict)}
     queue = _sq.load_queue(d)
     depth = _sq.next_depth(queue)
-    factor = decay ** depth
+    factor = decay**depth
 
     # emergent_questions.json is LLM output that flows into the sub_questions DB
     # column and the dashboard UI — scrub creds + exfil URLs before it enters the
@@ -1066,8 +1086,7 @@ def _activate_emergent(campaign_id: str) -> list[dict]:
         return []
     subs = json.loads(row["sub_questions"] or "[]")
     initial = [
-        s for s in subs
-        if isinstance(s, dict) and s.get("origin") in ("grill", "manual", None, "")
+        s for s in subs if isinstance(s, dict) and s.get("origin") in ("grill", "manual", None, "")
     ]
     initial_open = [s for s in initial if s.get("status") != "answered"]
     if initial_open and int(row["total_cycles"] or 0) < len(initial):
@@ -1118,11 +1137,13 @@ def _should_finalize(campaign_id: str) -> bool:
     if row is None or row["execution_mode"] != DEFAULT_EXECUTION_MODE:
         return False
     reserve_fraction = (
-        float(row["reserve_fraction"]) if row["reserve_fraction"] is not None
+        float(row["reserve_fraction"])
+        if row["reserve_fraction"] is not None
         else DEFAULT_RESERVE_FRACTION
     )
     return _in_reserve_zone(
-        int(row["total_cycles"] or 0), int(row["max_cycles"] or 0), reserve_fraction)
+        int(row["total_cycles"] or 0), int(row["max_cycles"] or 0), reserve_fraction
+    )
 
 
 def _enter_finalize(campaign_id: str) -> bool:
@@ -1188,9 +1209,7 @@ _WORKFLOW_RUN_FILE = "workflow_run.json"
 
 def _campaign_execution_mode(campaign_id: str) -> str:
     db = _get_db()
-    row = db.execute(
-        "SELECT execution_mode FROM campaigns WHERE id = ?", (campaign_id,)
-    ).fetchone()
+    row = db.execute("SELECT execution_mode FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     db.close()
     return (row["execution_mode"] if row else DEFAULT_EXECUTION_MODE) or DEFAULT_EXECUTION_MODE
 
@@ -1204,7 +1223,8 @@ def _write_workflow_run_id(campaign_id: str, run_id: str) -> None:
     # old). Persisting the offset makes the resumed run append correctly.
     cycle_offset = len(_list_cycle_files(campaign_id))
     d.joinpath(_WORKFLOW_RUN_FILE).write_text(
-        json.dumps({"run_id": run_id, "ts": time.time(), "cycle_offset": cycle_offset}))
+        json.dumps({"run_id": run_id, "ts": time.time(), "cycle_offset": cycle_offset})
+    )
 
 
 def _read_workflow_cycle_offset(campaign_id: str) -> int:
@@ -1242,10 +1262,13 @@ async def _launch_workflow(request: web.Request, cid: str) -> None:
     svc = getattr(state, "workflow_service", None) if state is not None else None
     if svc is None:
         logger.warning(
-            "auto_research: workflow_service unavailable; cannot launch workflow for %s", cid)
+            "auto_research: workflow_service unavailable; cannot launch workflow for %s", cid
+        )
         update_campaign_status(
-            cid, CampaignStatus.FAILED,
-            error_message="Dynamic Workflow engine unavailable — cannot start workflow mode.")
+            cid,
+            CampaignStatus.FAILED,
+            error_message="Dynamic Workflow engine unavailable — cannot start workflow mode.",
+        )
         _emit_sse({"type": "failed", "campaign_id": cid})
         return
     db = _get_db()
@@ -1259,8 +1282,10 @@ async def _launch_workflow(request: web.Request, cid: str) -> None:
     except Exception:
         logger.exception("auto_research: workflow start failed for %s", cid)
         update_campaign_status(
-            cid, CampaignStatus.FAILED,
-            error_message="Workflow start failed — see gateway logs for details.")
+            cid,
+            CampaignStatus.FAILED,
+            error_message="Workflow start failed — see gateway logs for details.",
+        )
         _emit_sse({"type": "failed", "campaign_id": cid})
         return
     run_id = (res or {}).get("run_id")
@@ -1270,8 +1295,8 @@ async def _launch_workflow(request: web.Request, cid: str) -> None:
     else:
         logger.warning("auto_research: workflow start returned no run_id for %s: %s", cid, res)
         update_campaign_status(
-            cid, CampaignStatus.FAILED,
-            error_message="Workflow start returned no run ID.")
+            cid, CampaignStatus.FAILED, error_message="Workflow start returned no run ID."
+        )
         _emit_sse({"type": "failed", "campaign_id": cid})
 
 
@@ -1295,6 +1320,7 @@ async def _poll_workflow_campaign(campaign_id: str, state: Any) -> None:
     raises into the watchdog.
     """
     try:
+
         def _redact_llm(s: Any) -> str:
             text = str(s or "")
             if not _HAS_SECURITY:
@@ -1326,8 +1352,10 @@ async def _poll_workflow_campaign(campaign_id: str, state: Any) -> None:
                     started_ts = float(run_meta.get("ts", 0))
                     if started_ts and (time.time() - started_ts) > 3600:
                         update_campaign_status(
-                            campaign_id, CampaignStatus.FAILED,
-                            error_message="Workflow run snapshot lost after 1h — run likely evicted or crashed.")
+                            campaign_id,
+                            CampaignStatus.FAILED,
+                            error_message="Workflow run snapshot lost after 1h — run likely evicted or crashed.",
+                        )
                         _emit_sse({"type": "failed", "campaign_id": campaign_id})
                 except (json.JSONDecodeError, OSError, ValueError, TypeError):
                     pass
@@ -1360,13 +1388,15 @@ async def _poll_workflow_campaign(campaign_id: str, state: Any) -> None:
                 continue  # already written by an earlier poll (idempotent)
             meta, fin = investigate[i]
             label = str(meta.get("label", ""))
-            insight = label[len("investigate: "):] if label.startswith("investigate: ") else label
+            insight = label[len("investigate: ") :] if label.startswith("investigate: ") else label
             finding = {
                 "cycle": cycle_no,
                 "summary": _redact_llm(fin.get("result_summary", "")),
                 "key_insight": _redact_llm(insight),
-                "sources_checked": [], "sources_empty": [],
-                "new_findings_count": 1, "evidence_strength": "moderate",
+                "sources_checked": [],
+                "sources_empty": [],
+                "new_findings_count": 1,
+                "evidence_strength": "moderate",
             }
             fpath.parent.mkdir(parents=True, exist_ok=True)
             fpath.write_text(json.dumps(finding, indent=2))
@@ -1378,8 +1408,13 @@ async def _poll_workflow_campaign(campaign_id: str, state: Any) -> None:
             db.execute("UPDATE campaigns SET total_cycles=? WHERE id=?", (count, campaign_id))
             db.commit()
             db.close()
-            _emit_sse({"type": "new_finding", "campaign_id": campaign_id,
-                       "finding": _read_finding_file(_list_cycle_files(campaign_id)[-1])})
+            _emit_sse(
+                {
+                    "type": "new_finding",
+                    "campaign_id": campaign_id,
+                    "finding": _read_finding_file(_list_cycle_files(campaign_id)[-1]),
+                }
+            )
         status = snap.get("status")
         if status == "finished":
             result = snap.get("result") if isinstance(snap.get("result"), dict) else {}
@@ -1392,8 +1427,12 @@ async def _poll_workflow_campaign(campaign_id: str, state: Any) -> None:
             _emit_sse({"type": "complete", "campaign_id": campaign_id})
         elif status in ("failed", "cancelled"):
             update_campaign_status(
-                campaign_id, CampaignStatus.FAILED,
-                error_message=_redact_llm(snap.get("error") or "workflow run ended without completing"))
+                campaign_id,
+                CampaignStatus.FAILED,
+                error_message=_redact_llm(
+                    snap.get("error") or "workflow run ended without completing"
+                ),
+            )
             _emit_sse({"type": "failed", "campaign_id": campaign_id})
     except Exception:
         logger.exception("auto_research: workflow poll failed for %s", campaign_id)
@@ -1445,11 +1484,19 @@ _GRILL_EXPAND_PROMPT = (
     "Reason from FIRST PRINCIPLES. Given the main question, the tree so far, and the "
     "target node to expand, propose at most 5 children — the highest-value next nodes. "
     "Each child is either:\n"
-    '  - "clarifier": a question to ASK THE USER to narrow scope or surface an unknown '
-    'they may not have considered; include a "recommended" best-guess answer.\n'
+    '  - "clarifier": a DECISION question to ask the user — something that narrows '
+    "scope or surfaces an unknown they may not have considered. These must be genuine "
+    "decisions only the user can make, NOT facts discoverable by exploring code/docs/"
+    'tools. Include a "recommended" best-guess answer.\n'
     '  - "research": a well-formed, distinct sub-question the campaign should '
     "investigate (use only when it is already a concrete research target).\n"
-    "Distinct, non-overlapping angles; no generic restatements. Output ONLY a JSON "
+    "Rules:\n"
+    "- Distinct, non-overlapping angles; no generic restatements.\n"
+    "- Never propose a clarifier for something the agent could look up itself "
+    "(codebase structure, API signatures, existing config, prior decisions in the tree).\n"
+    "- Each clarifier should be ONE focused question — asking multiple things in one "
+    "node is bewildering and produces shallow answers.\n"
+    "Output ONLY a JSON "
     'array like [{"kind":"clarifier","text":"...","recommended":"..."},'
     '{"kind":"research","text":"..."}].'
 )
@@ -1770,9 +1817,12 @@ async def _handle_nudge(request: web.Request) -> web.Response:
     # injected mid-run has no effect (the script doesn't read guidance.txt).
     if _campaign_execution_mode(cid) == "workflow":
         return web.json_response(
-            {"error": "Nudge/guidance not supported in workflow mode — the script "
-                      "runs autonomously. Use agent mode for interactive guidance."},
-            status=409)
+            {
+                "error": "Nudge/guidance not supported in workflow mode — the script "
+                "runs autonomously. Use agent mode for interactive guidance."
+            },
+            status=409,
+        )
     body = await request.json()
     text = body.get("text", "")
     if not text:
@@ -1790,8 +1840,7 @@ async def _handle_nudge(request: web.Request) -> web.Response:
 _REPORT_TIMEOUT = 90.0
 
 
-def _build_report_prompt(question: str, subs: list, findings_md: str,
-                         total_cycles: int) -> str:
+def _build_report_prompt(question: str, subs: list, findings_md: str, total_cycles: int) -> str:
     """Prompt the LLM to author a polished, self-contained HTML report."""
     sub_lines = []
     for s in subs:
@@ -1829,7 +1878,7 @@ async def _handle_report_status(request: web.Request) -> web.Response:
     status probe so the UI can show "View report" + "Regenerate" upfront
     instead of a bare "Export". Degrades gracefully when artifacts are off.
     """
-    if (denied := _require_auth(request)):
+    if denied := _require_auth(request):
         return denied
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
@@ -1837,9 +1886,7 @@ async def _handle_report_status(request: web.Request) -> web.Response:
     if not _HAS_ARTIFACTS:
         return web.json_response({"slug": None})
     db = _get_db()
-    row = db.execute(
-        "SELECT report_artifact_slug FROM campaigns WHERE id = ?", (cid,)
-    ).fetchone()
+    row = db.execute("SELECT report_artifact_slug FROM campaigns WHERE id = ?", (cid,)).fetchone()
     db.close()
     if row is None:
         return web.json_response({"error": "Not found"}, status=404)
@@ -1864,7 +1911,7 @@ async def _handle_to_artifact(request: web.Request) -> web.Response:
     to read; if the LLM pool is unavailable or returns nothing, we fall back to
     a mechanical render of FINDINGS.md so the action never hard-fails.
     """
-    if (denied := _require_auth(request)):
+    if denied := _require_auth(request):
         return denied
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
@@ -1897,8 +1944,7 @@ async def _handle_to_artifact(request: web.Request) -> web.Response:
     pool = request.app.get("auto_research_llm_pool")
     if pool is not None:
         try:
-            prompt = _build_report_prompt(question, subs, findings_md[:24000],
-                                          row["total_cycles"])
+            prompt = _build_report_prompt(question, subs, findings_md[:24000], row["total_cycles"])
             raw = (await pool.send(prompt, timeout=_REPORT_TIMEOUT)).strip()
             # LLMs often wrap HTML in a ```html … ``` fence despite instructions.
             raw = re.sub(r"^```[a-zA-Z0-9]*\s*", "", raw)
@@ -1908,8 +1954,11 @@ async def _handle_to_artifact(request: web.Request) -> web.Response:
         except Exception:
             logger.exception("LLM report authoring failed for %s; using fallback", cid)
     # Graceful fallback: mechanical render of the (escaped) findings.
-    html: str = authored if authored is not None else _render_findings_html(
-        question, subs, findings_md, row["total_cycles"], cid)
+    html: str = (
+        authored
+        if authored is not None
+        else _render_findings_html(question, subs, findings_md, row["total_cycles"], cid)
+    )
 
     # Redact agent/user-authored content before it lands in a shareable,
     # publishable artifact (HTML-escaping does NOT remove leaked credentials /
@@ -1952,8 +2001,7 @@ async def _handle_to_artifact(request: web.Request) -> web.Response:
     # the UI can show "View report" upfront.
     if art.slug != existing_slug:
         db = _get_db()
-        db.execute("UPDATE campaigns SET report_artifact_slug = ? WHERE id = ?",
-                   (art.slug, cid))
+        db.execute("UPDATE campaigns SET report_artifact_slug = ? WHERE id = ?", (art.slug, cid))
         db.commit()
         db.close()
     _audit("campaign_to_artifact", cid, slug=art.slug)
@@ -1963,8 +2011,9 @@ async def _handle_to_artifact(request: web.Request) -> web.Response:
     )
 
 
-def _render_findings_html(question: str, subs: list, findings_md: str,
-                          total_cycles: int, cid: str) -> str:
+def _render_findings_html(
+    question: str, subs: list, findings_md: str, total_cycles: int, cid: str
+) -> str:
     """Render campaign findings into a self-contained HTML document."""
     q = html_mod.escape(question)
     sub_items = ""
@@ -2006,7 +2055,7 @@ async def _handle_knowledge_status(request: web.Request) -> web.Response:
     gracefully (``in_library: false``) when the Knowledge Library is
     unavailable -- a status check must never surface a 503.
     """
-    if (denied := _require_auth(request)):
+    if denied := _require_auth(request):
         return denied
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
@@ -2034,7 +2083,7 @@ async def _handle_knowledge_status(request: web.Request) -> web.Response:
 
 async def _handle_to_knowledge(request: web.Request) -> web.Response:
     """POST /campaigns/{id}/to-knowledge -- ingest FINDINGS.md into Knowledge Library."""
-    if (denied := _require_auth(request)):
+    if denied := _require_auth(request):
         return denied
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
@@ -2064,7 +2113,9 @@ async def _handle_to_knowledge(request: web.Request) -> web.Response:
     # Dedup check
     existing = store.get_source_by_uri(uri)
     if existing:
-        return web.json_response({"error": "Already in Knowledge Library", "id": existing["id"]}, status=409)
+        return web.json_response(
+            {"error": "Already in Knowledge Library", "id": existing["id"]}, status=409
+        )
     # Add source and trigger ingestion
     db = _get_db()
     row = db.execute("SELECT question FROM campaigns WHERE id = ?", (cid,)).fetchone()
@@ -2072,8 +2123,11 @@ async def _handle_to_knowledge(request: web.Request) -> web.Response:
     # The Knowledge Library is an external surface (RAG/search), so even the
     # source name metadata must be redacted before ingestion — matching the
     # treatment _handle_to_artifact applies to its artifact name.
-    name = (f"Research: {_redact_finding({'v': row['question'][:60]})['v']}"
-            if row else f"Research: {cid}")
+    name = (
+        f"Research: {_redact_finding({'v': row['question'][:60]})['v']}"
+        if row
+        else f"Research: {cid}"
+    )
     sid = store.add_source(name=name, source_type="local_file", uri=uri, properties={})
     store.db.execute("UPDATE sources SET sync_status = 'syncing' WHERE id = ?", (sid,))
     store.db.commit()
@@ -2098,7 +2152,7 @@ async def _handle_to_knowledge(request: web.Request) -> web.Response:
 
 async def _handle_add_question(request: web.Request) -> web.Response:
     """Append a user-authored sub-question to a campaign mid-run."""
-    if (denied := _require_auth(request)):
+    if denied := _require_auth(request):
         return denied
     cid = request.match_info["id"]
     if not _validate_campaign_id(cid):
@@ -2107,10 +2161,13 @@ async def _handle_add_question(request: web.Request) -> web.Response:
     # decomposes them internally); adding questions mid-run has no effect.
     if _campaign_execution_mode(cid) == "workflow":
         return web.json_response(
-            {"error": "Adding questions mid-run not supported in workflow mode — "
-                      "sub-questions are planned at launch. Use agent mode for "
-                      "interactive exploration."},
-            status=409)
+            {
+                "error": "Adding questions mid-run not supported in workflow mode — "
+                "sub-questions are planned at launch. Use agent mode for "
+                "interactive exploration."
+            },
+            status=409,
+        )
     body = await request.json()
     text = (body.get("text") or "").strip()
     if not text:
@@ -2227,9 +2284,13 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/apps/auto-research/campaigns/{id}/nudge", _handle_nudge)
     app.router.add_post("/api/apps/auto-research/campaigns/{id}/questions", _handle_add_question)
     app.router.add_post("/api/apps/auto-research/campaigns/{id}/to-knowledge", _handle_to_knowledge)
-    app.router.add_get("/api/apps/auto-research/campaigns/{id}/knowledge-status", _handle_knowledge_status)
+    app.router.add_get(
+        "/api/apps/auto-research/campaigns/{id}/knowledge-status", _handle_knowledge_status
+    )
     app.router.add_post("/api/apps/auto-research/campaigns/{id}/to-artifact", _handle_to_artifact)
-    app.router.add_get("/api/apps/auto-research/campaigns/{id}/report-status", _handle_report_status)
+    app.router.add_get(
+        "/api/apps/auto-research/campaigns/{id}/report-status", _handle_report_status
+    )
     app.router.add_get("/api/apps/auto-research/campaigns/{id}/stream", _handle_stream)
 
     async def _start_watchdog(_app: web.Application) -> None:

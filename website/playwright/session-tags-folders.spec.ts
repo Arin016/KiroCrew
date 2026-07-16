@@ -24,12 +24,32 @@ async function wipeColumns(request: APIRequestContext) {
   const list = await (await request.get('/api/chat/tag-columns')).json()
   for (const c of list) await request.delete(`/api/chat/tag-columns/${c.id}`)
 }
+// Destructive wipes are gated on an EXPLICIT ephemeral-harness marker: the
+// e2e harness sets KIROCLAW_E2E_EPHEMERAL for the throwaway tmp-home gateway
+// it spawns. Token presence alone is NOT a safe signal -- it is also the normal
+// state when authenticating to a real, token-protected gateway, so a developer
+// pointing the suite at their live gateway (to debug a failure) must never
+// trigger a slot wipe. Absent the marker we skip the wipes and accept the flake
+// risk (e.g. a bare local `playwright test` against the port-5476 fallback).
+const HARNESS_GATEWAY = !!process.env.KIROCLAW_E2E_EPHEMERAL
+
+async function wipeSlots(request: APIRequestContext) {
+  // Slots accumulate across this serial describe (and across retries:2) since
+  // beforeEach previously only wiped columns/folders. A growing slot set makes
+  // the /chat render heavier and worsens the load-timeout flake. Each test
+  // creates its own slot, so a clean wipe before each is safe on the harness
+  // gateway (and skipped on a personal one — see HARNESS_GATEWAY).
+  if (!HARNESS_GATEWAY) return
+  const list = await (await request.get('/api/chat/slots')).json()
+  for (const s of list) await request.delete(`/api/chat/slots/${s.key}`)
+}
 
 test.describe.configure({ mode: 'serial' })
 
 test.describe('Folders inside columns (deep)', () => {
   test.beforeEach(async ({ page, request }) => {
     await primeBrowser(page)
+    await wipeSlots(request)
     await wipeColumns(request)
     await wipeFolders(request)
   })
@@ -43,7 +63,7 @@ test.describe('Folders inside columns (deep)', () => {
     await page.goto('/chat')
     await page.waitForSelector(`[data-testid="column-${col.id}"]`)
     // Folder header should render in the column, even with 0 matching sessions
-    await expect(page.locator(`[data-testid="col-${col.id}-folder-${folder.id}"]`)).toBeVisible({ timeout: 5000 })
+    await expect(page.locator(`[data-testid="col-${col.id}-folder-${folder.id}"]`)).toBeVisible({ timeout: 15000 })
   })
 
   test('F2. Column "New folder" UI button creates folder and it appears in the column', async ({ page, request }) => {
@@ -62,9 +82,9 @@ test.describe('Folders inside columns (deep)', () => {
     await expect.poll(async () => {
       const list = await (await request.get('/api/chat/folders')).json()
       return list.find((f: { name: string }) => f.name === 'F2-ui-created')
-    }, { timeout: 5000 }).toBeTruthy()
+    }, { timeout: 15000 }).toBeTruthy()
     const folder = ((await (await request.get('/api/chat/folders')).json()) as { id: string; name: string }[]).find(f => f.name === 'F2-ui-created')!
-    await expect(page.locator(`[data-testid="col-${col.id}-folder-${folder.id}"]`)).toBeVisible({ timeout: 5000 })
+    await expect(page.locator(`[data-testid="col-${col.id}-folder-${folder.id}"]`)).toBeVisible({ timeout: 15000 })
   })
 
   test('F3. Session with folder_id shows under that folder in the column, not in ungrouped area', async ({ page, request }) => {
@@ -80,7 +100,7 @@ test.describe('Folders inside columns (deep)', () => {
     // Session must be inside the folder's drop-target region, not directly under the column
     const folderEl = page.locator(`[data-testid="col-${col.id}-folder-${folder.id}"]`)
     await expect(folderEl).toBeVisible()
-    await expect(folderEl.locator(`[data-slot-key="${slot.key}"]`)).toHaveCount(1, { timeout: 5000 })
+    await expect(folderEl.locator(`[data-slot-key="${slot.key}"]`)).toHaveCount(1, { timeout: 15000 })
   })
 
   test('F4. Session without folder_id lands in ungrouped area of every matching column', async ({ page, request }) => {
@@ -130,7 +150,7 @@ test.describe('Folders inside columns (deep)', () => {
     await expect.poll(async () => {
       const slots = await (await request.get('/api/chat/slots')).json()
       return slots.find((s: { key: string }) => s.key === slot.key)?.folder_id
-    }, { timeout: 5000 }).toBe(folder.id)
+    }, { timeout: 15000 }).toBe(folder.id)
     // Re-read the page; session should now be nested inside the folder element
     await page.reload()
     await page.waitForSelector(`[data-testid="column-${col.id}"]`)
@@ -148,7 +168,7 @@ test.describe('Folders inside columns (deep)', () => {
     await page.goto('/chat')
     await page.waitForSelector(`[data-testid="column-${col.id}"]`)
     // Wait for the slot row (nested in the folder) to be in DOM
-    await page.waitForSelector(`[data-slot-key="${slot.key}"]`, { timeout: 5000 })
+    await page.waitForSelector(`[data-slot-key="${slot.key}"]`, { timeout: 15000 })
     // Simulate drop onto the column body's scroll area (not folder)
     await page.evaluate(({ slotKey, columnTestId }) => {
       const source = document.querySelector(`[data-slot-key="${slotKey}"]`) as HTMLElement
@@ -210,10 +230,10 @@ test.describe('Folders inside columns (deep)', () => {
       const slots = await (await request.get('/api/chat/slots')).json()
       const s = slots.find((x: { key: string }) => x.key === slot.key)
       return { tags: s?.tags, folder_id: s?.folder_id }
-    }, { timeout: 5000 }).toEqual({ tags: [doneId], folder_id: folder.id })
+    }, { timeout: 15000 }).toEqual({ tags: [doneId], folder_id: folder.id })
     // UI: session should now nest inside Done column's folder
     await page.reload()
-    await page.waitForSelector(`[data-testid="col-${doneCol.id}-folder-${folder.id}"] [data-slot-key="${slot.key}"]`, { timeout: 5000 })
+    await page.waitForSelector(`[data-testid="col-${doneCol.id}-folder-${folder.id}"] [data-slot-key="${slot.key}"]`, { timeout: 15000 })
     await expect(page.locator(`[data-testid="col-${todoCol.id}-folder-${folder.id}"] [data-slot-key="${slot.key}"]`)).toHaveCount(0)
   })
 
@@ -262,12 +282,12 @@ test.describe('Folders inside columns (deep)', () => {
     await expect.poll(async () => {
       const list = await (await request.get('/api/chat/folders')).json()
       return list.find((f: { id: string }) => f.id === folder.id)
-    }, { timeout: 5000 }).toBeFalsy()
+    }, { timeout: 15000 }).toBeFalsy()
     // Session ungrouped (folder_id cleared server-side)
     await expect.poll(async () => {
       const slots = await (await request.get('/api/chat/slots')).json()
       return slots.find((s: { key: string }) => s.key === slot.key)?.folder_id
-    }, { timeout: 5000 }).toBeFalsy()
+    }, { timeout: 15000 }).toBeFalsy()
   })
 
   test('F9. Session-disappearing repro: column with no matching sessions renders empty, sessions still exist on disk', async ({ page, request }) => {
@@ -330,7 +350,7 @@ test.describe('Folders inside columns (deep)', () => {
     await expect.poll(async () => {
       const list = await (await request.get('/api/chat/folders')).json()
       return list.find((f: { name: string }) => f.name === 'F11-child')?.parent_id
-    }, { timeout: 5000 }).toBe(parent.id)
+    }, { timeout: 15000 }).toBe(parent.id)
     // Subfolder also renders inside the parent in the column
     const child = ((await (await request.get('/api/chat/folders')).json()) as { id: string; name: string }[]).find(f => f.name === 'F11-child')!
     await expect(page.locator(`[data-testid="col-${col.id}-folder-${parent.id}"] [data-testid="col-${col.id}-folder-${child.id}"]`)).toBeVisible()

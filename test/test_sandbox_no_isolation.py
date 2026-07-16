@@ -24,6 +24,7 @@ def test_no_backend_emits_security_warning(monkeypatch, caplog):
     _reset_warned()
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
     monkeypatch.setattr(sb, "_allow_no_isolation", lambda: False)
+    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
 
     with caplog.at_level(logging.WARNING, logger=sb.logger.name):
         argv, cleanup = sb.wrap_argv(["echo", "hi"], mode="standard")
@@ -41,6 +42,7 @@ def test_no_backend_opted_in_demotes_to_info(monkeypatch, caplog):
     _reset_warned()
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
     monkeypatch.setattr(sb, "_allow_no_isolation", lambda: True)
+    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
 
     with caplog.at_level(logging.INFO, logger=sb.logger.name):
         sb.wrap_argv(["echo", "hi"], mode="standard")
@@ -55,6 +57,7 @@ def test_warning_emitted_once_per_process(monkeypatch, caplog):
     _reset_warned()
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
     monkeypatch.setattr(sb, "_allow_no_isolation", lambda: False)
+    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
 
     with caplog.at_level(logging.WARNING, logger=sb.logger.name):
         sb.wrap_argv(["echo", "1"], mode="standard")
@@ -74,3 +77,60 @@ def test_mode_off_does_not_warn(monkeypatch, caplog):
     assert argv == ["echo", "hi"]
     assert cleanup is None
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_scrub_env_drops_credential_keys():
+    """scrub_env removes AWS/SSH/Slack-token keys, keeps benign ones."""
+    env = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/x",
+        "AWS_SECRET_ACCESS_KEY": "sk",
+        "AWS_SESSION_TOKEN": "st",
+        "SSH_AUTH_SOCK": "/tmp/agent.sock",
+        "SLACK_BOT_TOKEN": "xoxb-1",
+        "KIROCLAW_OWNER_ID": "U123",
+    }
+    out = sb.scrub_env(env)
+    assert out == {"PATH": "/usr/bin", "HOME": "/home/x"}
+
+
+def test_scrub_env_extra_prefixes_strips_python_env():
+    """extra_prefixes drops PYTHONPATH/PYTHONHOME on top of the credential set."""
+    env = {"PATH": "/usr/bin", "PYTHONPATH": "/site", "PYTHONHOME": "/py"}
+    out = sb.scrub_env(env, extra_prefixes=sb._PYTHON_ENV_PREFIXES)
+    assert out == {"PATH": "/usr/bin"}
+
+
+def test_strip_python_env_holds_on_fail_open_path(monkeypatch):
+    """On the opted-in no-backend path wrap_argv returns argv unmodified (no
+    launcher strips PYTHONPATH), so sandboxed_spawn_argv MUST strip the Python
+    env vars from the returned env itself (AutoSDE finding on Talos 92e24570)."""
+    _reset_warned()
+    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: True)
+    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+
+    base = {"PATH": "/usr/bin", "PYTHONPATH": "/kiroclaw/site", "PYTHONHOME": "/py"}
+    argv, env, cleanup = sb.sandboxed_spawn_argv(
+        ["mcp-server"], mode="standard", env=base, strip_python_env=True
+    )
+    # Fail-open: no wrapper, no launcher, no cleanup.
+    assert argv == ["mcp-server"]
+    assert cleanup is None
+    # ...but the Python-env guarantee still holds via the parent-level scrub.
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_strip_python_env_false_keeps_python_env(monkeypatch):
+    """Without strip_python_env, the chokepoint leaves PYTHONPATH intact (our own
+    sandboxed Python children import kiro_claw via it)."""
+    _reset_warned()
+    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: True)
+    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+
+    base = {"PATH": "/usr/bin", "PYTHONPATH": "/kiroclaw/site"}
+    _, env, _ = sb.sandboxed_spawn_argv(["python", "-m", "x"], env=base)
+    assert env["PYTHONPATH"] == "/kiroclaw/site"

@@ -7,7 +7,8 @@
     "approval_mode": "auto",
     "streaming": true,
     "bot_name": "kiroclaw",
-    "default_agent": "kiroclaw"
+    "default_agent": "kiroclaw",
+    "sandbox": "off"
   },
   "session": {
     "idle_timeout_secs": 1800,

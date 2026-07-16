@@ -33,7 +33,7 @@ export default function OverviewPage() {
       </div>
         <div className="flex gap-1 mb-4 border-b border-border">
           {tabs.map(t => (
-            <button key={t} className={`px-4 py-2 border-none bg-transparent text-sm font-medium font-body cursor-pointer border-b-2 -mb-px transition-all ${tab === t ? 'text-accent border-b-accent' : 'text-muted border-b-transparent hover:text-text'}`} onClick={() => setTab(t)}>{tabLabel(t)}</button>
+            <button key={t} aria-current={tab === t ? 'page' : undefined} className={`px-4 py-2 border-none bg-transparent text-sm font-medium font-body cursor-pointer border-b-2 -mb-px transition-all ${tab === t ? 'text-accent border-b-accent' : 'text-muted border-b-transparent hover:text-text'}`} onClick={() => setTab(t)}>{tabLabel(t)}</button>
           ))}
           <div className="ml-auto flex items-center gap-2 pb-1">
             {restartMsg && <span className="text-ok text-[13px] animate-rise">{restartMsg}</span>}

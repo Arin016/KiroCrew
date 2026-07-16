@@ -19,6 +19,7 @@ from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
 import kiro_claw.validation as _validation_mod
+from kiro_claw import platform_compat
 from kiro_claw.agent import build_agent_config
 from kiro_claw.config.loader import (
     _VALID_STT_PROVIDERS,
@@ -357,6 +358,11 @@ async def api_stt_config(request: web.Request) -> web.Response:
 
     provider = cfg.stt.provider
     available = is_available(cfg.stt)
+    # _stt_prereq_commands probes for a system python/brew via subprocess; run it
+    # off the event loop so a slow/again-spawned interpreter check can't stall the
+    # gateway (observed as "event-loop heartbeat: lag" on Windows where the probe
+    # is heavier). The GET is read-only, so threading it is safe.
+    prereqs = await asyncio.to_thread(_stt_prereq_commands, provider)
     return web.json_response(
         {
             "enabled": cfg.stt.enabled,
@@ -375,7 +381,7 @@ async def api_stt_config(request: web.Request) -> web.Response:
             "install_step": _stt_install_status["step"],
             "install_detail": _stt_install_status["detail"],
             "install_error": _stt_install_status["error"],
-            "prereqs": _stt_prereq_commands(provider),
+            "prereqs": prereqs,
         }
     )
 
@@ -467,27 +473,40 @@ def _is_al2023() -> bool:
 
 
 def _find_suitable_python() -> str | None:
-    """Find a non-free-threaded python3 >= 3.10 with pip."""
-    for name in ("python3.12", "python3.11", "python3", "python3.13", "python3.10"):
-        p = shutil.which(name)
-        if not p:
-            continue
+    """Find a non-free-threaded python3 >= 3.10 with pip.
+
+    Delegates interpreter resolution to platform_compat.find_python_interpreter,
+    which rejects Brazil-path builds and — on Windows — the Microsoft Store alias
+    stub (spawning that stub is what prints "Python was not found" and is why
+    this probe must never touch it). This caller adds two requirements the shared
+    helper does not: the interpreter must NOT be free-threaded (whisper wheels
+    are unavailable) and MUST have pip (this is an install target). Those are
+    passed as the ``reject`` predicate so the resolver FALLS THROUGH to the next
+    candidate when one fails them, rather than giving up — preserving the
+    multi-candidate behavior the pre-shim loop had (a free-threaded/pip-less
+    interpreter winning the name race must not mask a usable later one).
+    """
+
+    def _unusable(p: str) -> bool:
+        # True => skip this interpreter and keep searching. A probe failure
+        # (can't even run it) also counts as unusable.
         try:
             ver = subprocess.check_output(
                 [p, "-c", "import sys; print(sys.version)"], timeout=5, text=True
             )
             if "free-threading" in ver:
-                continue
+                return True
             subprocess.check_output(
                 [p, "-m", "pip", "--version"],
                 timeout=5,
                 text=True,
                 stderr=subprocess.DEVNULL,
             )
-            return p
+            return False
         except Exception:
-            continue
-    return None
+            return True
+
+    return platform_compat.find_python_interpreter(reject=_unusable)
 
 
 async def api_stt_install(request: web.Request) -> web.Response:
@@ -939,6 +958,7 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     "agent.approval_mode": {"type": "enum", "values": ["auto", "interactive"]},
     "agent.sandbox": {"type": "enum", "values": ["auto", "off"]},
     "agent.sandbox_allow_no_isolation": {"type": "bool"},
+    "agent.apps_allow_third_party": {"type": "bool"},
     "agent.enforce_denied_commands": {"type": "enum", "values": ["all", "kiroclaw"]},
     "agent.completion_keep": {"type": "enum", "values": ["head", "tail", "both"]},
     "agent.completion_keep_chars": {"type": "int", "min": 0, "max": RESULT_FILE_MAX_BYTES},

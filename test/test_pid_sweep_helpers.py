@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -236,6 +237,7 @@ class TestSweepPidEntries:
         with (
             patch("os.kill"),  # signal-0 (alive) and SIGKILL both succeed
             patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
             patch("kiro_claw.acp.client._get_child_pids", return_value=[]),
         ):
             killed, dead, _ = _sweep_pid_entries(
@@ -263,6 +265,7 @@ class TestSweepPidEntries:
         with (
             patch("os.kill", side_effect=fake_kill),
             patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
             patch("kiro_claw.session_pid._kill_pid_tree", return_value=(1, False)),
         ):
             killed, dead, _ = _sweep_pid_entries(
@@ -281,6 +284,7 @@ class TestSweepPidEntries:
         with (
             patch("os.kill"),  # all probes succeed (alive)
             patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
             patch("kiro_claw.session_pid._kill_pid_tree", return_value=(1, False)),
         ):
             killed, dead, _ = _sweep_pid_entries(
@@ -378,6 +382,7 @@ class TestPeriodicPidSweep:
         with (
             patch("os.kill", side_effect=fake_kill),
             patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
         ):
             killed_or_dead, candidates = _periodic_pid_sweep(my_gw, set())
 
@@ -452,6 +457,7 @@ class TestPeriodicSweepIntegration:
         with (
             patch("os.kill"),
             patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
             patch("kiro_claw.acp.client._get_child_pids", return_value=[]),
         ):
             # Phase 1: identify candidates
@@ -463,9 +469,7 @@ class TestPeriodicSweepIntegration:
             assert orphan_pid in confirmed
 
             # Phase 2b: kill and writeback
-            orphan_killed = _kill_confirmed_and_writeback(
-                my_gw, confirmed, killed_or_dead
-            )
+            orphan_killed = _kill_confirmed_and_writeback(my_gw, confirmed, killed_or_dead)
             assert orphan_killed == 1
 
         # PID file should be cleaned
@@ -500,17 +504,13 @@ class TestPeriodicSweepIntegration:
         session_pid_file.write_text(f"{my_gw}:{managed_pid}\n")
 
         with patch("os.kill"):  # alive
-            killed_or_dead, candidates = _periodic_pid_sweep(
-                my_gw, {managed_pid}
-            )
+            killed_or_dead, candidates = _periodic_pid_sweep(my_gw, {managed_pid})
 
         assert managed_pid not in candidates
         assert len(killed_or_dead) == 0
 
     @pytest.mark.asyncio
-    async def test_catch_all_exception_does_not_crash(
-        self, session_pid_file: Path
-    ) -> None:
+    async def test_catch_all_exception_does_not_crash(self, session_pid_file: Path) -> None:
         """The except Exception catch-all at L1628 prevents crashes."""
         my_gw = os.getpid()
         session_pid_file.write_text(f"{my_gw}:99999\n")
@@ -557,3 +557,216 @@ class TestProtectedPidSweepShield:
         unregister_protected_pid(424243)
         pids, _ok = _collect_active_pids({})
         assert 424243 not in pids
+
+
+# ── Spawn grace period tests (Fix A) ──────────────────────────────────────────
+
+
+class TestPidAgeSeconds:
+    """Tests for _pid_age_seconds using a fake proc_root."""
+
+    def test_young_pid_age_below_grace(self, tmp_path: Path) -> None:
+        """A process started recently returns a small age value."""
+        from kiro_claw.session_pid import _pid_age_seconds
+
+        # Simulate a process that started 30 seconds ago.
+        # We need: uptime, and starttime_ticks such that age = 30s.
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        uptime_seconds = 100000.0  # system uptime
+        age_desired = 30.0
+        starttime_ticks = int((uptime_seconds - age_desired) * clk_tck)
+
+        # Create fake /proc/<pid>/stat
+        proc_dir = tmp_path / "42"
+        proc_dir.mkdir()
+        # comm with spaces and parens: "(kiro cli (v2))"
+        stat_line = (
+            f"42 (kiro cli (v2)) S 1 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 "
+            f"{starttime_ticks} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (proc_dir / "stat").write_text(stat_line)
+        # Fake /proc/uptime
+        (tmp_path / "uptime").write_text(f"{uptime_seconds} 50000.0\n")
+
+        # Capture a stable "now" so the age calculation is consistent with the
+        # fake uptime we wrote above.
+        now = time.time()
+
+        # Call with patched time so calculation is consistent
+        with patch("time.time", return_value=now):
+            age = _pid_age_seconds(42, proc_root=str(tmp_path))
+
+        assert age is not None
+        assert abs(age - age_desired) < 1.0  # within 1s tolerance
+
+    def test_old_pid_age_above_grace(self, tmp_path: Path) -> None:
+        """A process started long ago returns a large age value."""
+        from kiro_claw.session_pid import _pid_age_seconds
+
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        uptime_seconds = 100000.0
+        age_desired = 300.0  # 5 minutes — well above 120s grace
+        starttime_ticks = int((uptime_seconds - age_desired) * clk_tck)
+
+        proc_dir = tmp_path / "100"
+        proc_dir.mkdir()
+        stat_line = (
+            f"100 (kiro-cli) S 1 100 100 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 "
+            f"{starttime_ticks} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (proc_dir / "stat").write_text(stat_line)
+        (tmp_path / "uptime").write_text(f"{uptime_seconds} 50000.0\n")
+
+        now = time.time()
+        with patch("time.time", return_value=now):
+            age = _pid_age_seconds(100, proc_root=str(tmp_path))
+
+        assert age is not None
+        assert age > 200.0  # well above grace threshold
+
+    def test_proc_parse_failure_returns_none(self, tmp_path: Path) -> None:
+        """/proc read failure → None (treat as young in caller)."""
+        from kiro_claw.session_pid import _pid_age_seconds
+
+        # No /proc/<pid>/stat file exists
+        age = _pid_age_seconds(99999, proc_root=str(tmp_path))
+        assert age is None
+
+    def test_comm_with_spaces_and_parens(self, tmp_path: Path) -> None:
+        """comm field '(Web Content (Manager))' with spaces+parens parses correctly."""
+        from kiro_claw.session_pid import _pid_age_seconds
+
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        uptime_seconds = 50000.0
+        age_desired = 60.0
+        starttime_ticks = int((uptime_seconds - age_desired) * clk_tck)
+
+        proc_dir = tmp_path / "777"
+        proc_dir.mkdir()
+        # Adversarial comm: nested parens and spaces
+        stat_line = (
+            f"777 (Web Content (Manager)) S 1 777 777 0 -1 0 0 0 0 0 0 0 0 0 "
+            f"20 0 1 0 {starttime_ticks} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (proc_dir / "stat").write_text(stat_line)
+        (tmp_path / "uptime").write_text(f"{uptime_seconds} 25000.0\n")
+
+        now = time.time()
+        with patch("time.time", return_value=now):
+            age = _pid_age_seconds(777, proc_root=str(tmp_path))
+
+        assert age is not None
+        assert abs(age - age_desired) < 1.0
+
+    def test_non_linux_returns_none(self) -> None:
+        """On non-Linux, _pid_age_seconds returns None immediately."""
+        from kiro_claw.session_pid import _pid_age_seconds
+
+        with patch("kiro_claw.session_pid.sys.platform", "darwin"):
+            assert _pid_age_seconds(1234) is None
+
+
+class TestPidInSpawnGrace:
+    """Tests for _pid_in_spawn_grace helper."""
+
+    def test_non_linux_returns_false(self) -> None:
+        """Non-Linux: grace not applicable, returns False (sweep proceeds)."""
+        from kiro_claw.session_pid import _pid_in_spawn_grace
+
+        with patch("kiro_claw.session_pid.sys.platform", "darwin"):
+            assert _pid_in_spawn_grace(12345) is False
+
+    def test_linux_young_pid_returns_true(self) -> None:
+        """Linux + age < 120s → True (skip the kill)."""
+        from kiro_claw.session_pid import _pid_in_spawn_grace
+
+        with patch("kiro_claw.session_pid._pid_age_seconds", return_value=30.0):
+            assert _pid_in_spawn_grace(12345) is True
+
+    def test_linux_old_pid_returns_false(self) -> None:
+        """Linux + age > 120s → False (proceed with kill)."""
+        from kiro_claw.session_pid import _pid_in_spawn_grace
+
+        with patch("kiro_claw.session_pid._pid_age_seconds", return_value=200.0):
+            assert _pid_in_spawn_grace(12345) is False
+
+    def test_linux_parse_failure_returns_true(self) -> None:
+        """Linux + age=None (parse failure) → True (safe direction: skip kill)."""
+        from kiro_claw.session_pid import _pid_in_spawn_grace
+
+        with patch("kiro_claw.session_pid._pid_age_seconds", return_value=None):
+            assert _pid_in_spawn_grace(12345) is True
+
+
+class TestSweepGraceIntegration:
+    """Integration tests: grace period in the sweep pipeline."""
+
+    def test_young_pid_not_selected_as_candidate(self, session_pid_file: Path) -> None:
+        """A tracked PID younger than 120s is NOT selected as orphan candidate."""
+        from kiro_claw.session_pid import _periodic_pid_sweep
+
+        my_gw = os.getpid()
+        session_pid_file.write_text(f"{my_gw}:99999\n")
+
+        with (
+            patch("os.kill"),  # alive
+            patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=True),
+        ):
+            killed_or_dead, candidates = _periodic_pid_sweep(my_gw, set())
+
+        assert 99999 not in candidates
+        assert f"{my_gw}:99999" not in killed_or_dead
+
+    def test_old_pid_selected_as_candidate(self, session_pid_file: Path) -> None:
+        """A tracked PID older than 120s IS selected (regression guard)."""
+        from kiro_claw.session_pid import _periodic_pid_sweep
+
+        my_gw = os.getpid()
+        session_pid_file.write_text(f"{my_gw}:99999\n")
+
+        with (
+            patch("os.kill"),  # alive
+            patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            patch("kiro_claw.session_pid._pid_in_spawn_grace", return_value=False),
+        ):
+            killed_or_dead, candidates = _periodic_pid_sweep(my_gw, set())
+
+        assert 99999 in candidates
+
+    def test_dead_pid_pruned_regardless_of_grace(self, session_pid_file: Path) -> None:
+        """Dead PIDs are pruned (no /proc entry) — grace gate is never reached."""
+        from kiro_claw.session_pid import _periodic_pid_sweep
+
+        my_gw = os.getpid()
+        session_pid_file.write_text(f"{my_gw}:99999\n")
+
+        def fake_kill(pid: int, sig: int) -> None:
+            raise ProcessLookupError()  # dead
+
+        with patch("os.kill", side_effect=fake_kill):
+            killed_or_dead, candidates = _periodic_pid_sweep(my_gw, set())
+
+        # Dead entry is pruned — grace is irrelevant for dead processes
+        assert f"{my_gw}:99999" in killed_or_dead
+        assert 99999 not in candidates
+
+    def test_non_linux_old_orphan_still_killed(self, session_pid_file: Path) -> None:
+        """On non-Linux, grace is not applied — old orphans are still killed."""
+        from kiro_claw.session_pid import _sweep_pid_entries
+
+        with (
+            patch("os.kill"),  # alive
+            patch("kiro_claw.session_pid._is_managed_agent_process", return_value=True),
+            # _pid_in_spawn_grace returns False on non-linux
+            patch("kiro_claw.session_pid.sys.platform", "darwin"),
+            patch("kiro_claw.acp.client._get_child_pids", return_value=[]),
+        ):
+            killed, dead, _ = _sweep_pid_entries(
+                ["1:99999"],
+                should_skip_tagged=lambda gw, p: False,
+                should_skip_bare=lambda p: False,
+            )
+
+        assert killed == 1
+        assert "1:99999" in dead

@@ -88,6 +88,55 @@ class TestValidation:
         errors = m.validate()
         assert any("path traversal" in e for e in errors)
 
+    def test_path_traversal_backend_entrypoint(self):
+        m = AppManifest.from_dict(_valid_manifest(
+            backend={"entryPoint": "../../etc/evil.py"}
+        ))
+        errors = m.validate()
+        assert any("path traversal" in e for e in errors)
+
+    def test_absolute_path_agents(self):
+        m = AppManifest.from_dict(_valid_manifest(agents=["/etc/passwd"]))
+        errors = m.validate()
+        assert any("path traversal" in e for e in errors)
+
+    def test_absolute_backend_entrypoint(self):
+        m = AppManifest.from_dict(_valid_manifest(
+            backend={"entryPoint": "/tmp/evil.py"}
+        ))
+        errors = m.validate()
+        assert any("path traversal" in e for e in errors)
+
+    def test_module_style_entrypoint_ok(self):
+        # A dotted module-style backend entryPoint has no '..' and is not
+        # absolute, so the containment helper must not false-positive on it.
+        m = AppManifest.from_dict(_valid_manifest(
+            backend={"entryPoint": "kiro_claw.apps.builtins.x.server"}
+        ))
+        assert m.validate() == []
+
+    def test_canonical_containment_with_app_root(self, tmp_path):
+        # A symlink whose target escapes the app root must be flagged when
+        # app_root is known; a plain relative path inside the root passes.
+        app_root = tmp_path / "app"
+        app_root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.py").write_text("x = 1\n")
+        (app_root / "link.py").symlink_to(outside / "secret.py")
+        (app_root / "ok.py").write_text("y = 2\n")
+
+        escaping = AppManifest.from_dict(_valid_manifest(
+            backend={"entryPoint": "link.py"}
+        ))
+        errors = escaping.validate(app_root=app_root)
+        assert any("path traversal" in e for e in errors)
+
+        contained = AppManifest.from_dict(_valid_manifest(
+            backend={"entryPoint": "ok.py"}
+        ))
+        assert contained.validate(app_root=app_root) == []
+
     def test_cron_missing_name(self):
         m = AppManifest.from_dict(_valid_manifest(
             crons=[{"every": 60, "message": "hi"}]
@@ -480,6 +529,47 @@ class TestDependencies:
 # ---------------------------------------------------------------------------
 # Property tests for new dataclasses
 # ---------------------------------------------------------------------------
+
+class TestSignatureFields:
+    def test_signature_fields_roundtrip(self):
+        m = AppManifest.from_dict(_valid_manifest(
+            signer="acme", signature="deadbeef",
+        ))
+        assert m.signer == "acme"
+        assert m.signature == "deadbeef"
+        d = m.to_dict()
+        assert d["signer"] == "acme"
+        assert d["signature"] == "deadbeef"
+        m2 = AppManifest.from_dict(d)
+        assert m2.signer == "acme"
+        assert m2.signature == "deadbeef"
+
+    def test_signature_fields_omitted_when_empty(self):
+        m = AppManifest.from_dict(_valid_manifest())
+        d = m.to_dict()
+        assert "signer" not in d
+        assert "signature" not in d
+
+    def test_signing_payload_stable(self):
+        # Payload is deterministic regardless of source dict field ordering and
+        # is independent of the signature field itself.
+        base = _valid_manifest(
+            signer="acme", signature="sig-A",
+            permissions={"mcpTools": ["B", "A"], "network": True},
+        )
+        m1 = AppManifest.from_dict(base)
+        reordered = {k: base[k] for k in reversed(list(base.keys()))}
+        m2 = AppManifest.from_dict(reordered)
+        assert m1.signing_payload() == m2.signing_payload()
+
+        # Changing the signature does NOT change the signed payload.
+        m3 = AppManifest.from_dict(_valid_manifest(
+            signer="acme", signature="sig-B",
+            permissions={"mcpTools": ["B", "A"], "network": True},
+        ))
+        assert m1.signing_payload() == m3.signing_payload()
+        assert isinstance(m1.signing_payload(), bytes)
+
 
 class TestManifestNewProperties:
     # Feature: app-classification-redesign, Property 3: Manifest 数据类序列化往返一致性

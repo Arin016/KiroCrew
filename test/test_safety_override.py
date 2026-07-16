@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from unittest.mock import MagicMock, patch
 
@@ -365,18 +366,14 @@ class TestSelFaultTolerance:
         real_sel = SecurityEventLog(base_dir=tmp_path)
         monkeypatch.setattr("kiro_claw.safety_override.sel", lambda: real_sel)
 
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
-            if str(path).endswith("security_events.jsonl") and "a" in (
-                a[0] if a else k.get("mode", "")
-            ):
+            if str(path).endswith("security_events.jsonl"):
                 raise PermissionError("SEL file unwritable (chmod 000)")
-            return real_open(path, *a, **k)
+            return real_os_open(path, *a, **k)
 
-        import builtins
-
-        monkeypatch.setattr(builtins, "open", _boom)
+        monkeypatch.setattr(os, "open", _boom)
         try:
             result = override.activate("dashboard")
         finally:

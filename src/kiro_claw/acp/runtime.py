@@ -17,13 +17,13 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from kiro_claw import platform_compat
 from kiro_claw.acp._dispatch import (
     build_session_new_params,
     set_mode_params,
@@ -403,7 +403,12 @@ class AcpRuntime:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._work_dir),
             limit=_STDOUT_BUFFER_LIMIT,
-            start_new_session=True,
+            # POSIX: setsid so kill() can killpg the whole tree. Windows:
+            # start_new_session is silently ignored; CREATE_NEW_PROCESS_GROUP
+            # makes the child tree taskkill /T-reapable (see platform_compat
+            # spawn-isolation note).
+            start_new_session=platform_compat.IS_POSIX,
+            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             env=env,
         )
         self._pid = self._process.pid
@@ -491,15 +496,31 @@ class AcpRuntime:
 
         if self._process:
             pid = self._process.pid
+            # platform_compat.kill_process_tree: killpg on POSIX (the spawn
+            # sets start_new_session=IS_POSIX, so the group is the tree);
+            # taskkill /T on Windows, where os.getpgid/os.killpg do not exist
+            # (a raw call raises AttributeError, which the OSError guard here
+            # would NOT catch — the kiro-cli tree then leaks on every session
+            # recycle). Offloaded to the subprocess executor: on Windows the
+            # shim shells out to taskkill (a blocking subprocess.run), which
+            # must not run on the event loop (AUTOSDE
+            # no-blocking-call-on-event-loop).
+            loop = asyncio.get_running_loop()
             try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                await loop.run_in_executor(
+                    subprocess_executor(),
+                    lambda: platform_compat.kill_process_tree(pid, platform_compat.SIGTERM),
+                )
             except (OSError, ProcessLookupError):
                 pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 try:
-                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    await loop.run_in_executor(
+                        subprocess_executor(),
+                        lambda: platform_compat.kill_process_tree(pid, platform_compat.SIGKILL),
+                    )
                 except (OSError, ProcessLookupError):
                     pass
             self._process = None

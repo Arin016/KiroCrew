@@ -32,10 +32,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-# fcntl via flock_compat: POSIX-only, shimmed to a no-op on Windows so the
-# CLI (and thus `kiroclaw cloud` on Windows) can import this module. The
-# gateway/cron machinery that actually locks runs only on macOS/Linux.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.config.loader import config_dir  # noqa: E402 (avoid circular at module load)
 from kiro_claw.security import is_sensitive_path
 from kiro_claw.sel import sel as _sel
@@ -250,8 +247,9 @@ def update_registry(project_path: str, agent_entries: list[dict]) -> None:
     p = _registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     lock_path = p.with_suffix(".lock")
-    with open(lock_path, "w") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    with open(lock_path, "w") as lock_fh, platform_compat.file_lock(
+        lock_fh.fileno(), exclusive=True
+    ):
         registry = load_registry()
         existing = registry.get(project_path, {})
         registry[project_path] = {
@@ -275,8 +273,9 @@ def remove_from_registry(project_path: str) -> None:
         return
     lock_path = p.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    with open(lock_path, "w") as lock_fh, platform_compat.file_lock(
+        lock_fh.fileno(), exclusive=True
+    ):
         registry = load_registry()
         if project_path in registry:
             del registry[project_path]
@@ -336,8 +335,9 @@ def refresh_registry_startup() -> None:
         p = _registry_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         lock_path = p.with_suffix(".lock")
-        with open(lock_path, "w") as lock_fh:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        with open(lock_path, "w") as lock_fh, platform_compat.file_lock(
+            lock_fh.fileno(), exclusive=True
+        ):
             # Re-read under lock to avoid overwriting concurrent updates
             # (e.g. update_registry called between the unlocked read above and here)
             fresh = load_registry()

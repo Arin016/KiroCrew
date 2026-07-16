@@ -1582,6 +1582,15 @@ class TestIsSensitivePath:
         assert is_sensitive_path(f"{home}/.kiroclaw/sel_hmac.key") is True
         assert is_sensitive_path(f"{home}/.kiroclaw/security_events.jsonl") is True
 
+    def test_app_admission_policy(self) -> None:
+        # Keystone invariant: app_admission.json is the sole fleet-controlled
+        # admission ceiling (apps/admission.py). An absent file falls open, so a
+        # governed agent that could rewrite/delete it could neuter its own
+        # admission ceiling — it must be read/write blocked via the shared gate.
+        home = str(Path.home())
+        assert is_sensitive_path("~/.kiroclaw/app_admission.json") is True
+        assert is_sensitive_path(f"{home}/.kiroclaw/app_admission.json") is True
+
     def test_non_sel_kiroclaw_file_not_blocked(self) -> None:
         # Regression guard: the SEL additions must not over-block routine
         # ~/.kiroclaw reads (config.json, sessions.db) that operators/tools need.
@@ -1697,6 +1706,15 @@ class TestIsSensitiveBashCommand:
     def test_cat_security_events_log_blocked(self) -> None:
         result = is_sensitive_bash_command("cat ~/.kiroclaw/security_events.jsonl")
         assert result is not None and "blocked" in result.lower()
+
+    def test_write_app_admission_policy_blocked(self) -> None:
+        # Keystone invariant: a tee/rm to the admission ceiling is blocked
+        # (adding app_admission.json to _SENSITIVE_HOME_DIRS also arms the
+        # bash write/extract matcher, so the agent cannot delete or rewrite it).
+        tee = is_sensitive_bash_command("echo '{}' | tee ~/.kiroclaw/app_admission.json")
+        assert tee is not None and "blocked" in tee.lower()
+        rm = is_sensitive_bash_command("rm -f ~/.kiroclaw/app_admission.json")
+        assert rm is not None and "blocked" in rm.lower()
 
     def test_colon_separated_sensitive_path_blocked(self) -> None:
         # CR-284272012 H-p5: a sensitive path after ':' / VAR=val:path / a

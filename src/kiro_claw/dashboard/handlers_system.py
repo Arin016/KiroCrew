@@ -10,7 +10,6 @@ import hmac
 import logging
 import os
 import platform
-import resource
 import secrets
 import shutil
 import socket
@@ -25,6 +24,7 @@ from pathlib import Path
 from aiohttp import web
 
 import kiro_claw
+from kiro_claw import platform_compat
 from kiro_claw.dashboard.state import DashboardState
 from kiro_claw.platform import current_context
 from kiro_claw.safety_override import safety_override
@@ -104,7 +104,7 @@ def _get_telemetry_salt() -> bytes:
             os.write(tmp_fd, salt)
             os.close(tmp_fd)
             tmp_fd = -1
-            os.chmod(tmp_path, 0o600)
+            platform_compat.chmod_safe(tmp_path, 0o600)
             os.link(tmp_path, str(salt_file))
             return salt
         except FileExistsError:
@@ -259,9 +259,7 @@ def _collect_system_metrics() -> dict[str, object]:
 
     # Process memory (RSS)
     try:
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
-        data["proc_mem_mb"] = round(usage.ru_maxrss / divisor, 1)
+        data["proc_mem_mb"] = round(platform_compat.proc_rss_bytes() / (1024 * 1024), 1)
     except Exception:
         data["proc_mem_mb"] = 0
 
@@ -408,8 +406,7 @@ def _collect_system_metrics() -> dict[str, object]:
     except Exception:
         data["thread_count"] = 0
     try:
-        ru = resource.getrusage(resource.RUSAGE_SELF)
-        cpu_total = ru.ru_utime + ru.ru_stime
+        cpu_total = platform_compat.proc_cpu_seconds()
         now_mono = time.monotonic()
         global _proc_cpu_pct
         if _prev_cpu["ts"] > 0:

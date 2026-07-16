@@ -26,6 +26,7 @@ import aiohttp
 from kiro_claw.env import augmented_path
 from kiro_claw.hooks import safe_read_file
 from kiro_claw.mcp_utils import mcp_server_alias
+from kiro_claw.sandbox import sandboxed_spawn_argv
 from kiro_claw.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ _PROBE_TIMEOUT_SECS = 15  # fallback if config not loaded yet
 def _get_probe_timeout() -> int:
     try:
         from kiro_claw.config.loader import KiroClawConfig
+
         return KiroClawConfig.load().dashboard.mcp_probe_timeout_secs
     except Exception:
         return _PROBE_TIMEOUT_SECS
@@ -274,51 +276,66 @@ def _load_mcp_json() -> dict[str, Any]:
 
 def _server_from_spec(name: str, spec: dict, source: str) -> McpServerInfo:
     return McpServerInfo(
-        name=name, command=spec.get("command", ""), args=spec.get("args", []),
-        env=spec.get("env", {}), url=spec.get("url", ""), headers=spec.get("headers", {}),
+        name=name,
+        command=spec.get("command", ""),
+        args=spec.get("args", []),
+        env=spec.get("env", {}),
+        url=spec.get("url", ""),
+        headers=spec.get("headers", {}),
         source=source,
     )
 
 
-_MANAGED_SERVER_NAMES = {"kiroclaw-core", "kiroclaw-cron"}
+# Managed server name -> the ``kiroclaw`` CLI subcommand that serves it.
+_MANAGED_SERVER_SUBCOMMANDS = {"kiroclaw-core": "mcp-core", "kiroclaw-cron": "mcp-cron"}
+_MANAGED_SERVER_NAMES = set(_MANAGED_SERVER_SUBCOMMANDS)
 
-# Cached resolved binary path — avoids subprocess.run on every list_servers() call.
-_resolved_managed_bin: str | None = None
+# Cached resolved (command, args) — avoids subprocess.run on every list_servers() call.
+_resolved_managed_invocation: dict[str, tuple[str, list[str]]] = {}
 
 
 def _fix_stale_managed_command(name: str, spec: dict) -> None:
-    """Re-resolve command for managed MCP servers to the running binary.
+    """Re-resolve command + args for a managed MCP server to the running install.
 
-    Always re-resolves — the stored path may exist as a file/symlink but
-    still crash at runtime (e.g. a stale build output).  The running
-    gateway knows its own binary, so we re-resolve the ``kiroclaw``
-    executable via the general resolver / PATH each time.
+    Always re-resolves — the stored path may exist as a file/symlink but still
+    crash at runtime (e.g. a path from a previous install). The running gateway
+    knows how to invoke itself.
+
+    Delegates to :func:`kiro_claw.agent._kiroclaw_mcp_invocation`, the single
+    source of truth for the managed invocation. That handles every layout:
+    a standalone ``bin/kiroclaw`` (POSIX) / ``Scripts\\kiroclaw.exe`` (Windows)
+    console script when one resolves, and otherwise the
+    ``<interpreter> -m kiro_claw <sub>`` fallback. Both ``command`` AND ``args``
+    are rewritten — the fallback needs ``["-m", "kiro_claw", <sub>]``, so
+    re-resolving the command alone (the old behavior) silently dropped the args
+    and spawned a bare ``kiroclaw`` that isn't on PATH (Windows: ``command not
+    found: kiroclaw``; the built-in cron/core tools then never load).
     """
-    if name not in _MANAGED_SERVER_NAMES:
+    subcommand = _MANAGED_SERVER_SUBCOMMANDS.get(name)
+    if subcommand is None:
         return
-    global _resolved_managed_bin
-    # Use cached result to avoid blocking subprocess.run on every call.
-    if _resolved_managed_bin:
-        cmd = spec.get("command", "")
-        if cmd != _resolved_managed_bin:
-            logger.info("Re-resolved %s command: %s → %s", name, cmd, _resolved_managed_bin)
-            spec["command"] = _resolved_managed_bin
-        return
-    resolved: str | None = None
-    try:
-        from kiro_claw.agent import _resolve_kiroclaw_bin  # circular import
-        resolved = _resolve_kiroclaw_bin()
-    except Exception:
-        pass
-    if not resolved:
-        resolved = shutil.which("kiroclaw", path=augmented_path(os.environ.get("PATH", "")))
-    if not resolved:
-        return
-    _resolved_managed_bin = resolved
-    cmd = spec.get("command", "")
-    if cmd != resolved:
-        logger.info("Re-resolved %s command: %s → %s", name, cmd, resolved)
-        spec["command"] = resolved
+    invocation = _resolved_managed_invocation.get(name)
+    if invocation is None:
+        try:
+            from kiro_claw.agent import _kiroclaw_mcp_invocation  # circular import
+
+            invocation = _kiroclaw_mcp_invocation(subcommand)
+        except Exception:
+            logger.debug("managed MCP invocation resolution failed", exc_info=True)
+            return
+        _resolved_managed_invocation[name] = invocation
+    command, args = invocation
+    if spec.get("command") != command or spec.get("args") != args:
+        logger.info(
+            "Re-resolved %s invocation: %s %s → %s %s",
+            name,
+            spec.get("command"),
+            spec.get("args"),
+            command,
+            args,
+        )
+        spec["command"] = command
+        spec["args"] = args
 
 
 def list_servers() -> list[McpServerInfo]:
@@ -362,22 +379,14 @@ def list_servers() -> list[McpServerInfo]:
             # dropped for new servers because `name in servers` is False
             # before insertion, letting a lower-priority scope's value
             # overwrite the (empty) default on a later iteration.
-            if (
-                not spec.get("disabled")
-                and name not in servers
-                and name not in disabled_in_agent
-            ):
+            if not spec.get("disabled") and name not in servers and name not in disabled_in_agent:
                 servers[name] = _server_from_spec(name, spec, "mcp.json")
 
             # Per-tool disables: first-scope-wins.  Use "disabledTools" in
             # spec (key presence) rather than truthiness so an explicit
             # "disabledTools": [] (user intent: "all tools enabled") is
             # respected and prevents lower-priority scopes from overwriting.
-            if (
-                name in servers
-                and "disabledTools" in spec
-                and name not in disabled_tools_claimed
-            ):
+            if name in servers and "disabledTools" in spec and name not in disabled_tools_claimed:
                 servers[name].disabled_tools = spec.get("disabledTools", [])
                 disabled_tools_claimed.add(name)
 
@@ -393,8 +402,7 @@ def list_servers() -> list[McpServerInfo]:
     kiroclaw_own = by_source.get(SCOPE_KIROCLAW, {})
     for name, server in servers.items():
         mc_disabled = (
-            isinstance(kiroclaw_own.get(name), dict)
-            and kiroclaw_own[name].get("disabled") is True
+            isinstance(kiroclaw_own.get(name), dict) and kiroclaw_own[name].get("disabled") is True
         )
         in_any_source = (
             name in agent_names
@@ -583,7 +591,9 @@ async def _read_stdio_jsonrpc_response(
             if banner_lines:
                 logger.debug(
                     "MCP probe [%s]: EOF after %d banner line(s); first banner: %r",
-                    name or "?", banner_lines, first_banner,
+                    name or "?",
+                    banner_lines,
+                    first_banner,
                 )
             return None
         text = line.decode(errors="replace").strip()
@@ -601,7 +611,9 @@ async def _read_stdio_jsonrpc_response(
                 logger.warning(
                     "MCP probe [%s]: no JSON-RPC response after %d banner "
                     "line(s); first banner: %r",
-                    name or "?", banner_lines, first_banner,
+                    name or "?",
+                    banner_lines,
+                    first_banner,
                 )
                 return None
             continue
@@ -628,6 +640,7 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
 
     server.status = "probing"
     proc = None
+    sandbox_cleanup: str | None = None
     try:
         env = dict(os.environ)
         env["PATH"] = augmented_path(env.get("PATH", ""))
@@ -646,9 +659,19 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
             )
             return server
 
+        # A hostile MCP-config entry names the binary spawned here, so route it
+        # through the sandbox chokepoint: OS-level isolation plus a
+        # credential-scrubbed environment (on top of the augmented PATH built
+        # above). ``strip_python_env`` keeps KiroClaw's PYTHONPATH/PYTHONHOME out
+        # of a foreign Python MCP server. See Talos finding 92e24570.
+        wrapped_argv, env, sandbox_cleanup = sandboxed_spawn_argv(
+            [resolved, *(server.args or [])],
+            mode="standard",
+            env=env,
+            strip_python_env=True,
+        )
         proc = await asyncio.create_subprocess_exec(
-            resolved,
-            *(server.args or []),
+            *wrapped_argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -694,7 +717,9 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
         if isinstance(resp, dict) and resp.get("error"):
             server.status = "error"
             err = resp["error"]
-            server.error = err.get("message", "unknown error") if isinstance(err, dict) else str(err)
+            server.error = (
+                err.get("message", "unknown error") if isinstance(err, dict) else str(err)
+            )
             return server
 
         # Send initialized notification
@@ -732,9 +757,7 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
             result = resp2.get("result", {}) if isinstance(resp2, dict) else {}
             tools_data = result.get("tools", []) if isinstance(result, dict) else []
             server.tools = [
-                name
-                for t in tools_data
-                if isinstance(t, dict) and (name := t.get("name", ""))
+                name for t in tools_data if isinstance(t, dict) and (name := t.get("name", ""))
             ]
         else:
             # initialize succeeded but tools/list yielded no response (banner
@@ -752,7 +775,9 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
     except asyncio.TimeoutError:
         server.status = "error"
         server.error = "timeout"
-        logger.warning("MCP probe failed [%s]: timeout after %ds", server.name, _get_probe_timeout())
+        logger.warning(
+            "MCP probe failed [%s]: timeout after %ds", server.name, _get_probe_timeout()
+        )
     except FileNotFoundError:
         server.status = "error"
         server.error = f"command not found: {server.command}"
@@ -793,6 +818,8 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except Exception:
                     pass
+        if sandbox_cleanup:
+            Path(sandbox_cleanup).unlink(missing_ok=True)
 
     _cache_probe(server)
     return server
@@ -890,9 +917,9 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
             existing_env = existing.get("env", {})
             if not isinstance(existing_env, dict):
                 existing_env = {}
-            if not all(
-                existing_env.get(k) == v for k, v in info.env.items()
-            ) or _commands_diverged(info.command, existing.get("command", "")):
+            if not all(existing_env.get(k) == v for k, v in info.env.items()) or _commands_diverged(
+                info.command, existing.get("command", "")
+            ):
                 out.append(info)
     return out
 
@@ -1055,6 +1082,7 @@ def register_servers_for_cc(
         from kiro_claw.agent import (
             _atomic_json_write,  # circular import: agent imports mcp_discovery
         )
+
         _atomic_json_write(mcp_json_path, existing)
 
     return changed

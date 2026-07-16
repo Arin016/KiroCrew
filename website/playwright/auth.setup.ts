@@ -19,5 +19,12 @@ setup('authenticate', async ({ page }) => {
   }
   await page.goto(`/?token=${encodeURIComponent(token)}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.waitForLoadState('load', { timeout: 30000 })
+  // Dismiss the first-run theme-onboarding overlay. App.tsx gates the "Choose
+  // your look" modal on the `mc-onboarded` localStorage flag; a fresh browser
+  // context has no flag, so the modal would overlay the shell and intercept
+  // every spec's interactions. Persisting it into storageState here lets all
+  // test projects inherit it (the ephemeral gateway port makes a committed
+  // state.json localStorage entry useless across runs, so it must be set live).
+  await page.evaluate(() => window.localStorage.setItem('mc-onboarded', '1'))
   await page.context().storageState({ path: STATE_PATH })
 })

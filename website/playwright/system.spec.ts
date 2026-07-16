@@ -2,8 +2,9 @@ import { test, expect } from '@playwright/test'
 
 test.describe('System Page E2E Tests', () => {
   test.beforeEach(async ({ page }) => {
-    // Navigate directly to system page
-    await page.goto('/system', { waitUntil: 'domcontentloaded' })
+    // Navigate directly to system page (System metrics moved under the
+    // Developer page's System tab: /system → /developer?tab=system).
+    await page.goto('/developer?tab=system', { waitUntil: 'domcontentloaded' })
     await page.waitForTimeout(500)
   })
 

@@ -14,6 +14,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+from kiro_claw import platform_compat
+
 _umask_lock = threading.Lock()
 _default_mode: int | None = None
 
@@ -51,7 +53,10 @@ def atomic_write(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             fd = -1  # fdopen took ownership; prevent double-close
-            os.fchmod(f.fileno(), mode if mode is not None else _get_default_mode())
+            # No-op on Windows (no POSIX permission bits / os.fchmod).
+            platform_compat.fchmod_safe(
+                f.fileno(), mode if mode is not None else _get_default_mode()
+            )
             f.write(content)
             if fsync:
                 f.flush()

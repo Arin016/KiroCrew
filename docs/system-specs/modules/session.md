@@ -1,6 +1,6 @@
 # Session Manager Module
 
-Last Updated: 2026-07-13 (warm pool / model precedence / orphan-sweep companion runtimes; DM channel session-key model + dm_scope + generation reset + mid-turn steer/queue; Slack thread linking, bidirectional dashboard-Slack sync, slash commands)
+Last Updated: 2026-07-14 (cross-platform process management via platform_compat — Mesh-2329; warm pool / model precedence / orphan-sweep companion runtimes; DM channel session-key model + dm_scope + generation reset + mid-turn steer/queue; Slack thread linking, bidirectional dashboard-Slack sync, slash commands)
 
 ## Overview
 
@@ -466,6 +466,19 @@ PID in `kiro_session_pids.txt` at spawn. These two runtime kinds live outside
 `self._sessions`, so before this union the sweep saw their live PIDs as
 untracked orphans and SIGKILLed them mid-chat (surfacing as
 `process exited (rc=-9)`).
+
+### Cross-platform process management (platform_compat)
+
+All process liveness/kill/PID-file-lock operations in `session.py` and
+`session_pid.py` go through `kiro_claw.platform_compat` so KiroClaw runs natively on
+Windows as well as macOS/Linux (Mesh-2329). The critical correctness reason is that
+**`os.kill(pid, 0)` is NOT a liveness probe on Windows — it terminates the process** —
+so every liveness check uses `platform_compat.pid_exists(pid)` (or the tri-state
+`pid_liveness`) instead, kills use `kill_pid` / `kill_process_tree`, the PID-reuse
+guard reads the parent via `get_ppid`, the managed-agent check uses
+`process_matches(pid, ("kiro-cli","claude"))`, and the PID-file locks use
+`platform_compat.file_lock` / `acquire_lock` / `try_acquire_lock` (POSIX `flock`
+vs Windows `msvcrt`). On POSIX the behavior is unchanged.
 
 ## Resource Budget (Gateway Mode)
 

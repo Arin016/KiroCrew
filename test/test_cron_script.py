@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -68,6 +69,20 @@ class TestResolveScriptPath:
 class TestRunCommandSandboxed:
     """Tests for run_command_sandboxed shell execution."""
 
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        """Run commands directly, bypassing the OS-sandbox wrap.
+
+        These tests exercise the run_command_sandboxed output/exit-code plumbing,
+        not the sandbox itself. wrap_argv fails closed when no sandbox backend is
+        available (e.g. the test env's restricted namespaces), which would make
+        every command raise instead of run; patch it to a passthrough so the
+        plumbing is what is under test.
+        """
+        monkeypatch.setattr(
+            "kiro_claw.cron_script.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
+
     def test_basic_echo(self):
         result = run_command_sandboxed("echo hello")
         assert result["status"] == "ok"
@@ -98,6 +113,25 @@ class TestRunCommandSandboxed:
 
 class TestRunScriptSandboxed:
     """Tests for run_script_sandboxed Python function execution."""
+
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        """Bypass OS-sandbox wrap and ensure subprocess can import kiro_claw.
+
+        wrap_argv fails closed when no sandbox backend is available (e.g. macOS 26
+        where sandbox-exec is unsupported). run_script_sandboxed also spawns a fresh
+        sys.executable subprocess; on local dev runs outside a packaged install,
+        PYTHONPATH is not set so the subprocess can't import kiro_claw. Inject the
+        src/ dir so the subprocess finds the package. See
+        TestRunCommandSandboxed._passthrough_sandbox.
+        """
+        import os as _os
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+        existing = _os.environ.get("PYTHONPATH", "")
+        monkeypatch.setenv("PYTHONPATH", src_dir + (_os.pathsep + existing if existing else ""))
+        monkeypatch.setattr(
+            "kiro_claw.cron_script.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
 
     def _write_script(self, tmp_path, code):
         crons_dir = tmp_path / ".kiroclaw" / "crons"
@@ -404,6 +438,14 @@ class TestScriptContextCallTool:
 class TestRunCommandSandboxedEdgeCases:
     """Additional edge case tests for run_command_sandboxed."""
 
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        """Bypass the OS-sandbox wrap so these plumbing tests run without a
+        sandbox backend (see TestRunCommandSandboxed._passthrough_sandbox)."""
+        monkeypatch.setattr(
+            "kiro_claw.cron_script.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
+
     def test_command_with_env_vars(self):
         result = run_command_sandboxed("echo $HOME")
         assert result["status"] == "ok"
@@ -424,6 +466,17 @@ class TestRunCommandSandboxedEdgeCases:
 
 class TestRunScriptSandboxedEdgeCases:
     """Additional edge case tests for run_script_sandboxed."""
+
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        """See TestRunScriptSandboxed._passthrough_sandbox."""
+        import os as _os
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+        existing = _os.environ.get("PYTHONPATH", "")
+        monkeypatch.setenv("PYTHONPATH", src_dir + (_os.pathsep + existing if existing else ""))
+        monkeypatch.setattr(
+            "kiro_claw.cron_script.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
 
     def _write_script(self, tmp_path, code):
         crons_dir = tmp_path / ".kiroclaw" / "crons"
@@ -750,6 +803,13 @@ class TestScriptContextPost:
 
 class TestRunCommandSandboxedExceptions:
     """Tests for run_command_sandboxed timeout and exception paths."""
+
+    @pytest.fixture(autouse=True)
+    def _passthrough_sandbox(self, monkeypatch):
+        """See TestRunCommandSandboxed._passthrough_sandbox."""
+        monkeypatch.setattr(
+            "kiro_claw.cron_script.wrap_argv", lambda argv, **k: (list(argv), None)
+        )
 
     def test_timeout_returns_error(self):
         import subprocess

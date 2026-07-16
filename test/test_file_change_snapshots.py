@@ -14,6 +14,7 @@ touching the live ACP runtime — every test stays in pure-Python land.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -169,8 +170,11 @@ class TestFlushFileChanges:
         # No synthetic message created.
         assert slot.messages == []
 
-    def test_attaches_to_last_assistant_message(self, tmp_path: Path):
-        f = tmp_path / "x.py"
+    def test_attaches_to_last_assistant_message(self):
+        # Use /tmp directly — macOS tmp_path contains high-entropy dir IDs that
+        # trigger redact_credentials() on the path field, breaking the assertion.
+        d = Path(tempfile.mkdtemp(dir="/tmp"))
+        f = d / "x.py"
         f.write_text("after\n")
         slot = _make_slot_with_assistant_message()
         slot._file_changes = [{"path": str(f), "content": "before\n"}]
@@ -184,8 +188,10 @@ class TestFlushFileChanges:
         # Slot's accumulator is reset for the next turn.
         assert slot._file_changes == []
 
-    def test_dedup_keeps_first_before(self, tmp_path: Path):
-        f = tmp_path / "loop.py"
+    def test_dedup_keeps_first_before(self):
+        # Use /tmp directly — see test_attaches_to_last_assistant_message.
+        d = Path(tempfile.mkdtemp(dir="/tmp"))
+        f = d / "loop.py"
         f.write_text("v3\n")
         slot = _make_slot_with_assistant_message()
         slot._file_changes = [
@@ -200,9 +206,11 @@ class TestFlushFileChanges:
         # After-content is read from disk once.
         assert changes[0]["after"] == "v3\n"
 
-    def test_dedup_across_multiple_files(self, tmp_path: Path):
-        a = tmp_path / "a.py"
-        b = tmp_path / "b.py"
+    def test_dedup_across_multiple_files(self):
+        # Use /tmp directly — see test_attaches_to_last_assistant_message.
+        d = Path(tempfile.mkdtemp(dir="/tmp"))
+        a = d / "a.py"
+        b = d / "b.py"
         a.write_text("a-after")
         b.write_text("b-after")
         slot = _make_slot_with_assistant_message()
@@ -248,9 +256,11 @@ class TestFlushFileChanges:
         changes = slot.messages[-1]["meta"]["file_changes"]
         assert "AKIAIOSFODNN7EXAMPLE" not in changes[0]["before"]
 
-    def test_synthetic_message_created_when_no_assistant_text(self, tmp_path: Path):
+    def test_synthetic_message_created_when_no_assistant_text(self):
         """User stopped before any assistant chunk: still surface modified files."""
-        f = tmp_path / "edit.py"
+        # Use /tmp directly — see test_attaches_to_last_assistant_message.
+        d = Path(tempfile.mkdtemp(dir="/tmp"))
+        f = d / "edit.py"
         f.write_text("after\n")
         slot = _ChatSlot("aborted-turn")
         # No assistant message present — only a user message.

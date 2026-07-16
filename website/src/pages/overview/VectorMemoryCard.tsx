@@ -85,6 +85,23 @@ export function parseTags(raw: unknown): string[] {
   return Array.isArray(t) ? t : [];
 }
 
+// Cap how many semantic rows we render at once. The store can hold thousands of
+// entries (vector-only mode); rendering them all synchronously — each row does a
+// JSON.parse + JSON.stringify(…, null, 2) + esc() — froze the Settings page for
+// 10-20s on open (Mesh-2827). The full set stays in memory for key-suggestion
+// dedup; only the rendered window is bounded. Filter to reach entries past the cap.
+export const SEMANTIC_RENDER_CAP = 100
+
+// Render a semantic value exactly as the table cell shows it: parse a JSON
+// string, then pretty-print objects (plain String() for scalars). Shared by
+// the row renderer and the filter so filtering on visible value text matches
+// what's on screen — and object values match by content, not "[object Object]".
+export function semanticValueText(e: { value_json?: unknown }): string {
+  let val: unknown = e?.value_json
+  if (typeof val === 'string') { try { val = JSON.parse(val) } catch { /* raw string, keep as-is */ } }
+  return typeof val === 'object' && val !== null ? JSON.stringify(val, null, 2) : String(val ?? '')
+}
+
 export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: { onActiveChange?: (active: boolean) => void; onMigratedChange?: (migrated: boolean) => void }) {
   const [stats, setStats] = useState<VectorStats | null>(null)
   const [embStatus, setEmbStatus] = useState<EmbeddingStatus | null>(null)
@@ -104,6 +121,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
   const [migrating, setMigrating] = useState(false); const [migrateResult, setMigrateResult] = useState<MigrateResult | null>(null)
   const [inspectorQuery, setInspectorQuery] = useState(''); const [preview, setPreview] = useState<ContextPreview | null>(null)
   const [writeError, setWriteError] = useState('')
+  const [semFilter, setSemFilter] = useState('')
 
   const ALLOWLIST_PREFIXES = useMemo(() => [
     'pref.frontend.', 'pref.backend.', 'pref.streaming.', 'pref.editor.', 'pref.os', 'pref.shell',
@@ -121,6 +139,14 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
     if (!newKey) return keySuggestions.slice(0, 8)
     return keySuggestions.filter(k => k.startsWith(newKey)).slice(0, 8)
   }, [newKey, keySuggestions])
+
+  const filteredSemantic = useMemo(() => {
+    const q = semFilter.trim().toLowerCase()
+    if (!q) return semantic
+    return semantic.filter((e) =>
+      String(e.key ?? '').toLowerCase().includes(q) || semanticValueText(e).toLowerCase().includes(q))
+  }, [semantic, semFilter])
+  const visibleSemantic = useMemo(() => filteredSemantic.slice(0, SEMANTIC_RENDER_CAP), [filteredSemantic])
 
   const load = useCallback(async () => {
     const [st, emb, sem] = await Promise.all([
@@ -343,14 +369,16 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
           <SendBtn onClick={async () => { if (!newKey || !newVal) return; try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (e: unknown) { setWriteError(extractError(e)) } }}>Set</SendBtn>
         </div>
         {writeError && <p className="text-danger text-[13px] mb-2"><AlertTriangle className="lucide-inline" /> {writeError}</p>}
+        <div className="flex gap-2 items-center mb-3">
+          <Input placeholder="Filter by key or value…" style={{ flex: 1 }} value={semFilter} onChange={e => { setSemFilter(e.target.value); setEditKey(null) }} />
+          {semFilter && <Btn onClick={() => { setSemFilter(''); setEditKey(null) }}>Clear</Btn>}
+        </div>
         <div className="max-h-[500px] overflow-y-auto">
         <table className="w-full border-collapse table-striped"><thead><tr>
           {['Key','Value','Confidence','Source',''].map(h => <th key={h} className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium sticky top-0 bg-card z-10">{h}</th>)}
         </tr></thead><tbody>
-          {semantic.length === 0 ? <tr><td colSpan={5} className="text-muted italic px-2.5 py-3.5 text-sm">No semantic entries</td></tr> : semantic.map(e => {
-            let val = e.value_json
-            if (typeof val === 'string') { try { val = JSON.parse(val) } catch { /* raw string, keep as-is */ } }
-            const valStr = typeof val === 'object' && val !== null ? JSON.stringify(val, null, 2) : String(val ?? '')
+          {filteredSemantic.length === 0 ? <tr><td colSpan={5} className="text-muted italic px-2.5 py-3.5 text-sm">{semFilter ? 'No matching entries' : 'No semantic entries'}</td></tr> : visibleSemantic.map(e => {
+            const valStr = semanticValueText(e)
             const isEditing = editKey === e.key
             return (
               <tr key={e.key} className="hover:bg-bg-hover transition-colors group">
@@ -379,6 +407,11 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
           })}
         </tbody></table>
         </div>
+        {filteredSemantic.length > 0 && (
+          <p className="text-muted text-[12px] mt-2">
+            Showing {visibleSemantic.length} of {filteredSemantic.length}{filteredSemantic.length !== semantic.length ? ` (filtered from ${semantic.length})` : ''}{filteredSemantic.length > visibleSemantic.length ? ' — refine your filter to narrow further' : ''}
+          </p>
+        )}
       </Card>
     )}
 

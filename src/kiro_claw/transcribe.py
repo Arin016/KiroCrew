@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiro_claw import platform_compat
+
 # Transcribe-path deps are an OPTIONAL 'aws' extra (amazon-transcribe + boto3).
 # The module MUST stay importable when they're absent (default install, partial
 # install, pip mid-install) so that `cli_doctor` — which imports this module —
@@ -52,14 +54,10 @@ def ensure_ffmpeg_in_path() -> None:
 def _python3_bin_dir() -> str:
     """Return the bin dir of the system python3 (where pip installs scripts)."""
     try:
-        # Prefer 3.12/3.11 over 3.13 (free-threaded 3.13 lacks wheels)
-        py = None
-        for name in ("python3.12", "python3.11", "python3.13", "python3.10", "python3"):
-            p = shutil.which(name)
-            if not p or "brazil-path" in p:
-                continue
-            py = p
-            break
+        # platform_compat.find_python_interpreter prefers a real CPython >= 3.10
+        # and — on Windows — rejects the Microsoft Store alias stub, which would
+        # otherwise be spawned and print "Python was not found" on every call.
+        py = platform_compat.find_python_interpreter()
         if not py:
             return ""
         out = subprocess.check_output(

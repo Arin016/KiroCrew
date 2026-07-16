@@ -69,7 +69,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import signal
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -83,11 +82,11 @@ if TYPE_CHECKING:
     from kiro_claw.acp.runtime import AcpRuntime, AcpSessionHandle
     from kiro_claw.acp.types import AcpEvent
 
-from kiro_claw import model_registry, shutdown_event
+from kiro_claw import model_registry, platform_compat, shutdown_event
 from kiro_claw.agent import _enforce_denied_commands
 from kiro_claw.config import KiroClawConfig
 from kiro_claw.config.loader import POOL_SIZE_MAX, build_provider_factory, default_project_dir
-from kiro_claw.executors import maintenance_executor
+from kiro_claw.executors import maintenance_executor, subprocess_executor
 from kiro_claw.messaging.link import ChannelLink, canonical_key, legacy_key
 from kiro_claw.providers.base import CancelOutcome, LLMProvider
 from kiro_claw.sel import sel
@@ -106,6 +105,9 @@ from kiro_claw.session_pid import _track_session_pid as _track_session_pid  # no
 from kiro_claw.session_pid import _untrack_child_pids as _untrack_child_pids  # noqa: F401
 from kiro_claw.session_pid import _untrack_pid as _untrack_pid  # noqa: F401
 from kiro_claw.session_pid import _untrack_session_pid as _untrack_session_pid  # noqa: F401
+from kiro_claw.session_pid import (
+    cleanup_orphaned_session_roots,
+)
 from kiro_claw.session_pid import (  # noqa: F401
     cleanup_orphaned_sessions as cleanup_orphaned_sessions,
 )
@@ -1828,20 +1830,20 @@ class SessionManager:
                     if p not in child_pids:
                         child_pids[p] = (_get_start_time(p), _read_basename(p))
             await session.provider.shutdown()
-            # Verify process is actually dead; force-kill entire tree if not
+            # Verify process is actually dead; force-kill entire tree if not.
+            # os.kill(pid, 0) would *terminate* the process on Windows, so probe
+            # via pid_exists() and force-kill the tree through platform_compat.
             if pid:
-                try:
-                    os.kill(pid, 0)
+                if platform_compat.pid_exists(pid):
                     # Still alive after shutdown — force kill process group
                     logger.warning("Reset %s: PID %d survived shutdown, force-killing", key, pid)
                     try:
-                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                        platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
                     except (ProcessLookupError, OSError):
-                        os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass  # dead as expected
-                except OSError:
-                    pass
+                        try:
+                            platform_compat.kill_pid(pid, platform_compat.SIGKILL)
+                        except (ProcessLookupError, OSError):
+                            pass
                 # Sweep children in different PGIDs (MCP servers) even when
                 # root is dead — children in separate process groups may
                 # outlive the root.
@@ -2568,6 +2570,21 @@ class SessionManager:
                 )
                 if mcp_killed:
                     logger.info("Periodic sweep: cleaned %d orphaned MCP servers", mcp_killed)
+            except Exception:
+                pass
+
+            # Sweep session root kiro-cli processes left behind by crashed
+            # gateway instances (P472042997). Offloaded to a thread to keep
+            # blocking I/O (os.kill, file lock, /proc reads) off the event loop.
+            try:
+                roots_killed = await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), cleanup_orphaned_session_roots
+                )
+                if roots_killed:
+                    logger.info(
+                        "Periodic sweep: cleaned %d orphaned session root processes",
+                        roots_killed,
+                    )
             except Exception:
                 pass
 

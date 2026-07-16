@@ -12,8 +12,11 @@ certs and every HTTPS connection fails with CERTIFICATE_VERIFY_FAILED.
 
 from __future__ import annotations
 
+from kiro_claw import platform_compat
 from kiro_claw._ssl_compat import _ensure_ssl_certs
 
+# Windows: force UTF-8 stdout/stderr before any non-ASCII output (no-op on POSIX).
+platform_compat.ensure_utf8_console()
 _ensure_ssl_certs()
 
 if __name__ == "__main__":

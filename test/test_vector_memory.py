@@ -1167,6 +1167,7 @@ class TestVectorStoreConcurrency:
         assert any("zeta functionality" in str(ls.get("value_json", "")) for ls in lessons)
 
 
+@pytest.mark.skipif(not _HAS_NUMPY, reason="numpy not available (Linux-compiled binary)")
 class TestFaissDimMismatch:
     """Tests for build_faiss_index dimension validation (skip mismatched entries)."""
 
@@ -1372,3 +1373,90 @@ class TestEmbeddingDimPlumbing:
         mem_mod._get_vector_store(fresh_state)
 
         assert captured_kwargs.get("embedding_dim") == 384
+
+
+@pytest.mark.skipif(not _HAS_NUMPY, reason="numpy not available (Linux-compiled binary)")
+class TestWriteEpisodicWithoutEmbedding:
+    """write_episodic must not crash when the write has no embedding but the
+    FAISS index is non-empty.
+
+    Repro: memories were written with embeddings (index populated), then
+    embeddings are disabled (embedding_provider="none" -> embed_fn unbound) or
+    a single embed call fails. The FAISS dedup block used to dereference the
+    unbound `vec` local and raise UnboundLocalError, losing the memory.
+    Regression guard for the gateway consolidation crash (2026-07-15).
+    """
+
+    dim = 16
+
+    def _store_with_mock_index(self, tmp_path: Path, monkeypatch):
+        """Store whose FAISS index is a populated mock (ntotal=1)."""
+        from unittest.mock import MagicMock
+
+        import kiro_claw.vector_memory as vm_mod
+
+        mock_faiss = MagicMock()
+        monkeypatch.setattr(vm_mod, "_HAS_FAISS", True)
+        monkeypatch.setattr(vm_mod, "_HAS_NUMPY", True)
+        monkeypatch.setattr(vm_mod, "faiss", mock_faiss)
+
+        store = VectorMemoryStore(db_path=tmp_path / "mem.db", embedding_dim=self.dim)
+        store.init()
+
+        # Seed one embedded row and wire the mock index to it (ntotal=1)
+        import numpy as np
+
+        seed_vec = np.ones(self.dim, dtype=np.float32)
+        seed_vec /= np.linalg.norm(seed_vec)
+        store.db.execute(
+            "INSERT INTO episodic_memories (id, text, embedding, is_deleted, importance, "
+            "created_at, last_accessed_at) VALUES (?, ?, ?, 0, 1.0, '2026-01-01', '2026-01-01')",
+            ("existing-1", "Team agreed on PostgreSQL for the database layer", seed_vec.tobytes()),
+        )
+        store.db.commit()
+
+        mock_index = MagicMock()
+        mock_index.ntotal = 1
+        store._faiss_index = mock_index
+        store._faiss_id_map = ["existing-1"]
+        return store, mock_index
+
+    def test_no_embedding_write_does_not_crash(self, tmp_path: Path, monkeypatch) -> None:
+        """A write with embeddings disabled degrades gracefully (no dedup, no crash)."""
+        store, mock_index = self._store_with_mock_index(tmp_path, monkeypatch)
+        store.embed_fn = None  # embeddings disabled (embedding_provider="none")
+
+        # Distinct text (different 80-char prefix) so text-hash dedup does not apply.
+        # Pre-fix this raised UnboundLocalError on `vec` inside the dedup block.
+        assert store.write_episodic("User decided to use Rust for the parser rewrite")
+
+        # Dedup search must have been skipped and nothing added to the index
+        mock_index.search.assert_not_called()
+        mock_index.add.assert_not_called()
+
+        row = store.db.execute(
+            "SELECT embedding FROM episodic_memories WHERE is_deleted = 0 "
+            "AND text = 'User decided to use Rust for the parser rewrite'"
+        ).fetchone()
+        assert row is not None
+        assert row["embedding"] is None  # persisted without a vector
+
+    def test_embedded_writes_still_dedup(self, tmp_path: Path, monkeypatch) -> None:
+        """FAISS dedup still runs for writes that DO carry an embedding."""
+        import numpy as np
+
+        store, mock_index = self._store_with_mock_index(tmp_path, monkeypatch)
+
+        # Near-identical vector -> cosine above threshold -> conflict_skip.
+        # Keep the text SHORTER than 1.2x the seeded entry so the dedup takes
+        # the conflict_skip path (returns False), not the longer-text merge path.
+        mock_index.search.return_value = (
+            np.array([[0.99]], dtype=np.float32),
+            np.array([[0]], dtype=np.int64),
+        )
+        duplicate_vec = [1.0] * self.dim
+        assert not store.write_episodic(
+            "Same vector, new text prefix here",
+            embedding=duplicate_vec,
+        )
+        mock_index.search.assert_called_once()

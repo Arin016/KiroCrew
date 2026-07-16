@@ -21,6 +21,8 @@
         "default_agent": "",
         "sandbox": "auto",
         "sandbox_allow_no_isolation": false,
+        "sandbox_allow_unsandboxed_exec": false,
+        "apps_allow_third_party": true,
         "jail": "auto",
         "yolo": false,
         "notify_override_expiry": true,
@@ -156,6 +158,34 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
+    },
+    {
+      "path": "agent.sandbox_allow_unsandboxed_exec",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Allow Unsandboxed Execution",
+      "help": "When true, allow agent subprocesses to execute without any sandbox backend (fail-open). When false (default), wrap_argv raises a RuntimeError if no sandbox backend is available and mode is not 'off', preventing unsandboxed execution entirely (fail-closed). This is distinct from sandbox_allow_no_isolation which only controls warning severity — this field controls whether execution proceeds at all.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "agent.apps_allow_third_party",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Allow Third-Party Apps",
+      "help": "Allow running third-party (non-builtin) app Python. App code runs with FULL gateway privileges (filesystem, network, in-memory credentials) and is NOT sandboxed — the permission system gates only the SDK tool surface. Defaults to true (apps are operator-installed). Set false to refuse both in-process module loads AND out-of-process backend spawns for any app outside apps/builtins/ until out-of-process isolation ships (CSE SEC-012).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
     },
     {
       "path": "agent.jail",

@@ -84,6 +84,10 @@ def _resolve_piper_binary(configured: str = "") -> str | None:
 
     Resolution order: explicit ``configured`` path → ``piper`` on PATH →
     common pip-install location at ``~/piper-venv/bin/piper``.
+
+    Windows: not yet supported — upstream rhasspy/piper ships no Windows binary,
+    so this returns None and Piper TTS is unavailable (Polly works). Tracked in
+    Mesh-2364 (https://taskei.amazon.dev/tasks/Mesh-2364).
     """
     if configured:
         p = os.path.expanduser(configured)
@@ -534,7 +538,13 @@ def split_sentences(text: str) -> list[str]:
 
 
 async def stitch_mp3s(paths: list[str], output: str | None = None) -> str | None:
-    """Concatenate MP3 files into a single file using ffmpeg."""
+    """Concatenate MP3 files into a single file using ffmpeg.
+
+    Windows: ffmpeg is not guaranteed on PATH (the dashboard-streaming stitch
+    path then fails); should be made optional + warn. The Slack thread-upload
+    path is unaffected. Tracked in Mesh-2364
+    (https://taskei.amazon.dev/tasks/Mesh-2364).
+    """
     if not paths:
         return None
     if len(paths) == 1:

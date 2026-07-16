@@ -19,6 +19,24 @@ from kiro_claw.taskrunner import (
 
 pytestmark = requires_git
 
+
+@pytest.fixture(autouse=True)
+def _passthrough_sandbox(monkeypatch):
+    """These scenarios spawn REAL git via ``git_coord._git`` →
+    ``sandboxed_spawn_argv`` → ``wrap_argv``, which raises when no OS-level
+    sandbox backend is available (e.g. macOS where sandbox-exec is absent, or a
+    host with the probe disabled). The scenarios exercise git/taskrunner logic,
+    not sandbox availability, so run the command unwrapped in-test. On hosts with
+    a real backend this is a no-op relative to what production does."""
+    import os as _os
+
+    monkeypatch.setattr(
+        git_coord,
+        "sandboxed_spawn_argv",
+        lambda argv, *a, **k: (list(argv), dict(_os.environ), None),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Scenario 1: Multi-step code task in existing git repo (worktree path)
 # User runs: "implement a REST API with 3 endpoints"

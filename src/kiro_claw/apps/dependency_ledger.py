@@ -21,10 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-# fcntl via flock_compat: POSIX-only, shimmed on Windows so the import
-# graph stays loadable there (this module runs only on the macOS/Linux
-# gateway). Same call surface as fcntl.
-from kiro_claw import flock_compat as fcntl
+from kiro_claw import platform_compat
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
 
@@ -74,13 +71,12 @@ def _locked_ledger(*, exclusive: bool = True) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
     lock_path.touch(exist_ok=True)
-    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-    with open(lock_path, "r") as lf:
-        fcntl.flock(lf, mode)
-        try:
+    # "r+" (not "r"): Windows msvcrt.locking requires write access on the fd —
+    # a read-only handle fails with EACCES and platform_compat.file_lock
+    # swallows it (best-effort), silently degrading this to a no-op.
+    with open(lock_path, "r+") as lf:
+        with platform_compat.file_lock(lf.fileno(), exclusive=exclusive):
             yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _read_ledger_unlocked() -> dict[str, Any]:

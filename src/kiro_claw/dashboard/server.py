@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from kiro_claw import platform_compat
 from kiro_claw.apps.backend import start_enabled_app_backends
 from kiro_claw.apps.builtins import BUILTIN_NAMES
 from kiro_claw.apps.hooks_integration import (
@@ -469,9 +470,24 @@ def _write_secret_file(secret_path: Path, secret: str) -> None:
     """
     try:
         fd = os.open(str(secret_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.fchmod(fd, 0o600)  # enforce perms even if file already exists
-        with os.fdopen(fd, "w") as f:
-            f.write(secret)
+        try:
+            # Enforce perms even if the file already exists at looser mode.
+            # restrict_to_owner (fail-loud), NOT fchmod_safe: fchmod_safe swallows
+            # OSError, which would defeat the cleanup-and-reraise below — a
+            # pre-existing file with loose perms would stay loose and the caller
+            # never learns (AutoSDE). On POSIX this applies chmod 0o600 by path;
+            # on Windows an owner-only DACL via icacls (fchmod doesn't exist on
+            # Windows — previously this was a silent no-op).
+            platform_compat.restrict_to_owner(secret_path)
+            with os.fdopen(fd, "w") as f:
+                fd = -1  # fdopen took ownership; skip the redundant close below
+                f.write(secret)
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
     except OSError:
         try:
             secret_path.unlink(missing_ok=True)

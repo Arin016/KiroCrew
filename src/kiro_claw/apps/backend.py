@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -21,7 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kiro_claw.apps.manager import app_dir, get_app_manifest, list_apps
+from kiro_claw import platform_compat
+from kiro_claw.apps import module_loader as _module_loader
+from kiro_claw.apps.admission import app_admission_denied
+from kiro_claw.apps.manager import _read_installed, app_dir, get_app_manifest, list_apps
 from kiro_claw.apps.registry import minimal_env
 from kiro_claw.atomic_write import atomic_write
 from kiro_claw.config.loader import config_dir
@@ -282,12 +284,60 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
         and "." in entry_point
         and not (root / entry_point).exists()
     )
+
+    # CSE SEC-012 (Talos P472043259): the same operator off-switch that blocks
+    # in-process third-party module loading (module_loader.load_app_module) must
+    # also block spawning a third-party app's out-of-process backend, or the
+    # `agent.apps_allow_third_party=false` promise ("refuse third-party app code
+    # entirely") is only half-honored. Gate on the TRUSTED provenance signal — the
+    # installed record's ``origin`` (stamped "builtin" by register_builtin_apps for
+    # shipped apps) — NOT the ``is_module_entry`` heuristic derived from the
+    # attacker-controlled manifest entryPoint. A third-party app under
+    # ~/.kiroclaw/apps/<x>/ could otherwise declare a dotted module-style entryPoint
+    # (e.g. "kiro_claw.cli_server") to flip is_module_entry True and bypass both this
+    # off-switch AND the entryPoint path-containment backstop. Fail-safe: if
+    # provenance can't be read, treat as third-party (gated).
+    meta = _read_installed(app_name)
+    is_builtin_origin = meta is not None and meta.origin == "builtin"
+    if not is_builtin_origin and not _module_loader._third_party_apps_allowed():
+        try:
+            sel().log_api_access(
+                caller="gateway",
+                operation="app_backend_spawn",
+                outcome="denied",
+                resources=f"{app_name} (third_party)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("SEL audit failed for app %s backend deny: %s", app_name, exc)
+        logger.warning(
+            "Refusing to spawn third-party app %s backend: out-of-process execution of "
+            "untrusted app code is disabled by agent.apps_allow_third_party=false.",
+            app_name,
+        )
+        return None
+
     if is_module_entry:
         entry = None  # sentinel; no file path for module-style entries
     else:
         entry = root / entry_point
         if not entry.is_file():
             logger.error("App %s backend entry point not found: %s", app_name, entry)
+            return None
+        # Path containment backstop (mirrors module_loader hook-path check): the
+        # persisted manifest is spawned at boot without re-running validate(), so
+        # reject an entryPoint that resolves outside the app root (absolute path
+        # or '..' traversal).
+        try:
+            if not entry.resolve().is_relative_to(root.resolve()):
+                logger.error(
+                    "App %s backend entry point escapes app root: %s (resolved %s)",
+                    app_name, entry, entry.resolve(),
+                )
+                return None
+        except (OSError, ValueError):
+            logger.error(
+                "App %s backend entry point path resolution failed: %s", app_name, entry,
+            )
             return None
 
     # Resolve port
@@ -536,6 +586,10 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
 
     try:
         log_fh = open(log_path, "w")
+        # Process-group isolation so stop_app_backend can tree-kill the app. Pass
+        # both flags explicitly (NOT via **dict unpack — that breaks mypy's Popen
+        # overload resolution on the build fleet): start_new_session=True is a
+        # no-op on Windows, creationflags resolves to 0 (no-op) on POSIX.
         try:
             proc = subprocess.Popen(
                 sandboxed_cmd,
@@ -544,7 +598,8 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
                 stdin=subprocess.DEVNULL,
                 cwd=cwd,
                 env=env,
-                start_new_session=True,
+                start_new_session=platform_compat.IS_POSIX,
+                creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             )
         except OSError:
             log_fh.close()
@@ -622,17 +677,22 @@ def _wait_for_pids(pids: list[int], timeout: float = 2.0) -> None:
 
     Uses short sleeps (0.1s) to avoid blocking the thread for the full
     timeout duration when processes exit quickly.
+
+    Uses pid_liveness (tri-state), NOT pid_exists (which collapses EPERM to
+    True): an adopted app-backend PID can be recycled between kill_pid(SIGTERM)
+    and this poll to a different user's process. pid_exists would keep it in
+    still_alive for the whole 2.0s deadline; pid_liveness returns UNSIGNALABLE
+    for the not-ours case and we treat that as done, restoring the fast-return
+    behavior the old ``os.kill(pid, 0) except OSError`` had. Never raw
+    ``os.kill(pid, 0)`` — that TERMINATES the target on Windows.
     """
     deadline = time.monotonic() + timeout
     remaining = list(pids)
     while remaining and time.monotonic() < deadline:
         still_alive: list[int] = []
         for pid in remaining:
-            try:
-                os.kill(pid, 0)
+            if platform_compat.pid_liveness(pid) == platform_compat.PID_ALIVE:
                 still_alive.append(pid)
-            except (ProcessLookupError, OSError):
-                pass
         remaining = still_alive
         if remaining:
             time.sleep(0.1)
@@ -658,14 +718,15 @@ def stop_app_backend(app_name: str) -> bool:
         except Exception as exc:
             logger.debug("SEL audit failed for app_backend_stop %s: %s", app_name, exc)
         try:
-            os.killpg(os.getpgid(ap.proc.pid), signal.SIGTERM)
+            # killpg(getpgid) on POSIX, taskkill /T on Windows — via platform_compat.
+            platform_compat.kill_process_tree(ap.proc.pid, platform_compat.SIGTERM)
         except (ProcessLookupError, OSError):
             pass
         try:
             ap.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(os.getpgid(ap.proc.pid), signal.SIGKILL)
+                platform_compat.kill_process_tree(ap.proc.pid, platform_compat.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
             try:
@@ -727,7 +788,8 @@ def stop_app_backend(app_name: str) -> bool:
                 if pid <= 0:
                     continue
                 try:
-                    os.kill(pid, signal.SIGTERM)
+                    # kill_pid: os.kill on POSIX, taskkill /F on Windows.
+                    platform_compat.kill_pid(pid, platform_compat.SIGTERM)
                     pids.append(pid)
                 except (ProcessLookupError, OSError):
                     pass
@@ -744,12 +806,14 @@ def stop_app_backend(app_name: str) -> bool:
             # Escalate to SIGKILL if still alive
             escalated: list[int] = []
             for pid in pids:
-                try:
-                    os.kill(pid, 0)  # check if still alive
-                    os.kill(pid, signal.SIGKILL)
-                    escalated.append(pid)
-                except (ProcessLookupError, OSError):
-                    pass
+                # pid_exists (not os.kill(pid,0), which terminates on Windows);
+                # kill_pid dispatches os.kill / taskkill per platform.
+                if platform_compat.pid_exists(pid):
+                    try:
+                        platform_compat.kill_pid(pid, platform_compat.SIGKILL)
+                        escalated.append(pid)
+                    except (ProcessLookupError, OSError):
+                        pass
             if escalated:
                 try:
                     sel().log_api_access(
@@ -1044,18 +1108,17 @@ def _reap_stale_app_backends() -> int:
         if pid <= 0:
             handled[app_name] = entry
             continue
-        try:
-            os.kill(pid, 0)  # alive?
-        except ProcessLookupError:
+        # NEVER raw ``os.kill(pid, 0)`` — that TERMINATES the process on Windows.
+        # ``pid_liveness`` returns DEAD/ALIVE/UNSIGNALABLE (uid-owned-by-other on
+        # POSIX; unknown errno also maps to UNSIGNALABLE). Preserve the original
+        # three-way policy: drop-dead, skip-unsignalable, proceed-alive.
+        liveness = platform_compat.pid_liveness(pid)
+        if liveness == platform_compat.PID_DEAD:
             handled[app_name] = entry  # already gone — drop
             continue
-        except PermissionError:
-            # Alive but owned by another uid → not our orphan; cannot signal it.
+        if liveness == platform_compat.PID_UNSIGNALABLE:
             handled[app_name] = entry
             logger.info("Skipping stale-reap of %s pid %d: not owned by gateway", app_name, pid)
-            continue
-        except OSError:
-            handled[app_name] = entry
             continue
         recorded_st = entry.get("start_time")
         live_st = _proc_start_time(pid)
@@ -1069,7 +1132,7 @@ def _reap_stale_app_backends() -> int:
             )
             continue
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            platform_compat.kill_process_tree(pid, platform_compat.SIGTERM)
         except (ProcessLookupError, OSError):
             handled[app_name] = entry  # gone between the probe and the signal
             continue
@@ -1107,7 +1170,7 @@ def _reap_stale_app_backends() -> int:
             )
             continue
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
         except (ProcessLookupError, OSError):
             continue
         try:
@@ -1191,7 +1254,61 @@ def start_enabled_app_backends() -> list[str]:
         manifest = app_info.get("manifest", {})
         if not manifest.get("backend", {}).get("entryPoint"):
             continue
-        ap = start_app_backend(name)
+        # Re-vet admission at boot: an app enabled before a policy tightened
+        # (banned / allowlist-removed / now-unsigned) must NOT keep running
+        # across restarts. Builtins (origin == "builtin") are trusted first-party
+        # code shipped unsigned, so they are exempt (same carve-out as enable_app)
+        # — otherwise a require_signature policy would strand every core app.
+        if app_info.get("origin") != "builtin":
+            try:
+                denied = app_admission_denied(
+                    name, manifest=get_app_manifest(name), action="boot"
+                )
+            except Exception as exc:  # noqa: BLE001 — boot must never crash on re-vet
+                # Fail CLOSED: if the re-vet itself errors (transient I/O, a bug
+                # in the admission logic), treat the app as denied rather than
+                # booting it unchecked. The loop still continues to the next app,
+                # so a single failure never crashes boot — it just declines to
+                # start the app whose admission we could not confirm.
+                logger.error(
+                    "Boot admission re-vet failed for app %s: %s — treating as denied "
+                    "(fail-closed)",
+                    name, exc,
+                )
+                denied = f"admission re-vet error: {exc}"
+            if denied:
+                logger.warning(
+                    "Boot: skipping enabled app %s — blocked by admission policy: %s",
+                    name, denied,
+                )
+                try:
+                    sel().log_api_access(
+                        caller="gateway", operation="app_backend_boot",
+                        outcome="denied", resources=name, error=denied,
+                    )
+                except Exception as exc:
+                    logger.debug("SEL audit failed for app %s boot deny: %s", name, exc)
+                continue
+        try:
+            ap = start_app_backend(name)
+        except Exception as exc:  # noqa: BLE001 — boot must never crash on a single app's spawn
+            # A per-app spawn failure (e.g. sandbox.wrap_argv fail-closing when no
+            # OS-level sandbox backend is available — macOS 26 removed sandbox-exec)
+            # must NOT take down the whole gateway (Slack + dashboard + every session).
+            # Log, audit, and skip this app — same fail-isolated posture as the
+            # admission re-vet and MCP reconcile branches above.
+            logger.error(
+                "Boot: failed to start backend for app %s: %s — skipping (gateway continues)",
+                name, exc,
+            )
+            try:
+                sel().log_api_access(
+                    caller="gateway", operation="app_backend_boot",
+                    outcome="error", resources=name, error=str(exc),
+                )
+            except Exception as sel_exc:
+                logger.debug("SEL audit failed for app %s boot error: %s", name, sel_exc)
+            continue
         if ap:
             started.append(name)
             logger.info("Auto-started backend for app %s on port %d", name, ap.port)

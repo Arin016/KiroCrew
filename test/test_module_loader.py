@@ -88,6 +88,64 @@ def register_routes(ctx):
 
 
 # ---------------------------------------------------------------------------
+# CSE SEC-012: hard off switch — agent.apps_allow_third_party gate
+# ---------------------------------------------------------------------------
+
+
+class TestThirdPartyGate:
+    """When agent.apps_allow_third_party is false, third-party (non-builtin) app
+    modules are refused BEFORE exec_module runs; builtins are unaffected."""
+
+    def _make_app(self, tmp_path: Path) -> Path:
+        app_dir = tmp_path / "evil-app"
+        _create_app_module(app_dir, "backend.routes:register_routes", """
+def register_routes(ctx):
+    return "ok"
+""")
+        return app_dir
+
+    def test_third_party_denied_when_gate_off(self, tmp_path: Path, monkeypatch) -> None:
+        import kiro_claw.apps.module_loader as ml
+
+        monkeypatch.setattr(ml, "_third_party_apps_allowed", lambda: False)
+        ml._warned_third_party_apps.discard("evil-app")
+        app_dir = self._make_app(tmp_path)
+        unique_name = ml._module_namespace("evil-app", "backend.routes")
+        with pytest.raises(ImportError, match="apps_allow_third_party"):
+            load_app_module("evil-app", app_dir, "backend.routes:register_routes")
+        # The gate raised before spec_from_file_location/exec_module — no module
+        # was ever registered in sys.modules (untrusted code never executed).
+        assert unique_name not in sys.modules
+        unload_app_modules("evil-app")
+
+    def test_third_party_allowed_by_default(self, tmp_path: Path) -> None:
+        import kiro_claw.apps.module_loader as ml
+
+        ml._warned_third_party_apps.discard("evil-app")
+        app_dir = self._make_app(tmp_path)
+        # Default config leaves the gate open — the load succeeds.
+        func = load_app_module("evil-app", app_dir, "backend.routes:register_routes")
+        assert func(None) == "ok"
+        unload_app_modules("evil-app")
+
+    def test_builtin_load_not_blocked_by_gate(self, monkeypatch) -> None:
+        import kiro_claw.apps.module_loader as ml
+
+        # Gate closed, but builtins are trusted — they must still load.
+        monkeypatch.setattr(ml, "_third_party_apps_allowed", lambda: False)
+        app_dir = ml._BUILTINS_DIR / "deploy_web"
+        if not (app_dir / "handlers.py").is_file():
+            pytest.skip("deploy_web builtin layout changed")
+        ml._warned_third_party_apps.discard("deploy-web")
+        try:
+            load_app_module("deploy-web", app_dir, "handlers:register_routes")
+        except ImportError as exc:
+            # A missing callable is fine; the gate's ImportError is NOT.
+            assert "apps_allow_third_party" not in str(exc)
+        unload_app_modules("deploy-web")
+
+
+# ---------------------------------------------------------------------------
 # Property 15: Module isolation prevents namespace collisions
 # ---------------------------------------------------------------------------
 

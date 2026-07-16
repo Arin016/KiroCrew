@@ -716,6 +716,10 @@ export default function App() {
   }, [isPopout, isEmbed, navigate, dispatch])
 
   const { colorTheme, setColorTheme, allThemes, preference: modePref, setTheme: setModePref, onboarded, markOnboarded } = useTheme()
+  // The E2E Playwright suite depends on this onboarding gate: playwright/auth.setup.ts
+  // seeds localStorage['mc-onboarded']='1' so the first-run "Choose your look" modal
+  // never overlays the shell and intercepts every spec's interactions. If this flag is
+  // renamed or the modal moves off localStorage, update auth.setup.ts to match.
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('mc-onboarded'))
   // Dismiss onboarding when server reports user is already onboarded
   // (handles the race: boot fetch completes after useState initializer ran).

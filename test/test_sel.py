@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -427,10 +428,13 @@ class TestHmacKeyManagementExtras:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Read-only filesystems raise OSError on chmod — must not crash init.
+        # SEL key perms now go through platform_compat.chmod_safe (logs + swallows
+        # OSError; no-op on Windows), so patch os.chmod IN platform_compat to
+        # exercise the fail-soft path.
         def _boom(*a, **kw):
             raise OSError("chmod denied")
 
-        monkeypatch.setattr("kiro_claw.sel.os.chmod", _boom)
+        monkeypatch.setattr("kiro_claw.platform_compat.os.chmod", _boom)
         log = SecurityEventLog(base_dir=tmp_path, sync=True)
         assert (tmp_path / "sel_hmac.key").exists()
         assert log._hmac_key
@@ -743,18 +747,16 @@ class TestAsyncWriter:
         tip = log._last_hash
 
         # Make the next append's open() fail, then restore it.
-        real_open = open
+        real_os_open = os.open
         state = {"fail": True}
 
         def _maybe_fail(path, *a, **k):
             if state["fail"] and str(path).endswith("security_events.jsonl"):
                 raise OSError("disk full")
-            return real_open(path, *a, **k)
-
-        import builtins
+            return real_os_open(path, *a, **k)
 
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(builtins, "open", _maybe_fail)
+        monkeypatch.setattr(os, "open", _maybe_fail)
         log.log(_make_event(event_id="e1"))  # write fails — must roll back
         monkeypatch.undo()
 
@@ -784,17 +786,15 @@ class TestCriticalWrite:
     def test_critical_log_raises_when_file_unwritable(self, tmp_path: Path) -> None:
         """A critical write to an unwritable SEL file re-raises OSError."""
         log = SecurityEventLog(base_dir=tmp_path)
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
-            if str(path).endswith("security_events.jsonl") and "a" in (a[0] if a else k.get("mode", "")):
+            if str(path).endswith("security_events.jsonl"):
                 raise PermissionError("SEL file unwritable (chmod 000)")
-            return real_open(path, *a, **k)
-
-        import builtins
+            return real_os_open(path, *a, **k)
 
         mp = pytest.MonkeyPatch()
-        mp.setattr(builtins, "open", _boom)
+        mp.setattr(os, "open", _boom)
         try:
             with pytest.raises(OSError):
                 log.log(_make_event(event_id="crit"), critical=True)
@@ -825,17 +825,15 @@ class TestCriticalWrite:
     def test_sync_mode_critical_raises(self, tmp_path: Path) -> None:
         """In sync mode a critical write still re-raises on failure."""
         log = SecurityEventLog(base_dir=tmp_path, sync=True)
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
             if str(path).endswith("security_events.jsonl"):
                 raise OSError("disk full")
-            return real_open(path, *a, **k)
-
-        import builtins
+            return real_os_open(path, *a, **k)
 
         mp = pytest.MonkeyPatch()
-        mp.setattr(builtins, "open", _boom)
+        mp.setattr(os, "open", _boom)
         try:
             with pytest.raises(OSError):
                 log.log(_make_event(event_id="crit-sync"), critical=True)
@@ -846,17 +844,15 @@ class TestCriticalWrite:
         """Regression guard: a NON-critical write must remain best-effort
         (swallow + warn), never propagate to the hot-path caller."""
         log = SecurityEventLog(base_dir=tmp_path, sync=True)
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
             if str(path).endswith("security_events.jsonl"):
                 raise OSError("disk full")
-            return real_open(path, *a, **k)
-
-        import builtins
+            return real_os_open(path, *a, **k)
 
         mp = pytest.MonkeyPatch()
-        mp.setattr(builtins, "open", _boom)
+        mp.setattr(os, "open", _boom)
         try:
             log.log(_make_event(event_id="soft"))  # must NOT raise
         finally:
@@ -865,17 +861,15 @@ class TestCriticalWrite:
     def test_log_api_access_critical_raises(self, tmp_path: Path) -> None:
         """``log_api_access(critical=True)`` propagates a write failure."""
         log = SecurityEventLog(base_dir=tmp_path)
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
-            if str(path).endswith("security_events.jsonl") and "a" in (a[0] if a else k.get("mode", "")):
+            if str(path).endswith("security_events.jsonl"):
                 raise PermissionError("unwritable")
-            return real_open(path, *a, **k)
-
-        import builtins
+            return real_os_open(path, *a, **k)
 
         mp = pytest.MonkeyPatch()
-        mp.setattr(builtins, "open", _boom)
+        mp.setattr(os, "open", _boom)
         try:
             with pytest.raises(OSError):
                 log.log_api_access(
@@ -890,17 +884,15 @@ class TestCriticalWrite:
     def test_log_tool_invocation_critical_raises(self, tmp_path: Path) -> None:
         """``log_tool_invocation(critical=True)`` propagates a write failure."""
         log = SecurityEventLog(base_dir=tmp_path)
-        real_open = open
+        real_os_open = os.open
 
         def _boom(path, *a, **k):
-            if str(path).endswith("security_events.jsonl") and "a" in (a[0] if a else k.get("mode", "")):
+            if str(path).endswith("security_events.jsonl"):
                 raise PermissionError("unwritable")
-            return real_open(path, *a, **k)
-
-        import builtins
+            return real_os_open(path, *a, **k)
 
         mp = pytest.MonkeyPatch()
-        mp.setattr(builtins, "open", _boom)
+        mp.setattr(os, "open", _boom)
         try:
             with pytest.raises(OSError):
                 log.log_tool_invocation(

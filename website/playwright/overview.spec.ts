@@ -1,66 +1,47 @@
 import { test, expect } from '@playwright/test'
 
+// Overview page tabs as of the current IA. Cron / Skills / MCP were moved out
+// of Overview into their own pages, so they are intentionally not asserted here.
+const TABS = ['Memory', 'Usage', 'KiroClaw Config', 'Agent Config', 'Import/Export'] as const
+
 test.describe('Overview Page E2E Tests', () => {
   test.beforeEach(async ({ page }) => {
-    // Navigate directly to overview page
     await page.goto('/overview', { waitUntil: 'domcontentloaded' })
     await page.waitForTimeout(1000)
   })
 
   test('navigates to Overview and displays tabs', async ({ page }) => {
-    // Wait for the page to load - check for specific tab element
-    await expect(page.getByRole('button', { name: 'Memory' })).toBeVisible({ timeout: 10000 })
-    
-    // Check that all tabs are present
-    await expect(page.getByRole('button', { name: 'Memory' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Cron' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Skills' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'MCP' })).toBeVisible()
+    for (const label of TABS) {
+      // exact match: 'Memory' would otherwise also hit the 'Enable Vector Memory' CTA.
+      await expect(page.getByRole('button', { name: label, exact: true })).toBeVisible({ timeout: 10000 })
+    }
   })
 
   test('switches between Overview tabs and loads data', async ({ page }) => {
-    // Memory tab - click button
-    await page.getByRole('button', { name: 'Memory' }).click()
-    // Check for something specific to Memory tab - use heading
+    // Click each tab and assert it becomes the active tab via the semantic
+    // aria-current state, not a styling utility class -- a text-accent match
+    // would couple the gate to a design token and re-introduce the selector
+    // fragility this CR removes.
+    for (const label of TABS) {
+      const btn = page.getByRole('button', { name: label, exact: true })
+      await btn.click()
+      await expect(btn).toHaveAttribute('aria-current', 'page', { timeout: 5000 })
+    }
+    // Memory tab content check.
+    await page.getByRole('button', { name: 'Memory', exact: true }).click()
     await expect(page.getByRole('heading', { name: /memory settings/i })).toBeVisible({ timeout: 5000 })
-    
-    // Cron tab
-    await page.getByRole('button', { name: 'Cron' }).click()
-    // Check for cron-specific heading - use first() to handle duplicates
-    await expect(page.locator('div').filter({ hasText: /^Cron Jobs$/ }).first()).toBeVisible({ timeout: 5000 })
-    
-    // Skills tab
-    await page.getByRole('button', { name: 'Skills' }).click()
-    // Use first() to handle multiple matches
-    await expect(page.getByText(/skills|add skill/i).first()).toBeVisible({ timeout: 5000 })
-    
-    // MCP tab
-    await page.getByRole('button', { name: 'MCP' }).click()
-    // Use first() to handle multiple matches
-    await expect(page.getByText(/mcp servers|servers/i).first()).toBeVisible({ timeout: 5000 })
   })
 
   test('Memory tab: saves preferences', async ({ page }) => {
-    await page.getByRole('button', { name: 'Memory' }).click()
-
-    // Wait for preferences section heading to be visible
+    await page.getByRole('button', { name: 'Memory', exact: true }).click()
     await expect(page.getByRole('heading', { name: /memory settings/i })).toBeVisible({ timeout: 5000 })
-
-    // Memory tab doesn't have textareas - it has different UI
-    // Skip this test as the feature may not exist or work differently
-    // Let's just verify the tab loaded
   })
 
   test('Memory tab: tests consolidation', async ({ page }) => {
-    await page.getByRole('button', { name: 'Memory' }).click()
-
-    // Click test consolidation button
+    await page.getByRole('button', { name: 'Memory', exact: true }).click()
     const consolidateButton = page.getByRole('button', { name: /test consolidation|consolidate/i })
-    
     if (await consolidateButton.isVisible()) {
       await consolidateButton.click()
-      
-      // Wait for operation to complete (may show running then success)
       await page.waitForTimeout(2000)
     }
   })

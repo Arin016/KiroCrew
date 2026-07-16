@@ -8,6 +8,17 @@ interface NotificationsState {
 
 const initialState: NotificationsState = { items: [] }
 
+/** Ring-buffer cap on the notifications list. Without it, `items` grows
+ *  monotonically for the tab's lifetime (ack only flips a flag) — part of
+ *  the long-lived-tab heap retention class (Mesh-2835). Applied on both the
+ *  live SSE path and the fetch path so the page and the bell see one
+ *  consistent bounded list; oldest entries drop first. Older history stays
+ *  in the backend notification log. */
+export const NOTIFICATIONS_RING_CAP = 200
+
+const capped = (items: Notification[]): Notification[] =>
+  items.length > NOTIFICATIONS_RING_CAP ? items.slice(items.length - NOTIFICATIONS_RING_CAP) : items
+
 export const fetchNotifications = createAsyncThunk(
   'notifications/fetch',
   async () => { const d = await api.notifications(); return (d.notifications || []) as Notification[] },
@@ -43,7 +54,10 @@ const notificationsSlice = createSlice({
   initialState,
   reducers: {
     addNotification(state, action: PayloadAction<Notification>) {
-      if (!state.items.some(n => n.ts === action.payload.ts)) state.items.push(action.payload)
+      if (!state.items.some(n => n.ts === action.payload.ts)) {
+        state.items.push(action.payload)
+        state.items = capped(state.items)
+      }
     },
     ackNotificationByTs(state, action: PayloadAction<string>) {
       if (action.payload === '*') {
@@ -65,7 +79,7 @@ const notificationsSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchNotifications.fulfilled, (state, action) => { state.items = action.payload })
+      .addCase(fetchNotifications.fulfilled, (state, action) => { state.items = capped(action.payload) })
       .addCase(clearNotifications.fulfilled, (state) => { state.items = [] })
       .addCase(deleteNotification.fulfilled, (state, action) => {
         state.items = state.items.filter(n => n.ts !== action.payload)
