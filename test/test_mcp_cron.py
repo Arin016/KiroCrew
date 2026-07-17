@@ -68,3 +68,151 @@ class TestCronAddChannelCapture:
         svc = CronService(base_dir=tmp_path)
         jobs = svc.list_jobs()
         assert any(j.name == job_name for j in jobs)
+
+
+class TestCronAddModel:
+    """Test per-job model override on cron_add and cron_update."""
+
+    def test_cron_add_with_valid_model(self, monkeypatch, tmp_path):
+        """A recognized model is stored on the job."""
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.delenv("KIROCREW_CHANNEL_ID", raising=False)
+
+        job_name = f"model-valid-{uuid.uuid4().hex[:8]}"
+        result = _call_tool_inner(
+            "cron_add",
+            {"name": job_name, "message": "go", "every": 120, "model": "sonnet"},
+        )
+        assert "Added job" in result
+
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        matching = [j for j in svc.list_jobs() if j.name == job_name]
+        assert len(matching) == 1
+        assert matching[0].model != ""
+
+    def test_cron_add_with_empty_model(self, monkeypatch, tmp_path):
+        """Empty model string means inherit (no override stored)."""
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.delenv("KIROCREW_CHANNEL_ID", raising=False)
+
+        job_name = f"model-empty-{uuid.uuid4().hex[:8]}"
+        result = _call_tool_inner(
+            "cron_add",
+            {"name": job_name, "message": "go", "every": 120, "model": ""},
+        )
+        assert "Added job" in result
+
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        matching = [j for j in svc.list_jobs() if j.name == job_name]
+        assert len(matching) == 1
+        assert matching[0].model == ""
+
+    def test_cron_add_with_arbitrary_model_accepted(self, monkeypatch, tmp_path):
+        """An arbitrary well-formed kiro id is accepted and persisted verbatim.
+
+        There is no membership gate against the claude_code registry: the
+        model list is sourced from the live kiro-cli --list-models, so any id
+        the CLI advertises (not just the claude_code family) is valid. Matches
+        the chat model path. (Malformed ids are rejected by the schema-level
+        _MODEL_NAME_RE format gate in validation.py, which is retained.)
+        """
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.delenv("KIROCREW_CHANNEL_ID", raising=False)
+
+        job_name = f"model-arb-{uuid.uuid4().hex[:8]}"
+        result = _call_tool_inner(
+            "cron_add",
+            {"name": job_name, "message": "go", "every": 120, "model": "glm-4.7"},
+        )
+        assert "Added job" in result
+
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        matching = [j for j in svc.list_jobs() if j.name == job_name]
+        assert len(matching) == 1
+        assert matching[0].model == "glm-4.7"
+
+    def test_cron_update_model(self, monkeypatch, tmp_path):
+        """cron_update with a valid model stores it on the job."""
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.delenv("KIROCREW_CHANNEL_ID", raising=False)
+
+        job_name = f"model-upd-{uuid.uuid4().hex[:8]}"
+        _call_tool_inner(
+            "cron_add",
+            {"name": job_name, "message": "go", "every": 120},
+        )
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        job = next(j for j in svc.list_jobs() if j.name == job_name)
+
+        result = _call_tool_inner(
+            "cron_update",
+            {"job_id": job.id, "model": "sonnet"},
+        )
+        assert "Updated" in result or "updated" in result.lower()
+
+        svc2 = CronService(base_dir=tmp_path)
+        updated = next(j for j in svc2.list_jobs() if j.id == job.id)
+        assert updated.model != ""
+
+    def test_cron_update_model_clear(self, monkeypatch, tmp_path):
+        """cron_update with model='' clears the override."""
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.delenv("KIROCREW_CHANNEL_ID", raising=False)
+
+        job_name = f"model-clr-{uuid.uuid4().hex[:8]}"
+        _call_tool_inner(
+            "cron_add",
+            {"name": job_name, "message": "go", "every": 120, "model": "sonnet"},
+        )
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        job = next(j for j in svc.list_jobs() if j.name == job_name)
+
+        result = _call_tool_inner(
+            "cron_update",
+            {"job_id": job.id, "model": ""},
+        )
+        assert "Updated" in result or "updated" in result.lower()
+
+        svc2 = CronService(base_dir=tmp_path)
+        updated = next(j for j in svc2.list_jobs() if j.id == job.id)
+        assert updated.model == ""
+
+    def test_cron_update_arbitrary_model_accepted(self, monkeypatch, tmp_path):
+        """cron_update accepts an arbitrary well-formed kiro id and stores it.
+
+        No membership gate against the claude_code registry — the model list
+        comes from the live kiro-cli --list-models, so any advertised id is
+        valid. Matches the chat model path.
+        """
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.delenv("KIROCREW_CHANNEL_ID", raising=False)
+
+        job_name = f"model-upd-arb-{uuid.uuid4().hex[:8]}"
+        _call_tool_inner(
+            "cron_add",
+            {"name": job_name, "message": "go", "every": 120},
+        )
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        job = next(j for j in svc.list_jobs() if j.name == job_name)
+
+        result = _call_tool_inner(
+            "cron_update",
+            {"job_id": job.id, "model": "glm-4.7"},
+        )
+        assert "Updated" in result or "updated" in result.lower()
+
+        svc2 = CronService(base_dir=tmp_path)
+        updated = next(j for j in svc2.list_jobs() if j.id == job.id)
+        assert updated.model == "glm-4.7"

@@ -116,6 +116,7 @@ class CronJob:
     persistent_session: bool = True  # False → fresh ephemeral session per run (Mesh-1026)
     minimal_context: bool = False  # True → skip memory/lessons/skills/history (Mesh-1632)
     hide_in_chat: bool = False  # True → don't create a dashboard chat slot; result still goes to history + Slack/bell
+    model: str = ""  # per-job model override (canonical key or provider id); "" = inherit
 
     # When agent_sequence is set, it takes precedence over agent_id.
     # The execution logic runs agents in order; see Phase 3.
@@ -628,7 +629,7 @@ class CronService:
         """Update fields on an existing job. Returns updated job or None if not found.
 
         Accepted kwargs: name, message, every_secs, cron_expr, agent_id, channel,
-        approval_mode, silent, skip_dates, timezone, thread_ts.
+        approval_mode, silent, skip_dates, timezone, thread_ts, model.
         """
         with self._file_lock():
             self._sync()
@@ -684,6 +685,8 @@ class CronService:
                     job.minimal_context = bool(kwargs["minimal_context"])
                 if "hide_in_chat" in kwargs:
                     job.hide_in_chat = bool(kwargs["hide_in_chat"])
+                if "model" in kwargs:
+                    job.model = str(kwargs["model"] or "").strip()
 
                 # Schedule changes (already validated above)
                 if "cron_expr" in kwargs and kwargs["cron_expr"]:
@@ -928,6 +931,13 @@ class CronService:
             logger.debug("Cron: applying %.0fs jitter to job '%s'", jitter, job.name)
             await asyncio.sleep(jitter)
         exec_started_at = time.time()
+        # Notify dashboard that the job has started executing so the live
+        # is_running badge appears without a manual reload (upstream a5326708).
+        try:
+            if self._push_refresh:
+                self._push_refresh("crons")
+        except Exception:
+            logger.debug("push_refresh failed on job start", exc_info=True)
         try:
             await self._execute_with_timeout(job)
         finally:
@@ -939,6 +949,12 @@ class CronService:
             self._reaped_jobs.discard(job.id)
             self._executing.discard(job.id)
             self._running_tasks.pop(job.id, None)
+            # Notify dashboard that the job has finished (clears the badge).
+            try:
+                if self._push_refresh:
+                    self._push_refresh("crons")
+            except Exception:
+                logger.debug("push_refresh failed on job end", exc_info=True)
             # For 'every' jobs, use started_at to prevent cumulative drift
             if not reaped and job.schedule.kind == "every":
                 job.last_run_ts = started_at
@@ -1173,6 +1189,7 @@ class CronService:
                     persistent_session=j.get("persistent_session", True),
                     minimal_context=j.get("minimal_context", False),
                     hide_in_chat=j.get("hide_in_chat", False),
+                    model=j.get("model", ""),
                     agent_sequence=j.get("agent_sequence", []),
                     env=j.get("env", {}),
                     timeout_secs=j.get("timeout_secs", _JOB_TIMEOUT_SECS),
@@ -1234,6 +1251,7 @@ class CronService:
                     "persistent_session": j.persistent_session,
                     "minimal_context": j.minimal_context,
                     "hide_in_chat": j.hide_in_chat,
+                    "model": j.model,
                     "agent_sequence": j.agent_sequence,
                     "env": j.env,
                     "timeout_secs": j.timeout_secs,

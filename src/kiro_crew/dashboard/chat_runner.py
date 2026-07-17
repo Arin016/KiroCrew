@@ -26,6 +26,7 @@ from kiro_crew.acp.types import (
     STOP_REASON_STALE_RECOVER,
     STOP_REASON_TOOL_STALL,
 )
+from kiro_crew.autonudge import get_instance
 from kiro_crew.config.loader import (
     KiroCrewConfig,
     config_dir,
@@ -139,6 +140,39 @@ from kiro_crew.stats import Stats
 from kiro_crew.validation import ValidationError, infer_use_case, validate_ask_user_question
 
 logger = logging.getLogger(__name__)
+
+
+def drain_pending_context(slot: "_ChatSlot") -> str:
+    """Drain ``slot._pending_context`` into a prepend-ready context prefix.
+
+    Returns the concatenated ``[Background context from "<source>"] … [End of
+    background context]`` blocks (empty string when there is nothing to inject)
+    and clears the queue. Expired entries (``maxAge`` elapsed) are discarded.
+
+    Extracted from ``_run_chat`` so the entry contract — the ``content`` /
+    ``source`` keys and the delimiter frame — is pinned by a unit test and
+    shared by every producer (app-kit context inject, Slack thread backfill),
+    rather than duplicated inline where a key rename could silently break a
+    consumer while its producer's own tests stay green.
+    """
+    if not slot._pending_context:
+        return ""
+    now = time.time()
+    ctx_parts: list[str] = []
+    for entry in slot._pending_context:
+        max_age = entry.get("maxAge")
+        if max_age is not None:
+            injected_at = entry.get("injectedAt", 0)
+            if injected_at + max_age < now:
+                continue  # expired — silently discard
+        source = entry.get("source", "app")
+        ctx_parts.append(
+            f'[Background context from "{source}"]\n'
+            f'{entry["content"]}\n'
+            f"[End of background context]\n"
+        )
+    slot._pending_context.clear()
+    return "\n".join(ctx_parts) + "\n" if ctx_parts else ""
 
 
 def _turn_outcome(stop_reason: str | None) -> str:
@@ -1273,6 +1307,106 @@ async def _consume_pending_reset(state: DashboardState, slot: _ChatSlot) -> None
         )
 
 
+async def _handle_goal_command(
+    state: "DashboardState", slot: "_ChatSlot", message: str
+) -> None:
+    """Handle the ``/goal`` slash command (v0 self-verdict loop).
+
+    Extracted from ``_run_chat`` so it is unit-testable in isolation. Pure glue
+    over the async ``AutoNudgeService`` (``add`` / ``get_by_slot`` / ``remove``);
+    no autonudge-internals change. Subcommands: ``status`` (default/empty),
+    ``clear``, else arm with an optional ``--max N`` budget (default 50, clamped
+    1..50). The judge gate at ``HOOK_EVENT_STOP`` is a follow-up CR.
+    """
+    _goal_svc = get_instance()
+    _parts = message.split(None, 1)
+    _rest = _parts[1].strip() if len(_parts) > 1 else ""
+    if _goal_svc is None:
+        body = (
+            "🎯 Goal loops are unavailable (AutoNudge is disabled). "
+            "Set `KIROCREW_AUTONUDGE=1` and restart the gateway."
+        )
+    elif _rest in ("", "status"):
+        _loop = _goal_svc.get_by_slot(slot.key)
+        if _loop is not None:
+            _cap = _loop.max_cycles or "∞"
+            body = (
+                f"🎯 Active goal (budget {_cap} turns). "
+                "Use `/goal clear` to stop it."
+            )
+        else:
+            body = (
+                "No active goal. Set one with `/goal <objective>` "
+                "(optionally `/goal --max N <objective>`)."
+            )
+    elif _rest == "clear":
+        _loop = _goal_svc.get_by_slot(slot.key)
+        if _loop is not None:
+            await _goal_svc.remove(_loop.id)
+            body = "🎯 Goal cleared."
+        else:
+            body = "No active goal to clear."
+    else:
+        _max_cycles = 50
+        _objective = _rest
+        _m = re.match(r"--max\s+(\d+)\s+(.*)", _rest, re.DOTALL)
+        if _m:
+            _max_cycles = max(1, min(50, int(_m.group(1))))
+            _objective = _m.group(2).strip()
+        elif _rest.startswith("--max"):
+            _objective = ""
+        if not _objective:
+            body = "Usage: `/goal <objective>` or `/goal --max N <objective>`."
+        else:
+            _slug = re.sub(r"[^A-Za-z0-9._-]", "_", slot.key)
+            _sentinel = str(Path.home() / ".kirocrew" / "goal-stop" / f"{_slug}.stop")
+            Path(_sentinel).unlink(missing_ok=True)
+            _nudge = (
+                f"Continue toward your goal: {_objective}\n\n"
+                "Every cycle, in order:\n"
+                f"1. STOP CHECK: if the file {_sentinel} exists, call the "
+                'autonudge_stop MCP tool (reason="sentinel") and stop.\n'
+                "2. DONE CHECK: decide whether the goal is fully met, verified "
+                "by concrete evidence (a passing test, a built file, command "
+                "output) — not a guess. If met, call autonudge_stop"
+                '(reason="goal met"), post a one-line summary citing the '
+                "evidence, and stop.\n"
+                "3. Otherwise do ONE atomic step toward the goal (<=5 tool "
+                "calls). Make the deliverable durable (write the file / run the "
+                "check) before declaring done.\n\n"
+                "Rules: never git push; never read credential files; if you hit "
+                "a hard blocker needing the user, state it once and call "
+                f'autonudge_stop(reason="blocked"). Budget is {_max_cycles} '
+                "turns (the service stops you at the cap). One short progress "
+                "line per cycle."
+            )
+            await _goal_svc.add(
+                slot.key,
+                message=_nudge,
+                idle_secs=15,
+                max_cycles=_max_cycles,
+                stop_sentinel_path=_sentinel,
+            )
+            body = (
+                f"⊙ Goal set ({_max_cycles}-turn budget): {_objective}\n\n"
+                "I'll work toward it across turns and stop when it's met "
+                "(verified by evidence) — or run `/goal clear` to stop."
+            )
+    body = _redact_for_display(body)
+    sel().log_tool_invocation(
+        session_key=slot.key,
+        agent=slot.agent or "kirocrew",
+        source="dashboard",
+        tool_name="/goal",
+        tool_kind="slash_command",
+        outcome="ok",
+        metadata={"slot": slot.key},
+    )
+    slot.append("assistant", body, "msg msg-a")
+    state.push_slots_update()
+    slot.append("done", "", "done")
+
+
 async def _run_chat(
     state: DashboardState,
     slot: _ChatSlot,
@@ -1450,6 +1584,14 @@ async def _run_chat(
         )
         state.push_slots_update()
         slot.append("done", "", "done")
+        return
+
+    # ── /goal: arm / clear a goal-driven self-verdict loop (v0) ──
+    # v0 rides AutoNudgeService unchanged: the nudge instructs the agent to
+    # self-check its Definition of Done each cycle and call autonudge_stop when
+    # met. (The GoalJudge gate at HOOK_EVENT_STOP is a follow-up CR.)
+    if first_word == "/goal":
+        await _handle_goal_command(state, slot, message)
         return
 
     # ── /prompts: handle locally instead of forwarding to kiro-cli ──
@@ -1827,24 +1969,9 @@ async def _run_chat(
             _user_msg_for_mirror = message
             # Drain pending context injections (silent background context
             # from apps/subagents).  Expired entries are discarded.
-            if slot._pending_context:
-                now = time.time()
-                ctx_parts: list[str] = []
-                for entry in slot._pending_context:
-                    max_age = entry.get("maxAge")
-                    if max_age is not None:
-                        injected_at = entry.get("injectedAt", 0)
-                        if injected_at + max_age < now:
-                            continue  # expired — silently discard
-                    source = entry.get("source", "app")
-                    ctx_parts.append(
-                        f'[Background context from "{source}"]\n'
-                        f'{entry["content"]}\n'
-                        f"[End of background context]\n"
-                    )
-                slot._pending_context.clear()
-                if ctx_parts:
-                    message = "\n".join(ctx_parts) + "\n" + message
+            _ctx_prefix = drain_pending_context(slot)
+            if _ctx_prefix:
+                message = _ctx_prefix + message
             # Use resolved kiro agent name (e.g. "kirocrew"), not the slot
             # name (e.g. "default"), so build_message's is_custom check
             # correctly identifies kirocrew sessions and enables skills.

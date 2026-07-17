@@ -149,6 +149,7 @@ from kiro_crew.taskrunner import TaskRunner
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.state import _ChatSlot
+    from kiro_crew.providers.base import LLMProvider
     from kiro_crew.task_models import Task
     from kiro_crew.telegram.client import TelegramClient
     from kiro_crew.wechat.client import WeComClient
@@ -514,6 +515,43 @@ class GatewayOrchestrator:
         self._wecom_client: "WeComClient | None" = None  # set by maybe_start_wecom
         self._ollama_manager: object | None = None  # OllamaManager (lazy import)
         self._mcp_gateway_manager: GatewayManager | None = None
+
+    def _count_in_flight_work(self) -> int:
+        """Count in-flight backend tasks that an abrupt restart would lose.
+
+        Used by the stale-asset watchdog to drain before shutting down: an
+        update prune only breaks static-asset serving, not live ACP turns, so
+        letting active turns finish avoids the "❌ lost to gateway restart /
+        no result captured" orphaning. Counts active provider turns (dashboard
+        chat + task-runner sessions) plus in-flight Slack session turns.
+
+        Defensive: any failure to introspect a surface is treated as idle, so
+        a broken accessor can never wedge shutdown.
+        """
+        count = 0
+        state = self.dashboard_state
+        if state is not None:
+            try:
+                for provider in state.sessions.active_providers():
+                    checker = getattr(provider, "has_active_turn", None)
+                    if not callable(checker):
+                        continue
+                    try:
+                        if checker():
+                            count += 1
+                    except Exception:
+                        # A provider that can't report turn state must not
+                        # block shutdown — treat it as idle.
+                        pass
+            except Exception:
+                logger.debug(
+                    "in-flight count: active_providers() failed", exc_info=True
+                )
+        # In-flight Slack session turns (one task per active thread turn).
+        for task in list(self._session_tasks.values()):
+            if not task.done():
+                count += 1
+        return count
 
     # ------------------------------------------------------------------
     # Tool approval callback (shared by cron, heartbeat, subagent, task)
@@ -1430,6 +1468,52 @@ class GatewayOrchestrator:
                 finally:
                     self._running_script_ids.discard(job.id)
 
+            async def _acquire_with_model_fallback(
+                key: str, agent_id: str | None
+            ) -> "tuple[LLMProvider, bool, bool, bool]":
+                """get_or_create honoring job.model; if that model is
+                unavailable, retry once with the registry default.
+                Returns (client, is_new, resumed, downgraded)."""
+                assert self.sessions is not None
+                try:
+                    client, is_new, resumed = await self.sessions.get_or_create(
+                        key,
+                        agent=agent_id,
+                        channel_id=job.channel,
+                        approval_policy=job.approval_mode,
+                        model=job.model or None,
+                        extra_env=job.env or None,
+                    )
+                    return client, is_new, resumed, False
+                except Exception as model_exc:
+                    if not job.model:
+                        raise
+                    # Only fall back when the failure plausibly implicates the
+                    # pinned model; unrelated session-creation errors (provider
+                    # spawn, missing factory, transient I/O) must propagate so
+                    # they are not misreported as a model downgrade.
+                    _err = str(model_exc).lower()
+                    if "model" not in _err and job.model.lower() not in _err:
+                        raise
+                    logger.warning(
+                        "Cron '%s': model %r unavailable (%s); retrying with default",
+                        job.name, job.model, model_exc,
+                    )
+                    client, is_new, resumed = await self.sessions.get_or_create(
+                        key,
+                        agent=agent_id,
+                        channel_id=job.channel,
+                        approval_policy=job.approval_mode,
+                        extra_env=job.env or None,
+                    )
+                    return client, is_new, resumed, True
+
+            def _annotate_model_downgrade(text: str) -> str:
+                # job.model is LLM-controllable via MCP; redact before it
+                # reaches Slack/dashboard through last_result.
+                safe_model = redact_credentials(redact_exfiltration_urls(job.model)[0])[0]
+                return f"⚠️ Model '{safe_model}' unavailable; ran with default.\n\n" + text
+
             # ── Sequential agent execution (Mimir integration) ──
             # When agent_sequence has multiple agents, run them sequentially
             # with per-agent session keys and per-job env vars.
@@ -1438,19 +1522,17 @@ class GatewayOrchestrator:
                 assert self.sessions is not None
                 assert self.ctx_builder is not None
                 result_text = "_No response._"
+                _seq_downgraded = False
                 for agent in agents:
                     agent_session_key = f"cron:{job.id}:{agent}"
                     if self.cron_svc is not None:
                         self.cron_svc.register_active_session_key(job.id, agent_session_key)
                     _acq = False
                     try:
-                        client, is_new, _resumed = await self.sessions.get_or_create(
-                            agent_session_key,
-                            agent=agent,
-                            channel_id=job.channel,
-                            approval_policy=job.approval_mode,
-                            extra_env=job.env or None,
+                        client, is_new, _resumed, _downgraded = (
+                            await _acquire_with_model_fallback(agent_session_key, agent)
                         )
+                        _seq_downgraded = _seq_downgraded or _downgraded
                         _acq = True
                         # Off-loop: build_message embeds the episodic query.
                         full_message, _ = await run_in_embed_pool(
@@ -1482,6 +1564,8 @@ class GatewayOrchestrator:
                             await self.sessions.reset(agent_session_key)
                             if self.cron_svc is not None:
                                 self.cron_svc.clear_active_session_key(job.id)
+                if _seq_downgraded:
+                    result_text = _annotate_model_downgrade(result_text)
                 job.last_result = result_text
                 return result_text
 
@@ -1491,15 +1575,12 @@ class GatewayOrchestrator:
                 self.cron_svc.register_active_session_key(job.id, session_key)
 
             _acquired = False
+            _model_downgraded = False
             try:
                 assert self.sessions is not None
                 assert self.ctx_builder is not None
-                client, is_new, _resumed = await self.sessions.get_or_create(
-                    session_key,
-                    agent=job.agent_id or None,
-                    channel_id=job.channel,
-                    approval_policy=job.approval_mode,
-                    extra_env=job.env or None,
+                client, is_new, _resumed, _model_downgraded = (
+                    await _acquire_with_model_fallback(session_key, job.agent_id or None)
                 )
                 _acquired = True
                 if job.acked_items:
@@ -1533,6 +1614,9 @@ class GatewayOrchestrator:
 
                 if not result_text:
                     result_text = "_No response._"
+
+                if _model_downgraded:
+                    result_text = _annotate_model_downgrade(result_text)
 
                 job.last_result = result_text
 
@@ -4024,8 +4108,14 @@ class GatewayOrchestrator:
 
         # Stale-asset watchdog: detects when an update prunes the running
         # install's static assets and triggers graceful shutdown so the
-        # supervisor can restart a fresh process. (Mesh-2690)
-        _watchdog = asyncio.create_task(run_stale_asset_watchdog(shutdown_event))
+        # supervisor can restart a fresh process. It first drains in-flight
+        # backend turns (count_in_flight) so active work isn't killed
+        # mid-prompt by the restart. (Mesh-2690)
+        _watchdog = asyncio.create_task(
+            run_stale_asset_watchdog(
+                shutdown_event, count_in_flight=self._count_in_flight_work
+            )
+        )
         self._background_tasks.add(_watchdog)
         _watchdog.add_done_callback(self._background_tasks.discard)
 

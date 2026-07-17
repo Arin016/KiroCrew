@@ -67,6 +67,91 @@ class TestCronCreateApprovalMode:
         assert resp.status == 200
 
 
+class TestCronCreateModel:
+    """Test model validation on cron create (dashboard handler)."""
+
+    def _make_request(self, body: dict) -> MagicMock:
+        mock_state = MagicMock()
+        mock_state.has_slot.return_value = False
+        mock_job = MagicMock()
+        mock_job.id = "abc"
+        mock_job.agent_id = ""
+        mock_job.approval_mode = ""
+        mock_job.silent = False
+        mock_job.model = ""
+        mock_state.crons.add_job.return_value = mock_job
+        request = MagicMock()
+        request.app = {"state": mock_state}
+        request.json = AsyncMock(return_value=body)
+        return request
+
+    @pytest.mark.asyncio
+    async def test_valid_model_accepted(self):
+        request = self._make_request(
+            {"name": "t", "message": "m", "every": 300, "model": "sonnet"}
+        )
+        resp = await api_crons_create(request)
+        assert resp.status == 200
+        job = request.app["state"].crons.add_job.return_value
+        assert job.model != ""
+
+    @pytest.mark.asyncio
+    async def test_empty_model_accepted(self):
+        request = self._make_request(
+            {"name": "t", "message": "m", "every": 300, "model": ""}
+        )
+        resp = await api_crons_create(request)
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_invalid_model_format_rejected(self):
+        request = self._make_request(
+            {"name": "t", "message": "m", "every": 300, "model": "../../etc/passwd"}
+        )
+        resp = await api_crons_create(request)
+        assert resp.status == 400
+        body = json.loads(resp.body)
+        assert "invalid model format" in body["error"]
+
+    @pytest.mark.asyncio
+    async def test_malformed_model_rejected(self):
+        # A value that violates _MODEL_NAME_RE (contains a space and "!") is
+        # still rejected by the FORMAT gate — that gate is retained.
+        request = self._make_request(
+            {"name": "t", "message": "m", "every": 300, "model": "bad model!"}
+        )
+        resp = await api_crons_create(request)
+        assert resp.status == 400
+        body = json.loads(resp.body)
+        assert "invalid model format" in body["error"]
+
+    @pytest.mark.asyncio
+    async def test_arbitrary_kiro_model_accepted(self):
+        # There is no membership gate against the claude_code registry: the
+        # model dropdown is sourced from the live kiro-cli --list-models, so an
+        # arbitrary well-formed kiro id (not in the claude_code family) is
+        # accepted and persisted verbatim. Matches the chat model path.
+        request = self._make_request(
+            {"name": "t", "message": "m", "every": 300, "model": "glm-4.7"}
+        )
+        resp = await api_crons_create(request)
+        assert resp.status == 200
+        job = request.app["state"].crons.add_job.return_value
+        assert job.model == "glm-4.7"
+
+    @pytest.mark.asyncio
+    async def test_non_string_model_rejected(self):
+        # A numeric/bool JSON `model` must be rejected as a clean 400, not raise
+        # AttributeError on .strip() and leak an HTTP 500.
+        request = self._make_request(
+            {"name": "t", "message": "m", "every": 300, "model": 123}
+        )
+        resp = await api_crons_create(request)
+        assert resp.status == 400
+        body = json.loads(resp.body)
+        assert "invalid model format" in body["error"]
+
+
 class TestCronListFields:
     @pytest.mark.asyncio
     async def test_response_includes_approval_mode_and_silent(self):
@@ -91,6 +176,7 @@ class TestCronListFields:
         mock_job.script = ""
         mock_job.command = ""
         mock_job.last_error = ""
+        mock_job.model = ""
 
         mock_state = MagicMock()
         mock_state.has_slot.return_value = False

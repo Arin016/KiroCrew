@@ -46,6 +46,17 @@ ALLOWED_HOOK_EVENTS = frozenset(
 # Valid agent name pattern (alphanumeric, hyphens, underscores)
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
 
+# Artifact slug grammar — mirrors kiro_crew.artifacts._SLUG_RE (kept here so
+# consumers outside the store module share one public definition). Used to
+# validate the companion-chat `artifact` slot binding (Mesh-2772) at EVERY
+# boundary it crosses: slot create (chat_handlers) and history-metadata
+# restore (chat_persistence) — a tampered history JSONL must not be able to
+# inject an arbitrary string that flows into to_dict()/WS broadcasts.
+# \Z (not $): Python's $ also matches just before a trailing newline, so
+# "valid-slug\n" would pass a $-anchored .match() — \Z anchors at the true
+# end of the string.
+ARTIFACT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?\Z")
+
 # Valid model name pattern — alphanumerics, hyphens, dots (e.g. "claude-opus-4.8", "deepseek-3.2")
 _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
@@ -682,6 +693,7 @@ CRON_ADD_SCHEMA = ToolSchema(
         FieldSpec("delay", (int, float), min_val=1, max_val=86400 * 30),  # 1s to 30 days
         FieldSpec("at_time", str, max_len=100),
         FieldSpec("agent", str, max_len=MAX_SHORT_STRING, pattern=_AGENT_NAME_RE),
+        FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
         FieldSpec("silent", bool),
         FieldSpec("channel", str, max_len=CHANNEL_MAX_LEN, pattern=CHANNEL_ID_RE),
         FieldSpec("thread_ts", str, max_len=30, pattern=re.compile(r"^\d+\.\d+$")),
@@ -935,6 +947,7 @@ MCP_CRON_SCHEMAS: dict[str, ToolSchema] = {
             FieldSpec("cron_expr", str, max_len=100),
             FieldSpec("every", int, min_val=60, max_val=86400 * 30),
             FieldSpec("agent", str, max_len=MAX_SHORT_STRING, pattern=_AGENT_NAME_RE),
+            FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
             FieldSpec("channel", str, max_len=CHANNEL_MAX_LEN, pattern=CHANNEL_ID_RE),
             FieldSpec("thread_ts", str, max_len=30, pattern=re.compile(r"^\d+\.\d+$")),
             FieldSpec("approval_mode", str, max_len=10, pattern=re.compile(r"^(auto)?$")),

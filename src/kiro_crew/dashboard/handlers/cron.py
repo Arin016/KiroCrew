@@ -14,6 +14,7 @@ from zoneinfo import available_timezones
 
 from aiohttp import web
 
+from kiro_crew import model_registry
 from kiro_crew.aim_agents import auto_register_project as _auto_register_project
 from kiro_crew.aim_agents import find_agent_file as _find_agent_file
 from kiro_crew.dashboard.cron_inject import (
@@ -25,6 +26,7 @@ from kiro_crew.executors import cron_executor
 from kiro_crew.llm_helpers import stream_and_collect
 from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_crew.validation import (
+    _MODEL_NAME_RE,
     CHANNEL_ID_RE,
     CHANNEL_MAX_LEN,
     LEARN_ADD_SCHEMA,
@@ -187,6 +189,28 @@ async def api_crons_create(request: web.Request) -> web.Response:
     if timezone_val and timezone_val not in available_timezones():
         safe_tz, _ = redact_credentials(redact_exfiltration_urls(timezone_val)[0])
         return web.json_response({"error": f"invalid timezone: {safe_tz!r}"}, status=400)
+    # Validate model BEFORE add_job so an invalid value never leaves an
+    # orphaned job behind (a retried create would then duplicate it).
+    model_raw = body.get("model")
+    if model_raw is not None and not isinstance(model_raw, str):
+        # A numeric/bool JSON `model` would raise AttributeError on .strip()
+        # (HTTP 500); reject it as a clean 400 instead.
+        return web.json_response({"error": "invalid model format"}, status=400)
+    model_val = (model_raw or "").strip()
+    if model_val:
+        if len(model_val) > MAX_SHORT_STRING or not _MODEL_NAME_RE.match(model_val):
+            return web.json_response({"error": "invalid model format"}, status=400)
+        # No membership gate: the model dropdown is sourced from the live
+        # kiro-cli `--list-models` (via /api/models), not the claude_code
+        # registry family, so any well-formed id the CLI advertises is valid.
+        # Matches the chat model path (which also skips membership); the
+        # runtime is model-agnostic with a gateway fallback. Only normalize
+        # the "auto" inherit sentinel below.
+        resolved_model = model_registry.to_provider_id(model_val, "claude_code")
+        if resolved_model == "":
+            # "auto" sentinel (canonical key with no pinned provider id):
+            # explicit inherit — same as leaving model unset.
+            model_val = ""
     if every:
         try:
             every = int(every)
@@ -254,11 +278,13 @@ async def api_crons_create(request: web.Request) -> web.Response:
             source="api_cron_create",
             resources=resolved,
         )
-    if agent_id or project_path or approval_mode or silent or timezone_val or strict_schedule or hide_in_chat:
+    if agent_id or project_path or model_val or approval_mode or silent or timezone_val or strict_schedule or hide_in_chat:
         if agent_id:
             job.agent_id = agent_id
         if project_path:
             job.project_path = resolved
+        if model_val:
+            job.model = model_val
         if approval_mode:
             job.approval_mode = approval_mode
         if silent:
@@ -458,6 +484,25 @@ async def api_cron_update(request: web.Request) -> web.Response:
                 resources=resolved_pp,
             )
         kwargs["project_path"] = resolved_pp
+    if "model" in body:
+        model_raw = body["model"]
+        if model_raw is not None and not isinstance(model_raw, str):
+            # Non-string JSON `model` would raise on .strip() (HTTP 500) — 400.
+            return web.json_response({"error": "invalid model format"}, status=400)
+        m = (model_raw or "").strip()
+        if m:
+            if len(m) > MAX_SHORT_STRING or not _MODEL_NAME_RE.match(m):
+                return web.json_response({"error": "invalid model format"}, status=400)
+            # No membership gate: the model dropdown is sourced from the live
+            # kiro-cli `--list-models` (via /api/models), not the claude_code
+            # registry family, so any well-formed id the CLI advertises is
+            # valid. Matches the chat model path (which also skips membership);
+            # the runtime is model-agnostic with a gateway fallback. Only
+            # normalize the "auto" inherit sentinel below.
+            resolved_model = model_registry.to_provider_id(m, "claude_code")
+            if resolved_model == "":
+                m = ""
+        kwargs["model"] = m
     # Validate channel if being updated
     if "channel" in kwargs:
         ch = (kwargs["channel"] or "").strip() or None
@@ -860,6 +905,7 @@ async def api_crons(request: web.Request) -> web.Response:
             "created_ts": j.created_ts or None,
             "last_status": j.last_status,
             "agent": redact_credentials(redact_exfiltration_urls(j.agent_id or "")[0])[0] or None,
+            "model": redact_credentials(redact_exfiltration_urls(j.model or "")[0])[0] or None,
             "channel": redact_credentials(redact_exfiltration_urls(j.channel or "")[0])[0] or None,
             "approval_mode": redact_credentials(redact_exfiltration_urls(j.approval_mode or "")[0])[
                 0

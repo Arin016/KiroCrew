@@ -50,6 +50,7 @@ from kiro_crew.dashboard.chat_utils import (
     _sync_dashboard_slots,
 )
 from kiro_crew.dashboard.state import (
+    _MAX_PENDING_CONTEXT,
     DashboardState,
     _ChatSlot,
     _mark_permission_resolved,
@@ -63,7 +64,7 @@ from kiro_crew.security import (
     redact_exfiltration_urls,
 )
 from kiro_crew.sel import SecurityEvent, sel
-from kiro_crew.validation import _AGENT_NAME_RE
+from kiro_crew.validation import _AGENT_NAME_RE, ARTIFACT_SLUG_RE
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +589,14 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         title, _ = redact_credentials(title)
         slot.title = title
         slot._titled = True
+    # Bind to an artifact if provided (companion chat, Mesh-2772). Validate
+    # against the artifact slug grammar so an injection-shaped value can never
+    # land on the slot; anything invalid is silently dropped. Uniqueness (≤1
+    # active bound session per slug) is a frontend-flow convention, not
+    # enforced here.
+    artifact_slug = body.get("artifact") if isinstance(body, dict) else None
+    if isinstance(artifact_slug, str) and ARTIFACT_SLUG_RE.match(artifact_slug):
+        slot._artifact = artifact_slug
     # Default project to workspace directory so file search works out of the box
     if not slot.project:
         cfg_proj = cfg.dashboard.default_project if cfg else ""
@@ -2245,9 +2254,8 @@ async def api_chat_slot_context(request: web.Request) -> web.Response:
                 {"error": f"source {source!r} has {_MAX_CONTEXT_PER_SOURCE} pending entries"}, status=429
             )
 
-    # FIFO eviction: cap pending queue at 50 entries
-    max_pending_context = 50
-    while len(slot._pending_context) >= max_pending_context:
+    # FIFO eviction: cap pending queue at the shared ceiling
+    while len(slot._pending_context) >= _MAX_PENDING_CONTEXT:
         slot._pending_context.pop(0)
 
     slot._pending_context.append(entry)  # type: ignore[arg-type]
