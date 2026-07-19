@@ -391,6 +391,25 @@ class TestApiServerAuth:
             await runner.cleanup()
 
     @pytest.mark.asyncio
+    async def test_artifact_folders_allowed_with_secret(self, tmp_path, monkeypatch):
+        # The MCP artifact-folder tools authenticate via X-Internal-Secret; the
+        # request must reach the handler (not be 403'd by auth) with the secret.
+        import aiohttp
+
+        runner, _state, base = await self._start(tmp_path, monkeypatch)
+        try:
+            secret = (tmp_path / ".local_secret").read_text().strip()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base}/api/artifact-folders",
+                    headers={"X-Internal-Secret": secret},
+                ) as resp:
+                    # Auth passed → handler reached (200). NOT 403 (auth reject).
+                    assert resp.status != 403
+        finally:
+            await runner.cleanup()
+
+    @pytest.mark.asyncio
     async def test_slack_profile_denied_without_secret(self, tmp_path, monkeypatch):
         # /api/slack-profile is MCP-only (no browser caller) — a strict internal
         # path. Unauthenticated callers are denied at the auth layer.

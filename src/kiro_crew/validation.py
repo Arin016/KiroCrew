@@ -464,6 +464,19 @@ AUTONUDGE_STOP_SCHEMA = ToolSchema(
     ],
 )
 
+# delete_message reads args["channel"] and args["ts"] by subscript. Without a
+# schema, a call omitting either key raised KeyError, which is NOT caught by
+# call_tool_with_logging (only ValidationError is) and propagated out of the
+# stdio loop, killing the whole kirocrew-core MCP server for the session.
+# Requiring both fields turns a missing key into a clean ValidationError string.
+DELETE_MESSAGE_SCHEMA = ToolSchema(
+    tool_name="delete_message",
+    fields=[
+        FieldSpec("channel", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("ts", str, required=True, max_len=MAX_SHORT_STRING),
+    ],
+)
+
 SKILL_SEARCH_SCHEMA = ToolSchema(
     tool_name="skill_search",
     fields=[
@@ -539,7 +552,12 @@ WORKFLOW_RERUN_SCHEMA = ToolSchema(
 # Artifact tools — slug pattern matches kiro_crew.artifacts._SLUG_RE.
 _ARTIFACT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 _ARTIFACT_TAG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_:.-]{0,63}$")
-_ARTIFACT_KIND_RE = re.compile(r"^(widget|html|markdown|svg|json|text)$")
+_ARTIFACT_KIND_RE = re.compile(r"^(widget|html|markdown|svg|json|text|image)$")
+
+# Model identifiers passed to kiro-cli ``--model`` (AcpRuntime). First char
+# must be alphanumeric so a value can never be parsed as a CLI flag, and the
+# charset covers real model ids (gpt-5.6-sol, claude-sonnet-4.6) only.
+MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 _ARTIFACT_SOURCE_RE = re.compile(r"^(chat|cron|subagent|manual|import)$")
 # Single source of truth: the MCP save/update field cap MUST equal the store's
 # own content cap, else the tool path rejects content the store would accept
@@ -918,6 +936,7 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "register_hook": REGISTER_HOOK_SCHEMA,
     "file_send": FILE_SEND_SCHEMA,
     "autonudge_stop": AUTONUDGE_STOP_SCHEMA,
+    "delete_message": DELETE_MESSAGE_SCHEMA,
     "local_knowledge_search": LOCAL_KNOWLEDGE_SEARCH_SCHEMA,
     "knowledge_dedup": KNOWLEDGE_DEDUP_SCHEMA,
     "search_chat_history": SEARCH_CHAT_HISTORY_SCHEMA,

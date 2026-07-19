@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1879,7 +1880,16 @@ class TestPoolHealthLoop:
 
 
 class TestCleanupLoop:
-    """Tests for _cleanup_loop periodic maintenance."""
+    """Tests for _cleanup_loop periodic maintenance.
+
+    Every sweep the loop dispatches is stubbed: these tests pin the LOOP's
+    wiring (which sweeps run, with what args, and when), not sweep behavior —
+    each sweep has its own tests in its own module. Leaving a sweep unstubbed
+    (notably ``find_orphan_mcp_candidates``, a full process-table scan, and
+    ``cleanup_orphaned_session_roots``, which reads the operator's real
+    ``~/.kirocrew`` PID file) made each test take ~10-20s of wall-clock and
+    probe live system state — both banned by testing-conventions.md.
+    """
 
     @pytest.mark.asyncio
     async def test_cleanup_loop_calls_expire_idle(self, cfg):
@@ -1888,9 +1898,12 @@ class TestCleanupLoop:
 
         with patch.object(mgr, "_expire_idle", new_callable=AsyncMock) as mock_expire, \
              patch("kiro_crew.session._cleanup_orphaned_mcp_servers", return_value=0), \
+             patch("kiro_crew.session.cleanup_stale_sandbox_profiles", return_value=0), \
              patch("kiro_crew.session._collect_active_pids", return_value=({}, True)), \
              patch("kiro_crew.session._periodic_pid_sweep", return_value=([], [])), \
              patch("kiro_crew.session._kill_confirmed_and_writeback", return_value=0), \
+             patch("kiro_crew.session.cleanup_orphaned_session_roots", return_value=0), \
+             patch("kiro_crew.session.find_orphan_mcp_candidates", return_value=[]), \
              patch("kiro_crew.session.shutdown_event") as mock_event:
             # First wait_for returns TimeoutError (normal wakeup), second signals shutdown
             mock_event.is_set = lambda: mock_expire.await_count >= 1
@@ -1907,9 +1920,12 @@ class TestCleanupLoop:
 
         with patch.object(mgr, "_expire_idle", new_callable=AsyncMock) as mock_expire, \
              patch("kiro_crew.session._cleanup_orphaned_mcp_servers", return_value=0), \
+             patch("kiro_crew.session.cleanup_stale_sandbox_profiles", return_value=0), \
              patch("kiro_crew.session._collect_active_pids", return_value=({}, True)), \
              patch("kiro_crew.session._periodic_pid_sweep", return_value=([], [])), \
              patch("kiro_crew.session._kill_confirmed_and_writeback", return_value=0), \
+             patch("kiro_crew.session.cleanup_orphaned_session_roots", return_value=0), \
+             patch("kiro_crew.session.find_orphan_mcp_candidates", return_value=[]), \
              patch("kiro_crew.session.shutdown_event") as mock_event:
             call_count = [0]
 
@@ -1932,9 +1948,12 @@ class TestCleanupLoop:
 
         with patch.object(mgr, "_expire_idle", new_callable=AsyncMock) as mock_expire, \
              patch("kiro_crew.session._cleanup_orphaned_mcp_servers", return_value=0), \
+             patch("kiro_crew.session.cleanup_stale_sandbox_profiles", return_value=0), \
              patch("kiro_crew.session._collect_active_pids", return_value=({}, True)), \
              patch("kiro_crew.session._periodic_pid_sweep", return_value=([], [])), \
              patch("kiro_crew.session._kill_confirmed_and_writeback", return_value=0), \
+             patch("kiro_crew.session.cleanup_orphaned_session_roots", return_value=0), \
+             patch("kiro_crew.session.find_orphan_mcp_candidates", return_value=[]), \
              patch("kiro_crew.session.shutdown_event") as mock_event:
             mock_event.is_set = lambda: mock_expire.await_count >= 1
             mock_event.wait = AsyncMock(side_effect=asyncio.TimeoutError)
@@ -1955,6 +1974,49 @@ class TestCleanupLoop:
             mock_event.wait = AsyncMock(return_value=None)
             # Should return immediately since shutdown is set
             await mgr._cleanup_loop()
+        await mgr.close_all()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_loop_runs_sandbox_sweep_via_executor(self, cfg, caplog):
+        """Sandbox sweep is invoked through run_in_executor on maintenance_executor.
+
+        Asserts the offload specifically (the AutoSDE blocking fix): the sweep
+        must execute on a maintenance-executor worker thread, NOT the event
+        loop thread, so its blocking os.listdir/os.kill/os.remove I/O cannot
+        freeze the loop.
+        """
+        cfg.session.timeout_secs = 120
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+
+        sweep_threads: list[str] = []
+
+        def _fake_sweep() -> int:
+            sweep_threads.append(threading.current_thread().name)
+            return 3
+
+        with patch.object(mgr, "_expire_idle", new_callable=AsyncMock), \
+             patch("kiro_crew.session._cleanup_orphaned_mcp_servers", return_value=0), \
+             patch("kiro_crew.session.cleanup_stale_sandbox_profiles", side_effect=_fake_sweep) as mock_sweep, \
+             patch("kiro_crew.session._collect_active_pids", return_value=({}, True)), \
+             patch("kiro_crew.session._periodic_pid_sweep", return_value=([], [])), \
+             patch("kiro_crew.session._kill_confirmed_and_writeback", return_value=0), \
+             patch("kiro_crew.session.cleanup_orphaned_session_roots", return_value=0), \
+             patch("kiro_crew.session.find_orphan_mcp_candidates", return_value=[]), \
+             patch("kiro_crew.session.shutdown_event") as mock_event:
+            mock_event.is_set = lambda: mock_sweep.call_count >= 1
+            mock_event.wait = AsyncMock(side_effect=asyncio.TimeoutError)
+            with caplog.at_level(logging.INFO, logger="kiro_crew.session"):
+                await mgr._cleanup_loop()
+
+        # Verify: sweep was called (production wiring)
+        mock_sweep.assert_called_once()
+        # Verify the offload: ran on a maintenance-executor worker thread,
+        # not the event loop thread (run_in_executor path).
+        assert sweep_threads, "sweep never executed"
+        assert sweep_threads[0] != threading.main_thread().name
+        assert sweep_threads[0].startswith("mc-maint")
+        # Verify: non-zero return produces the info log
+        assert "removed 3 stale sandbox launchers" in caplog.text
         await mgr.close_all()
 
 
@@ -3000,4 +3062,93 @@ class TestGetBgSessionRecycle:
         # offloaded _is_stale() probe.
         stale._is_stale.assert_not_awaited()
         assert result is sentinel
+        await mgr.close_all()
+
+
+def _run_runtime_factory(created_runtimes: list):
+    """Factory whose providers each carry a fully-configured shared AcpRuntime.
+
+    In production each factory call spawns its own kiro-cli process; the task
+    runner must call the factory ONCE per run and reuse that runtime for every
+    step. ``created_runtimes`` records each runtime so tests can assert the
+    factory ran exactly once.
+    """
+
+    def factory(session_key=None, agent=None, channel_id=None, **kwargs):
+        runtime = MagicMock()
+        runtime.is_alive = MagicMock(return_value=True)
+        runtime.pid = 4321
+        runtime.create_session = AsyncMock(
+            side_effect=lambda **kw: MagicMock(session_id="step-session")
+        )
+        runtime.terminate_session = AsyncMock()
+        runtime.kill = AsyncMock()
+        created_runtimes.append(runtime)
+
+        boot_handle = MagicMock()
+        boot_handle.session_id = "bootstrap-sess"
+        session_provider = MagicMock()
+        session_provider._runtime = runtime
+        session_provider._handle = boot_handle
+        session_provider._owns_runtime = True
+
+        provider = AsyncMock()
+        provider.start = AsyncMock()
+        provider.shutdown = AsyncMock()
+        provider._client = session_provider
+        return provider
+
+    return factory
+
+
+class TestOpenTaskSession:
+    """The task runner shares ONE run-scoped AcpRuntime across all its steps."""
+
+    @pytest.mark.asyncio
+    async def test_run_shares_one_runtime_across_sessions(self, cfg):
+        created: list = []
+        mgr = SessionManager(cfg, provider_factory=_run_runtime_factory(created))
+        parent = "taskrunner:run1:runtime"
+
+        p1, new1, res1 = await mgr.open_task_session(
+            parent, "taskrunner:run1:decompose", agent="kirocrew"
+        )
+        p2, new2, res2 = await mgr.open_task_session(
+            parent, "taskrunner:run1:task0", agent="kirocrew"
+        )
+
+        # Exactly ONE factory-built runtime, adopted + reused for both steps.
+        assert len(created) == 1
+        runtime = created[0]
+        assert mgr._subagent_runtimes[parent] is runtime
+        # Each step opened its own isolated session on the shared runtime.
+        assert runtime.create_session.await_count == 2
+        # The factory provider's bootstrap session was freed (runtime kept alive).
+        runtime.terminate_session.assert_awaited_once_with("bootstrap-sess")
+        # Fresh, never-resumed sessions.
+        assert new1 is True and new2 is True
+        assert res1 is False and res2 is False
+
+        # Release frees the shared runtime exactly once.
+        mgr.release("taskrunner:run1:decompose")
+        mgr.release("taskrunner:run1:task0")
+        await mgr.release_subagent_runtime(parent)
+        runtime.kill.assert_awaited_once()
+        assert parent not in mgr._subagent_runtimes
+        await mgr.close_all()
+
+    @pytest.mark.asyncio
+    async def test_open_task_session_registers_under_key(self, cfg):
+        created: list = []
+        mgr = SessionManager(cfg, provider_factory=_run_runtime_factory(created))
+        parent = "taskrunner:run2:runtime"
+        key = "taskrunner:run2:task0"
+
+        provider, is_new, _resumed = await mgr.open_task_session(parent, key, agent="kirocrew")
+
+        # Registered under the per-step key so reset/context helpers work by key.
+        assert key in mgr._sessions
+        assert mgr._sessions[key].provider is provider
+        mgr.release(key)
+        await mgr.release_subagent_runtime(parent)
         await mgr.close_all()

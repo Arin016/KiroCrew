@@ -83,6 +83,7 @@ ALLOWED_KINDS = frozenset(
         "svg",  # standalone svg
         "json",  # structured data
         "text",  # plain text
+        "image",  # generated image (source_path points to PNG/JPEG)
     }
 )
 

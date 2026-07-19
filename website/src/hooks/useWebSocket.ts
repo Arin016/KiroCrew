@@ -4,7 +4,8 @@ import { useAppDispatch } from '../store'
 import { store } from '../store'
 import { sseStatus, sseConnected, sseDisconnected, sseSlots, setChannelTrusted, sseSlotTitle, triggerRefresh, fetchSlots, markSlotUnread, setUpdateProgress, sseSubagentStatus, sseSubagentText, touchSlotActivity, type SubagentDetail } from '../store/dashboardSlice'
 import { addNotification, ackNotificationByTs, unackNotificationByTs, removeNotificationByTs, fetchNotifications } from '../store/notificationsSlice'
-import { fetchHistory, missedChunkMarker, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, warmSlotCache, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, sseSubagentPending, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone, sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, sseWorkflowEvent, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, appendMessage, setQuestionCard } from '../store/chatSlice'
+import { MC_NOTIFICATION_EVENT, type McNotificationDetail } from './notificationEvent'
+import { fetchHistory, missedChunkMarker, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, warmSlotCache, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, sseSubagentPending, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone, sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, sseWorkflowEvent, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, appendSlotMessage, setQuestionCard } from '../store/chatSlice'
 import { api } from '../api/client'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import type { StatusData, ChatSlot, Notification } from '../types'
@@ -258,9 +259,21 @@ export function useWebSocket() {
           case 'slot_title':
             dispatch(sseSlotTitle(data as { key: string; title: string }))
             break
-          case 'notification':
-            dispatch(addNotification(data as Notification))
+          case 'notification': {
+            const n = data as Notification
+            dispatch(addNotification(n))
+            // Also fire MC_NOTIFICATION_EVENT so useNotificationSound plays the
+            // configured sound. The WS transport previously only dispatched the
+            // Redux action (toast/badge), so notification sounds never played —
+            // only the now-unmounted useSSE fired this event. Mirror useSSE.
+            try {
+              const detail: McNotificationDetail = { kind: n.kind }
+              window.dispatchEvent(new CustomEvent(MC_NOTIFICATION_EVENT, { detail }))
+            } catch (err) {
+              console.warn('mc-notification listener error', err)
+            }
             break
+          }
           case 'notification_ack':
             dispatch(ackNotificationByTs(data.ts))
             break
@@ -290,11 +303,16 @@ export function useWebSocket() {
                 ts: String(data.ts || Date.now() / 1000),
                 meta: { tool_input: data.tool_input || '', approval_id: data.id, source: data.source, ...(data.tool_call_id ? { tool_call_id: data.tool_call_id } : {}) },
               }))
-              // For spawn approvals, create a pending subagent entry instead of a toolLog approval
+              // For spawn approvals, create a pending subagent entry instead of a toolLog approval.
+              // Require an explicit slot from the event: falling back to activeSlot would
+              // misattribute cards from other sessions/crons to whatever chat the user is
+              // viewing (ghost "Starting…" cards with empty input that never resolve).
               const rid = data.id as string
               if (rid?.startsWith('spawn:')) {
-                const agentId = rid.replace('spawn:', '')
-                dispatch(sseSubagentPending({ slot: targetSlot, id: agentId, task: (data.tool as string || '').replace('spawn_run(', '').replace(/\)$/, ''), approval_id: rid }))
+                if (data.slot) {
+                  const agentId = rid.replace('spawn:', '')
+                  dispatch(sseSubagentPending({ slot: data.slot, id: agentId, task: (data.tool as string || '').replace('spawn_run(', '').replace(/\)$/, ''), approval_id: rid }))
+                }
               } else if (data.source !== 'subagent') {
                 dispatch(sseActivityEvent({ slot: targetSlot, kind: 'approval', text: data.tool || 'Unknown', approval_id: data.id, approval_type: 'chat' }))
               }
@@ -381,11 +399,13 @@ export function useWebSocket() {
             break
           case 'steer_push':
             // Mid-turn steer echo: show the user's steered text inline in the
-            // active slot's transcript. v1 renders on-send; consumed-based
-            // materialization + reload persistence is a follow-up.
-            if ((data as { slot?: string }).slot === store.getState().chat.activeSlot) {
-              dispatch(appendMessage({ role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true } }))
-            }
+            // target slot's transcript. Uses appendSlotMessage so the bubble
+            // appears whether or not the slot is currently active (background
+            // tabs). Persisted server-side — survives page reload.
+            dispatch(appendSlotMessage({
+              slot: (data as { slot?: string }).slot || store.getState().chat.activeSlot || '',
+              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true }, ts: (data as { ts?: string }).ts },
+            }))
             break
           case 'queue_cancel':
             dispatch(cancelQueuedMessage(data))

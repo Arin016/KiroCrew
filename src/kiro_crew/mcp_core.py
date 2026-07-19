@@ -440,7 +440,8 @@ def _list_tools() -> list[dict[str, Any]]:
             "name": "task_run",
             "description": (
                 "Start the autonomous task runner from a spec file or inline content. "
-                "Use when the user provides a task spec or says 'run this task'. "
+                "Use when the user provides a task spec or says 'run this task', "
+                "'start a task', or 'run a task'. "
                 "For inline specs, prefix content with __inline__:"
             ),
             "inputSchema": {
@@ -2777,8 +2778,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         return "Notification delivered."
 
     if name == "delete_message":
-        channel = args["channel"]
-        msg_ts = args["ts"]
+        # Use .get() (not subscript) as defense-in-depth: _validate_args enforces
+        # both as required via DELETE_MESSAGE_SCHEMA, but a direct/unvalidated call
+        # must still degrade to a clean error string rather than a KeyError that
+        # would propagate out of the stdio loop and kill the whole MCP server.
+        channel = args.get("channel", "")
+        msg_ts = args.get("ts", "")
         if not CHANNEL_ID_RE.match(channel):
             sel().log_tool_invocation(
                 session_key=_resolve_session_key(),

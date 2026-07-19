@@ -22,7 +22,6 @@ from kiro_crew.dashboard.cron_inject import (
     inject_cron_result_to_dashboard,
 )
 from kiro_crew.dashboard.state import DashboardState
-from kiro_crew.executors import cron_executor
 from kiro_crew.llm_helpers import stream_and_collect
 from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_crew.validation import (
@@ -346,27 +345,26 @@ async def api_cron_batch_delete(request: web.Request) -> web.Response:
         )
     deleted: list[str] = []
     failed: list[str] = []
-    loop = asyncio.get_running_loop()
-    for job_id in unique_ids:
-        try:
-            # remove_job is a synchronous file save under a lock; offload it so a
-            # large batch (up to _MAX_BATCH_DELETE) can't block the event loop.
-            removed = await loop.run_in_executor(
-                cron_executor(), state.crons.remove_job, job_id
-            )
-        except Exception:
-            # remove_job itself raised (unexpected) — record and keep going.
-            logger.warning("Batch delete failed for cron %s", job_id, exc_info=True)
-            failed.append(job_id)
-            continue
-        if not removed:
-            failed.append(job_id)
-            continue
+    try:
+        # remove_jobs runs the WHOLE batch under one file lock with one
+        # reload/serialize/save — and offloads that disk work to a worker
+        # thread (no-blocking-call-on-event-loop; slow/network storage would
+        # otherwise stall chat + heartbeat). Only its _arm_timer() step runs
+        # back on the loop (asyncio.create_task needs it) — splitting these
+        # is what the earlier naive executor-offload of remove_job got wrong
+        # (it moved _arm_timer off-loop too, which raised AFTER the on-disk
+        # delete and left the scheduler timer cancelled).
+        deleted, failed = await state.crons.remove_jobs(unique_ids)
+    except Exception:
+        # The batch itself raised (unexpected) — report everything as failed.
+        logger.warning("Batch delete failed", exc_info=True)
+        failed = unique_ids
+        deleted = []
+    for job_id in deleted:
         # The job is gone now, so it is unconditionally a successful delete.
         # History cleanup is best-effort: a failure there must NOT reclassify a
         # completed delete as "failed" — that would make the UI offer a retry
         # that can never succeed (the job no longer exists).
-        deleted.append(job_id)
         try:
             await state.crons.get_history().delete_job_history(job_id)
         except Exception:
@@ -548,6 +546,22 @@ async def api_cron_run(request: web.Request) -> web.Response:
             state.crons._running_tasks.pop(_jid, None)
 
     task.add_done_callback(_on_done)
+    state.push_refresh("crons")
+    safe_name = redact_credentials(redact_exfiltration_urls(job.name)[0])[0]
+    return web.json_response({"ok": True, "name": safe_name})
+
+
+async def api_cron_cancel(request: web.Request) -> web.Response:
+    """POST /api/crons/{id}/cancel — cancel a running execution."""
+    state: DashboardState = request.app["state"]
+    job_id = request.match_info["job_id"]
+    jobs = state.crons.list_jobs(include_disabled=True)
+    job = next((j for j in jobs if j.id == job_id), None)
+    if not job:
+        return web.json_response({"error": "job not found"}, status=404)
+    cancelled = await state.crons.cancel(job_id)
+    if not cancelled:
+        return web.json_response({"error": "job is not running"}, status=409)
     state.push_refresh("crons")
     safe_name = redact_credentials(redact_exfiltration_urls(job.name)[0])[0]
     return web.json_response({"ok": True, "name": safe_name})

@@ -99,7 +99,7 @@ _CREDENTIAL_KEYS = (
 
 DEFAULT_MODEL = "auto"
 DEFAULT_SESSION_TIMEOUT = 3600  # 60 min
-DEFAULT_MAX_PARALLEL_STEPS = 2
+DEFAULT_MAX_PARALLEL_STEPS = 0  # 0 = auto: derive from agent.subagent_auto_max via compute_max_subagents
 
 _DEFAULT_PORT = 5476
 
@@ -697,7 +697,17 @@ class SessionConfig:
 class TaskRunnerConfig:
     max_parallel_steps: int = field(
         default=DEFAULT_MAX_PARALLEL_STEPS,
-        metadata=_meta("Max Parallel Steps", "Maximum number of task steps to run in parallel."),
+        metadata=_meta("Max Parallel Steps", "Maximum task steps to run in parallel. 0 = auto (the host-safe cap from agent.subagent_auto_max, clamped to memory/CPU). A positive value only *lowers* concurrency — it is capped at the auto maximum and can never exceed the host-safe limit."),
+    )
+    workspace_dir: str = field(
+        default="",
+        metadata=_meta(
+            "Workspace Folder",
+            "Absolute path where task runner executions run. When set, "
+            "every execution operates in this folder instead of a per-run scratch "
+            "directory, so the task runner works on the intended target location. "
+            "Empty = use the default per-run workspace directory.",
+        ),
     )
 
 
@@ -952,6 +962,16 @@ class KnowledgeConfig:
             "pathological un-chunked input); raise/lower only to tune truncation.",
         ),
     )
+    pool_idle_ttl_secs: int = field(
+        default=300,
+        metadata=_meta(
+            "Pool Idle TTL (secs)",
+            "Seconds the document-extraction worker pool may sit fully idle "
+            "before it is scaled to zero (all workers shut down, freeing ~1GB "
+            "of held process trees); the next ingest respawns them lazily. "
+            "0 keeps the workers warm indefinitely.",
+        ),
+    )
 
 
 @dataclass
@@ -1163,6 +1183,14 @@ class DashboardConfig:
             "'more' encourages widgets for any visual content; "
             "'less' limits to only when markdown is clearly insufficient.",
             enum=["more", "less"],
+        ),
+    )
+    tail_fork_enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Tail-only Fork",
+            "When forking, keep only the messages after the chosen point. The "
+            "earlier messages are dropped.",
         ),
     )
     auto_open_browser: bool = field(
@@ -1910,6 +1938,25 @@ class McpGatewayConfig:
             "socket; channel_id is a stable id, so a prewarmed backend is "
             "reused by every later new-chat in that channel. 0 (default) "
             "disables prewarming — no hot-key file is read or written.",
+        ),
+    )
+    read_buffer_limit_bytes: int = field(
+        default=64 * 1024 * 1024,
+        metadata=_meta(
+            "Read Buffer Limit",
+            "Maximum bytes for a single MCP response line before asyncio drops it. "
+            "Default 64 MiB. Responses exceeding this are fast-failed with -32000. "
+            "Env override: KIROCREW_MCP_READ_LIMIT.",
+        ),
+    )
+    response_spill_threshold_bytes: int = field(
+        default=256 * 1024,
+        metadata=_meta(
+            "Response Spill Threshold",
+            "Tool-call responses larger than this (bytes) have their text content "
+            "written to ~/.kirocrew/mcp_spill/ and truncated inline to 16 KiB + "
+            "a file path marker. Default 256 KiB. Set 0 to disable spilling. "
+            "Env override: KIROCREW_MCP_SPILL_THRESHOLD.",
         ),
     )
 
@@ -2726,6 +2773,7 @@ class KiroCrewConfig:
                 max_parallel_steps=taskrunner_data.get(
                     "max_parallel_steps", DEFAULT_MAX_PARALLEL_STEPS
                 ),
+                workspace_dir=str(taskrunner_data.get("workspace_dir", "")),
             ),
             cron_history=CronHistoryConfig(
                 cron_summary_cap=int(cron_history_data.get("cron_summary_cap", 200)),
@@ -2778,6 +2826,15 @@ class KiroCrewConfig:
                 ],
                 embed_timeout_secs=float(knowledge_data.get("embed_timeout_secs", 10.0)),
                 embed_content_budget=int(knowledge_data.get("embed_content_budget", 0)),
+                pool_idle_ttl_secs=(
+                    ttl
+                    if isinstance(
+                        (ttl := knowledge_data.get("pool_idle_ttl_secs", 300)), int
+                    )
+                    and not isinstance(ttl, bool)
+                    and ttl >= 0
+                    else 300
+                ),
             ),
             telegram=TelegramConfig(
                 enabled=bool(telegram_data.get("enabled", False)),
@@ -2855,6 +2912,7 @@ class KiroCrewConfig:
                 quick_send=dashboard_data.get("quick_send", False),
                 session_grid=dashboard_data.get("session_grid", False),
                 widget_density=dashboard_data.get("widget_density", "more"),
+                tail_fork_enabled=dashboard_data.get("tail_fork_enabled", False),
                 terminal=dashboard_data.get("terminal", {"enabled": True}),
                 default_project=dashboard_data.get("default_project", ""),
                 theme_mode=dashboard_data.get("theme_mode", ""),
@@ -2911,6 +2969,8 @@ class KiroCrewConfig:
                     s for s in mcp_gateway_data.get("poolable_servers", []) if isinstance(s, str)
                 ],
                 prewarm_count=max(0, int(mcp_gateway_data.get("prewarm_count", 0))),
+                read_buffer_limit_bytes=max(1024, int(mcp_gateway_data.get("read_buffer_limit_bytes", 64 * 1024 * 1024))),
+                response_spill_threshold_bytes=max(0, int(mcp_gateway_data.get("response_spill_threshold_bytes", 256 * 1024))),
             ),
             instances=InstancesConfig(
                 enabled=bool(instances_data.get("enabled", False)),

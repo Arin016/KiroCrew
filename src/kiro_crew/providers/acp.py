@@ -740,6 +740,7 @@ class AcpProvider(LLMProvider):
             tool_input=e.tool_input,
             tool_output=e.tool_output,
             tool_final=e.tool_final,
+            usage=e.usage,
             raw_tool_params=e.raw_tool_params,
             server_name=e.server_name,
             oauth_url=e.oauth_url,
@@ -863,6 +864,12 @@ class AcpProvider(LLMProvider):
 
     def touch_activity(self) -> None:
         self._client.touch_activity()
+
+    def runtime_info(self) -> tuple[int | None, str | None]:
+        """Return (runtime_pid, gateway_socket_path) for abort propagation."""
+        pid = getattr(self._client, "_pid", None)
+        socket_path = getattr(self._client, "_mcp_gateway_socket", None)
+        return (pid, socket_path)
 
     @property
     def session_id(self) -> str:

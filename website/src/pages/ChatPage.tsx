@@ -23,10 +23,10 @@ import { changeApprovalMode, sseSlotTitle } from '../store/dashboardSlice'
 import { api } from '../api/client'
 import type { PlanStepInput } from '../api/client'
 import { useProvider } from '../providers'
-import AutoNudgePopover, { type AutoNudgeLoop } from '../components/AutoNudgePopover'
+import { type AutoNudgeLoop } from '../components/AutoNudgePopover'
 import { fileReadUrl } from '../utils/fileReadUrl'
 import { safeSetItem, safeSetSessionItem } from '../utils/safeStorage'
-import { handleStopPress } from '../utils/stopDebounce'
+import { handleStopPress, isEscalationState } from '../utils/stopDebounce'
 import { EmptyState, Btn, Input } from '../components/ui'
 import MarkdownPanel from '../components/MarkdownPanel'
 import DiffPanel from '../components/DiffPanel'
@@ -90,7 +90,6 @@ import TypewriterText from '../components/TypewriterText'
 import ActivityViewer from './chat/ActivityViewer'
 import { useChatNavigation } from '../hooks/useChatNavigation'
 import SubagentProgressBar from './chat/SubagentProgressBar'
-import ChatProgressTrack from './chat/ChatProgressTrack'
 import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
 import { toSlug } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
@@ -633,7 +632,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const [reasoningEffortBtnRect, setReasoningEffortBtnRect] = useState<DOMRect | null>(null)
   const reasoningEffortDropdownRef = useRef<HTMLDivElement>(null)
   const [autoNudgeOpen, setAutoNudgeOpen] = useState(false)
-  const [autoNudgeBtnRect, setAutoNudgeBtnRect] = useState<DOMRect | null>(null)
   const [autoNudgeLoop, setAutoNudgeLoop] = useState<AutoNudgeLoop | null>(null)
   const approvalDropdownRef = useRef<HTMLDivElement>(null)
   const approvalMode = useAppSelector(s => s.dashboard.approvalMode)
@@ -1220,6 +1218,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     }
   }, [messages.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const { data: forkCfg } = useQuery<{ tail_fork_enabled?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
   const handleFork = useCallback(async (visibleIndex: number) => {
     if (!activeSlot) return
     try {
@@ -1228,7 +1227,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
       // per-slot draft mechanism saves the source slot's composer text on
       // slot-switch, so the user's parked draft stays safe in the original
       // session and the fork opens with an empty composer.
-      const result = await dispatch(forkSlot({ slot: activeSlot, atIndex: visibleIndex })).unwrap()
+      //
+      // B3 cold-cache fix (D2): forkCfg is undefined until the dashboardConfig
+      // query resolves for the first time. Use the cache when warm; otherwise
+      // fetch a fresh value directly so direction never silently falls back
+      // to an undefined config (which previously downgraded an intended
+      // tail-fork to a head-fork whenever the query had errored/settled with
+      // no data, not just while it was loading).
+      const resolvedCfg = forkCfg ?? await api.dashboardConfig()
+      const direction = resolvedCfg?.tail_fork_enabled ? 'tail' : 'head'
+      const result = await dispatch(forkSlot({ slot: activeSlot, atIndex: visibleIndex, direction })).unwrap()
       if (result.ok) {
         await dispatch(switchSlot(result.key))
       } else {
@@ -1237,7 +1245,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     } catch (e) {
       alert('Fork failed: ' + (e instanceof Error ? e.message : String(e)))
     }
-  }, [activeSlot, dispatch])
+  }, [activeSlot, dispatch, forkCfg])
 
   const handlePlanFromHere = useCallback(async (visibleIndex: number) => {
     if (!activeSlot) return
@@ -1406,7 +1414,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // "Scroll to previous user message" pill — tracks topmost visible item
   const topmostIdxRef = useRef(0)
   const [hasUserMsgAbove, setHasUserMsgAbove] = useState(false)
-  const [currentSectionIdx, setCurrentSectionIdx] = useState(0)
   const displayItemsRef = useRef<DisplayItem[]>([])
   // Update topmost index from scroll position (replaces Virtuoso rangeChanged)
   const updateTopmostIdx = useCallback(() => {
@@ -1425,13 +1432,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
         const idx = parseInt(htmlItem.getAttribute('data-display-index') || '0', 10)
         topmostIdxRef.current = idx
         setHasUserMsgAbove(findPrevUserMsgDisplayIdx(displayItemsRef.current, idx) >= 0)
-        // Compute which nav section is current (last section whose displayIdx <= topmost)
-        const secs = chatNavSectionsRef.current
-        let secIdx = 0
-        for (let s = secs.length - 1; s >= 0; s--) {
-          if (secs[s].displayIdx <= idx) { secIdx = s; break }
-        }
-        setCurrentSectionIdx(secIdx)
         break
       }
     }
@@ -2305,11 +2305,19 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     const { txt } = prepareSendPayload(raw, files)
     const activePastes = pasteBlocksRef.current
     const llmTxt = activePastes.length ? expandPasteTokens(txt, activePastes) : txt
+    // Optimistically show the steered text immediately. Since steer became the
+    // default mid-turn action (split send button), pressing Enter while a turn
+    // is running routes here — which previously had NO optimistic bubble, so
+    // the message only appeared once the backend echoed it via the 'steer_push'
+    // WS event, making it look like nothing happened until the response resumed.
+    // Tagged meta.optimistic so the echo reconciles this bubble in place
+    // (appendSlotMessage) instead of rendering a duplicate.
+    dispatch(appendMessage({ role: 'user', content: llmTxt, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { steer: true, optimistic: true } }))
     steerMutation.mutate(llmTxt)
     setInput(''); setPendingFiles([]); setPasteBlocks([])
     delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]
     saveDrafts()
-  }, [activeSlot, steerMutation, saveDrafts])
+  }, [activeSlot, steerMutation, saveDrafts, dispatch])
 
   const handleCancelQueued = useCallback((queueId: string) => {
     if (!activeSlot) return
@@ -2351,12 +2359,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   }, [displayItems])
 
   const chatNav = useChatNavigation(messages, messageToDisplayIdx)
-  const chatNavSectionsRef = useRef(chatNav.sections)
-  chatNavSectionsRef.current = chatNav.sections
-
-  const scrollToNavSection = useCallback((displayIdx: number) => {
-    navToDisplayIndex(displayIdx, { behavior: 'smooth', align: 'start', offset: -72 })
-  }, [navToDisplayIndex])
 
   // Track the timestamp of the previous search-nav step so we can tell "user is
   // holding Enter through many matches" apart from "user landed on one match".
@@ -2605,6 +2607,13 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
       safeSetItem('mc-sidebar-pinned', 'true')
     }
   }, [filteredSlots.length, sidebarPinned])
+
+  // Horizontal space (px) the detail panel must keep clear so it never grows
+  // past its flex row and collapses the chat pane: the open sidebar's width
+  // plus a usable chat-pane minimum. On mobile the panel is full-screen (no
+  // shared row), so no reserve applies.
+  const CHAT_PANE_MIN = 320
+  const panelReserve = isMobile ? undefined : (sidebarOpen ? sidebarWidth : 0) + CHAT_PANE_MIN
 
   return (
     <TagPopoverProvider>
@@ -2912,7 +2921,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                 />
               </motion.div>
             ) : (
-            <div className="relative flex flex-col flex-1 min-h-0">
             <div
               ref={scrollerRef}
               style={{
@@ -3011,14 +3019,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
               {/* Footer */}
               <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} regenerating={regenerating} stopState={currentSlot?.stop_state} />
               <div style={{height: '2vh'}} />
-            </div>
-            {!isWelcomeState && chatNav.sections.length >= 2 && (
-              <ChatProgressTrack
-                sections={chatNav.sections}
-                currentIdx={currentSectionIdx}
-                onScrollToSection={scrollToNavSection}
-              />
-            )}
             </div>
             )}
             <div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none -mt-6 relative z-[1]" />
@@ -3159,7 +3159,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
               onStop={() => {
                 const slot = activeSlot
                 if (!slot) return
-                const isSoftPending = currentSlot?.stop_state === 'soft_pending'
+                const isEscalation = isEscalationState(currentSlot?.stop_state)
                 // Per-slot view over the map, satisfying SoftStopRef so the
                 // arming window is measured against THIS slot's soft press.
                 const map = softStopAtMapRef.current
@@ -3168,7 +3168,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                   set current(v: number) { map.set(slot, v) },
                 }
                 const action = handleStopPress(
-                  isSoftPending,
+                  isEscalation,
                   Date.now(),
                   slotRef,
                   () => dispatch(requestStop({ slotId: slot, force: false })),
@@ -3184,9 +3184,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
               providerId={provider.id}
               reasoningEffort={currentSlot?.reasoning_effort || ''}
               onReasoningEffortClick={provider.capabilities.reasoningEffort && modelSupportsEffort(currentSlot?.model || resolvedModel) ? (rect) => { setReasoningEffortBtnRect(rect); setReasoningEffortDropdown(!reasoningEffortDropdown) } : undefined}
-              autoNudgeActive={!!autoNudgeLoop?.active}
-              autoNudgeCycleCount={autoNudgeLoop?.cycle_count || 0}
-              onAutoNudgeClick={(rect) => { setAutoNudgeBtnRect(rect); setAutoNudgeOpen(!autoNudgeOpen) }}
+              onAutoNudgeClick={setAutoNudgeOpen}
+              autoNudgeLoop={autoNudgeLoop}
+              autoNudgeOpen={autoNudgeOpen}
+              onAutoNudgeChange={setAutoNudgeLoop}
               browseMode={browseMode}
               onBrowseToggle={toggleBrowseMode}
               onOptimizeResult={handleOptimizeResult}
@@ -3286,17 +3287,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
               anchorRect={projectBtnRect}
               onSelect={path => { setProject(path); setProjectPickerOpen(false) }}
             />
-            {/* Auto-nudge popover — triggered from input bar */}
-            {autoNudgeOpen && autoNudgeBtnRect && activeSlot && createPortal(
-              <AutoNudgePopover
-                slotKey={activeSlot}
-                anchorRect={autoNudgeBtnRect}
-                loop={autoNudgeLoop}
-                onClose={() => setAutoNudgeOpen(false)}
-                onChange={setAutoNudgeLoop}
-              />,
-              document.body
-            )}
             {/* Approval mode dropdown portal — triggered from input bar */}
             {approvalDropdown && approvalBtnRect && createPortal(
               <div ref={approvalDropdownRef} className="fixed z-[9999] animate-slide-up flex items-end gap-2" style={(() => { const left = Math.max(8, Math.min(approvalBtnRect.left, window.innerWidth - 520)); return { bottom: window.innerHeight - approvalBtnRect.top + 4, left: isMobile ? 8 : left, ...(isMobile ? { flexDirection: 'column-reverse' as const, alignItems: 'flex-start', right: 8, maxWidth: 'calc(100vw - 16px)' } : {}) } })()}>
@@ -3372,6 +3362,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
             onClose={search.close}
             initialWidth={400}
             minWidth={320}
+            reserveWidth={panelReserve}
             storageKey="mc-search-width"
             noPadding
           >
@@ -3404,6 +3395,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
             }
             onClose={() => { diffPanel.closeDiff(); dispatch(openActivityToTab('files')) }}
             initialWidth={600}
+            reserveWidth={panelReserve}
             storageKey="mc-panel-width"
             noPadding
             headerClassName="diff-panel-header"
@@ -3418,10 +3410,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
           </DetailPanel>
         )}
         {panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
-          <MarkdownPanel key="md-panel" filePath={panel.filePath} content={panel.content} onContentChange={panel.setContent} onSave={handleFileSave} onClose={panel.closePanel} liveWatch onSubmitComments={submitComments} />
+          <MarkdownPanel key="md-panel" filePath={panel.filePath} content={panel.content} onContentChange={panel.setContent} onSave={handleFileSave} onClose={panel.closePanel} liveWatch onSubmitComments={submitComments} reserveWidth={panelReserve} />
         )}
         {activityOpen && !panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
-          <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} storageKey="mc-activity-width">
+          <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} reserveWidth={panelReserve} storageKey="mc-activity-width">
             <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving} />
           </DetailPanel>
         )}

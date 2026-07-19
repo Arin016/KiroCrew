@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shlex
+import socket
 import string
 import uuid
 from collections import Counter
@@ -55,11 +56,27 @@ BUILTIN_DENY_PATTERNS: list[str] = [
     # CredentialValidatorServiceCDK, credential-rotation-service).
     "get_secret*",
     "read_secret*",
-    # Destructive AWS operations
+    # Destructive AWS operations.
+    # Real AWS CLI subcommands are HYPHENATED (``aws cloudformation
+    # delete-stack``, ``aws ec2 terminate-instances``); boto3 SDK method names
+    # are the UNDERSCORE forms (``client.delete_stack(...)``). The underscore
+    # globs alone matched no real CLI invocation, so a destructive
+    # ``aws … delete-stack``/``terminate-instances`` slipped through
+    # ``is_denied`` — notably on the ``mcp_cron`` command path, which relies on
+    # ``is_denied`` to block prompt-injected destructive shell. Cover BOTH
+    # spellings. Patterns are specific destructive subcommand tokens, so they
+    # don't over-block benign reads (``describe-instances``, ``s3 ls``) or
+    # command/package names like ``get-credentials`` / ``credential-rotation``.
     "*delete_stack*",
+    "*delete-stack*",
     "*terminate_instance*",
+    "*terminate-instance*",  # matches terminate-instance and terminate-instances
     "*drop_table*",
+    "*drop-table*",
+    "*delete_table*",
+    "*delete-table*",
     "*delete_bucket*",
+    "*delete-bucket*",
     # NOTE: ``git push`` is NOT a glob here — a broad ``*git*push*`` substring
     # glob over-blocked any command whose text merely contained "push" (e.g. a
     # ``git commit -m`` message mentioning push, or an ``ssh host '...'`` whose
@@ -560,6 +577,23 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     ".kirocrew/security_policy.json",
     ".kirocrew/profiles",
     ".kirocrew/admission_policy.json",
+    # KiroCrew's own dashboard-auth secrets (Mesh-2369). ``token_signing.key``
+    # (dashboard/token_secret.py) signs every access + refresh token;
+    # ``refresh_chains.json`` (dashboard/refresh_tokens.py) stores refresh-token
+    # chain state; ``.local_secret`` (server.py / cli_commands.py / mcp_core.py /
+    # cron_script.py / mcp_shared.py) is the shared internal-auth secret used to
+    # authenticate MCP/cron/hook callbacks back into the gateway. These are this
+    # host's own crown-jewel credentials: like the SEL trust root (sel_hmac.key),
+    # the app-admission root, and the governance security_policy.json above, an
+    # agent that could fs_read them could forge dashboard auth tokens or
+    # impersonate internal callers. All legitimate readers (token_secret.py,
+    # refresh_tokens.py, cli_commands.py, mcp_core.py, cron_script.py,
+    # mcp_shared.py, mcp_playwright_proxy.py, cli_server.py, mcp_cron.py) open
+    # these files directly via ``Path.read_text()``/``open()`` and do NOT route
+    # through this gate, so legitimate token minting/verification still works.
+    ".kirocrew/token_signing.key",
+    ".kirocrew/refresh_chains.json",
+    ".kirocrew/.local_secret",
 ]
 
 # ── Write-protected paths (block modification, allow reads) ──
@@ -744,6 +778,35 @@ def _path_in_home_dirs(path_str: str, home_dirs: list[str], base_dir: str | None
     home_real = os.path.realpath(home)
     if home_real.casefold() != home.casefold():
         sensitive_targets |= {os.path.join(home_real, d).casefold() for d in home_dirs}
+    # When KIROCREW_HOME points to a non-default path, the keystone secrets
+    # (token_signing.key, refresh_chains.json, .local_secret, sel_hmac.key,
+    # security_policy.json etc.) live there — NOT under ~/.kirocrew. Without
+    # this expansion any ".kirocrew/X" entry in the home_dirs list would miss
+    # the real file location, letting the agent read/write its own signing key
+    # or governance ceiling via the custom KIROCREW_HOME. Expand each entry
+    # prefixed with ".kirocrew" using the env-override root ADDITIONALLY (the
+    # ~/~ root stays so both locations are always covered).
+    kiro_home_env = os.environ.get("KIROCREW_HOME")
+    if kiro_home_env:
+        try:
+            kiro_home = str(Path(kiro_home_env).expanduser().resolve())
+        except (OSError, ValueError):
+            kiro_home = os.path.abspath(os.path.expanduser(kiro_home_env))
+        _kiro_prefix = ".kirocrew" + os.sep
+        for d in home_dirs:
+            if d.startswith(_kiro_prefix) or d == ".kirocrew":
+                tail = d[len(".kirocrew"):]  # includes leading / or is ""
+                full = (
+                    os.path.join(kiro_home, tail.lstrip(os.sep))
+                    if tail else kiro_home
+                )
+                sensitive_targets.add(full.casefold())
+                # Also add the resolved form in case the env value itself has
+                # symlinks (matches the home/home_real duality above).
+                try:
+                    sensitive_targets.add(os.path.realpath(full).casefold())
+                except (OSError, ValueError):
+                    pass
 
     # Case-fold both sides for the membership test.  On a case-insensitive
     # filesystem (macOS APFS/HFS+ default — a supported platform) the OS opens
@@ -987,7 +1050,13 @@ _URL_RE = re.compile(
     r"[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}"  # DNS name with a letter TLD
     r"|\d{1,3}(?:\.\d{1,3}){3}"  # raw IPv4 literal
     r"|\[[0-9A-Fa-f:.]+\]"  # bracketed IPv6 literal (incl. IPv4-mapped ::ffff:d.d.d.d)
-    r")(:\d+)?(/[^\s)\"'>]*)?"
+    # Group 3 = path AND/OR query. It must start with ``/`` (path) OR ``?``
+    # (a query attached directly to the host, no path segment). The prior
+    # ``/[...]*`` required a leading slash, so ``https://host?leak=<secret>``
+    # yielded group(3)=None and both scan/redact bailed on ``qmark == -1``,
+    # never inspecting the query — a real exfil bypass. ``[/?]`` admits both;
+    # the ``path_and_query.find("?")`` split at the call sites is unchanged.
+    r")(:\d+)?([/?][^\s)\"'>]*)?"
 )
 
 # Query string length threshold — normal URLs rarely exceed this
@@ -2526,6 +2595,22 @@ def canonicalize_ip(s: str) -> str:
                 # Four octets (each 0-255)
                 if all(0 <= o <= 255 for o in octets):
                     return f"{octets[0]}.{octets[1]}.{octets[2]}.{octets[3]}"
+            elif len(octets) in (2, 3):
+                # inet_aton "short" forms the OS resolver / curl accept but which
+                # neither ipaddress nor the 1-/4-octet branches above canonicalize:
+                #   a.b     -> a.(b as 24-bit)     e.g. 169.16689662  -> 169.254.169.254
+                #   a.b.c   -> a.b.(c as 16-bit)   e.g. 169.254.43518 -> 169.254.169.254
+                # Resolve them exactly as the OS does via inet_aton (which also
+                # rejects out-of-range forms like 169.254.11207422), so an IMDS
+                # SSRF cannot slip through in a 2-/3-part encoding. The last octet
+                # carries the remaining low-order bytes, so a decimal/hex value up
+                # to 0xFFFFFF (3-part) / 0xFFFFFFFF (2-part) is legal — validate the
+                # leading octets are single bytes, then defer to inet_aton.
+                if all(0 <= o <= 255 for o in octets[:-1]):
+                    try:
+                        return socket.inet_ntoa(socket.inet_aton(s))
+                    except OSError:
+                        pass
 
     # Try parsing as a plain integer (no dots) -- decimal or hex
     try:
@@ -2559,6 +2644,13 @@ _IP_CANDIDATE_RE = re.compile(
     r"(?:"
     r"::ffff:[0-9a-fA-Fx.:]+|"  # IPv6-mapped
     r"0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-Fx]+)*|"  # Hex (with possible dotted)
+    # inet_aton "short" forms the OS resolver / curl accept (a.b.c and a.b),
+    # where the trailing component packs the remaining low-order bytes. These
+    # must be captured WHOLE (not just the tail) so canonicalize_ip can resolve
+    # them and catch an IMDS SSRF hidden in a 2-/3-part encoding. Listed before
+    # the bare-integer / dotted-quad alternatives so the full token wins.
+    r"\d{1,3}\.\d{1,3}\.(?:0[xX][0-9a-fA-F]+|\d{4,10})|"  # 3-part: a.b.c
+    r"\d{1,3}\.(?:0[xX][0-9a-fA-F]+|\d{5,10})|"  # 2-part: a.b
     r"\d{7,10}|"  # Large decimal (single integer IP)
     r"(?:0[0-7]+\.){3}0[0-7]+|"  # Octal dotted
     r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"  # Standard dotted-quad

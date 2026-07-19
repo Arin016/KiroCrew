@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
-import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Goal, Target, Lock, Globe, FolderOpen, FileText, ChevronDown, Check } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, ShieldCheck, BookOpen, Handshake, Rocket, X, ClipboardList, CheckCircle, Ban, Sparkles, Target, Lock, Globe, FolderOpen, FileText, ChevronDown, Check } from 'lucide-react'
 import { Toggle } from './ui'
 import VoiceStatusBar from './VoiceStatusBar'
 import { createPortal } from 'react-dom'
@@ -18,6 +18,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import { useSimplifiedToolNames } from '../hooks/useSimplifiedToolNames'
 import TrustDropdown from './TrustDropdown'
+import AutoNudgePopover, { type AutoNudgeLoop } from './AutoNudgePopover'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { isScreenSnipSupported } from '../hooks/useScreenSnip'
@@ -68,6 +69,7 @@ import SlashCommandMenu from './SlashCommandMenu'
 import FilePickerMenu from './FilePickerMenu'
 import SkillPickerMenu from './SkillPickerMenu'
 import { matchFileToken, matchSkillToken, replaceTokenAtCaret } from './composerTokens'
+import { useStopEscapeHatch } from '../hooks/useStopEscapeHatch'
 
 const INPUT_MIN_H = 44
 const INPUT_DEFAULT_MAX_H = 140
@@ -217,9 +219,10 @@ interface ChatInputProps {
   /** User-sent messages for ↑/↓ history navigation (oldest → newest). */
   sentMessages?: string[]
   /** Auto-nudge loop state for this slot (if any) */
-  autoNudgeActive?: boolean
-  autoNudgeCycleCount?: number
-  onAutoNudgeClick?: (rect: DOMRect) => void
+  onAutoNudgeClick?: (open: boolean) => void
+  autoNudgeLoop?: AutoNudgeLoop | null
+  autoNudgeOpen?: boolean
+  onAutoNudgeChange?: (loop: AutoNudgeLoop | null) => void
   /** Send-key mode. Default 'enter'. */
   sendOnEnter?: SendMode
   /** Follow-up options from assistant message */
@@ -354,9 +357,10 @@ function ChatInput({
   memoryMode,
   cleanMode,
   sentMessages,
-  autoNudgeActive = false,
-  autoNudgeCycleCount = 0,
   onAutoNudgeClick,
+  autoNudgeLoop,
+  autoNudgeOpen,
+  onAutoNudgeChange,
   sendOnEnter = 'enter',
   followUpOptions,
   followUpPicked,
@@ -427,6 +431,9 @@ function ChatInput({
   const showInChat = useCallback(() => {
     if (approvalToolCallId) dispatch(openActivityToTool(approvalToolCallId))
   }, [approvalToolCallId, dispatch])
+
+  // Stop button: killing-state escape hatch (re-enable after 15s)
+  const { escaped: killingEscaped } = useStopEscapeHatch(stopState)
 
   const handleApprovalAction = useCallback((decision: string, pattern?: string) => {
     if (!approvalId) return
@@ -919,12 +926,19 @@ function ChatInput({
   }, [onChange])
 
   const optimizeMutation = useMutation({
-    mutationFn: async ({ prompt, context }: { prompt: string; context: string; slotId: string | null }) => {
+    mutationFn: async (
+      { prompt, context, pastes }: {
+        prompt: string
+        context: string
+        pastes?: Array<{ seq: number; content: string }>
+        slotId: string | null
+      },
+    ) => {
       const resp = await fetch('/api/optimizer/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-session-key': 'dashboard:ui' },
         credentials: 'same-origin',
-        body: JSON.stringify({ prompt, context }),
+        body: JSON.stringify({ prompt, context, pastes }),
       })
       if (!resp.ok) throw new Error('optimizer failed')
       return resp.json()
@@ -1027,8 +1041,15 @@ function ChatInput({
       .slice(-10)
       .map(m => (m.content || '').slice(0, 200))
       .join('\n')
-    runOptimize({ prompt: txt, context, slotId })
-  }, [runOptimize, chatMessages, slotId])
+    // Forward the full content behind each paste placeholder still present in
+    // the draft, so the optimizer understands the paste without us expanding
+    // the "[ Paste #N · M lines ]" token inline. The optimizer preserves the
+    // tokens verbatim in its output, so pasteBlocks keeps mapping them back on
+    // send. Only referenced blocks are sent (pruneBlocks drops stale ones).
+    const referenced = pruneBlocks(txt, pasteBlocks)
+    const pastes = referenced.map(b => ({ seq: b.seq, content: b.content }))
+    runOptimize({ prompt: txt, context, pastes, slotId })
+  }, [runOptimize, chatMessages, pasteBlocks, slotId])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Cmd/Ctrl+Shift+V → next paste inserts full text inline (no chip collapse).
@@ -1865,19 +1886,13 @@ function ChatInput({
             <div className="flex items-center gap-0.5 min-w-0 overflow-x-auto flex-1">
 
               {onAutoNudgeClick && (
-                <button
-                  className={`h-8 px-2 rounded-lg text-[12px] font-mono flex items-center gap-1 cursor-pointer transition-all bg-transparent border-none shrink-0 whitespace-nowrap ${
-                    autoNudgeActive
-                      ? 'text-accent hover:text-accent hover:bg-accent/10 animate-pulse'
-                      : 'text-muted hover:text-text hover:bg-bg-hover'
-                  }`}
-                  onClick={e => onAutoNudgeClick(e.currentTarget.getBoundingClientRect())}
-                  title={autoNudgeActive ? `Goal active (cycle ${autoNudgeCycleCount})` : 'Set a goal'}
-                  aria-label={autoNudgeActive ? `Goal active (cycle ${autoNudgeCycleCount})` : 'Set a goal'}
-                >
-                  <Goal size={16} className="shrink-0" />
-                  {autoNudgeActive && autoNudgeCycleCount > 0 ? autoNudgeCycleCount : null}
-                </button>
+                <AutoNudgePopover
+                  slotKey={slotId || ''}
+                  loop={autoNudgeLoop || null}
+                  open={autoNudgeOpen || false}
+                  onOpenChange={v => onAutoNudgeClick(v)}
+                  onChange={onAutoNudgeChange || (() => {})}
+                />
               )}
               {!isMobile && onApprovalClick && approvalMode && (() => {
                 const d = APPROVAL_DISPLAY[approvalMode] || APPROVAL_DISPLAY.normal
@@ -1915,21 +1930,39 @@ function ChatInput({
             )}
             {(isRunning || stopState === 'soft_pending' || stopState === 'killing') && onStop ? (
               stopState === 'killing' ? (
-                <button className="w-8 h-8 rounded-lg bg-danger text-danger-fg border-none flex items-center justify-center cursor-not-allowed transition-all" disabled title="Killing…" aria-label="Killing session">
-                  <Loader2 size={18} className="animate-spin" />
-                </button>
+                killingEscaped ? (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      className="w-8 h-8 rounded-lg bg-danger text-danger-fg border-none flex items-center justify-center cursor-pointer hover:bg-danger/80 transition-all"
+                      onClick={onStop}
+                      title="Force reset — taking longer than expected"
+                      aria-label="Force reset session (taking longer than expected)"
+                      data-testid="stop-button-escape-hatch"
+                    >
+                      <Square size={18} fill="currentColor" />
+                    </button>
+                    <span className="text-xs text-muted whitespace-nowrap" data-testid="stop-escape-hint">taking longer than expected</span>
+                  </div>
+                ) : (
+                  <button className="w-8 h-8 rounded-lg bg-danger text-danger-fg border-none flex items-center justify-center cursor-not-allowed transition-all" disabled title="Killing…" aria-label="Killing session" data-testid="stop-button-killing">
+                    <Loader2 size={18} className="animate-spin" />
+                  </button>
+                )
               ) : stopState === 'soft_pending' ? (
-                <motion.button
-                  className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all"
-                  onClick={onStop}
-                  title="Force kill — discards in-progress work and queued messages"
-                  aria-label="Force kill session (discards in-progress work and queued messages)"
-                  animate={{ opacity: [0.6, 1, 0.6] }}
-                  transition={{ duration: 1.2, repeat: Infinity }}
-                  data-testid="stop-button-pulsing"
-                >
-                  <Square size={18} fill="currentColor" />
-                </motion.button>
+                <div className="flex items-center gap-1.5">
+                  <motion.button
+                    className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all"
+                    onClick={onStop}
+                    title="Force kill — discards in-progress work and queued messages"
+                    aria-label="Force kill session (discards in-progress work and queued messages)"
+                    animate={{ opacity: [0.6, 1, 0.6] }}
+                    transition={{ duration: 1.2, repeat: Infinity }}
+                    data-testid="stop-button-pulsing"
+                  >
+                    <Square size={18} fill="currentColor" />
+                  </motion.button>
+                  <span className="text-xs text-muted whitespace-nowrap" data-testid="stop-force-hint">Click again to force stop</span>
+                </div>
               ) : isQueued ? (
                 <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 transition-all" onClick={onStop} title="Stopping…" aria-label="Stopping">
                   <Loader2 size={18} className="animate-spin" />

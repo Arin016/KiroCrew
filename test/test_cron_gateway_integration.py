@@ -261,8 +261,13 @@ class TestAutoPause:
         for i in range(4):
             await _run_script_callback(gw, job, {"status": "error", "error": f"fail {i}"})
             assert job.enabled is True, f"Should not pause after {i+1} failures"
+            assert job.auto_paused is False
         await _run_script_callback(gw, job, {"status": "error", "error": "fail 4"})
         assert job.enabled is False
+        # auto_paused is the durable reason the pause survives a reload; without
+        # it, _load re-derives enabled=True (user_paused stays False) and the
+        # failing job resurrects on the next daemon restart.
+        assert job.auto_paused is True
         assert job.consecutive_failures == 5
 
     @pytest.mark.asyncio
@@ -274,6 +279,7 @@ class TestAutoPause:
             assert job.enabled is True
         await _run_command_callback(gw, job, {"status": "error", "output": "err 4", "exit_code": 1})
         assert job.enabled is False
+        assert job.auto_paused is True
         assert job.consecutive_failures == 5
 
     @pytest.mark.asyncio
@@ -286,6 +292,7 @@ class TestAutoPause:
         await _run_script_callback(gw, job, {"status": "ok"})
         assert job.consecutive_failures == 0
         assert job.enabled is True
+        assert job.auto_paused is False
 
 
 # ── Per-job model override: _acquire_with_model_fallback / _annotate_model_downgrade ──
@@ -464,3 +471,79 @@ class TestModelFallback:
 
         with pytest.raises(RuntimeError, match="model spawn failed"):
             await _run_llm_callback(gw, job, get_or_create_side_effect=_side_effect)
+
+
+class TestExecutePreservesCallbackStatus:
+    """CronService._execute must not clobber a failure the callback reported by
+    mutating the job. Command/script callbacks return NORMALLY and signal
+    failure via job.last_status="error"; only the LLM path raises. Overwriting
+    unconditionally with "ok" mis-reported failed runs as healthy on the
+    dashboard and in cron_list.
+    """
+
+    @pytest.mark.asyncio
+    async def test_execute_preserves_callback_error(self, tmp_path):
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+
+        async def failing_cb(job):
+            # command/script contract: report failure by mutation, return normally
+            job.last_status = "error"
+            job.last_error = "command failed (exit_code=1)"
+
+        svc._on_job = failing_cb
+        job = svc.add_job("failing", "false", every_secs=3600)
+        await svc._execute(job)
+        assert job.last_status == "error"
+        assert job.last_error == "command failed (exit_code=1)"
+
+    @pytest.mark.asyncio
+    async def test_execute_marks_ok_when_callback_clean(self, tmp_path):
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+
+        async def clean_cb(job):
+            return None  # no error mutation, no raise
+
+        svc._on_job = clean_cb
+        job = svc.add_job("okjob", "echo hi", every_secs=3600)
+        await svc._execute(job)
+        assert job.last_status == "ok"
+        assert job.last_error is None
+
+    @pytest.mark.asyncio
+    async def test_execute_marks_error_when_callback_raises(self, tmp_path):
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+
+        async def raising_cb(job):
+            raise RuntimeError("boom")
+
+        svc._on_job = raising_cb
+        job = svc.add_job("raises", "x", every_secs=3600)
+        await svc._execute(job)
+        assert job.last_status == "error"
+        assert "boom" in job.last_error
+
+    @pytest.mark.asyncio
+    async def test_execute_clears_stale_error_on_success(self, tmp_path):
+        from kiro_crew.cron import CronService
+
+        svc = CronService(base_dir=tmp_path)
+        results = ["error", "clean"]
+
+        async def cb(job):
+            if results.pop(0) == "error":
+                job.last_status = "error"
+                job.last_error = "prior failure"
+
+        svc._on_job = cb
+        job = svc.add_job("flappy", "cmd", every_secs=3600)
+        await svc._execute(job)  # first run fails
+        assert job.last_status == "error"
+        await svc._execute(job)  # second run clean → must reset to ok, not stay error
+        assert job.last_status == "ok"
+        assert job.last_error is None

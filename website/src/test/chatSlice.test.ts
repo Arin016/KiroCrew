@@ -4,6 +4,7 @@ import reducer, {
   setActiveSlot,
   setPendingInput,
   appendMessage,
+  appendSlotMessage,
   updateStreamingMessage,
   finalizeAssistant,
   removeThinking,
@@ -358,6 +359,53 @@ describe('switchSlot.pending', () => {
     // No stale streaming message from old slot
     expect(state.messages.some(m => m.role === 'streaming')).toBe(false)
   })
+
+  it('fulfilled preserves a locally-finalized latest reply when the server fetch is stale (switch-away-and-back regression)', () => {
+    // Slot B finished streaming while backgrounded: its cache holds the
+    // finalized assistant reply (via applyNonActiveFrame). User switches back to B.
+    const bCache = [
+      { role: 'user' as const, content: 'question', cls: '' },
+      { role: 'assistant' as const, content: 'the latest reply', cls: 'msg msg-a' },
+    ]
+    let state = { ...initial, activeSlot: 'A',
+      messages: [{ role: 'user' as const, content: 'A msg', cls: '' }],
+      slotMessages: { 'B': bCache } }
+    // Switch back to B — pending restores the cache instantly.
+    state = reducer(state, { type: 'chat/switchSlot/pending', meta: { arg: 'B', requestId: 'r1', requestStatus: 'pending' } })
+    expect(state.messages).toHaveLength(2)
+    // The HTTP fetch resolves with a STALE history that predates the reply.
+    state = reducer(state, {
+      type: 'chat/switchSlot/fulfilled',
+      meta: { arg: 'B', requestId: 'r1', requestStatus: 'fulfilled' },
+      payload: { key: 'B', messages: [{ role: 'user', content: 'question', cls: '' }], running: false, stopping: false, hasMore: false, total: 1, queue: [] },
+    })
+    // The latest reply must NOT be dropped — server history + re-attached reply.
+    expect(state.messages.some(m => m.role === 'assistant' && m.content === 'the latest reply')).toBe(true)
+    expect(state.messages[state.messages.length - 1].content).toBe('the latest reply')
+    expect(state.slotMessages['B'].some(m => m.content === 'the latest reply')).toBe(true)
+  })
+
+  it('fulfilled does not duplicate the reply when the server fetch already includes it', () => {
+    const bCache = [
+      { role: 'user' as const, content: 'question', cls: '' },
+      { role: 'assistant' as const, content: 'the latest reply', cls: 'msg msg-a' },
+    ]
+    let state = { ...initial, activeSlot: 'A',
+      messages: [{ role: 'user' as const, content: 'A msg', cls: '' }],
+      slotMessages: { 'B': bCache } }
+    state = reducer(state, { type: 'chat/switchSlot/pending', meta: { arg: 'B', requestId: 'r1', requestStatus: 'pending' } })
+    // Server IS up to date — it already returns the reply.
+    state = reducer(state, {
+      type: 'chat/switchSlot/fulfilled',
+      meta: { arg: 'B', requestId: 'r1', requestStatus: 'fulfilled' },
+      payload: { key: 'B', messages: [
+        { role: 'user', content: 'question', cls: '' },
+        { role: 'assistant', content: 'the latest reply', cls: 'msg msg-a' },
+      ], running: false, stopping: false, hasMore: false, total: 2, queue: [] },
+    })
+    expect(state.messages.filter(m => m.role === 'assistant' && m.content === 'the latest reply')).toHaveLength(1)
+    expect(state.messages).toHaveLength(2)
+  })
   it('pending restores cached messages instantly without loading', () => {
     let state = { ...initial, activeSlot: 'A',
       messages: [{ role: 'user' as const, content: 'A msg', cls: '' }],
@@ -384,6 +432,107 @@ describe('switchSlot.pending', () => {
     let state = { ...initial, slotMessages: { 'A': [{ role: 'user' as const, content: 'hi', cls: '' }] } }
     state = reducer(state, { type: 'chat/deleteSlot/fulfilled', meta: { arg: 'A', requestId: 'r1', requestStatus: 'fulfilled' }, payload: 'A' })
     expect(state.slotMessages['A']).toBeUndefined()
+  })
+})
+
+describe('appendSlotMessage steer reconcile', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+
+  it('reconciles the steer echo into the optimistic bubble instead of duplicating (active slot)', () => {
+    let state = { ...initial, activeSlot: 'A', messages: [{ role: 'streaming' as const, content: 'partial', cls: 'msg msg-a' }] }
+    // steer() optimistically appends the user bubble (meta.optimistic).
+    state = reducer(state, appendMessage({ role: 'user', content: 'steered text', cls: 'msg msg-u', ts: 't1', meta: { steer: true, optimistic: true } }))
+    expect(state.messages.filter(m => m.role === 'user')).toHaveLength(1)
+    // Backend echoes via steer_push (meta.steer, NO optimistic) — must reconcile.
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'steered text', cls: 'msg msg-u', ts: 't2', meta: { steer: true } } }))
+    const users = state.messages.filter(m => m.role === 'user')
+    expect(users).toHaveLength(1)
+    expect(users[0].ts).toBe('t2')
+    expect(users[0].meta?.optimistic).toBeUndefined()
+    expect(users[0].meta?.steer).toBe(true)
+  })
+
+  it('reconciles the steer echo for a backgrounded (non-active) slot', () => {
+    let state = { ...initial, activeSlot: 'A',
+      slotMessages: { 'B': [{ role: 'user' as const, content: 'steered', cls: 'msg msg-u', meta: { steer: true, optimistic: true } }] } }
+    state = reducer(state, appendSlotMessage({ slot: 'B', message: { role: 'user', content: 'steered', cls: 'msg msg-u', ts: 't2', meta: { steer: true } } }))
+    expect(state.slotMessages['B'].filter(m => m.role === 'user')).toHaveLength(1)
+    expect(state.slotMessages['B'][0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('still pushes a normal (non-steer) slot message', () => {
+    let state = { ...initial, activeSlot: 'A', messages: [{ role: 'user' as const, content: 'hi', cls: '' }] }
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'assistant', content: 'reply', cls: 'msg msg-a' } }))
+    expect(state.messages).toHaveLength(2)
+  })
+
+  it('reconciles even when streaming/thinking messages landed after the optimistic bubble (mid-turn race)', () => {
+    // Real-world duplicate: steer is by definition sent mid-turn, so chunks
+    // keep streaming in. The optimistic bubble is NOT the last message when
+    // the echo arrives — a tail-only check rendered two steer cards.
+    let state = { ...initial, activeSlot: 'A', messages: [] as any[] }
+    state = reducer(state, appendMessage({ role: 'user', content: 'u should rebase from remote beta', cls: 'msg msg-u', ts: 't1', meta: { steer: true, optimistic: true } }))
+    // Streaming content lands between optimistic append and steer_push echo.
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'thinking', content: '', cls: '' } }))
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'streaming', content: 'checking builds…', cls: 'msg msg-a' } }))
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'u should rebase from remote beta', cls: 'msg msg-u', ts: 't2', meta: { steer: true } } }))
+    const users = state.messages.filter(m => m.role === 'user')
+    expect(users).toHaveLength(1)
+    expect(users[0].ts).toBe('t2')
+    expect(users[0].meta?.optimistic).toBeUndefined()
+    expect(users[0].meta?.steer).toBe(true)
+  })
+
+  it('reconciles by most-recent optimistic steer bubble when redaction altered the echoed content', () => {
+    let state = { ...initial, activeSlot: 'A', messages: [] as any[] }
+    state = reducer(state, appendMessage({ role: 'user', content: 'raw with secret AKIA123', cls: 'msg msg-u', ts: 't1', meta: { steer: true, optimistic: true } }))
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'streaming', content: 'working…', cls: 'msg msg-a' } }))
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'raw with secret [REDACTED]', cls: 'msg msg-u', ts: 't2', meta: { steer: true } } }))
+    const users = state.messages.filter(m => m.role === 'user')
+    expect(users).toHaveLength(1)
+    expect(users[0].content).toBe('raw with secret [REDACTED]')
+    expect(users[0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('matches the correct bubble for rapid back-to-back steers', () => {
+    let state = { ...initial, activeSlot: 'A', messages: [] as any[] }
+    state = reducer(state, appendMessage({ role: 'user', content: 'first steer', cls: 'msg msg-u', ts: 'o1', meta: { steer: true, optimistic: true } }))
+    state = reducer(state, appendMessage({ role: 'user', content: 'second steer', cls: 'msg msg-u', ts: 'o2', meta: { steer: true, optimistic: true } }))
+    // Echo for the FIRST steer arrives after both optimistic bubbles exist.
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'first steer', cls: 'msg msg-u', ts: 'e1', meta: { steer: true } } }))
+    const users = state.messages.filter(m => m.role === 'user')
+    expect(users).toHaveLength(2)
+    expect(users[0].ts).toBe('e1')
+    expect(users[0].meta?.optimistic).toBeUndefined()
+    // Second bubble untouched, still optimistic pending its own echo.
+    expect(users[1].meta?.optimistic).toBe(true)
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'second steer', cls: 'msg msg-u', ts: 'e2', meta: { steer: true } } }))
+    expect(state.messages.filter(m => m.role === 'user')).toHaveLength(2)
+    expect(state.messages.filter(m => m.role === 'user')[1].meta?.optimistic).toBeUndefined()
+  })
+
+  it('does not reconcile into an unrelated non-steer optimistic user message', () => {
+    // A plain queued/optimistic user message (no meta.steer) with different
+    // content must NOT swallow a steer echo — the echo appends instead.
+    let state = { ...initial, activeSlot: 'A', messages: [] as any[] }
+    state = reducer(state, appendMessage({ role: 'user', content: 'normal message', cls: 'msg msg-u', ts: 't1', meta: { optimistic: true } }))
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'a steer', cls: 'msg msg-u', ts: 't2', meta: { steer: true } } }))
+    expect(state.messages.filter(m => m.role === 'user')).toHaveLength(2)
+  })
+
+  it('does not consume a non-steer optimistic message even when content matches the echo exactly', () => {
+    // AutoSDE CR-290147649 finding: the exact-content-match path must also
+    // require meta.steer — a plain optimistic user message that happens to
+    // have identical text to the steer echo is a different message and must
+    // keep its own bubble.
+    let state = { ...initial, activeSlot: 'A', messages: [] as any[] }
+    state = reducer(state, appendMessage({ role: 'user', content: 'same text', cls: 'msg msg-u', ts: 't1', meta: { optimistic: true } }))
+    state = reducer(state, appendSlotMessage({ slot: 'A', message: { role: 'user', content: 'same text', cls: 'msg msg-u', ts: 't2', meta: { steer: true } } }))
+    const users = state.messages.filter(m => m.role === 'user')
+    expect(users).toHaveLength(2)
+    // The original optimistic bubble is untouched.
+    expect(users[0].meta?.optimistic).toBe(true)
+    expect(users[0].meta?.steer).toBeUndefined()
   })
 })
 
@@ -615,6 +764,32 @@ describe('subagent reducers', () => {
     expect(state.subagents['late1']).toBeDefined()
     expect(state.subagents['late1'].status).toBe('done')
     expect(state.subagents['late1'].task).toBe('late task')
+  })
+
+  it('sseSubagentSpawn copies task onto pending card (empty approval-derived task)', () => {
+    // Pending card created from a spawn-approval event whose title carried no
+    // task text — the later spawn event holds the authoritative task.
+    let state = reducer(withSlot, sseSubagentPending({ slot: 'slot-1', id: 'a1', task: '', approval_id: 'spawn:a1' }))
+    state = reducer(state, sseSubagentSpawn({ slot: 'slot-1', id: 'a1', task: 'scan package X', agent: 'kirocrew' }))
+    expect(state.subagents['a1'].status).toBe('running')
+    expect(state.subagents['a1'].task).toBe('scan package X')
+  })
+
+  it('sseSubagentDone resolves card by id across slots (mis-bucketed card)', () => {
+    // Card lives under activeSlot but the done event arrives with a different
+    // slot key (e.g. parent session key changed after reset) — the card must
+    // still transition to done instead of staying stuck "running" forever.
+    let state = reducer(withSlot, sseSubagentSpawn({ slot: 'slot-1', id: 'a1', task: 'task', agent: '' }))
+    state = reducer(state, sseSubagentDone({ slot: 'other-slot', id: 'a1', elapsed: 7 }))
+    expect(state.subagents['a1'].status).toBe('done')
+    expect(state.subagents['a1'].elapsed).toBe(7)
+  })
+
+  it('sseSubagentDone backfills empty task from done payload', () => {
+    let state = reducer(withSlot, sseSubagentPending({ slot: 'slot-1', id: 'a1', task: '', approval_id: 'spawn:a1' }))
+    state = reducer(state, sseSubagentDone({ slot: 'slot-1', id: 'a1', elapsed: 4, task: 'the real task' }))
+    expect(state.subagents['a1'].status).toBe('done')
+    expect(state.subagents['a1'].task).toBe('the real task')
   })
 
   it('switchSlot saves and restores subagents per slot', () => {

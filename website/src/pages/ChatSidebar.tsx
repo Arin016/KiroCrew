@@ -1,14 +1,14 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, Loader2, Smile, RotateCcw, Bot, ExternalLink, Cpu } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, List, Loader2, Smile, RotateCcw, Bot, ExternalLink, Cpu } from 'lucide-react'
 import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDroppable, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch, useAppSelector } from '../store'
 import { useConnected } from '../hooks/useConnected'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../components/ui/dropdown-menu'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent } from '../components/ui/context-menu'
 import { offlineProps } from '../utils/offline'
 import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession } from '../store/chatSlice'
@@ -31,10 +31,22 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent } from '../utils/folderAgent'
 import SessionActionsMenu from '../components/SessionActionsMenu'
+import TagManagerList from '../components/TagManagerList'
 import { DndDraggable, DndDroppable } from '../components/dnd'
 import { collectFolderSubtreeIds } from '../utils/folderTree'
 import type { ChatFolder, ChatTag, TagColumn, TagColumnMode, SubagentActivity } from '../types'
 import { decideUnreadDrain } from './unreadDrain'
+import {
+  type RecentUnit,
+  DEFAULT_RECENT_WINDOW_MS,
+  RECENT_WINDOW_PRESETS,
+  decomposeRecentWindow,
+  formatRecentWindow,
+  clampRecentAmount,
+  customRecentWindowMs,
+  recentTickIntervalMs,
+  isWithinRecentWindow,
+} from './recentWindow'
 import { loadChatConfig, saveChatConfig } from './chat/ChatSettings'
 
 /** Telegram-style relative time: time today, "Yesterday hh:mm", weekday+time this week,
@@ -208,6 +220,9 @@ interface Slot {
   clean_mode?: boolean
   folder_id?: string
   pinned?: boolean
+  // Derived (not a payload field), like `unread`: true when the slot's last
+  // activity falls inside `RECENT_WINDOW_MS`. Computed in `enrichedSlots`.
+  recent?: boolean
   tags?: string[]
   forked_from?: string | null
 }
@@ -228,28 +243,60 @@ interface AgentInfo {
   source: string
 }
 
-type SessionFilterKey = 'unread' | 'running' | 'pinned'
+type SessionFilterKey = 'unread' | 'running' | 'pinned' | 'recent'
+
+// Recency window for the "Recent" filter: surfaces sessions whose last activity
+// is within the selected window (default one hour), keyed off the same
+// last-activity timestamp the date sort uses. The window is user-selectable
+// (presets + custom) and persisted under RECENT_WINDOW_LS_KEY. The pure window
+// math lives in ./recentWindow so it can be unit-tested without a render.
+const RECENT_WINDOW_LS_KEY = 'mc-session-recent-window-ms'
+
+/** Read the persisted Recent window (ms), falling back to the default. Runs in
+ *  a useState initializer during render, so a throwing localStorage (private
+ *  mode / disabled storage) must not crash the component — fall back instead. */
+function readStoredRecentWindow(): number {
+  try {
+    const saved = Number(localStorage.getItem(RECENT_WINDOW_LS_KEY))
+    return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_RECENT_WINDOW_MS
+  } catch {
+    return DEFAULT_RECENT_WINDOW_MS
+  }
+}
 
 interface SessionFilterDef {
   key: SessionFilterKey
   storageKey: string
   label: string
+  description: string
   color: string
   icon: (active: boolean) => React.ReactNode
 }
 
 const SESSION_FILTERS: SessionFilterDef[] = [
   {
-    key: 'unread', storageKey: 'mc-session-unread-only', label: 'Unread', color: 'var(--info)',
+    key: 'unread', storageKey: 'mc-session-unread-only', label: 'Unread',
+    description: 'Show only sessions with unread messages',
+    color: 'var(--info)',
     icon: (active) => <Circle size={12} className={active ? 'text-[var(--info)]' : 'text-muted'} {...(active ? { strokeWidth: 0, fill: 'var(--info)' } : {})} />,
   },
   {
-    key: 'running', storageKey: 'mc-session-running-only', label: 'In progress', color: 'var(--warn)',
+    key: 'running', storageKey: 'mc-session-running-only', label: 'In progress',
+    description: 'Show only sessions the agent is actively working on',
+    color: 'var(--warn)',
     icon: (active) => <Zap size={12} className={active ? 'text-[var(--warn)]' : 'text-muted'} {...(active ? { fill: 'var(--warn)', stroke: 'none' } : {})} />,
   },
   {
-    key: 'pinned', storageKey: 'mc-session-pinned-only', label: 'Pinned', color: 'var(--accent)',
+    key: 'pinned', storageKey: 'mc-session-pinned-only', label: 'Pinned',
+    description: 'Show only sessions you have pinned',
+    color: 'var(--accent)',
     icon: (active) => <Pin size={12} className={active ? 'text-accent' : 'text-muted'} {...(active ? { fill: 'var(--accent)', stroke: 'none' } : {})} />,
+  },
+  {
+    key: 'recent', storageKey: 'mc-session-recent-only', label: 'Recent',
+    description: 'Show only sessions active within the selected window',
+    color: 'var(--ok)',
+    icon: (active) => <Clock size={12} className={active ? 'text-[var(--ok)]' : 'text-muted'} />,
   },
 ]
 
@@ -449,6 +496,8 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: 'name-desc', label: 'Z → A' },
 ]
 const SORT_LS_KEY = 'mc-session-sort'
+/** Flat view ("explode chats out of folders") persistence key. */
+const FLAT_VIEW_LS_KEY = 'mc-sidebar-flat-view'
 
 function compareSlots(a: Slot, b: Slot, key: SortKey): number {
   return compareBySort(a, b, key)
@@ -561,6 +610,14 @@ function ChatSidebar({
     const saved = localStorage.getItem(SORT_LS_KEY)
     return SORT_OPTIONS.some(o => o.value === saved) ? saved as SortKey : 'date-desc'
   })
+  // Flat view: temporarily explode every chat out of its folder into one
+  // recency-sorted list, for working temporally across many folders ("what's
+  // the latest?"). Pure view projection — folder membership is untouched, and
+  // toggling back restores the folder tree exactly as it was.
+  const [flatView, setFlatView] = useState(() => localStorage.getItem(FLAT_VIEW_LS_KEY) === '1')
+  const toggleFlatView = useCallback(() => {
+    setFlatView(v => { const next = !v; safeSetItem(FLAT_VIEW_LS_KEY, next ? '1' : '0'); return next })
+  }, [])
   const [activeFilters, setActiveFilters] = useState<Set<SessionFilterKey>>(() => {
     const initialFilters = new Set<SessionFilterKey>()
     for (const filterDef of SESSION_FILTERS) { if (localStorage.getItem(filterDef.storageKey) === '1') initialFilters.add(filterDef.key) }
@@ -628,10 +685,65 @@ function ChatSidebar({
   // O(1) lookup set for the filter predicate (mirrors the `pinned` and
   // `slotSearchKeys` patterns elsewhere in this file).
   const unreadSet = useMemo(() => new Set(unreadSlots), [unreadSlots])
-  const enrichedSlots = useMemo<Slot[]>(() =>
-    slots.map(s => ({ ...s, unread: unreadSet.has(s.key) })),
-    [slots, unreadSet]
-  )
+  // Heartbeat that re-evaluates recency even when nothing else re-renders.
+  // Sidebar interactions (new messages, status changes, opening the menu) all
+  // recompute `enrichedSlots` for free, so this only matters when the sidebar
+  // sits idle with the Recent filter on — without it a stale session would
+  // never age out of the list. Gated on the filter being active so we don't
+  // wake an idle tab needlessly, mirroring the `staleTick` pattern in App.tsx.
+  const recentFilterActive = activeFilters.has('recent')
+  // User-selectable recency window (ms), persisted. Presets + custom value live
+  // in the filter submenu; the chip and menu row show the current window.
+  const [recentWindowMs, setRecentWindowMs] = useState(readStoredRecentWindow)
+  const setRecentWindow = useCallback((ms: number) => {
+    setRecentWindowMs(ms)
+    safeSetItem(RECENT_WINDOW_LS_KEY, String(ms))
+  }, [])
+  // Custom-picker draft state. The amount is a raw string (not derived from the
+  // committed window) so the field can be cleared / partially edited without
+  // snapping to 1 on every keystroke, and the unit stays exactly as the user
+  // picked it rather than being re-derived (24 "hours" must not flip to 1 "day").
+  // We commit + clamp to `recentWindowMs` only on blur / Enter / unit change; a
+  // preset click re-seeds both drafts so the boxes track the chosen preset.
+  const [recentAmountDraft, setRecentAmountDraft] = useState(() => String(decomposeRecentWindow(recentWindowMs).value))
+  const [recentUnitDraft, setRecentUnitDraft] = useState<RecentUnit>(() => decomposeRecentWindow(recentWindowMs).unit)
+  const selectRecentPreset = useCallback((ms: number) => {
+    setRecentWindow(ms)
+    const { value, unit } = decomposeRecentWindow(ms)
+    setRecentAmountDraft(String(value))
+    setRecentUnitDraft(unit)
+  }, [setRecentWindow])
+  const commitRecentAmount = useCallback(() => {
+    const clamped = clampRecentAmount(recentAmountDraft)
+    setRecentAmountDraft(String(clamped))
+    setRecentWindow(customRecentWindowMs(clamped, recentUnitDraft))
+  }, [recentAmountDraft, recentUnitDraft, setRecentWindow])
+  const changeRecentUnit = useCallback((unit: RecentUnit) => {
+    setRecentUnitDraft(unit)
+    setRecentWindow(customRecentWindowMs(recentAmountDraft, unit))
+  }, [recentAmountDraft, setRecentWindow])
+  const [recentTick, setRecentTick] = useState(0)
+  useEffect(() => {
+    if (!recentFilterActive) return
+    // Tick often enough that a slot ages out promptly relative to its window
+    // (~1/10th the window), but never faster than every 30s and never slower
+    // than RECENT_TICK_MS — a short custom window shouldn't wake the tab every
+    // few seconds, and a long one shouldn't lag by more than ~10 minutes.
+    const id = setInterval(() => setRecentTick(t => t + 1), recentTickIntervalMs(recentWindowMs))
+    return () => clearInterval(id)
+  }, [recentFilterActive, recentWindowMs])
+  const enrichedSlots = useMemo<Slot[]>(() => {
+    // Snapshot `now` once per recompute so every slot's recency is measured
+    // against the same instant. The last-activity timestamp mirrors the
+    // date-sort comparator (`last_ts` ISO, else `created` ISO).
+    const now = Date.now()
+    return slots.map(s => {
+      const recent = isWithinRecentWindow(s.last_ts || s.created, now, recentWindowMs)
+      return { ...s, unread: unreadSet.has(s.key), recent }
+    })
+    // `recentTick` is an intentional dep: it forces recency to re-evaluate on
+    // the heartbeat above so idle sessions age out of the Recent filter.
+  }, [slots, unreadSet, recentWindowMs, recentTick]) // eslint-disable-line react-hooks/exhaustive-deps
   const filterCounts = useMemo(() => {
     const counts = {} as Record<SessionFilterKey, number>
     for (const filterDef of SESSION_FILTERS) counts[filterDef.key] = enrichedSlots.filter(slot => slot[filterDef.key]).length
@@ -701,6 +813,7 @@ function ChatSidebar({
     document.body.style.userSelect = 'none'
   }, [historyHeight])
   const [cleanupOpen, setCleanupOpen] = useState(false)
+  const [manageTagsOpen, setManageTagsOpen] = useState(false)  // header ⋮ → "Manage tags…" panel (list-view tag CRUD)
   const [filterSortOpen, setFilterSortOpen] = useState(false)
   const [cleanupDays, setCleanupDays] = useState(3)
   const [cleanupExpanded, setCleanupExpanded] = useState(false)
@@ -917,6 +1030,16 @@ function ChatSidebar({
   }, [rawColumns, tagColumnsEnabled])
   const [columnEditId, setColumnEditId] = useState<string | null>(null)  // column whose popover is open
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number } | null>(null)
+  // The column-filter popover is portaled to <body>, so it is outside the trigger's
+  // DOM tab-order and never receives focus on open. columnPopoverRef + the effect
+  // below move focus into it, and closeColumnPopover returns focus to the trigger —
+  // together with the onKeyDown (Escape + Tab-trap) on the popover, this makes the
+  // portaled overlay fully keyboard-operable.
+  const columnPopoverRef = useRef<HTMLDivElement>(null)
+  const closeColumnPopover = useCallback((colId: string) => {
+    setColumnEditId(null)
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-testid="column-edit-${colId}"]`)?.focus())
+  }, [])
   // Anchor the popover to the edit button's bounding rect so it stays put even
   // though it renders in a portal outside the (overflow-hidden) column ancestor.
   useEffect(() => {
@@ -949,35 +1072,22 @@ function ChatSidebar({
     const id = setTimeout(() => document.addEventListener('mousedown', handler), 0)
     return () => { clearTimeout(id); document.removeEventListener('mousedown', handler) }
   }, [columnEditId])
-
-  // Close filter/sort popover on outside click
+  // Move focus into the portaled column-filter popover once it is positioned. We
+  // focus the dialog container itself (tabIndex=-1) — not its first control — so the
+  // screen reader announces the dialog and Tab then walks its fields in order; this
+  // avoids landing on the Close button (first in DOM) or stealing focus into a text field.
   useEffect(() => {
-    if (!filterSortOpen) return
-    const handler = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null
-      if (t?.closest('[data-filter-sort]')) return
-      setFilterSortOpen(false)
-    }
-    const id3 = setTimeout(() => document.addEventListener('mousedown', handler), 0)
-    return () => { clearTimeout(id3); document.removeEventListener('mousedown', handler) }
-  }, [filterSortOpen])
+    if (!columnEditId || !popoverPos) return
+    // Focus only on initial open. popoverPos gets a fresh object on every
+    // resize/scroll reflow, re-running this effect — so bail if focus is already
+    // inside the popover (e.g. the user is typing in the rename input) to avoid
+    // yanking it back to the container.
+    if (columnPopoverRef.current?.contains(document.activeElement)) return
+    const raf = requestAnimationFrame(() => columnPopoverRef.current?.focus())
+    return () => cancelAnimationFrame(raf)
+  }, [columnEditId, popoverPos])
 
-  const createTagMutation = useMutation({
-    mutationFn: ({ name, color, status }: { name: string; color?: string; status?: boolean }) => api.createChatTag(name, color, status),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['chat-tags'] }),
-  })
-  const updateTagMutation = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: { name?: string; color?: string; status?: boolean } }) => api.updateChatTag(id, body),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['chat-tags'] }),
-  })
-  const deleteTagMutation = useMutation({
-    mutationFn: (id: string) => api.deleteChatTag(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['chat-tags'] })
-      queryClient.invalidateQueries({ queryKey: ['tag-columns'] })
-      queryClient.invalidateQueries({ queryKey: ['chat-slots'] })
-    },
-  })
+
   const createColumnMutation = useMutation({
     mutationFn: (body: { name?: string; tag_ids?: string[]; mode?: TagColumnMode }) => api.createTagColumn(body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tag-columns'] }),
@@ -1066,6 +1176,16 @@ function ChatSidebar({
   },
     [enrichedSlots, slotFilter, slotSearchKeys, pinned, sortKey, activeFilters]
   )
+
+  // Flat-view projection: every visible session (foldered + unfoldered) in one
+  // list. Removes ONLY the folder rendering hierarchy — the user's sort
+  // (incl. pin priority) and active filters/search apply exactly as in the
+  // tree, via filteredSlots.
+  const folderNameById = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const f of folders) m[f.id] = f.name
+    return m
+  }, [folders])
 
   // Folder mutations
   const createFolderMutation = useMutation({
@@ -1382,7 +1502,7 @@ function ChatSidebar({
           )}
           <span className="text-[10px] text-muted shrink-0">{count}</span>
           {!(editingId === folder.id && editScope === columnId) && (
-          <span className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+          <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5">
             <select className="text-[10px] text-muted bg-transparent border-none cursor-pointer outline-none max-w-[60px]" title="Default agent" value={folder.default_agent || ''} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { default_agent: e.target.value } }) }}>
               <option value="">agent…</option>
               {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
@@ -1442,6 +1562,12 @@ function ChatSidebar({
   // can render in several columns at once; same layoutId in one LayoutGroup
   // collides (Framer paints one, hides the rest). Distinct scope = distinct id.
   const renderSessionRow = (s: Slot, _indent: number, showDivider: boolean, scope = 'list') => {
+    // Flat view shares the tree's layoutId namespace so Framer Motion treats a
+    // row as the SAME element across the view toggle and animates it from its
+    // tree position into the flat lane (and back). Safe: the two views are
+    // ternary branches — never mounted simultaneously — so IDs can't collide.
+    // Behavior stays keyed on the real scope ('flat' disables DnD etc.).
+    const layoutScope = scope === 'flat' ? 'list' : scope
     const agentName = s.agent || defaultAgent || ''
     const agentMeta = installedAgents.find(a => a.name === agentName)
     const isAim = agentMeta?.source === 'aim'
@@ -1472,7 +1598,7 @@ function ChatSidebar({
       onRename: () => { const sl = slots.find(x => x.key === s.key); suppressMenuRestoreRef.current = true; setRenamingSlot(s.key); setRenameScope(scope); setRenameValue(sl?.title && sl.title !== sl.key ? sl.title : '') },
     }
     return (
-      <motion.div key={s.key} layout="position" layoutId={`slot-${scope}-${s.key}`}
+      <motion.div key={s.key} layout="position" layoutId={`slot-${layoutScope}-${s.key}`}
         data-slot-key={s.key}
         initial={{ opacity: 0, x: -12 }}
         animate={{ opacity: 1, x: 0 }}
@@ -1481,17 +1607,36 @@ function ChatSidebar({
           {({ setNodeRef, listeners, isDragging }) => (
         <ContextMenu>
           <ContextMenuTrigger asChild>
-        {/* Session row: a dnd-kit draggable node wrapped by a ContextMenuTrigger;
-            adding tabIndex/keyboard here fights the DnD keyboard sensor and the
-            context-menu trigger, so scope-disable the interaction/click rules. */}
-        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
         <div ref={scope === 'list' ? setNodeRef : undefined} {...(scope === 'list' ? listeners : {})}
           data-draggable={(renamingSlot !== s.key).toString()}
           className={`session-row group relative flex items-start gap-2.5 px-4 py-2 rounded-md text-sm transition-all select-none ${isActive ? !connected ? 'session-active text-text-strong bg-accent-subtle cursor-not-allowed' : 'session-active text-text-strong bg-accent-subtle cursor-pointer' : !connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''} ${isDragging ? 'opacity-40' : ''}`}
           style={boostStyle as React.CSSProperties}
-          draggable={(scope !== 'list' && renamingSlot !== s.key) && (connected || isActive)}
+          draggable={(scope !== 'list' && scope !== 'flat' && renamingSlot !== s.key) && (connected || isActive)}
           {...offlineProps(connected, 'switch sessions')}
-          onDragStart={scope !== 'list' ? (e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }) : undefined}
+          role="button"
+          tabIndex={0}
+          aria-current={isActive ? 'true' : undefined}
+          aria-disabled={!connected}
+          onKeyDown={e => {
+            // WCAG 2.1.1: session rows must be operable via keyboard.
+            // Enter/Space activates the row (same as click). Other keys are
+            // forwarded to dnd-kit's listener (this prop appears after the
+            // {...listeners} spread, so last-prop-wins would otherwise clobber
+            // it) — useful for continuing a pointer-initiated drag via arrow
+            // keys. Note: keyboard-initiated drag pickup was never functional
+            // for these rows (plain useDraggable without SortableContext), so
+            // consuming Enter/Space here does not regress it.
+            if (e.key !== 'Enter' && e.key !== ' ') {
+              if (scope === 'list') (listeners as Record<string, (e: React.KeyboardEvent) => void> | undefined)?.onKeyDown?.(e)
+              return
+            }
+            if ((e.target as HTMLElement) !== e.currentTarget) return // don't hijack inner buttons
+            e.preventDefault()
+            if (!connected) return
+            dispatch(switchSlot(s.key))
+            onSelectSlot?.(s.key)
+          }}
+          onDragStart={scope !== 'list' && scope !== 'flat' ? (e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }) : undefined}
           onClick={e => {
             if ((e.target as HTMLElement).closest?.('[data-fork]')) { sessionActions.duplicate(s.key); return }
             if ((e.target as HTMLElement).closest?.('[data-close]')) { sessionActions.close(s.key); return }
@@ -1533,7 +1678,20 @@ function ChatSidebar({
                     {s.memory_mode === 'temporary' && <span className="text-aim" title="Temporary — no memory reads or writes"><VenetianMask size={10} /></span>}
                   </>}
               {s.mode === 'orchestrator' && <span className="text-[11px] px-1 py-0 rounded bg-accent/15 text-accent font-medium" title="Autopilot mode">Autopilot</span>}
-              {(s.last_ts || s.created) && <span className="ml-auto text-[11px] text-muted font-normal shrink-0">{fmtRelativeTime(s.last_ts || s.created!)}</span>}
+              {/* Trailing meta grouped under ONE ml-auto: two sibling auto
+               *  margins would split the free space and strand the folder
+               *  chip mid-row (AutoSDE, CR-290079557). */}
+              {(scope === 'flat' && slotFolders[s.key] && folderNameById[slotFolders[s.key]]) || s.last_ts || s.created ? (
+                <span className="ml-auto inline-flex items-center gap-1 shrink-0">
+                  {scope === 'flat' && slotFolders[s.key] && folderNameById[slotFolders[s.key]] && (
+                    <span className="text-[10px] text-muted font-normal inline-flex items-center gap-0.5 max-w-[90px]" title={`In folder: ${folderNameById[slotFolders[s.key]]}`}>
+                      <Folder size={9} className="shrink-0" aria-hidden />
+                      <span className="truncate">{folderNameById[slotFolders[s.key]]}</span>
+                    </span>
+                  )}
+                  {(s.last_ts || s.created) && <span className="text-[11px] text-muted font-normal shrink-0">{fmtRelativeTime(s.last_ts || s.created!)}</span>}
+                </span>
+              ) : null}
             </div>
             <div className="text-[13px] font-semibold leading-snug line-clamp-2 break-words text-text" title={s.title && s.title !== s.key ? s.title : s.key}>
               {s.forked_from && slots.some(x => x.key === s.forked_from!.replace(/^dashboard:/, '')) && (
@@ -1567,7 +1725,7 @@ function ChatSidebar({
             ) : s.last_message ? (
               <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>
             ) : null}
-            {tagColumnsEnabled && s.tags && s.tags.length > 0 && (
+            {s.tags && s.tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-1">
                 {s.tags.map(tid => {
                   const t = tagById[tid]
@@ -1661,7 +1819,7 @@ function ChatSidebar({
         <span className="text-[11px] text-muted tabular-nums shrink-0">{count}</span>
         {folder.default_agent && <span className="text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded-full shrink-0 truncate max-w-[60px]" title={`Default agent: ${folder.default_agent}`}>{folder.default_agent}</span>}
         {!(editingId === folder.id && editScope === 'list') && (
-        <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
+        <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
           <select className="text-[10px] text-muted bg-transparent border-none cursor-pointer outline-none max-w-[70px]" title="Default agent for new chats" value={folder.default_agent || ''} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); updateFolderMutation.mutate({ id: folder.id, body: { default_agent: e.target.value } }) }}>
             <option value="">agent…</option>
             {installedAgents.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
@@ -1828,6 +1986,10 @@ function ChatSidebar({
                 <Cpu size={14} className="text-muted" />
                 Switch all to model…
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setManageTagsOpen(o => !o)}>
+                <TagIcon size={14} className="text-muted" />
+                Manage tags…
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           {/* Split create-button: main segment = one-click New chat; caret
@@ -1980,69 +2142,189 @@ function ChatSidebar({
         </div>
       )}
 
+      {/* Manage-tags panel — mirrors the Clean Up / Switch All panels. Renders
+       *  the shared TagManagerList in 'manage' mode (no column context), so tag
+       *  CRUD is reachable in list view too, not only from a board column. */}
+      {manageTagsOpen && (
+        <div data-testid="manage-tags-panel" className="mx-2 mb-2 p-3 rounded-lg bg-bg border border-border shadow-md text-sm animate-rise">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-medium text-text-strong"><TagIcon size={14} className="lucide-inline" /> Manage Tags</div>
+            <button type="button" className="text-muted hover:text-text bg-transparent border-none cursor-pointer p-0 leading-none" onClick={() => setManageTagsOpen(false)} aria-label="Close"><X size={13} /></button>
+          </div>
+          <div className="text-muted text-[12px] mb-2">Rename, flag as status, or delete tags. Changes apply everywhere tags are shown.</div>
+          <TagManagerList mode="manage" />
+        </div>
+      )}
+
       {/* Search with inline sort/filter control */}
       <div className="px-2 pt-2 pb-1">
         <div className="relative">
-          <SearchInput className={`w-full ${slotFilter ? '[&>input]:pr-14' : '[&>input]:pr-9'}`} placeholder="Search sessions…" value={slotFilter} onChange={e => setSlotFilter(e.target.value)} />
+          <SearchInput className={`w-full ${slotFilter ? (folders.length > 0 ? '[&>input]:pr-[76px]' : '[&>input]:pr-14') : (folders.length > 0 ? '[&>input]:pr-14' : '[&>input]:pr-9')}`} placeholder="Search sessions…" value={slotFilter} onChange={e => setSlotFilter(e.target.value)} />
           {slotFilter && (
-            <button type="button" className="absolute right-8 top-1/2 -translate-y-1/2 text-muted hover:text-text cursor-pointer bg-transparent border-none p-0 leading-none transition-colors" onClick={() => setSlotFilter('')} aria-label="Clear search"><X size={13} /></button>
+            <button type="button" className={`absolute ${folders.length > 0 ? 'right-[56px]' : 'right-8'} top-1/2 -translate-y-1/2 text-muted hover:text-text cursor-pointer bg-transparent border-none p-0 leading-none transition-colors`} onClick={() => setSlotFilter('')} aria-label="Clear search"><X size={13} /></button>
           )}
-          <div className="absolute right-1 inset-y-0 flex items-center" data-filter-sort>
+          <div className="absolute right-1 inset-y-0 flex items-center gap-0.5">
+            {/* Flat-view toggle only makes sense when folders exist — without
+             *  them the list is already flat. */}
+            {folders.length > 0 && (
             <button
               type="button"
-              className="relative w-6 h-6 rounded text-muted flex items-center justify-center cursor-pointer transition-colors hover:text-text hover:bg-bg-hover bg-transparent border-none"
-              onClick={() => setFilterSortOpen(o => !o)}
-              title="Sort & filter sessions"
-              aria-label="Sort and filter sessions"
-              aria-haspopup="menu"
-              aria-expanded={filterSortOpen}
+              className={`relative w-6 h-6 rounded flex items-center justify-center cursor-pointer transition-colors border-none ${flatView ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`}
+              onClick={toggleFlatView}
+              title={flatView ? 'Back to folder view' : 'Flat view — all chats without folders'}
+              aria-label={flatView ? 'Switch to folder view' : 'Switch to flat view (all chats without folders)'}
+              aria-pressed={flatView}
+              data-testid="flat-view-toggle"
             >
-              <ListFilter size={14} />
-              {filterCounts['unread'] > 0 && (
-                <span
-                  aria-hidden="true"
-                  className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
-                >
-                  {filterCounts['unread'] > 99 ? '99+' : filterCounts['unread']}
-                </span>
-              )}
+              <List size={14} />
             </button>
-            {filterSortOpen && (
-            <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-bg-elevated shadow-lg py-1 animate-rise" role="menu">
-              <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Filter</div>
-              {SESSION_FILTERS.map(filterDef => {
-                const active = activeFilters.has(filterDef.key)
-                const slotCount = filterCounts[filterDef.key] ?? 0
-                return (
-                  <button
-                    key={filterDef.key}
-                    role="menuitemcheckbox"
-                    aria-checked={active}
-                    className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                    onClick={() => toggleFilter(filterDef.key)}
-                  >
-                    {filterDef.icon(active)}
-                    <span className="flex-1">{filterDef.label}{slotCount > 0 ? ` (${slotCount})` : ''}</span>
-                    {active && <Check size={14} className="text-accent" />}
-                  </button>
-                )
-              })}
-              <div className="my-1 border-t border-border" />
-              <div className="px-3 pt-1 pb-1 text-[11px] font-medium text-muted uppercase tracking-[.04em]">Sort by</div>
-              {SORT_OPTIONS.map(o => (
+            )}
+            <DropdownMenu open={filterSortOpen} onOpenChange={setFilterSortOpen}>
+              <DropdownMenuTrigger asChild>
                 <button
-                  key={o.value}
-                  role="menuitemradio"
-                  aria-checked={sortKey === o.value}
-                  className="w-full px-3 py-1.5 text-left text-[13px] text-text flex items-center gap-2 hover:bg-bg-hover cursor-pointer bg-transparent border-none transition-colors"
-                  onClick={() => { setSortKey(o.value); safeSetItem(SORT_LS_KEY, o.value); setFilterSortOpen(false) }}
+                  type="button"
+                  className="relative w-6 h-6 rounded text-muted flex items-center justify-center cursor-pointer transition-colors hover:text-text hover:bg-bg-hover bg-transparent border-none"
+                  title="Sort & filter sessions"
+                  aria-label="Sort and filter sessions"
                 >
-                  <span className="flex-1">{o.label}</span>
-                  {sortKey === o.value && <Check size={14} className="text-accent" />}
+                  <ListFilter size={14} />
+                  {filterCounts['unread'] > 0 && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-[3px] rounded-full bg-[var(--info)] text-white text-[10px] font-semibold leading-[14px] text-center pointer-events-none shadow-[0_0_4px_rgba(59,130,246,.5)]"
+                    >
+                      {filterCounts['unread'] > 99 ? '99+' : filterCounts['unread']}
+                    </span>
+                  )}
                 </button>
-              ))}
-            </div>
-          )}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-[180px]">
+                <DropdownMenuLabel className="text-[11px] uppercase tracking-[.04em]">Filter</DropdownMenuLabel>
+                {SESSION_FILTERS.map(filterDef => {
+                  const active = activeFilters.has(filterDef.key)
+                  const slotCount = filterCounts[filterDef.key] ?? 0
+                  const isRecent = filterDef.key === 'recent'
+                  if (isRecent) {
+                    // Recent gets a nested submenu (flyout) for choosing the
+                    // window. The whole row is a single SubTrigger (one focusable
+                    // menu item with correct roving-tabindex). Toggling the
+                    // filter must be reachable by every input modality:
+                    //  - pointer/touch: onClick toggles; we deliberately do NOT
+                    //    preventDefault so Radix's own click-to-open still fires
+                    //    (touch/coarse pointers have no hover path to the picker).
+                    //  - keyboard: Radix routes Enter/Space/ArrowRight to open the
+                    //    submenu and the SubTrigger is a div (no synthetic click),
+                    //    so onClick never fires for keys. onKeyDown toggles on
+                    //    Enter/Space (preventDefault suppresses Radix's open for
+                    //    just those keys); ArrowRight falls through and opens.
+                    return (
+                      <DropdownMenuSub key={filterDef.key}>
+                        <DropdownMenuSubTrigger
+                          title={filterDef.description}
+                          onClick={() => toggleFilter('recent')}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              toggleFilter('recent')
+                            }
+                          }}
+                        >
+                          {filterDef.icon(active)}
+                          <span className="flex-1 truncate">
+                            {filterDef.label}
+                            <span className="text-muted"> · {formatRecentWindow(recentWindowMs)}</span>
+                            {slotCount > 0 ? ` (${slotCount})` : ''}
+                          </span>
+                          {active && <Check size={14} className="text-accent shrink-0" />}
+                          <ChevronRight size={13} className="text-muted shrink-0" />
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="min-w-[190px] p-2">
+                          {/* Non-menu-item controls: stop click/keydown from
+                              reaching Radix so choosing a window doesn't dismiss
+                              the menu (mirrors the folder-rename input pattern). */}
+                          <div
+                            onClick={e => e.stopPropagation()}
+                            onMouseDown={e => e.stopPropagation()}
+                            onKeyDown={e => e.stopPropagation()}
+                          >
+                            <div className="px-1 pb-1 text-[11px] text-muted">Within</div>
+                            <div className="flex flex-wrap gap-1 px-1 mb-2">
+                              {RECENT_WINDOW_PRESETS.map(preset => (
+                                <button
+                                  key={preset.ms}
+                                  type="button"
+                                  aria-pressed={recentWindowMs === preset.ms}
+                                  className="px-2 py-0.5 rounded-full text-[11px] cursor-pointer border transition-colors"
+                                  style={recentWindowMs === preset.ms
+                                    ? { background: 'color-mix(in srgb, var(--ok) 12%, transparent)', color: 'var(--ok)', borderColor: 'color-mix(in srgb, var(--ok) 35%, transparent)' }
+                                    : { background: 'transparent', color: 'var(--muted)', borderColor: 'var(--border)' }}
+                                  onClick={() => selectRecentPreset(preset.ms)}
+                                >
+                                  {preset.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="px-1 text-[12px] text-muted">
+                              <div className="mb-1">Custom</div>
+                              <div className="flex items-center gap-1.5">
+                                {/* Draft-string value so the field can be cleared
+                                    / partially typed; commit + clamp on blur or
+                                    Enter. Unit changes commit immediately but keep
+                                    the amount as-typed (no re-derivation flip). */}
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={9999}
+                                  value={recentAmountDraft}
+                                  onChange={e => setRecentAmountDraft(e.target.value)}
+                                  onBlur={commitRecentAmount}
+                                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitRecentAmount() } }}
+                                  aria-label="Custom recency amount"
+                                  className="w-12 shrink-0 px-1.5 py-0.5 rounded border border-border bg-bg-elevated text-text text-[12px]"
+                                />
+                                <select
+                                  value={recentUnitDraft}
+                                  onChange={e => changeRecentUnit(e.target.value as RecentUnit)}
+                                  aria-label="Custom recency unit"
+                                  className="flex-1 min-w-0 px-1.5 py-0.5 rounded border border-border bg-bg-elevated text-text text-[12px] cursor-pointer"
+                                >
+                                  <option value="minutes">min</option>
+                                  <option value="hours">hours</option>
+                                  <option value="days">days</option>
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    )
+                  }
+                  return (
+                    <DropdownMenuItem
+                      key={filterDef.key}
+                      title={filterDef.description}
+                      // Keep the menu open so multiple filters can be toggled.
+                      onSelect={e => { e.preventDefault(); toggleFilter(filterDef.key) }}
+                    >
+                      {filterDef.icon(active)}
+                      <span className="flex-1 truncate">{filterDef.label}{slotCount > 0 ? ` (${slotCount})` : ''}</span>
+                      {active && <Check size={14} className="text-accent shrink-0" />}
+                    </DropdownMenuItem>
+                  )
+                })}
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="text-[11px] uppercase tracking-[.04em]">Sort by</DropdownMenuLabel>
+                {SORT_OPTIONS.map(o => (
+                  <DropdownMenuItem
+                    key={o.value}
+                    onSelect={() => { setSortKey(o.value); safeSetItem(SORT_LS_KEY, o.value) }}
+                  >
+                    <span className="flex-1">{o.label}</span>
+                    {sortKey === o.value && <Check size={14} className="text-accent shrink-0" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </div>
@@ -2060,7 +2342,7 @@ function ChatSidebar({
                 title={`Clear ${filterDef.label.toLowerCase()} filter`}
                 aria-label={`Clear ${filterDef.label.toLowerCase()} filter`}
               >
-                {filterDef.label}{slotCount > 0 ? ` (${slotCount})` : ''}
+                {filterDef.label}{filterDef.key === 'recent' ? ` · ${formatRecentWindow(recentWindowMs)}` : ''}{slotCount > 0 ? ` (${slotCount})` : ''}
                 <X size={11} />
               </button>
             )
@@ -2068,7 +2350,57 @@ function ChatSidebar({
         </div>
       )}
       <LayoutGroup id="chat-slots">
-        {orderedColumns.length === 0 ? (
+        {flatView && folders.length > 0 ? (
+          // Flat view: every chat exploded out of its folder into one lane.
+          // Removes only the folder rendering hierarchy — sort, pin priority,
+          // filters, and search all apply as usual (filteredSlots). No folder
+          // tree, no DnD. Takes precedence over the tag-columns layout.
+          // Inactive without folders (the toggle is hidden then too), so a
+          // persisted flat preference can never strand the user.
+          <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col" data-testid="flat-view-lane">
+            {(() => {
+              // Date segments (Today / Yesterday / Last 7 Days / …) between
+              // rows — resurrects the 9bb0f71 active-list pattern: only for
+              // date sorts (segments mislead on name/created order, same
+              // guard as the history pane), and pinned rows render first
+              // without segments since pinning overrides date order.
+              const isDateSort = sortKey === 'date-desc' || sortKey === 'date-asc'
+              const segOf = (s: Slot) => isDateSort && !pinned.has(s.key) ? dateSegment(s.last_ts || s.created) : ''
+              let prevSeg = ''
+              return filteredSlots.map((s, i) => {
+                const seg = segOf(s)
+                const showHeader = seg !== '' && seg !== prevSeg
+                if (seg) prevSeg = seg
+                const next = i < filteredSlots.length - 1 ? filteredSlots[i + 1] : null
+                const nextIsActive = next != null && activeSlot === next.key
+                const isActive = activeSlot === s.key
+                // No divider before a segment header — the header separates.
+                const nextSeg = next ? segOf(next) : seg
+                const showDivider = next != null && !isActive && !nextIsActive && nextSeg === seg
+                return (
+                  <Fragment key={s.key}>
+                    {showHeader && (
+                      <div data-testid="date-segment-header" className="px-3 pt-3 pb-1 text-[11px] font-semibold text-muted uppercase tracking-[.06em] select-none first:pt-1">{seg}</div>
+                    )}
+                    {renderSessionRow(s, 0, showDivider, 'flat')}
+                  </Fragment>
+                )
+              })
+            })()}
+            {filteredSlots.length === 0 && (
+              <div className="px-3 py-4 text-[12px] text-muted">No sessions match</div>
+            )}
+            {!historyOpen && (
+              <button
+                type="button"
+                onClick={() => { setHistoryOpen(true); dispatch(fetchHistory(false)) }}
+                className="mt-1 mx-1 px-2 py-1.5 text-left text-[12px] text-muted hover:text-accent hover:bg-accent-subtle rounded-md cursor-pointer bg-transparent border-none transition-colors"
+              >
+                Show all older sessions
+              </button>
+            )}
+          </motion.div>
+        ) : orderedColumns.length === 0 ? (
           // Legacy single-lane layout (identical to pre-columns behavior)
           <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col">
             {/* One DndContext owns folder reorder (sortable) + session drag-to-
@@ -2240,13 +2572,30 @@ function ChatSidebar({
                       overflow-hidden ancestor cannot clip it; viewport-anchored
                       to the edit button via popoverPos. */}
                   {columnEditId === col.id && popoverPos && createPortal(
-                    <div role="presentation" data-column-popover={col.id}
-                      className="fixed z-[9100] bg-bg-elevated border border-border rounded-lg shadow-lg p-2 min-w-[240px] text-[13px]"
+                    /* Non-modal disclosure: role=dialog + a Tab-trap contains keyboard
+                       focus, but we deliberately omit aria-modal — the popover has no
+                       backdrop and is outside-click-dismissible, so claiming the rest of
+                       the page is inert would mislead screen readers. */
+                    <div ref={columnPopoverRef} role="dialog" aria-label={`Filter tags: ${col.name || 'column'}`} tabIndex={-1} data-column-popover={col.id}
+                      className="fixed z-[9100] bg-bg-elevated border border-border rounded-lg shadow-lg p-2 min-w-[240px] text-[13px] outline-none"
                       style={{ top: popoverPos.top, left: popoverPos.left }}
-                      onClick={e => e.stopPropagation()}>
+                      onClick={e => e.stopPropagation()}
+                      onKeyDown={e => {
+                        if (e.key === 'Escape') { e.stopPropagation(); closeColumnPopover(col.id); return }
+                        if (e.key !== 'Tab') return
+                        // Trap Tab within the dialog — portal content sits at the end of
+                        // <body>, so without this Tab would jump into unrelated page chrome.
+                        const root = columnPopoverRef.current
+                        if (!root) return
+                        const f = Array.from(root.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+                        if (f.length === 0) return
+                        const first = f[0], last = f[f.length - 1]
+                        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+                        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+                      }}>
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[11px] font-semibold text-muted uppercase tracking-wider">Column filter</span>
-                        <button className="text-muted hover:text-text bg-transparent border-none cursor-pointer p-0" onClick={() => setColumnEditId(null)} aria-label="Close"><X size={13} /></button>
+                        <button className="text-muted hover:text-text bg-transparent border-none cursor-pointer p-0" onClick={() => closeColumnPopover(col.id)} aria-label="Close"><X size={13} /></button>
                       </div>
                       <Input className="w-full py-1 text-[12px] mb-2" placeholder="Column name (optional)" defaultValue={col.name} onBlur={e => { const v = e.target.value.trim(); if (v !== col.name) updateColumnMutation.mutate({ id: col.id, body: { name: v } }) }} />
                       <div className="flex items-center gap-1 mb-2" role="radiogroup" aria-label="Match mode">
@@ -2266,72 +2615,12 @@ function ChatSidebar({
                         />
                         Include untagged sessions
                       </label>
-                      <div className="flex flex-col gap-0.5 max-h-[260px] overflow-y-auto">
-                        {[...tags].sort((a, b) => a.order - b.order).map(t => {
-                          const on = col.tag_ids.includes(t.id)
-                          const nextIds = on ? col.tag_ids.filter(x => x !== t.id) : [...col.tag_ids, t.id]
-                          return (
-                            <div key={t.id} data-testid={`tag-row-${t.id}`} className={`group/tag flex items-center gap-1.5 px-1.5 py-1 rounded transition-all ${on ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`}>
-                              {/* Filter toggle — the color swatch is the click target */}
-                              <button type="button" role="menuitemcheckbox" aria-checked={on} aria-label={`${on ? 'Remove' : 'Include'} ${t.name} from filter`}
-                                className="w-4 h-4 rounded-sm border border-border shrink-0 cursor-pointer relative"
-                                style={{ background: t.color }}
-                                onClick={() => updateColumnMutation.mutate({ id: col.id, body: { tag_ids: nextIds } })}>
-                                {on && <span className="absolute inset-0 flex items-center justify-center" style={{ color: t.color === '#ffffff' ? '#000' : '#fff' }}><Check size={10} /></span>}
-                              </button>
-                              {/* Inline rename */}
-                              <input
-                                type="text"
-                                data-testid={`tag-name-${t.id}`}
-                                aria-label={`Rename tag ${t.name}`}
-                                defaultValue={t.name}
-                                className="flex-1 min-w-0 bg-transparent border-none outline-none text-[12px] text-text py-0 px-0.5 rounded focus:bg-bg-elevated focus:border focus:border-accent/50"
-                                onBlur={e => { const v = e.target.value.trim(); if (v && v !== t.name) updateTagMutation.mutate({ id: t.id, body: { name: v } }) }}
-                                onKeyDown={e => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); else if (e.key === 'Escape') (e.currentTarget as HTMLInputElement).blur() }}
-                                onClick={e => e.stopPropagation()}
-                              />
-                              {/* Status lightning — filled for status tags, muted ghost for non-status on hover */}
-                              <button type="button" data-testid={`tag-status-${t.id}`}
-                                className={`shrink-0 cursor-pointer bg-transparent border-none p-[2px] transition-all ${t.status ? 'text-accent hover:text-accent-hover' : 'text-transparent group-hover/tag:text-muted hover:!text-text'}`}
-                                title={t.status ? 'Status tag (mutually exclusive on cards) — click to make regular' : 'Make status tag'}
-                                aria-pressed={!!t.status}
-                                aria-label={t.status ? `Remove status flag from ${t.name}` : `Make ${t.name} a status tag`}
-                                onClick={() => updateTagMutation.mutate({ id: t.id, body: { status: !t.status } })}>
-                                <Zap size={11} fill={t.status ? 'currentColor' : 'none'} />
-                              </button>
-                              {/* Delete */}
-                              <button type="button" data-testid={`tag-delete-${t.id}`}
-                                className="shrink-0 cursor-pointer bg-transparent border-none p-[2px] text-transparent group-hover/tag:text-muted hover:!text-danger transition-all"
-                                title={`Delete tag "${t.name}"`}
-                                aria-label={`Delete tag ${t.name}`}
-                                onClick={() => { if (confirm(`Delete tag "${t.name}"?`)) deleteTagMutation.mutate(t.id) }}>
-                                <X size={11} />
-                              </button>
-                            </div>
-                          )
-                        })}
-                      </div>
-                      {/* Create new tag */}
-                      <div className="mt-2 border-t border-border pt-2 flex items-center gap-1.5">
-                        <span className="w-4 h-4 rounded-sm border border-dashed border-border shrink-0 flex items-center justify-center text-muted"><Plus size={10} /></span>
-                        <input
-                          type="text"
-                          data-testid={`tag-create-${col.id}`}
-                          aria-label="New tag name"
-                          placeholder="New tag… ↵"
-                          className="flex-1 min-w-0 bg-transparent border-none outline-none text-[12px] text-text py-0 px-0.5 placeholder:text-muted/60"
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                              const el = e.currentTarget as HTMLInputElement
-                              const v = el.value.trim()
-                              if (!v) return
-                              createTagMutation.mutate({ name: v })
-                              el.value = ''
-                            }
-                          }}
-                          onClick={e => e.stopPropagation()}
-                        />
-                      </div>
+                      <TagManagerList
+                        mode="column-filter"
+                        selectedIds={col.tag_ids}
+                        onToggleTag={(_tagId, nextIds) => updateColumnMutation.mutate({ id: col.id, body: { tag_ids: nextIds } })}
+                        createTestId={`tag-create-${col.id}`}
+                      />
                       <div className="mt-2 flex justify-end">
                         <button className="text-[11px] text-muted hover:text-text bg-transparent border-none cursor-pointer" onClick={() => { updateColumnMutation.mutate({ id: col.id, body: { tag_ids: [] } }) }}>Clear filter</button>
                       </div>
@@ -2508,10 +2797,22 @@ function ChatSidebar({
                   const agentColor = agentColorFor(agentName)
                   const isDashboard = s.key.startsWith('dashboard')
                   return (
-                    /* History row uses onMouseDown (preventDefault) to resume/delete
-                       without stealing focus from the transcript; scope-disable the rule. */
-                    /* eslint-disable-next-line jsx-a11y/no-static-element-interactions */
-                    <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} onMouseDown={e => {
+                    <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} role="button" tabIndex={0} aria-disabled={!connected} onKeyDown={e => {
+                      // WCAG 2.1.1: history rows must be resumable via keyboard.
+                      if (e.key !== 'Enter' && e.key !== ' ') return
+                      if ((e.target as HTMLElement) !== e.currentTarget) return
+                      e.preventDefault()
+                      if (!connected) return
+                      dispatch(resumeFromHistory({ key: s.key, title: s.title || s.key }))
+                    }} onMouseDown={e => {
+                      // NOTE: pointer activation lives on onMouseDown (not onClick). For a
+                      // div[role="button"], browsers do NOT synthesize a click from Enter
+                      // (that only happens for native buttons/links — hence the onKeyDown
+                      // handler above), and AT activation (e.g. VoiceOver VO+Space)
+                      // synthesizes a click INSTEAD of key events. So each path activates
+                      // exactly once. Do NOT add an e.detail === 0 guard here or in any
+                      // future onClick: AT-synthesized clicks have detail 0 and would be
+                      // silently dropped, breaking screen-reader activation.
                       e.preventDefault()
                       if ((e.target as HTMLElement).closest?.('[data-close]')) { if (confirm('Are you sure you want to delete this history session?')) dispatch(deleteHistorySession(s.key)); return }
                       if (!connected) return
@@ -2538,7 +2839,7 @@ function ChatSidebar({
                         <div className="text-[13px] leading-snug line-clamp-2 break-words">{s.title || s.key}</div>
                       </div>
                       {/* Floating hover button group — matches session-row pattern */}
-                      <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
+                      <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
                         <button type="button" title="Delete history session" aria-label="Delete history session" className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all bg-transparent border-none" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (confirm('Are you sure you want to delete this history session?')) dispatch(deleteHistorySession(s.key)) }}><X size={12} /></button>
                       </div>
                     </div>

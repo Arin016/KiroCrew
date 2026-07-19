@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -215,6 +216,37 @@ class TestBuildLauncherScript:
         assert script.index("sys.path[:]") < script.index("import ctypes")
         # sys must be imported first (it is a builtin and cannot be shadowed).
         assert script.index("import sys") < script.index("sys.path[:]")
+
+    def test_launcher_has_no_unimportable_kiro_crew_refs(self):
+        """The launcher runs as a standalone ~/.kirocrew/run script with the
+        launcher dir scrubbed from sys.path, so it CANNOT import kiro_crew.
+        Referencing a module-level helper like ``platform_compat`` NameErrors at
+        runtime and crashed every command cron. Guard: chmod is inlined, the
+        script stays syntactically valid, and there is no module-qualified
+        RUNTIME reference to any host-only module the isolated launcher can't
+        import.
+
+        The naive ``"platform_compat" not in script`` string check that upstream
+        also carries is DELETED here: the fork's launcher COMMENT intentionally
+        names platform_compat (explaining why the inline os.chmod must NOT use
+        it), so a substring check false-positives. The AST guard below proves
+        there is no runtime module-qualified reference, which is the correct
+        behavioral check.
+        """
+        for level in ("strict", "standard", "cc"):
+            script = _build_launcher_script(level)
+            assert "os.chmod(dest, 0o444)" in script, f"{level}: inline chmod missing"
+            compile(script, "<launcher>", "exec")
+            # AST-based so mentions in comments/strings (e.g. the fork's own
+            # explanatory comment naming platform_compat/kiro_crew) don't
+            # false-positive — only module-qualified attribute access counts.
+            used_modules = {
+                node.value.id
+                for node in ast.walk(ast.parse(script))
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            }
+            forbidden = used_modules & {"platform_compat", "kiro_crew", "logger", "logging"}
+            assert not forbidden, f"{level}: launcher references un-importable module(s) {forbidden}"
 
 
 class TestLauncherStdlibShadowing:
@@ -675,10 +707,13 @@ class TestCleanupStaleSandboxProfiles:
         stale_file.write_text("(version 1)")
 
         with patch("kiro_crew.sandbox.os.path.expanduser", return_value=str(tmp_path)):
-            with patch("kiro_crew.sandbox.os.kill", side_effect=OSError("No such process")):
-                cleanup_stale_sandbox_profiles()
+            with patch(
+                "kiro_crew.sandbox.platform_compat.pid_exists", return_value=False
+            ):
+                removed = cleanup_stale_sandbox_profiles(legacy_dir=str(tmp_path / "nonexistent"))
 
         assert not stale_file.exists()
+        assert removed == 1
 
     def test_preserves_live_pid_profile(self, tmp_path):
         """Profile file whose PID is alive (current process) is preserved."""
@@ -690,9 +725,10 @@ class TestCleanupStaleSandboxProfiles:
         live_file.write_text("(version 1)")
 
         with patch("kiro_crew.sandbox.os.path.expanduser", return_value=str(tmp_path)):
-            cleanup_stale_sandbox_profiles()
+            removed = cleanup_stale_sandbox_profiles(legacy_dir=str(tmp_path / "nonexistent"))
 
         assert live_file.exists()
+        assert removed == 0
 
     def test_ignores_non_sandbox_files(self, tmp_path):
         """Files not matching kirocrew_sandbox_*.sb pattern are left alone."""
@@ -704,9 +740,10 @@ class TestCleanupStaleSandboxProfiles:
         other_file.write_text("keep me")
 
         with patch("kiro_crew.sandbox.os.path.expanduser", return_value=str(tmp_path)):
-            cleanup_stale_sandbox_profiles()
+            removed = cleanup_stale_sandbox_profiles(legacy_dir=str(tmp_path / "nonexistent"))
 
         assert other_file.exists()
+        assert removed == 0
 
 
 class TestResourceLimitPreexec:

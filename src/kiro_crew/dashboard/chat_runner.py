@@ -728,6 +728,24 @@ def _mask_quoted_separators(text: str) -> tuple[str, dict[str, str]]:
 # per-sub-agent identity/status that the stages payload lacked.
 
 
+_NATIVE_SUBAGENT_STALE_SECS = 120.0  # auto-close cards with no progress after 2 min
+
+
+def _native_card_feed(card_output, card_id: str) -> str:
+    """Join a native card's accumulated feed, truncate, and redact.
+
+    Defense in depth: card_output entries are redacted at append time, but
+    never trust LLM output at the broadcast boundary — re-apply both
+    redactions before the payload leaves the process. Single choke point for
+    every ``subagent_done`` result broadcast on the native card path.
+    """
+    feed = "".join((card_output or {}).get(card_id, []))[:8000]
+    if feed:
+        feed, _ = redact_exfiltration_urls(feed)
+        feed, _ = redact_credentials(feed)
+    return feed
+
+
 def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> None:
     """Reconcile per-subagent Activity cards from a kiro-cli
     ``_kiro.dev/subagent/list_update`` notification.
@@ -747,12 +765,16 @@ def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> 
     if not isinstance(subagents, list):
         return
     _running = ("working", "running", "pending", "queued", "in_progress", "")
+    now = time.time()
+    # Track which sids are still reported by kiro-cli this update
+    _seen_sids: set[str] = set()
     for sub in subagents:
         if not isinstance(sub, dict):
             continue
         sid = str(sub.get("sessionId") or "")
         if not sid:
             continue
+        _seen_sids.add(sid)
         card_id = f"native:{_redact_tool_field(sid)}"
         _status_raw = sub.get("status")
         status = _status_raw if isinstance(_status_raw, dict) else {}
@@ -767,7 +789,27 @@ def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> 
                 str(sub.get("initialQuery") or sub.get("sessionName") or "")[:2000]
             )
             task, _ = redact_credentials(task)
-            tracker[sid] = {"started": time.time(), "done": False, "agent": agent, "task": task}
+            # Skip cards with empty task entirely — kiro-cli sometimes emits
+            # list_update notifications where initialQuery/sessionName are both
+            # empty. Showing an Activity card with no meaningful input is
+            # confusing UX ("Starting..." with nothing to explain what it does).
+            # Mark as done immediately so we don't re-process on next update.
+            if not task.strip():
+                tracker[sid] = {
+                    "started": now, "done": True, "agent": agent, "task": "",
+                    "last_activity": now,
+                }
+                logger.debug(
+                    "native subagent skipped (empty task): sid=%s slot=%s",
+                    sid, slot.key,
+                )
+                continue
+            tracker[sid] = {
+                "started": now, "done": False, "agent": agent, "task": task,
+                "last_activity": now,
+            }
+            # Register in state-level dict so DELETE /api/spawn can cancel native cards.
+            _register_native_card(state, card_id, slot.key, sid)
             logger.debug(
                 "native subagent spawn broadcast: id=%s agent=%s slot=%s",
                 card_id, agent, slot.key,
@@ -776,6 +818,13 @@ def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> 
                 "subagent_spawn",
                 {"id": card_id, "slot": slot.key, "task": task, "agent": agent},
             )
+        else:
+            # Card is still being reported this update — keep it alive. Update
+            # unconditionally (not just on non-empty smsg): a card reported
+            # with empty status messages for >120s would otherwise be
+            # auto-closed the instant it disappears from the list, since its
+            # last_activity would still be the creation timestamp.
+            tracker[sid]["last_activity"] = now
         info = tracker[sid]
         if info["done"]:
             continue
@@ -786,7 +835,8 @@ def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> 
                 err, _ = redact_credentials(err)
                 err = err[:200]
             info["done"] = True
-            _feed = "".join((card_output or {}).get(card_id, []))[:8000]
+            _feed = _native_card_feed(card_output, card_id)
+            _unregister_native_card(state, card_id)
             state.broadcast_ws(
                 "subagent_done",
                 {
@@ -808,6 +858,56 @@ def _native_subagent_sync(state, slot, subagents, tracker, card_output=None) -> 
                 {"id": card_id, "slot": slot.key, "tool": tool[:80]},
             )
 
+    # Staleness timeout: auto-close cards that kiro-cli no longer reports and
+    # that have had no activity for too long. This prevents native sub-agent
+    # cards from staying stuck in "Starting..." indefinitely when kiro-cli
+    # fails to emit a terminal status. Cards still present in the current
+    # list_update are alive by definition and never timed out here.
+    for sid, info in list(tracker.items()):
+        if info.get("done"):
+            continue
+        if sid in _seen_sids:
+            continue  # still reported by kiro-cli this update — not stale
+        last_act = info.get("last_activity", info["started"])
+        if now - last_act > _NATIVE_SUBAGENT_STALE_SECS:
+            info["done"] = True
+            _cid = f"native:{_redact_tool_field(sid)}"
+            _feed = _native_card_feed(card_output, _cid)
+            _unregister_native_card(state, _cid)
+            state.broadcast_ws(
+                "subagent_done",
+                {
+                    "id": _cid,
+                    "slot": slot.key,
+                    "elapsed": now - info["started"],
+                    "error": "timed out (no activity)",
+                    "task": info.get("task", ""),
+                    "agent": info.get("agent", ""),
+                    "result": _feed or "(no output received)",
+                },
+            )
+            logger.info(
+                "native subagent %s auto-closed: stale for %.0fs",
+                _cid, now - last_act,
+            )
+
+
+def _register_native_card(state, card_id: str, slot_key: str, session_id: str) -> None:
+    """Register a native subagent card in the state-level dict for cancel support."""
+    if not hasattr(state, "_native_cards"):
+        state._native_cards = {}  # card_id -> {slot, session_id, started}
+    state._native_cards[card_id] = {
+        "slot": slot_key,
+        "session_id": session_id,
+        "started": time.time(),
+    }
+
+
+def _unregister_native_card(state, card_id: str) -> None:
+    """Remove a native subagent card from the state-level dict."""
+    if hasattr(state, "_native_cards"):
+        state._native_cards.pop(card_id, None)
+
 
 def _native_subagent_close_all(state, slot, tracker, card_output=None) -> None:
     """Complete any still-open native subagent cards (turn-end safety net)."""
@@ -816,7 +916,8 @@ def _native_subagent_close_all(state, slot, tracker, card_output=None) -> None:
             continue
         info["done"] = True
         _cid = f"native:{_redact_tool_field(sid)}"
-        _feed = "".join((card_output or {}).get(_cid, []))[:8000]
+        _feed = _native_card_feed(card_output, _cid)
+        _unregister_native_card(state, _cid)
         state.broadcast_ws(
             "subagent_done",
             {
@@ -1362,23 +1463,17 @@ async def _handle_goal_command(
             _sentinel = str(Path.home() / ".kirocrew" / "goal-stop" / f"{_slug}.stop")
             Path(_sentinel).unlink(missing_ok=True)
             _nudge = (
-                f"Continue toward your goal: {_objective}\n\n"
-                "Every cycle, in order:\n"
-                f"1. STOP CHECK: if the file {_sentinel} exists, call the "
-                'autonudge_stop MCP tool (reason="sentinel") and stop.\n'
-                "2. DONE CHECK: decide whether the goal is fully met, verified "
-                "by concrete evidence (a passing test, a built file, command "
-                "output) — not a guess. If met, call autonudge_stop"
-                '(reason="goal met"), post a one-line summary citing the '
-                "evidence, and stop.\n"
-                "3. Otherwise do ONE atomic step toward the goal (<=5 tool "
-                "calls). Make the deliverable durable (write the file / run the "
-                "check) before declaring done.\n\n"
-                "Rules: never git push; never read credential files; if you hit "
-                "a hard blocker needing the user, state it once and call "
-                f'autonudge_stop(reason="blocked"). Budget is {_max_cycles} '
-                "turns (the service stops you at the cap). One short progress "
-                "line per cycle."
+                f"Goal: {_objective}\n"
+                "Each idle cycle, in order: "
+                f'(1) if the file {_sentinel} exists -> autonudge_stop(reason="sentinel") and stop; '
+                "(2) if the goal is fully met by concrete evidence (a passing test, a built file, "
+                'command output — not a guess) -> autonudge_stop(reason="goal met"), post a one-line '
+                "summary citing the evidence, and stop; "
+                "(3) else do ONE atomic step (<=5 tool calls) and make the deliverable durable "
+                "(write the file / run the check) before claiming progress.\n"
+                'Guardrails: never git push; never read credential files. Hard blocker -> state it once and '
+                f'autonudge_stop(reason="blocked"). Budget {_max_cycles} cycles (service stops at '
+                "the cap). One short progress line per cycle."
             )
             await _goal_svc.add(
                 slot.key,
@@ -3222,20 +3317,21 @@ async def _run_chat(
                 # running at turn end (in case a terminal status was missed),
                 # so cards don't stay stuck "running".
                 _native_subagent_close_all(state, slot, _native_tracker, _native_card_output)
-                if event.input_tokens or event.output_tokens or event.credits:
+                _u = event.usage
+                if _u.input_tokens or _u.output_tokens or _u.credits:
                     stats = Stats()
-                    stats.inc_input_tokens(event.input_tokens)
-                    stats.inc_output_tokens(event.output_tokens)
-                    if event.cache_creation_tokens:
-                        stats.inc_cache_creation_tokens(event.cache_creation_tokens)
-                    if event.cache_read_tokens:
-                        stats.inc_cache_read_tokens(event.cache_read_tokens)
-                    if event.cost_usd:
-                        stats.inc_cost_usd(event.cost_usd)
-                    if event.num_turns:
-                        stats.inc_turns(event.num_turns)
-                    if event.duration_ms:
-                        stats.inc_duration_ms(event.duration_ms)
+                    stats.inc_input_tokens(_u.input_tokens)
+                    stats.inc_output_tokens(_u.output_tokens)
+                    if _u.cache_creation_tokens:
+                        stats.inc_cache_creation_tokens(_u.cache_creation_tokens)
+                    if _u.cache_read_tokens:
+                        stats.inc_cache_read_tokens(_u.cache_read_tokens)
+                    if _u.cost_usd:
+                        stats.inc_cost_usd(_u.cost_usd)
+                    if _u.num_turns:
+                        stats.inc_turns(_u.num_turns)
+                    if _u.duration_ms:
+                        stats.inc_duration_ms(_u.duration_ms)
                     try:
                         _provider_name = cfg.agent.provider  # type: ignore[possibly-undefined]
                     except (NameError, AttributeError):
@@ -3257,7 +3353,7 @@ async def _run_chat(
                     )
                 # ── Turn-completion histogram (OTel M2) ──
                 # kirocrew.turn.duration → turn latency p50/p90 + fault rate.
-                _emit_turn_metric(event.duration_ms, event.stop_reason, slot.key)
+                _emit_turn_metric(event.usage.duration_ms, event.stop_reason, slot.key)
                 _stop_reason = event.stop_reason
                 if _stop_reason == STOP_REASON_TOOL_STALL:
                     _stall_tool_title = event.title

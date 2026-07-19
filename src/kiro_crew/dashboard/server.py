@@ -86,6 +86,11 @@ from kiro_crew.dashboard.handlers.auth_refresh import (
     api_auth_me,
     api_auth_refresh,
 )
+from kiro_crew.dashboard.handlers.discover import (
+    api_skills_discover,
+    api_skills_discover_install,
+    api_skills_discover_preview,
+)
 from kiro_crew.dashboard.handlers.knowledge import setup_knowledge_routes
 from kiro_crew.dashboard.handlers.tunnel import api_tunnel_status
 from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog
@@ -153,33 +158,6 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
 
 
-# Base Content-Security-Policy applied to all dashboard responses.
-# See ``_apply_security_headers`` for the full rationale and the
-# instances-mode ``frame-src`` extension.
-_BASE_CSP = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' "
-    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
-    "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
-    "img-src 'self' data: blob: https:; "
-    "font-src 'self' data:; "
-    "connect-src 'self' ws://localhost:* ws://127.0.0.1:*; "
-    "media-src 'self' blob:; "
-    "worker-src 'self' blob:; "
-    "frame-src 'self' blob:{frame_src_extra}; "
-    "object-src 'none'; base-uri 'self'"
-)
-
-_INSTANCES_FRAME_SRC_EXTRA = " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
-
-# Permissions-Policy header. Chrome 143+ changed the default policy so
-# that clipboard-write is DENIED unless explicitly allowlisted, even in
-# secure contexts like http://localhost (crbug.com/414348233). Without
-# this header, ``navigator.clipboard.writeText`` fails with a permissions
-# policy violation, breaking the "Copy link" button on published
-# artifacts. Grant same-origin only; cross-origin remains denied.
-_PERMISSIONS_POLICY = "clipboard-write=(self), clipboard-read=(self)"
-
 # Strict internal API paths — exact paths that ONLY internal processes
 # (mcp-core, doctor, cron) call, never the browser. Access requires loopback
 # AND a matching ``X-Internal-Secret`` header; non-loopback is always denied and
@@ -237,14 +215,58 @@ _MIXED_INTERNAL_API_PATHS = frozenset(
 )
 
 
-def _apply_security_headers(resp: web.StreamResponse, app: web.Application) -> None:
+# Base Content-Security-Policy applied to all dashboard responses.
+# See ``_apply_security_headers`` for the full rationale and the
+# instances-mode ``frame-src`` extension.
+_BASE_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' "
+    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+    "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+    "img-src 'self' data: blob: https:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' ws://localhost:* ws://127.0.0.1:*; "
+    "media-src 'self' blob:; "
+    "worker-src 'self' blob:; "
+    "frame-src 'self' blob:{frame_src_extra}; "
+    "object-src 'none'; base-uri 'self'"
+)
+
+_INSTANCES_FRAME_SRC_EXTRA = " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
+
+# Permissions-Policy header. Chrome 143+ changed the default policy so
+# that clipboard-write is DENIED unless explicitly allowlisted, even in
+# secure contexts like http://localhost (crbug.com/414348233). Without
+# this header, ``navigator.clipboard.writeText`` fails with a permissions
+# policy violation, breaking the "Copy link" button on published
+# artifacts. Grant same-origin only; cross-origin remains denied.
+_PERMISSIONS_POLICY = "clipboard-write=(self), clipboard-read=(self)"
+
+# Content-hashed build output (Vite emits ``/assets/<name>-<hash>.<ext>``;
+# the URL changes whenever the content changes) is safe to cache forever.
+# Everything else — index.html, the SPA shell, /api — keeps the no-store
+# policy so upgrades are picked up immediately. Without this exemption the
+# ~6MB entry bundle is re-downloaded on every page load, and a reload right
+# after a gateway restart bets the whole page on that transfer succeeding
+# while the gateway is at cold-start peak (the "black screen until hard
+# refresh" failure mode). Deliberately excludes /vendor, /fonts and
+# /sprites: those use stable, un-hashed filenames.
+_IMMUTABLE_PATH_PREFIXES = ("/assets/",)
+_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+def _apply_security_headers(
+    resp: web.StreamResponse, app: web.Application, path: str = ""
+) -> None:
     """Apply cache-control and security headers to a dashboard response.
 
     Sets four groups of headers (all via ``setdefault`` so handlers keep
     the ability to override):
 
     1. Cache-Control / Pragma / Expires — prevent Chrome from caching stale
-       assets across upgrades.
+       assets across upgrades. Content-hashed paths (``/assets/``) are the
+       exception: their URL *is* the version, so they are served as
+       ``immutable`` instead (see ``_IMMUTABLE_PATH_PREFIXES``).
     2. Content-Security-Policy — defense-in-depth against XSS. Primary XSS
        protection is rehypeSanitize (strips script/iframe/form/foreignObject
        at HAST level before rendering). CSP allows ``'unsafe-inline'``
@@ -260,9 +282,12 @@ def _apply_security_headers(resp: web.StreamResponse, app: web.Application) -> N
        on published artifacts fails with a permissions-policy violation
        (crbug.com/414348233).
     """
-    resp.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-    resp.headers.setdefault("Pragma", "no-cache")
-    resp.headers.setdefault("Expires", "0")
+    if path.startswith(_IMMUTABLE_PATH_PREFIXES):
+        resp.headers.setdefault("Cache-Control", _IMMUTABLE_CACHE_CONTROL)
+    else:
+        resp.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        resp.headers.setdefault("Pragma", "no-cache")
+        resp.headers.setdefault("Expires", "0")
 
     state = app.get("state")
     instances_mgr = getattr(state, "instances_manager", None) if state else None
@@ -384,6 +409,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_patch("/api/crons/{job_id}", handlers.api_cron_update)
     app.router.add_post("/api/crons/{job_id}/enable", handlers.api_cron_enable)
     app.router.add_post("/api/crons/{job_id}/run", handlers.api_cron_run)
+    app.router.add_post("/api/crons/{job_id}/cancel", handlers.api_cron_cancel)
     app.router.add_post("/api/crons/{job_id}/to-chat", handlers.api_cron_to_chat)
     app.router.add_post("/api/crons/{job_id}/ack", handlers.api_cron_ack)
     app.router.add_get("/api/crons/{job_id}/history", handlers.api_cron_history)
@@ -1070,6 +1096,10 @@ async def start_dashboard(
     # catch-all {name:.+} so aiohttp reaches them first.
     app.router.add_get("/api/skills", handlers.api_skills)
     app.router.add_post("/api/skills", handlers.api_skills_create)
+    # Multi-provider skill discovery (skills.sh REST browser)
+    app.router.add_get("/api/skills/-/discover", api_skills_discover)
+    app.router.add_get("/api/skills/-/discover/preview", api_skills_discover_preview)
+    app.router.add_post("/api/skills/-/discover/install", api_skills_discover_install)
     app.router.add_get("/api/skills/{name:.+}/-/tree", handlers.api_skill_tree)
     app.router.add_get("/api/skills/{name:.+}/-/file", handlers.api_skill_file)
     app.router.add_get("/api/skills/{name:.+}", handlers.api_skill_detail)
@@ -1257,6 +1287,9 @@ async def start_dashboard(
     app.router.add_post("/api/taskrunner/{task_id}/to-chat", handlers.api_taskrunner_to_chat)
     app.router.add_get(
         "/api/taskrunner/{task_id}/plan-context", handlers.api_taskrunner_plan_context
+    )
+    app.router.add_get(
+        "/api/taskrunner/{task_id}/plan.yaml", handlers.api_taskrunner_export_yaml
     )
     app.router.add_put("/api/taskrunner/{task_id}/plan", handlers.api_taskrunner_update_plan)
     app.router.add_post("/api/taskrunner/{task_id}/execute", handlers.api_taskrunner_execute_plan)
@@ -1553,7 +1586,7 @@ async def start_dashboard(
     ) -> web.StreamResponse:
         resp = await handler(request)  # type: ignore[operator]
         if hasattr(resp, "headers"):
-            _apply_security_headers(resp, request.app)
+            _apply_security_headers(resp, request.app, request.path)
         return resp  # type: ignore[return-value]
 
     # SPA fallback: serve index.html for client-side React Router paths.
@@ -2028,8 +2061,8 @@ async def start_api_server(
         handler: object,
     ) -> web.StreamResponse:
         if request.method in _sel_methods and request.path.startswith("/api/"):
-            from kiro_crew.sel import sel
-
+            # ``sel`` is imported at module scope (top of file); no in-function
+            # import needed (host/csrf middleware below call it unqualified too).
             try:
                 resp = await handler(request)  # type: ignore[operator]
                 sel().log_api_access(

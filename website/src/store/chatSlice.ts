@@ -162,9 +162,9 @@ function pushHistory(history: string[], key: string): string[] {
  */
 function applyNonActiveFrame(
   state: ChatState,
-  p: { slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string },
+  p: { slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string; batched?: boolean },
 ) {
-  const { slot, role, content, ts, seq, cls, meta, kind } = p
+  const { slot, role, content, ts, seq, cls, meta, kind, batched } = p
   const msgs = (state.slotMessages[slot] ??= [])
   const run = (state.slotRun[slot] ??= { state: 'idle' })
   const sa = (state.slotActivity[slot] ??= { toolLog: [], subagents: {} })
@@ -214,7 +214,14 @@ function applyNonActiveFrame(
     if (streamIdx >= 0) {
       const msg = msgs[streamIdx]
       // Share missedChunkMarker with the active path so the two cannot drift.
-      if (seq !== undefined && run.lastChunkSeq !== undefined) {
+      // Skip on batched frames: the live WS flush buffer already owns gap
+      // detection across the chunks it merges and inlines the marker into the
+      // batch content, and it dispatches each batch carrying only the batch's
+      // LAST seq. Comparing consecutive batches' last-seqs here would treat the
+      // batch size as a gap and fabricate a false "[N chunk(s) missed]" marker
+      // on every multi-chunk background-pane batch. Mirror the active path,
+      // which guards the identical branch with `!batched`.
+      if (!batched && seq !== undefined && run.lastChunkSeq !== undefined) {
         msg.content += missedChunkMarker(run.lastChunkSeq, seq)
       }
       msg.content += content
@@ -490,10 +497,10 @@ export const resumeFromHistory = createAsyncThunk(
 export const forkSlot = createAsyncThunk(
   'chat/forkSlot',
   async (
-    { slot, atIndex, prompt, mode }: { slot: string; atIndex?: number; prompt?: string; mode?: string },
+    { slot, atIndex, prompt, mode, direction }: { slot: string; atIndex?: number; prompt?: string; mode?: string; direction?: 'head' | 'tail' },
     { dispatch },
   ) => {
-    const d = await api.forkChatSlot(slot, atIndex, prompt, mode)
+    const d = await api.forkChatSlot(slot, atIndex, prompt, mode, direction)
     if (d.ok) {
       dispatch(addSlotOptimistic({ key: d.key, title: d.title || d.key, messages: d.messages || 0, running: false, folder_id: d.folder_id }))
     }
@@ -601,6 +608,40 @@ const chatSlice = createSlice({
     appendSlotMessage(state, action: PayloadAction<{ slot: string; message: ChatMessage }>) {
       const { slot, message } = action.payload
       const msgs = slot === state.activeSlot ? state.messages : (state.slotMessages[slot] ??= [])
+      // Reconcile a steer echo (server 'steer_push', meta.steer, no optimistic
+      // flag) against the optimistic bubble that steer() added client-side
+      // (meta.optimistic). Update it in place rather than pushing a duplicate
+      // user message — mirrors the user-frame reconcile in applyMessageToArray.
+      //
+      // The optimistic bubble is NOT necessarily the last message: a steer is
+      // by definition sent mid-turn, so streaming/thinking/tool messages keep
+      // landing between the optimistic append and the WS echo. A tail-only
+      // check loses that race and renders a duplicate "Steered into the
+      // running turn" card. Scan backwards (bounded) over optimistic STEER
+      // bubbles only (a plain optimistic user message with coincidentally
+      // identical text must never be consumed): prefer exactly matching
+      // content (handles rapid back-to-back steers in order), else fall back
+      // to the most recent one (server-side redaction can alter the echoed
+      // content, so an exact match isn't guaranteed).
+      if (message.role === 'user' && message.meta?.steer && !message.meta?.optimistic) {
+        const floor = Math.max(0, msgs.length - 50)
+        let target: ChatMessage | undefined
+        let fallback: ChatMessage | undefined
+        for (let i = msgs.length - 1; i >= floor; i--) {
+          const m = msgs[i]
+          if (m.role !== 'user' || !m.meta?.optimistic || !m.meta?.steer) continue
+          if (message.content && m.content === message.content) { target = m; break }
+          if (!fallback) fallback = m
+        }
+        const bubble = target ?? fallback
+        if (bubble) {
+          if (message.content) bubble.content = message.content
+          if (message.ts) bubble.ts = message.ts
+          bubble.meta = { ...(bubble.meta || {}), ...(message.meta || {}) }
+          delete (bubble.meta as Record<string, unknown>).optimistic
+          return
+        }
+      }
       msgs.push(message)
     },
     updateStreamingMessage(state, action: PayloadAction<string>) {
@@ -745,6 +786,10 @@ const chatSlice = createSlice({
       if (existing?.status === 'pending') {
         existing.status = 'running'
         existing.agent = action.payload.agent || existing.agent || 'kirocrew'
+        // The spawn event carries the authoritative task text (the pending
+        // card's task is derived from the approval title, which may be empty
+        // or just "spawn_run") — always prefer the spawn payload's task.
+        if (action.payload.task) existing.task = action.payload.task
         return
       }
       subs[action.payload.id] = {
@@ -769,12 +814,25 @@ const chatSlice = createSlice({
       const subs = action.payload.slot !== state.activeSlot
         ? (state.slotActivity[action.payload.slot] ??= { toolLog: [], subagents: {} }).subagents
         : state.subagents
-      const a = subs[action.payload.id]
+      let a = subs[action.payload.id]
+      if (!a) {
+        // Cross-slot fallback: the card may live under a different slot key
+        // than the done event's slot (e.g. the parent session was reset, or
+        // the pending card was created under the activeSlot fallback). Find
+        // it by id anywhere so the card doesn't stay stuck "running" forever.
+        if (state.subagents[action.payload.id]) a = state.subagents[action.payload.id]
+        else {
+          for (const sa of Object.values(state.slotActivity)) {
+            if (sa.subagents[action.payload.id]) { a = sa.subagents[action.payload.id]; break }
+          }
+        }
+      }
       if (a) {
         a.status = action.payload.error ? 'error' : 'done'
         a.elapsed = action.payload.elapsed
         a.error = action.payload.error
         a.streaming = ''
+        if (action.payload.task && !a.task) a.task = action.payload.task
       }
       else { subs[action.payload.id] = { id: action.payload.id, task: action.payload.task || '', agent: action.payload.agent || 'kirocrew', status: action.payload.error ? 'error' : 'done', streaming: '', lastTool: '', startedAt: Date.now() - action.payload.elapsed * 1000, elapsed: action.payload.elapsed, error: action.payload.error } }
     },
@@ -1309,6 +1367,23 @@ const chatSlice = createSlice({
         ) {
           // WS chunks arrived during fetch — use fetched history + local streaming
           state.messages = [...preserved.filter(m => m.role !== 'streaming'), lastLocal]
+        } else if (
+          lastLocal
+          && (lastLocal.role === 'assistant' || lastLocal.role === 'streaming')
+          && !!lastLocal.content && lastLocal.content.length > 0
+          && !preserved.some(m => m.role === 'assistant' && m.content === lastLocal.content)
+        ) {
+          // The HTTP fetch resolved with a history that predates the reply we
+          // already finalized locally (via applyNonActiveFrame while this slot
+          // was backgrounded). Blindly replacing with the server response here
+          // is the "switch away and back drops the latest response" regression.
+          // Keep the server history but re-attach the local trailing reply,
+          // finalizing a still-streaming one. Guarded by the content check above
+          // so we never duplicate a reply the server already returned.
+          const finalized: ChatMessage = lastLocal.role === 'streaming'
+            ? { ...lastLocal, role: 'assistant' }
+            : lastLocal
+          state.messages = [...preserved.filter(m => m.role !== 'streaming'), finalized]
         } else {
           state.messages = preserved
         }

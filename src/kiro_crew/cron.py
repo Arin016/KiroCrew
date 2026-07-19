@@ -44,9 +44,10 @@ except ImportError:
     get_description = None  # type: ignore[assignment]
 from croniter import croniter  # type: ignore[import-untyped]
 
-from kiro_crew import platform_compat, shutdown_event
+from kiro_crew import cron_script, platform_compat, sel, shutdown_event
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.cron_history import CronHistoryStore, CronRunRecord
+from kiro_crew.executors import subprocess_executor
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ _STORE_VERSION = 2
 _MIN_INTERVAL_SECS = 60
 _JOB_TIMEOUT_SECS = 1800  # 30 min per job
 _TIMER_POLL_SECS = 30  # check for due cron-expr jobs
+_AUTO_PAUSE_THRESHOLD = 5  # consecutive failures before a script/command cron auto-pauses
 _REAPER_INTERVAL = 60  # seconds between reaper sweeps
 _REAPER_RESET_TIMEOUT = 30.0  # max seconds for session reset in reaper
 _MAX_SKIP_DATE_LOOKAHEAD = 52  # weekly cron × 1 year — cap iterations when advancing past skip_dates
@@ -92,6 +94,7 @@ class CronJob:
     thread_ts: str | None = None
     enabled: bool = True
     user_paused: bool = False  # True when explicitly paused by user; never mutated by execution
+    auto_paused: bool = False  # True when paused by execution after repeated failures; cleared on re-enable/success
     last_run_ts: float | None = None
     last_status: str | None = None  # "ok" | "error"
     last_error: str | None = None
@@ -128,6 +131,52 @@ class CronJob:
     script: str = ""  # Python callable path (module:func or file.py:func); bypasses LLM dispatch
     command: str = ""  # Shell command for direct execution; bypasses LLM dispatch
     timeout: int = 0  # script/command timeout in seconds (0 = use default: 30s script, 300s command)
+
+    def _audit_pause_change(self, outcome: str) -> None:
+        """Emit a SEL audit event for an auto-pause permission transition.
+
+        Auto-pausing revokes a job's ability to execute (and clearing it restores
+        that ability), so the transition is a permission decision that must be
+        auditable per the security-controls guideline. Best-effort — an audit
+        write failure must never mask the failure/success bookkeeping that drives
+        the pause itself; the tool-invocation error paths already log the run
+        outcome separately."""
+        try:
+            sel.sel().log_tool_invocation(
+                session_key=f"cron:{self.id}",
+                tool_name=self.script or self.command or "cron_job",
+                tool_kind="cron_auto_pause",
+                outcome=outcome,
+                metadata={"job_id": self.id, "consecutive_failures": self.consecutive_failures},
+            )
+        except Exception:
+            logger.debug("SEL logging failed in cron auto-pause transition", exc_info=True)
+
+    def record_failure(self) -> None:
+        """Count one consecutive failure and auto-pause once the threshold is hit.
+
+        Auto-pause is execution-owned: it sets both `enabled` (so the in-memory
+        scheduler stops firing immediately) and `auto_paused` (the durable reason,
+        distinct from a user pause), so the pause survives a reload. Single-sourced
+        here so the many script/command failure branches can't drift on how a pause
+        is recorded — mirroring how the effective-enabled derivation reads it back.
+        """
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= _AUTO_PAUSE_THRESHOLD and not self.auto_paused:
+            self.enabled = False
+            self.auto_paused = True
+            self._audit_pause_change("auto_paused")
+
+    def record_success(self) -> None:
+        """Reset the failure counter and lift any execution auto-pause.
+
+        A recovered job clears `auto_paused`; `enabled` is intentionally NOT set
+        back to True here — a job the user paused (`user_paused`) must stay paused
+        across a success, and re-enabling is the user's action (`enable_job`)."""
+        self.consecutive_failures = 0
+        if self.auto_paused:
+            self.auto_paused = False
+            self._audit_pause_change("auto_pause_cleared")
 
 
 # ── Session-context helper (Mesh-1026) ──
@@ -337,6 +386,7 @@ class CronService:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}  # strong refs to prevent GC
         self._job_start_times: dict[str, float] = {}  # job ID → epoch start
         self._reaped_jobs: set[str] = set()  # job IDs killed by the reaper
+        self._cancelled_jobs: set[str] = set()  # job IDs cancelled by the user
         self._job_jitter: dict[str, float] = {}  # job ID → jitter seconds applied
         self._job_run_meta: dict[str, tuple[float, str]] = {}  # job_id → (start_time, trigger)
         # Mesh-1026: job_id → active session_key for the in-flight run.
@@ -529,9 +579,9 @@ class CronService:
                 return
             client = getattr(session.provider, "_client", None)
             raw_pid = getattr(client, "_pid", None) if client else None
-            pid = raw_pid if isinstance(raw_pid, int) else None
+            pid = raw_pid if isinstance(raw_pid, int) and raw_pid > 1 else None
             if not pid:
-                logger.warning("Reaper: no PID found for %s", session_key)
+                logger.warning("Reaper: no usable PID (%r) for %s", raw_pid, session_key)
                 return
             # Snapshot child tree before killing — children in different
             # PGIDs survive killpg.
@@ -561,10 +611,15 @@ class CronService:
                 session_key,
             )
             try:
-                # killpg(getpgid) on POSIX, taskkill /T on Windows — routed through
-                # platform_compat so the reaper doesn't AttributeError on win32
-                # (os.getpgid/os.killpg/signal.SIGKILL are POSIX-only).
+                # killpg(getpgid) on POSIX, taskkill /T on Windows — routed
+                # through platform_compat, whose POSIX path carries the
+                # broadcast guard (refuses pgid<=1 / own group; see
+                # platform_compat.kill_process_tree).
                 platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)
+            except ValueError:
+                # Guard refused the pid outright (non-int/reserved) — nothing
+                # safe to signal.
+                logger.error("Reaper: kill guard refused pid %r for %s", pid, session_key)
             except (ProcessLookupError, OSError):
                 try:
                     platform_compat.kill_pid(pid, platform_compat.SIGKILL)
@@ -573,6 +628,107 @@ class CronService:
             _kill_escaped_children(child_pids)
         except Exception:
             logger.exception("Reaper: SIGKILL failed for %s", session_key)
+
+    # ── User-initiated cancellation ──
+
+    async def cancel(self, job_id: str) -> bool:
+        """Cancel a running cron execution (user-initiated).
+
+        Kills the sandboxed subprocess (script/command crons) or the kiro-cli
+        session (agent crons), cancels the asyncio task, records a
+        ``cancelled`` history entry, and leaves ``consecutive_failures``
+        untouched. Returns True when a running execution was found.
+        """
+        if job_id not in self._executing:
+            return False
+        logger.info("Cancel: user-initiated cancellation of cron job %s", job_id)
+        self._cancelled_jobs.add(job_id)
+        meta = self._job_run_meta.pop(job_id, None)
+        started_at = meta[0] if meta else self._job_start_times.get(job_id, time.time())
+        trigger = meta[1] if meta else "scheduled"
+        elapsed = time.time() - started_at
+        self._job_start_times.pop(job_id, None)
+        self._job_jitter.pop(job_id, None)
+
+        job = next((j for j in self._jobs if j.id == job_id), None)
+
+        # 1. Script/command crons: SIGTERM the sandboxed subprocess group.
+        # Offloaded: kill_running_process performs blocking kernel calls.
+        killed_proc = await asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(), cron_script.kill_running_process, job_id
+        )
+
+        # 2. Agent crons: kill the kiro-cli session (mirrors _force_reap).
+        session_key = self._active_session_keys.get(job_id) or f"cron:{job_id}"
+        is_agent_job = job is None or not (job.script or job.command)
+        if self._sessions and is_agent_job and not killed_proc:
+            try:
+                await asyncio.wait_for(
+                    self._sessions.reset(session_key), timeout=_REAPER_RESET_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Cancel: reset hung for cron %s, attempting SIGKILL", job_id)
+                await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), self._sigkill_session, session_key
+                )
+            except Exception:
+                logger.exception("Cancel: reset failed for cron %s, attempting SIGKILL", job_id)
+                await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), self._sigkill_session, session_key
+                )
+
+        # 3. Cancel the asyncio task and clean up tracking state directly
+        # (idempotent with _run_job_isolated's finally).
+        task = self._running_tasks.pop(job_id, None)
+        if task and not task.done():
+            task.cancel()
+        self._executing.discard(job_id)
+
+        # 4. Update job state, persist, and record history.
+        if job:
+            job.last_status = "error"
+            job.last_error = f"Cancelled by user after {int(elapsed)}s"
+            job.last_run_ts = time.time()
+            try:
+                self._save()
+            except Exception:
+                logger.exception("Cancel: failed to persist state for cron %s", job_id)
+            try:
+                record = CronRunRecord(
+                    job_id=job_id,
+                    trigger=trigger,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    duration_ms=int(elapsed * 1000),
+                    status="cancelled",
+                    summary=job.last_error or "",
+                    error=job.last_error or "",
+                )
+                await self._history.append(record)
+                if self._push_refresh:
+                    self._push_refresh("cron_history")
+            except Exception:
+                logger.exception("Cancel: failed to record history for cron %s", job_id)
+        if self._push_refresh:
+            self._push_refresh("crons")
+
+        # SEL audit.
+        try:
+            sel.sel().log_tool_invocation(
+                session_key=session_key,
+                source="cron",
+                tool_name="cron_cancel",
+                outcome="cancelled",
+                metadata={
+                    "job_id": job_id,
+                    "session_key": session_key,
+                    "elapsed": int(elapsed),
+                    "killed_subprocess": killed_proc,
+                },
+            )
+        except Exception:
+            logger.exception("Cancel: SEL audit failed for cron %s", job_id)
+        return True
 
     # ── Public API ──
 
@@ -712,6 +868,49 @@ class CronService:
                 return True
         return False
 
+    def _remove_jobs_locked(self, job_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Sync core of :meth:`remove_jobs` — lock/reload/mutate/save only.
+
+        Deliberately does NO timer work so it is safe to run in an executor
+        thread (``_arm_timer`` needs the event loop). Cross-thread safety:
+        every other store mutation also takes ``_file_lock`` — flock on
+        separate fds mutually excludes within the process too — so a
+        concurrent loop-side mutation blocks until this completes.
+        """
+        removed: list[str] = []
+        missing: list[str] = []
+        with self._file_lock():
+            self._sync()
+            present = {j.id for j in self._jobs}
+            targets = set()
+            for jid in job_ids:
+                if jid in present:
+                    removed.append(jid)
+                    targets.add(jid)
+                else:
+                    missing.append(jid)
+            if targets:
+                self._jobs = [j for j in self._jobs if j.id not in targets]
+                self._save()
+                logger.info("Removed %d cron job(s) in batch", len(targets))
+        return removed, missing
+
+    async def remove_jobs(self, job_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Remove many jobs under ONE lock/reload/save, off the event loop.
+
+        Returns ``(removed_ids, missing_ids)`` preserving input order. The
+        batch-delete API previously looped :meth:`remove_job`, paying the
+        file-lock + reload + full-serialize + atomic-write cost PER id on the
+        event loop — with up to 500 ids that starves every other gateway task
+        (and on slow/network storage even one save can stall). The disk work
+        runs in a worker thread; only ``_arm_timer`` (asyncio.create_task)
+        runs back on the loop, and only when something was actually removed.
+        """
+        removed, missing = await asyncio.to_thread(self._remove_jobs_locked, list(job_ids))
+        if removed:
+            self._arm_timer()
+        return removed, missing
+
     def enable_job(self, job_id: str, enabled: bool = True) -> bool:
         """Enable or disable a job by ID."""
         with self._file_lock():
@@ -720,6 +919,20 @@ class CronService:
                 if job.id == job_id:
                     job.user_paused = not enabled
                     job.enabled = enabled
+                    # Re-enabling clears an execution auto-pause; without this a
+                    # job auto-paused after failures would be re-derived as
+                    # disabled on the next reload despite the explicit resume.
+                    if enabled and job.auto_paused:
+                        job.auto_paused = False
+                        # Reset the counter too: the user re-enabled expecting a
+                        # fresh set of attempts. Left at the threshold, the very
+                        # next failure would immediately re-auto-pause the job
+                        # (consecutive_failures already >= threshold). Mirrors
+                        # record_success, which resets the counter on recovery.
+                        job.consecutive_failures = 0
+                        # A user resume that lifts an auto-pause restores execute
+                        # permission — audit it like the auto-pause transition.
+                        job._audit_pause_change("auto_pause_cleared")
                     self._save()
                     self._arm_timer()
                     logger.info("%s cron job %s", "Enabled" if enabled else "Disabled", job_id)
@@ -927,18 +1140,28 @@ class CronService:
         # Apply jitter to spread execution unless strict_schedule is set or manual
         jitter = self._compute_jitter(job) if trigger != "manual" else 0
         self._job_jitter[job.id] = jitter
-        if jitter > 0:
-            logger.debug("Cron: applying %.0fs jitter to job '%s'", jitter, job.name)
-            await asyncio.sleep(jitter)
-        exec_started_at = time.time()
-        # Notify dashboard that the job has started executing so the live
-        # is_running badge appears without a manual reload (upstream a5326708).
+        # Provisional; refined once the jitter sleep completes. Only read on
+        # the history path, which a cancelled-during-jitter run never reaches.
+        exec_started_at = started_at
         try:
-            if self._push_refresh:
-                self._push_refresh("crons")
-        except Exception:
-            logger.debug("push_refresh failed on job start", exc_info=True)
-        try:
+            # The jitter sleep MUST live inside this try: hourly/daily jobs
+            # sleep up to 59 min here, and a user cancel() during that window
+            # raises CancelledError at the sleep — if that happened BEFORE the
+            # try, the finally below would never run, leaking the
+            # _cancelled_jobs marker (and the rest of the bookkeeping) so the
+            # job's NEXT run would see the stale marker and silently drop its
+            # real result as "cancelled".
+            if jitter > 0:
+                logger.debug("Cron: applying %.0fs jitter to job '%s'", jitter, job.name)
+                await asyncio.sleep(jitter)
+            exec_started_at = time.time()
+            # Notify dashboard that the job has started executing so the live
+            # is_running badge appears without a manual reload (upstream a5326708).
+            try:
+                if self._push_refresh:
+                    self._push_refresh("crons")
+            except Exception:
+                logger.debug("push_refresh failed on job start", exc_info=True)
             await self._execute_with_timeout(job)
         finally:
             finished_at = time.time()
@@ -947,6 +1170,8 @@ class CronService:
             self._job_run_meta.pop(job.id, None)
             reaped = job.id in self._reaped_jobs
             self._reaped_jobs.discard(job.id)
+            cancelled = job.id in self._cancelled_jobs
+            self._cancelled_jobs.discard(job.id)
             self._executing.discard(job.id)
             self._running_tasks.pop(job.id, None)
             # Notify dashboard that the job has finished (clears the badge).
@@ -956,9 +1181,9 @@ class CronService:
             except Exception:
                 logger.debug("push_refresh failed on job end", exc_info=True)
             # For 'every' jobs, use started_at to prevent cumulative drift
-            if not reaped and job.schedule.kind == "every":
+            if not reaped and not cancelled and job.schedule.kind == "every":
                 job.last_run_ts = started_at
-            if not reaped:
+            if not reaped and not cancelled:
                 try:
                     self._merge_job_result(job)
                 except Exception:
@@ -1070,11 +1295,22 @@ class CronService:
     async def _execute(self, job: CronJob) -> None:
         """Run the job callback and update runtime fields (last_run_ts, last_status)."""
         logger.info("Cron: executing '%s' (%s)", job.name, job.id)
+        # Reset status for this run so a prior run's "error" can't leak into an
+        # "ok" decision below.
+        job.last_status = None
         try:
             if self._on_job:
                 await self._on_job(job)
-            job.last_status = "ok"
-            job.last_error = None
+            # Only mark "ok" if the callback did not itself report failure. The
+            # command/script paths return NORMALLY and signal failure by mutating
+            # the shared job (last_status="error"); only the LLM path raises.
+            # Overwriting unconditionally with "ok" destroyed that error before
+            # the history recorder and _merge_job_result read it, mis-reporting
+            # failed command/script runs as successful on the dashboard and in
+            # cron_list.
+            if job.last_status != "error":
+                job.last_status = "ok"
+                job.last_error = None
         except Exception as exc:
             job.last_status = "error"
             job.last_error = str(exc)
@@ -1101,6 +1337,14 @@ class CronService:
                 if job.schedule.kind == "at" and not job.delete_after_run:
                     by_id[job.id].enabled = job.enabled
                     by_id[job.id].user_paused = not job.enabled
+                # auto_paused is execution-owned (repeated-failure auto-pause and
+                # its reset on success), so propagate it for every job — unlike
+                # `enabled`, which must not be clobbered for recurring jobs. Also
+                # reflect it into the disk copy's derived `enabled` so the next
+                # reader sees the pause before a reload re-derives it.
+                by_id[job.id].auto_paused = job.auto_paused
+                if job.auto_paused and not by_id[job.id].user_paused:
+                    by_id[job.id].enabled = False
                 by_id[job.id].last_result = job.last_result
                 by_id[job.id].last_posted_hash = job.last_posted_hash
                 by_id[job.id].consecutive_dupes = job.consecutive_dupes
@@ -1163,8 +1407,18 @@ class CronService:
                     ),
                     channel=j.get("channel"),
                     thread_ts=j.get("thread_ts"),
-                    enabled=not j.get("user_paused", not j.get("enabled", True)),
+                    # Effective enabled is derived from the two "reasons a job is
+                    # off": an explicit user pause and an execution auto-pause
+                    # (repeated failures). Deriving it — rather than trusting the
+                    # stored `enabled` — is what makes an auto-pause survive a
+                    # restart: the failing run sets auto_paused=True, and a
+                    # recurring job's `enabled` is otherwise never persisted, so a
+                    # naive `enabled` read would resurrect the job on reload.
+                    # user_paused/auto_paused fall back to legacy !enabled for
+                    # stores written before either field existed.
+                    enabled=not j.get("user_paused", not j.get("enabled", True)) and not j.get("auto_paused", False),
                     user_paused=j.get("user_paused", not j.get("enabled", True)),
+                    auto_paused=j.get("auto_paused", False),
                     last_run_ts=j.get("last_run_ts"),
                     last_status=j.get("last_status"),
                     last_error=j.get("last_error"),
@@ -1227,6 +1481,7 @@ class CronService:
                     "thread_ts": j.thread_ts,
                     "enabled": j.enabled,
                     "user_paused": j.user_paused,
+                    "auto_paused": j.auto_paused,
                     "last_run_ts": j.last_run_ts,
                     "last_status": j.last_status,
                     "last_error": j.last_error,

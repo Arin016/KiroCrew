@@ -87,8 +87,10 @@ from kiro_crew.agent import _enforce_denied_commands
 from kiro_crew.config import KiroCrewConfig
 from kiro_crew.config.loader import POOL_SIZE_MAX, build_provider_factory, default_project_dir
 from kiro_crew.executors import maintenance_executor, subprocess_executor
+from kiro_crew.mcp_gateway.abort import schedule_abort
 from kiro_crew.messaging.link import ChannelLink, canonical_key, legacy_key
 from kiro_crew.providers.base import CancelOutcome, LLMProvider
+from kiro_crew.sandbox import cleanup_stale_sandbox_profiles
 from kiro_crew.sel import sel
 from kiro_crew.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
 from kiro_crew.session_map import SessionMap as SessionMap  # noqa: F401
@@ -746,7 +748,9 @@ class SessionManager:
                         self._bg_runtime = None
         raise AcpRuntimeDead("get_bg_session exhausted retries")
 
-    async def get_subagent_runtime(self, parent_session_key: str) -> "AcpRuntime":
+    async def get_subagent_runtime(
+        self, parent_session_key: str, agent: str | None = None
+    ) -> "AcpRuntime":
         """Get or create a shared AcpRuntime for a parent session's subagents.
 
         Each parent session gets ONE shared runtime that all its subagents
@@ -788,7 +792,7 @@ class SessionManager:
                             "get_subagent_runtime: dead runtime kill failed for %s",
                             parent_session_key, exc_info=True,
                         )
-                agent = self._get_session_agent(parent_session_key) or "kirocrew"
+                agent = agent or self._get_session_agent(parent_session_key) or "kirocrew"
                 # Mirror the parent's security posture (sandbox + MCP gateway +
                 # env) so companion-runtime subagents never run unsandboxed.
                 rt_kwargs = self._parent_runtime_kwargs(parent_session_key)
@@ -835,6 +839,148 @@ class SessionManager:
                 logger.warning(
                     "Failed to kill subagent runtime for %s", parent_session_key, exc_info=True
                 )
+
+    async def _get_or_bootstrap_run_runtime(
+        self, parent_session_key: str, *, agent: str | None = None, cwd: str | None = None
+    ) -> "AcpRuntime":
+        """Get or lazily bootstrap the task-runner's run-scoped shared runtime.
+
+        Unlike ``get_subagent_runtime`` (a bare ``AcpRuntime`` mirrored from a
+        live parent session), the task runner has no live parent session — so a
+        bare runtime would miss the MCP-gateway/sandbox config the provider
+        factory bakes in from ``KiroCrewConfig``. Instead, cold-start ONE
+        fully-configured factory provider, adopt its ``AcpRuntime`` as the run's
+        shared runtime, neutralize the factory provider's ownership, and
+        terminate its bootstrap session (co-tenant-safe — the process stays
+        alive). Every subsequent task/decompose/review session opens its own
+        ``create_session`` on this runtime; it is killed exactly once via
+        ``release_subagent_runtime(parent_session_key)`` at run end/cancel.
+        """
+        # No factory (e.g. unit tests) — fall back to a bare companion runtime.
+        # Done BEFORE taking the per-parent lock: get_subagent_runtime acquires
+        # the same lock and asyncio.Lock is not reentrant.
+        if not self._provider_factory:
+            return await self.get_subagent_runtime(parent_session_key, agent=agent)
+
+        if parent_session_key not in self._subagent_runtime_locks:
+            self._subagent_runtime_locks[parent_session_key] = asyncio.Lock()
+        lock = self._subagent_runtime_locks[parent_session_key]
+        async with lock:
+            existing = self._subagent_runtimes.get(parent_session_key)
+            if existing is not None and existing.is_alive():
+                return existing
+            provider = self._provider_factory(parent_session_key, agent=agent, cwd=cwd)
+            await provider.start()
+            session_provider = getattr(provider, "_client", None)
+            runtime = getattr(session_provider, "_runtime", None)
+            if session_provider is not None and runtime is not None:
+                # Transfer ownership to _subagent_runtimes so the (soon-dropped)
+                # factory provider's shutdown never kills the shared runtime.
+                try:
+                    session_provider._owns_runtime = False
+                except Exception:
+                    logger.debug("run runtime ownership transfer failed", exc_info=True)
+                self._subagent_runtimes[parent_session_key] = runtime
+                # Free the bootstrap session; the process stays alive for the
+                # per-step sessions opened on it (co-tenant-safe).
+                try:
+                    _handle = getattr(session_provider, "_handle", None)
+                    _sid = getattr(_handle, "session_id", None) or getattr(
+                        _handle, "_session_id", None
+                    )
+                    if _sid:
+                        await runtime.terminate_session(_sid)
+                except Exception:
+                    logger.debug("run runtime bootstrap-session terminate failed", exc_info=True)
+                return runtime
+            # Non-AcpRuntime backend (e.g. Claude Code) — can't share a runtime.
+            try:
+                await provider.shutdown()
+            except Exception:
+                logger.debug("run runtime bootstrap provider shutdown failed", exc_info=True)
+        # Fall back OUTSIDE the lock (get_subagent_runtime takes the same lock).
+        return await self.get_subagent_runtime(parent_session_key, agent=agent)
+
+    async def open_task_session(
+        self,
+        parent_session_key: str,
+        session_key: str,
+        *,
+        agent: str | None = None,
+        cwd: str | None = None,
+        approval_policy: str = "",
+    ) -> tuple[LLMProvider, bool, bool]:
+        """Open a task-runner session multiplexed onto the run's shared runtime.
+
+        Unlike ``get_or_create`` (which cold-starts a dedicated provider/process
+        per key), every task/decompose/self-review session for one task-runner
+        run shares ONE ``AcpRuntime`` keyed by ``parent_session_key`` (via
+        ``get_subagent_runtime``). Each call opens its own kiro-cli session
+        (``AcpSessionProvider``, ``owns_runtime=False``) on that runtime, so a
+        run uses a single process instead of one per step.
+
+        The session is registered in ``self._sessions`` under ``session_key`` so
+        the existing key-based helpers keep working: ``check_context_usage`` and
+        ``reset(session_key)`` operate on it, and because the provider does not
+        own the runtime (and the key is not the runtime's parent key),
+        ``reset`` terminates only this session — the shared runtime survives and
+        is freed once via ``release_subagent_runtime(parent_session_key)`` at run
+        end/cancel.
+
+        Returns ``(provider, is_new, resumed)`` mirroring ``get_or_create``.
+        Acquires the per-session semaphore; the caller MUST ``release`` it.
+        """
+        # circular import: session -> acp.session_provider -> acp.client -> session
+        from kiro_crew.acp.session_provider import AcpSessionProvider
+
+        key = self._fold_key(session_key)
+
+        # Fast path: an existing live session for this key — reuse it.
+        async with self._lock:
+            existing = self._sessions.get(key)
+            if existing is not None:
+                existing.last_used = time.monotonic()
+                if approval_policy:
+                    existing.approval_policy = approval_policy
+        if existing is not None:
+            await existing.semaphore.acquire()
+            return existing.provider, False, False
+
+        # Cold path: open a fresh session on the run's shared runtime. Runtime
+        # I/O (get_subagent_runtime spawn + create_session) is kept OUTSIDE the
+        # global lock to avoid pinning it across subprocess/RPC work.
+        runtime = await self._get_or_bootstrap_run_runtime(
+            parent_session_key, agent=agent, cwd=cwd
+        )
+        handle = await runtime.create_session(cwd=cwd or None, agent=agent or None)
+        provider = AcpSessionProvider(handle, runtime)
+
+        dup: LLMProvider | None = None
+        async with self._lock:
+            _existing = self._sessions.get(key)
+            if _existing is not None:
+                # Race: another coroutine registered this key first. Use theirs
+                # and tear down our extra session (below, off the lock).
+                sess = _existing
+                sess.last_used = time.monotonic()
+                if approval_policy:
+                    sess.approval_policy = approval_policy
+                dup = provider
+            else:
+                sess = _Session(
+                    provider=provider,
+                    is_new=True,
+                    approval_policy=approval_policy,
+                    agent=agent or "",
+                )
+                self._sessions[key] = sess
+        if dup is not None:
+            try:
+                await dup.shutdown()  # terminate the redundant session on the shared runtime
+            except Exception:
+                logger.debug("open_task_session: duplicate session teardown failed", exc_info=True)
+        await sess.semaphore.acquire()
+        return sess.provider, dup is None, False
 
     def _get_session_agent(self, session_key: str) -> str:
         """Return the agent name for an active session, or empty string."""
@@ -2445,11 +2591,17 @@ class SessionManager:
         if not preserve_queue:
             self.clear_queue(key)
         budget: float = self._cfg.agent.soft_stop_budget_secs
+        t0 = time.monotonic()
 
         if not force:
             outcome = await session.provider.cancel(wait_ack_timeout=budget)
             logger.debug("stop_turn: provider.cancel outcome=%r for %s", outcome, key)
             if outcome == "acked":
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "stop_turn outcome=soft-acked session=%s elapsed=%.2fs",
+                    key, elapsed,
+                )
                 # kiro-cli discards cancelled turns from its conversation log,
                 # so the next prompt must re-inject the cancelled turn context.
                 session.prev_turn_cancelled = True
@@ -2460,10 +2612,27 @@ class SessionManager:
                         logger.warning("on_soft hook failed for %s", key, exc_info=True)
                 return "soft"
             if outcome == "no_turn":
+                logger.info("stop_turn outcome=idle session=%s (no active turn)", key)
                 return "idle"
             # timeout or error → escalate to hard kill
+            logger.info(
+                "stop_turn outcome=escalated-to-hard session=%s "
+                "cancel_result=%r elapsed=%.2fs",
+                key, outcome, time.monotonic() - t0,
+            )
+
+        # --- Hard kill path ---
+        # Scope A gateway hook: send abort frame to gatewayd for this
+        # session's runtime PIDs so in-flight tool work is cancelled in the
+        # pooled backend processes.
+        await self._send_abort_for_session(key, session)
 
         await self.reset(key)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "stop_turn outcome=hard-done session=%s elapsed=%.2fs",
+            key, elapsed,
+        )
         # Keep a strong reference — the event loop holds only a weak ref,
         # and without this the task could be GC'd mid-respawn.
         t = asyncio.create_task(self._eager_respawn(key))
@@ -2475,6 +2644,52 @@ class SessionManager:
             except Exception:
                 logger.warning("on_hard hook failed for %s", key, exc_info=True)
         return "hard"
+
+    async def _send_abort_for_session(self, key: str, session: Any) -> None:
+        """Send an abort frame to gatewayd for the session's runtime PID(s).
+
+        Best-effort: failures are logged but never block the hard-kill path.
+        """
+        try:
+            # Prefer the stable runtime_info() API on the provider base class.
+            pid, socket_path = session.provider.runtime_info()
+
+            # Fallback for providers that haven't overridden runtime_info().
+            if pid is None:
+                client = getattr(session.provider, "_client", None)
+                pid = getattr(client, "_pid", None) if client else None
+            if socket_path is None:
+                client = getattr(session.provider, "_client", None)
+                socket_path = getattr(client, "_mcp_gateway_socket", None) if client else None
+
+            if isinstance(pid, int) and pid > 1 and socket_path:
+                # SEL audit at the point of decision: schedule_abort is
+                # fire-and-forget and the downstream _audit_abort_applied in
+                # gatewayd only fires on success — record the initiation here
+                # so there is an audit trail even if gatewayd never acks.
+                try:
+                    sel().log_api_access(
+                        caller="session",
+                        operation="mcp-gateway.abort-initiated",
+                        outcome="initiated",
+                        source="session",
+                        resources=f"pid={pid} session={key}",
+                        error="reason=hard-stop",
+                    )
+                except Exception:  # pragma: no cover — audit must never block the kill path
+                    logger.debug("SEL audit for abort initiation failed", exc_info=True)
+                schedule_abort(socket_path, [pid], reason=f"hard-stop session={key}")
+            else:
+                # Visible-by-default: if provider internals get renamed, the
+                # abort push silently stops firing and the stop/kill bug this
+                # exists to fix would quietly return. Warn so regressions show.
+                logger.warning(
+                    "abort-push skipped for %s: no runtime pid/socket resolved "
+                    "(pid=%r socket=%r) — in-flight tool calls will not be cancelled",
+                    key, pid, socket_path,
+                )
+        except Exception:
+            logger.debug("_send_abort_for_session failed for %s", key, exc_info=True)
 
     async def _eager_respawn(self, key: str) -> None:
         """Fire-and-forget respawn after hard kill.
@@ -2587,6 +2802,21 @@ class SessionManager:
                     )
             except Exception:
                 pass
+
+            # Sweep orphaned sandbox launcher scripts and seatbelt profiles
+            # from ~/.kirocrew/run/.  PID-tagged filenames; the blocking
+            # os.kill/os.remove loop is kept off the event loop (Mesh-1968).
+            try:
+                sandbox_removed = await asyncio.get_running_loop().run_in_executor(
+                    maintenance_executor(), cleanup_stale_sandbox_profiles
+                )
+                if sandbox_removed:
+                    logger.info(
+                        "Periodic sweep: removed %d stale sandbox launchers",
+                        sandbox_removed,
+                    )
+            except Exception as exc:
+                logger.debug("sandbox launcher sweep failed: %s", type(exc).__name__)
 
             # Sweep kiro-cli processes tracked in kiro_session_pids.txt
             # but no longer in self._sessions or self._warm_pool (leaked by

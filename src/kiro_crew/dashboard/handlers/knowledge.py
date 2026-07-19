@@ -533,6 +533,22 @@ async def add_source(request: web.Request) -> web.Response:
     source_type = body.get("source_type", "")
     uri = body.get("uri", "")
     properties = body.get("properties", {})
+    if not isinstance(properties, dict):
+        return web.json_response(
+            {"error": "properties must be an object"}, status=400
+        )
+    namespace = body.get("namespace", "")
+
+    # Validate namespace if provided at top level or in properties
+    if not namespace:
+        namespace = properties.get("namespace", "")
+    if namespace:
+        if not isinstance(namespace, str):
+            return web.json_response(
+                {"error": "namespace must be a string"}, status=400
+            )
+        namespace = namespace.strip()[:64]
+
     if not source_type:
         return web.json_response({"error": "source_type required"}, status=400)
 
@@ -601,6 +617,9 @@ async def add_source(request: web.Request) -> web.Response:
         # Store with pending_confirmation status
         if isinstance(properties, dict):
             properties["sync_status"] = "pending_confirmation"
+            # Fold top-level namespace into properties for folder watchers
+            if namespace and "namespace" not in properties:
+                properties["namespace"] = namespace
         sid = store.add_source(name=name or uri, source_type=source_type, uri=uri,
                                properties=properties)
         _sel_log("source.add", source_id=sid, source_type=source_type)
@@ -1334,9 +1353,9 @@ async def search_for_context(request: web.Request) -> web.Response:
     embedder = request.app.get("knowledge_embedder")
     embed_fn = embedder.embed if embedder and await embedder.is_available_async() else None
     retriever = HybridRetriever(store, embedder=embed_fn)
-    # HybridRetriever.search attaches citation fields (source identity + the
-    # per-document locator) inside this executor call, so all sqlite access
-    # stays on the connection's thread. mc-embed bulkhead: the query embed
+    # HybridRetriever.search runs on an mc-embed worker thread; KnowledgeStore
+    # hands each thread its own sqlite connection, so all sqlite
+    # access is thread-safe here. mc-embed bulkhead: the query embed
     # blocks on Ollama.
     results = await run_in_embed_pool(retriever.search, q, limit=limit)
 

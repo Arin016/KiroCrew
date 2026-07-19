@@ -689,7 +689,8 @@
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": {
-        "max_parallel_steps": 2
+        "max_parallel_steps": 0,
+        "workspace_dir": ""
       }
     },
     {
@@ -701,10 +702,24 @@
       "sensitive": false,
       "tags": [],
       "label": "Max Parallel Steps",
-      "help": "Maximum number of task steps to run in parallel.",
+      "help": "Maximum task steps to run in parallel. 0 = auto (the host-safe cap from agent.subagent_auto_max, clamped to memory/CPU). A positive value only *lowers* concurrency — it is capped at the auto maximum and can never exceed the host-safe limit.",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": 2
+      "defaultValue": 0
+    },
+    {
+      "path": "taskrunner.workspace_dir",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Workspace Folder",
+      "help": "Absolute path where task runner executions run. When set, every execution operates in this folder instead of a per-run scratch directory, so the task runner works on the intended target location. Empty = use the default per-run workspace directory.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
     },
     {
       "path": "orchestrator",
@@ -1212,7 +1227,8 @@
           "json"
         ],
         "embed_timeout_secs": 10.0,
-        "embed_content_budget": 0
+        "embed_content_budget": 0,
+        "pool_idle_ttl_secs": 300
       }
     },
     {
@@ -1289,6 +1305,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 0
+    },
+    {
+      "path": "knowledge.pool_idle_ttl_secs",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Pool Idle TTL (secs)",
+      "help": "Seconds the document-extraction worker pool may sit fully idle before it is scaled to zero (all workers shut down, freeing ~1GB of held process trees); the next ingest respawns them lazily. 0 keeps the workers warm indefinitely.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 300
     },
     {
       "path": "skills",
@@ -1692,7 +1722,9 @@
         "idle_timeout_secs": 300,
         "max_backends": 64,
         "poolable_servers": [],
-        "prewarm_count": 0
+        "prewarm_count": 0,
+        "read_buffer_limit_bytes": 67108864,
+        "response_spill_threshold_bytes": 262144
       }
     },
     {
@@ -1806,6 +1838,34 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 0
+    },
+    {
+      "path": "mcp_gateway.read_buffer_limit_bytes",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Read Buffer Limit",
+      "help": "Maximum bytes for a single MCP response line before asyncio drops it. Default 64 MiB. Responses exceeding this are fast-failed with -32000. Env override: KIROCREW_MCP_READ_LIMIT.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 67108864
+    },
+    {
+      "path": "mcp_gateway.response_spill_threshold_bytes",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Response Spill Threshold",
+      "help": "Tool-call responses larger than this (bytes) have their text content written to ~/.kirocrew/mcp_spill/ and truncated inline to 16 KiB + a file path marker. Default 256 KiB. Set 0 to disable spilling. Env override: KIROCREW_MCP_SPILL_THRESHOLD.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 262144
     },
     {
       "path": "instances",
@@ -2661,6 +2721,7 @@
         "merge_queued_messages": false,
         "mcp_probe_timeout_secs": 15,
         "widget_density": "more",
+        "tail_fork_enabled": false,
         "auto_open_browser": true,
         "quick_send": false,
         "session_grid": false,
@@ -2788,6 +2849,20 @@
         "less"
       ],
       "defaultValue": "more"
+    },
+    {
+      "path": "dashboard.tail_fork_enabled",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Tail-only Fork",
+      "help": "When forking, keep only the messages after the chosen point. The earlier messages are dropped.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
     },
     {
       "path": "dashboard.auto_open_browser",
