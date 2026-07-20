@@ -69,6 +69,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -95,10 +96,12 @@ from kiro_crew.sel import sel
 from kiro_crew.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
 from kiro_crew.session_map import SessionMap as SessionMap  # noqa: F401
 from kiro_crew.session_pid import (
+    _build_child_map,
     _cleanup_orphaned_mcp_servers,
     _collect_active_pids,
     _kill_confirmed_and_writeback,
     _periodic_pid_sweep,
+    _rss_mb_from_tree,
     _sync_kill_provider,
 )
 from kiro_crew.session_pid import _track_child_pids as _track_child_pids  # noqa: F401
@@ -118,6 +121,7 @@ from kiro_crew.session_pid import (
     kill_orphan_mcps,
 )
 from kiro_crew.stats import Stats
+from kiro_crew.watchdog import CleanupHook, SessionWatchdog
 
 # The standalone ClaudeCodeProvider was removed in the KiroACP-only refactor;
 # the public core ships kiro-cli (ACP) only. The name is kept (always None) so
@@ -281,6 +285,10 @@ _COMPACT_FAILURE_COOLDOWN_SECS = 60.0
 
 class _CompactCallback(Protocol):
     async def __call__(self, key: str, pct: float, *, success: bool) -> None: ...  # noqa: E704
+
+
+class _RecycleCallback(Protocol):
+    async def __call__(self, key: str, *, reason: str) -> None: ...  # noqa: E704
 
 
 # Circuit breaker: force-reset after this many consecutive failures
@@ -489,6 +497,7 @@ class SessionManager:
         self._compact_cooldown_until: dict[str, float] = {}
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         self._on_compacted: _CompactCallback | None = None
+        self._on_recycled: _RecycleCallback | None = None
         self._pool_started = False
         self._session_map = SessionMap()
         self._active_dashboard_slots: set[str] | None = (
@@ -535,6 +544,31 @@ class SessionManager:
         self._subagent_runtimes: dict[str, "AcpRuntime"] = {}
         self._subagent_runtime_locks: dict[str, asyncio.Lock] = {}
 
+        # ── Session Watchdog ──
+        # RSS recycle threshold (MiB). 0 disables (default). A non-busy session
+        # whose process tree exceeds this is reset on the next cleanup tick.
+        # Tolerate a non-int (absent field, or a MagicMock cfg in unit tests) by
+        # treating it as disabled — never raise from the constructor.
+        _rss_cfg = getattr(cfg.session, "watchdog_rss_max_mb", 0)
+        self._rss_max_mb: int = max(0, _rss_cfg) if isinstance(_rss_cfg, int) else 0
+        # Idle-sweep gate + clamped timeout are computed once when the cleanup
+        # loop starts (it owns the clamp logic) and read by _expire_idle_hook.
+        self._idle_sweep_enabled: bool = False
+        self._idle_timeout: int = 0
+        # The watchdog holds the *execution* half of each cleanup behaviour as a
+        # named CleanupHook. Each hook keeps the exact try/except of the inline
+        # block it was lifted from, so the dispatcher stays dumb. The orphan-PID
+        # sweep is intentionally NOT moved here (it is an inline ~35-line block
+        # in _cleanup_loop); extracting it is a refactor deferred to CR 2.
+        self._watchdog = SessionWatchdog(
+            [
+                CleanupHook("idle_expiry", self._expire_idle_hook),
+                CleanupHook("orphan_mcp", self._orphan_mcp_hook),
+                CleanupHook("denied_commands", self._enforce_denied_commands_hook),
+                CleanupHook("rss_threshold", self._rss_threshold_check),
+            ]
+        )
+
     async def reload_provider_factory(self) -> None:
         """Reload provider factory from current config (after provider switch)."""
         cfg = KiroCrewConfig.load()
@@ -552,10 +586,7 @@ class SessionManager:
                         provider, _ = self._warm_pool.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    try:
-                        await provider.shutdown()
-                    except Exception:
-                        logger.debug("Failed to shut down stale pool provider", exc_info=True)
+                    await self._discard_pool_provider(provider, "Stale pool drain")
                 # Clear all existing sessions (they use the old provider)
                 stale = list(self._sessions.items())
                 self._sessions.clear()
@@ -1073,13 +1104,115 @@ class SessionManager:
                     break
                 finally:
                     if p is not None:
-                        try:
-                            await p.shutdown()
-                        except Exception:
-                            pass
-                        except BaseException:
-                            _sync_kill_provider(p)
-                            raise
+                        await self._discard_pool_provider(p, "Warm pool fill cleanup")
+
+    # Bound on the graceful shutdown attempt during a pool discard. The pool
+    # health sweep is a single long-lived task: an unbounded await on a wedged
+    # shutdown would freeze every future sweep, silently disabling TTL
+    # enforcement for the whole pool.
+    _POOL_DISCARD_TIMEOUT = 10.0
+
+    @staticmethod
+    def _dispatch_hard_kill(provider: LLMProvider) -> None:
+        """Fire-and-forget ``_sync_kill_provider`` on the subprocess executor.
+
+        For cancellation handlers, where neither alternative works: awaiting
+        the offload re-raises ``CancelledError`` at the ``await`` and skips the
+        kill, while calling ``_sync_kill_provider`` inline blocks the event
+        loop (``os.waitpid`` on POSIX, a ``taskkill`` subprocess on Windows).
+        Submission itself is synchronous and non-blocking, so the kill is
+        guaranteed to be dispatched before the handler re-raises; it then
+        completes on a worker thread. If the executor is already shut down
+        (gateway teardown), a dedicated daemon thread carries the kill instead
+        — the loop must never run ``_sync_kill_provider`` inline, because it
+        blocks (``os.waitpid`` on POSIX, a ``taskkill`` subprocess on Windows)
+        and a blocked loop can trip the watchdog; a daemon thread dying with
+        the process is the acceptable trade.
+        """
+        try:
+            asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(), _sync_kill_provider, provider,
+            )
+        except RuntimeError:
+            threading.Thread(
+                target=_sync_kill_provider, args=(provider,), daemon=True,
+            ).start()
+
+    async def _discard_pool_provider(self, provider: LLMProvider, context: str) -> None:
+        """Shut down a discarded pool provider and verify its process is gone.
+
+        A discard removes the provider from all pool bookkeeping, so this is
+        the LAST code path that will ever signal the process — a shutdown that
+        fails (or silently fails to kill) leaks the full provider process tree
+        until the next gateway restart. The orphan sweep cannot backstop this:
+        it only reaps *reparented* processes, and a leaked pool child stays
+        parented to its live launcher. Three guarantees:
+
+        1. **Bounded** — the graceful shutdown is capped so a wedged provider
+           can't stall the caller.
+        2. **Loud** — shutdown failures are logged, never swallowed.
+        3. **Verified against the OS** — liveness is re-checked after shutdown
+           and any survivor is hard-killed via its tracked PID. The PID is
+           captured BEFORE shutdown and probed with ``pid_exists`` because the
+           provider's own bookkeeping (``is_process_alive``) self-reports dead
+           once its kill path has *run* — even when signal delivery silently
+           failed and the OS process is still alive.
+        """
+        # Resolve the OS handle before shutdown mutates provider state.
+        # ``_client`` first (the attribute _sync_kill_provider kills through),
+        # falling back to the public ``client`` accessor the pool sweep reads —
+        # on real providers ``client`` is a passthrough property for
+        # ``_client``, so probing both spellings guarantees this verification
+        # can never resolve a different PID than either of those paths.
+        _client = getattr(provider, "_client", None) or getattr(provider, "client", None)
+        pid = getattr(_client, "_pid", None)
+        try:
+            await asyncio.wait_for(provider.shutdown(), timeout=self._POOL_DISCARD_TIMEOUT)
+        except asyncio.CancelledError:
+            # Cancellation handler: cannot await (the await would re-raise and
+            # skip the kill) and must not block the loop — dispatch the kill
+            # to a worker thread and re-raise immediately.
+            self._dispatch_hard_kill(provider)
+            raise
+        except Exception:
+            logger.warning(
+                "%s: provider shutdown failed — falling back to hard kill",
+                context, exc_info=True,
+            )
+        except BaseException:
+            self._dispatch_hard_kill(provider)  # same rationale as the CancelledError arm
+            raise
+        # OS-truth probe on the pre-captured PID; fall back to the provider's
+        # own view when no PID was resolvable (e.g. providers without a
+        # tracked client PID).
+        if isinstance(pid, int):
+            still_alive = platform_compat.pid_exists(pid)
+        else:
+            try:
+                still_alive = hasattr(provider, "is_process_alive") and provider.is_process_alive()
+            except Exception:
+                still_alive = False
+        if still_alive:
+            logger.warning(
+                "%s: provider process (pid=%s) still alive after shutdown — hard-killing",
+                context, pid,
+            )
+            # Normal (non-cancellation) path: offload — on Windows kill_pid
+            # shells out to taskkill, a blocking call that must not run on the
+            # event loop. Isolated so one provider's failure (e.g. an executor
+            # shutdown race) can never abort a caller iterating a batch of
+            # discards — the health sweep discards several providers in one
+            # pass, and an escaping exception here would leak the rest.
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), _sync_kill_provider, provider,
+                )
+            except Exception:
+                logger.warning(
+                    "%s: executor hard kill failed (pid=%s) — dispatching to a "
+                    "dedicated thread", context, pid, exc_info=True,
+                )
+                self._dispatch_hard_kill(provider)
 
     def _claim_from_pool(self, agent: str | None) -> tuple[LLMProvider, float] | None:
         """Try to claim a pre-warmed provider if the agent matches.
@@ -1112,13 +1245,7 @@ class SessionManager:
                     self._pool_ttl_secs,
                 )
                 discarded = True
-                try:
-                    await provider.shutdown()
-                except Exception:
-                    pass
-                except BaseException:
-                    _sync_kill_provider(provider)
-                    raise
+                await self._discard_pool_provider(provider, "Warm pool discard")
                 claimed = self._claim_from_pool(agent)
                 continue
             # Check liveness — use process-level check, not is_alive/is_responsive
@@ -1132,13 +1259,7 @@ class SessionManager:
                     "Warm pool: claimed provider is dead (returncode=%s), discarding", rc
                 )
                 discarded = True
-                try:
-                    await provider.shutdown()
-                except Exception:
-                    pass
-                except BaseException:
-                    _sync_kill_provider(provider)
-                    raise
+                await self._discard_pool_provider(provider, "Warm pool discard")
                 claimed = self._claim_from_pool(agent)
                 continue
             return provider
@@ -1223,92 +1344,93 @@ class SessionManager:
         while True:
             await asyncio.sleep(self._POOL_HEALTH_INTERVAL)
             try:
-                if not self._pool_size:
-                    continue
-                qsize = self._warm_pool.qsize()
-                if not qsize:
-                    continue
-                logger.debug(
-                    "Pool health: sweeping %d providers (target=%d, ttl=%ds)",
-                    qsize,
-                    self._pool_size,
-                    self._pool_ttl_secs,
-                )
-                # Drain entire queue, keep healthy entries, discard the rest
-                healthy: list[tuple[LLMProvider, float]] = []
-                to_shutdown: list[LLMProvider] = []
-                now = time.monotonic()
-                try:
-                    for _ in range(qsize):
-                        try:
-                            provider, spawn_time = self._warm_pool.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        age = now - spawn_time
-                        pid = getattr(getattr(provider, "client", None), "_pid", None)
-                        if isinstance(pid, int):
-                            self._pool_sweep_pids.add(pid)
-                        if self._pool_ttl_secs and age > self._pool_ttl_secs:
-                            logger.warning(
-                                "Pool health: %.0fs old provider (pid=%s) exceeds TTL %ds, discarding",
-                                age,
-                                pid,
-                                self._pool_ttl_secs,
-                            )
-                            to_shutdown.append(provider)
-                            continue
-                        try:
-                            alive = (
-                                hasattr(provider, "is_process_alive")
-                                and provider.is_process_alive()
-                            )
-                        except Exception:
-                            alive = False
-                        if not alive:
-                            rc = provider.exit_code if hasattr(provider, "exit_code") else None
-                            logger.warning(
-                                "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), discarding",
-                                pid,
-                                rc,
-                                age,
-                            )
-                            to_shutdown.append(provider)
-                            continue
-                        logger.debug("Pool health: provider pid=%s alive (age=%.0fs)", pid, age)
-                        healthy.append((provider, spawn_time))
-                finally:
-                    # Re-enqueue survivors first, then shut down dead providers.
-                    # This avoids an empty-queue window where _drain_and_claim()
-                    # would fall back to cold start.  CancelledError during
-                    # shutdown may skip remaining providers in to_shutdown —
-                    # acceptable because they're already dead/expired and their
-                    # PIDs are tracked in kiro_session_pids.txt for startup
-                    # cleanup.  Sweep PIDs are cleared in a nested finally so
-                    # they can't go stale regardless of how we exit.
-                    try:
-                        for entry in healthy:
-                            self._warm_pool.put_nowait(entry)
-                        for p in to_shutdown:
-                            try:
-                                await p.shutdown()
-                            except Exception:
-                                pass
-                    finally:
-                        self._pool_sweep_pids.clear()
-                removed = qsize - len(healthy)
-                if removed:
-                    logger.info(
-                        "Pool health: removed %d dead/expired, %d healthy remain",
-                        removed,
-                        len(healthy),
-                    )
-                    self._schedule_replenish()
-                else:
-                    logger.debug("Pool health: all %d providers healthy", len(healthy))
+                await self._sweep_warm_pool_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Pool health sweep failed")
+
+    async def _sweep_warm_pool_once(self) -> None:
+        """One health sweep: drain the pool, keep healthy entries, reap the rest."""
+        if not self._pool_size:
+            return
+        qsize = self._warm_pool.qsize()
+        if not qsize:
+            return
+        logger.debug(
+            "Pool health: sweeping %d providers (target=%d, ttl=%ds)",
+            qsize,
+            self._pool_size,
+            self._pool_ttl_secs,
+        )
+        # Drain entire queue, keep healthy entries, discard the rest
+        healthy: list[tuple[LLMProvider, float]] = []
+        to_shutdown: list[LLMProvider] = []
+        now = time.monotonic()
+        try:
+            for _ in range(qsize):
+                try:
+                    provider, spawn_time = self._warm_pool.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                age = now - spawn_time
+                pid = getattr(getattr(provider, "client", None), "_pid", None)
+                if isinstance(pid, int):
+                    self._pool_sweep_pids.add(pid)
+                if self._pool_ttl_secs and age > self._pool_ttl_secs:
+                    logger.warning(
+                        "Pool health: %.0fs old provider (pid=%s) exceeds TTL %ds, discarding",
+                        age,
+                        pid,
+                        self._pool_ttl_secs,
+                    )
+                    to_shutdown.append(provider)
+                    continue
+                try:
+                    alive = (
+                        hasattr(provider, "is_process_alive")
+                        and provider.is_process_alive()
+                    )
+                except Exception:
+                    alive = False
+                if not alive:
+                    rc = provider.exit_code if hasattr(provider, "exit_code") else None
+                    logger.warning(
+                        "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), discarding",
+                        pid,
+                        rc,
+                        age,
+                    )
+                    to_shutdown.append(provider)
+                    continue
+                logger.debug("Pool health: provider pid=%s alive (age=%.0fs)", pid, age)
+                healthy.append((provider, spawn_time))
+        finally:
+            # Re-enqueue survivors first, then shut down dead providers.
+            # This avoids an empty-queue window where _drain_and_claim()
+            # would fall back to cold start.  CancelledError during
+            # shutdown may skip remaining providers in to_shutdown —
+            # acceptable because they're already dead/expired and their
+            # PIDs are tracked in kiro_session_pids.txt for startup
+            # cleanup.  Sweep PIDs are cleared in a nested finally so
+            # they can't go stale regardless of how we exit.
+            try:
+                for entry in healthy:
+                    self._warm_pool.put_nowait(entry)
+                for p in to_shutdown:
+                    await self._discard_pool_provider(p, "Pool health discard")
+            finally:
+                self._pool_sweep_pids.clear()
+        removed = qsize - len(healthy)
+        if removed:
+            logger.info(
+                "Pool health: removed %d dead/expired, %d healthy remain",
+                removed,
+                len(healthy),
+            )
+            self._schedule_replenish()
+        else:
+            logger.debug("Pool health: all %d providers healthy", len(healthy))
 
     def context_info(self) -> list[dict[str, object]]:
         """Return context usage for all active sessions."""
@@ -1948,10 +2070,39 @@ class SessionManager:
 
         return result
 
-    async def reset(self, key: str) -> None:
-        """Kill and recreate a session (context overflow recovery)."""
+    async def reset(
+        self,
+        key: str,
+        *,
+        expect_session: _Session | None = None,
+        skip_if_busy: bool = False,
+    ) -> bool:
+        """Kill and recreate a session (context overflow recovery).
+
+        Returns True if a session was actually torn down, False if an optional
+        guard below made it a no-op.
+
+        Optional guards, evaluated atomically under the lock together with the
+        pop (so no turn can start and no session swap can slip into a
+        released-lock window), used by the RSS-recycle watchdog:
+
+          * ``expect_session`` — only reset if this exact session object still
+            occupies ``key``. Guards against recycling a session that was
+            reset+recreated under a reused key between an off-lock RSS
+            measurement and this call (the victim would otherwise be killed on
+            the prior occupant's stale reading).
+          * ``skip_if_busy`` — skip if the current session has a turn in flight
+            (semaphore held), so a live stream is never cut mid-turn. This is
+            enforced here, atomically with the pop, rather than in a caller's
+            separate lock acquisition (which reopens the window).
+        """
         key = self._fold_key(key)
         async with self._lock:
+            current = self._sessions.get(key)
+            if expect_session is not None and current is not expect_session:
+                return False
+            if skip_if_busy and current is not None and current.semaphore.locked():
+                return False
             session = self._sessions.pop(key, None)
             # The new process is a fresh start — drop any stale failure
             # cooldown so it isn't inherited.
@@ -2021,6 +2172,7 @@ class SessionManager:
                 except Exception:
                     logger.debug("Reset %s: subagent runtime cleanup failed", key, exc_info=True)
             logger.debug("Reset session: %s (pid=%s)", key, pid)
+        return session is not None
 
     def check_context_usage(self, key: str, provider: LLMProvider) -> float:
         """Check context usage and fire background compaction at the
@@ -2064,6 +2216,19 @@ class SessionManager:
         if self._on_compacted is not None and cb is not None:
             logger.warning("Compact callback already registered; replacing existing handler")
         self._on_compacted = cb
+
+    def set_recycle_callback(self, cb: _RecycleCallback | None) -> None:
+        """Register a callback fired when the watchdog recycles a session.
+
+        Signature: ``async def cb(key, *, reason)``.  Used by the dashboard to
+        notify the user that their session was reset (e.g. by the RSS-threshold
+        watchdog), since unlike idle/orphan expiry this can happen while the
+        user is still around. Idle and orphan sweeps do NOT fire this — the
+        user has already walked away in those cases.
+        """
+        if self._on_recycled is not None and cb is not None:
+            logger.warning("Recycle callback already registered; replacing existing handler")
+        self._on_recycled = cb
 
     def _trigger_compaction(self, key: str, reason: str, pct: float) -> None:
         """Schedule a background compact task for *key*, gated by two checks.
@@ -2183,6 +2348,15 @@ class SessionManager:
             await self._on_compacted(key, pct, success=success)
         except Exception:
             logger.exception("Compact callback failed for %s", key)
+
+    async def _fire_recycle_callback(self, key: str, *, reason: str) -> None:
+        """Invoke ``_on_recycled`` if registered, swallowing exceptions."""
+        if self._on_recycled is None:
+            return
+        try:
+            await self._on_recycled(key, reason=reason)
+        except Exception:
+            logger.exception("Recycle callback failed for %s", key)
 
     async def remove(self, key: str) -> None:
         """Shut down a session but preserve session_map for future resume.
@@ -2758,6 +2932,132 @@ class SessionManager:
 
     # ── Idle cleanup ──
 
+    # ── Watchdog hooks ──
+    # Each hook is the execution half of a CleanupHook (see watchdog.py). Each
+    # one reproduces the exact try/except of the inline cleanup-loop block it
+    # was lifted from, so SessionWatchdog.tick() can stay a dumb dispatcher and
+    # the move is behaviour-preserving (no severity promotion of swallowed
+    # errors). The orphan-PID sweep is deliberately NOT a hook in CR 1.
+
+    async def _expire_idle_hook(self) -> None:
+        """Idle/orphan session expiry. Gate + timeout are published onto self by
+        _cleanup_loop, which owns the <60 clamp. Preserves the original
+        ``logger.exception`` on failure."""
+        if not self._idle_sweep_enabled:
+            return
+        try:
+            await self._expire_idle(self._idle_timeout)
+        except Exception:
+            logger.exception("Cleanup loop: _expire_idle crashed; continuing")
+
+    async def _orphan_mcp_hook(self) -> None:
+        """Sweep MCP servers orphaned by crashed/expired sessions. Preserves the
+        original silent-swallow behaviour.
+
+        Offloaded to the bounded maintenance pool (not the default executor) so
+        the per-PID os.kill loop + file lock can't block the event loop or
+        starve its DNS resolution (Mesh-1968)."""
+        try:
+            mcp_killed = await asyncio.get_running_loop().run_in_executor(
+                maintenance_executor(), _cleanup_orphaned_mcp_servers
+            )
+            if mcp_killed:
+                logger.info("Periodic sweep: cleaned %d orphaned MCP servers", mcp_killed)
+        except Exception:
+            pass
+
+    async def _enforce_denied_commands_hook(self) -> None:
+        """Re-enforce deniedCommands (catches manual edits). The sync enforcement
+        performs file I/O and is reachable from the event loop (via
+        _cleanup_loop → watchdog.tick()), so it is offloaded to the bounded
+        maintenance pool — mirroring _orphan_mcp_hook — to avoid blocking the
+        loop. Preserves the original silent-swallow behaviour."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                maintenance_executor(), _enforce_denied_commands
+            )
+        except Exception:
+            pass
+
+    async def _rss_threshold_check(self) -> None:
+        """Recycle non-busy sessions whose process tree exceeds the configured
+        RSS ceiling. New in CR 1; disabled by default (``watchdog_rss_max_mb=0``).
+
+        Mirrors _expire_idle's kill structure AND its protected-key set: collect
+        candidates under the lock — skipping persistent and channel-prefixed
+        sessions exactly as the idle sweep does — then reset() each victim AFTER
+        releasing the lock (reset() re-acquires it, so holding it across the call
+        would deadlock). A session whose turn is in flight (semaphore held) is
+        skipped to avoid cutting a live stream.
+
+        RSS measurement walks the process tree with synchronous /proc reads, so
+        it is done OUTSIDE the lock on the bounded maintenance executor —
+        mirroring _orphan_mcp_hook — to avoid blocking the event loop. Because the
+        lock is released across that measurement, the victim's session OBJECT is
+        captured at collection time and handed to reset(), which re-verifies
+        identity + not-busy atomically under the lock before killing (see
+        reset()); a session that was swapped or became busy in the measurement
+        window is left untouched and generates no recycle notice.
+        """
+        if not self._rss_max_mb:
+            return
+        candidates: list[tuple[str, int, _Session]] = []
+        async with self._lock:
+            for key, sess in self._sessions.items():
+                if key in _PERSISTENT_KEYS:
+                    continue
+                if key.startswith(_CHANNEL_PREFIX):
+                    # Channel sessions are protected from idle expiry; keep RSS
+                    # recycle aligned so a long-lived channel context isn't
+                    # silently cut (and _on_recycled only notifies dashboard:
+                    # keys, so a recycled channel session would have no notice).
+                    continue
+                if sess.semaphore.locked():  # turn in flight — don't cut it
+                    continue
+                pid = self.get_pid(key)
+                if pid is not None:
+                    candidates.append((key, pid, sess))
+        victims: list[tuple[str, int, _Session]] = []
+        if candidates:
+            # Build the /proc parent->child map ONCE per tick, off-loop. It is
+            # identical for every candidate this sweep, so measuring each tree
+            # via get_session_rss_mb (which builds its own map) would rescan all
+            # of /proc K times; scan once and share the read-only map instead.
+            # Offloaded to the bounded maintenance pool (not the default
+            # executor), matching the sibling hooks, so an unrelated default-
+            # pool backlog can't starve this periodic /proc walk.
+            loop = asyncio.get_running_loop()
+            child_map = await loop.run_in_executor(maintenance_executor(), _build_child_map)
+            for key, pid, sess in candidates:
+                rss = await loop.run_in_executor(
+                    maintenance_executor(), _rss_mb_from_tree, pid, child_map
+                )
+                if rss > self._rss_max_mb:
+                    victims.append((key, rss, sess))
+        for key, rss, sess in victims:
+            # Per-victim guard so one failed reset/notify doesn't skip the rest
+            # of the victims this tick (the watchdog backstop is debug-only).
+            try:
+                # reset() re-verifies UNDER ITS OWN LOCK, atomically with the
+                # pop, that (a) this exact session object still occupies key —
+                # guarding against a reset+recreate under a reused key in the
+                # released-lock measurement window — and (b) it is not mid-turn.
+                # It returns False (a no-op) if either guard fails, so we neither
+                # kill the wrong/busy session nor emit a misleading recycle
+                # notice for a session we did not actually recycle.
+                recycled = await self.reset(key, expect_session=sess, skip_if_busy=True)
+                if not recycled:
+                    continue
+                logger.warning(
+                    "RSS recycle: session %s tree rss=%dMB exceeds %dMB", key, rss, self._rss_max_mb
+                )
+                Stats().inc_session_cleaned()
+                # Unlike idle/orphan expiry, an RSS recycle can hit a session
+                # whose user is still around, so notify them it was reset.
+                await self._fire_recycle_callback(key, reason=f"memory limit ({rss}MB)")
+            except Exception:
+                logger.exception("RSS recycle failed for session %s", key)
+
     async def _cleanup_loop(self) -> None:
         timeout = self._cfg.session.timeout_secs
         # Defensive clamp: the dashboard validator now allows 0 (disable
@@ -2778,6 +3078,10 @@ class SessionManager:
                 "MCP/PID sweeps still run at default cadence",
                 timeout,
             )
+        # Publish the clamped idle config for _expire_idle_hook (the watchdog
+        # hook re-checks idle_sweep_enabled so the gate is preserved verbatim).
+        self._idle_sweep_enabled = idle_sweep_enabled
+        self._idle_timeout = timeout
         # When idle sweep is disabled we still run the maintenance sweeps
         # (orphaned MCP servers, leaked kiro-cli PIDs, deniedCommands) on a
         # fixed cadence so operators who set timeout_secs=0 don't also lose
@@ -2789,24 +3093,14 @@ class SessionManager:
                 return  # shutdown signaled
             except asyncio.TimeoutError:
                 pass  # normal wake-up
-            if idle_sweep_enabled:
-                try:
-                    await self._expire_idle(timeout)
-                except Exception:
-                    logger.exception("Cleanup loop: _expire_idle crashed; continuing")
 
-            # Sweep MCP servers orphaned by crashed/expired sessions.
-            # Offloaded to the bounded maintenance pool (not the default
-            # executor) so the per-PID os.kill loop + file lock can't block the
-            # event loop or starve its DNS resolution (Mesh-1968).
-            try:
-                mcp_killed = await asyncio.get_running_loop().run_in_executor(
-                    maintenance_executor(), _cleanup_orphaned_mcp_servers
-                )
-                if mcp_killed:
-                    logger.info("Periodic sweep: cleaned %d orphaned MCP servers", mcp_killed)
-            except Exception:
-                pass
+            # idle expiry + orphaned-MCP sweep + deniedCommands re-enforcement,
+            # plus the new RSS-threshold recycle, are dispatched by the watchdog.
+            # Each hook carries the exact error handling of the block it was
+            # lifted from (the orphan-MCP hook keeps the Mesh-1968 maintenance-
+            # executor offload). The orphan-PID sweep below is intentionally left
+            # inline (CR 2 extracts it into a hook).
+            await self._watchdog.tick()
 
             # Sweep session root kiro-cli processes left behind by crashed
             # gateway instances (P472042997). Offloaded to a thread to keep
@@ -2926,12 +3220,6 @@ class SessionManager:
                     )
             except Exception:
                 logger.warning("Orphan MCP sweep failed", exc_info=True)
-
-            # Periodically re-enforce deniedCommands (catches manual edits)
-            try:
-                _enforce_denied_commands()
-            except Exception:
-                pass
 
     def set_active_dashboard_slots(self, slot_keys: set[str]) -> None:
         """Update the set of active dashboard slot keys.

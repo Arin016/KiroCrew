@@ -296,7 +296,16 @@ def _apply_security_headers(resp: web.StreamResponse, app: web.Application, path
        on published artifacts fails with a permissions-policy violation
        (crbug.com/414348233).
     """
-    if path.startswith(_IMMUTABLE_PATH_PREFIXES):
+    # Immutable only on success — during cold-start a request to /assets/*
+    # may get 404 (static route not mounted) or 503 (SPA fallback answering).
+    # Caching that error with max-age=31536000 would be a permanent black
+    # screen, the same bug class sw.js fixes for the cache layer.
+    # 206 (range) and 304 (conditional) are also valid static-handler
+    # responses for hashed assets: a 304's headers merge into the stored
+    # cache entry, so answering it with no-store would degrade the cached
+    # immutable bundle.
+    status = getattr(resp, "status", None)
+    if status in (200, 206, 304) and path.startswith(_IMMUTABLE_PATH_PREFIXES):
         resp.headers.setdefault("Cache-Control", _IMMUTABLE_CACHE_CONTROL)
     else:
         resp.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -1026,6 +1035,8 @@ async def start_dashboard(
 
     # Visible notice + pct reset when auto-compaction fires on a dashboard session
     state.wire_session_compact_callback()
+    # Visible notice when the watchdog recycles a dashboard session (e.g. RSS)
+    state.wire_session_recycle_callback()
 
     app = web.Application(
         client_max_size=60 * 1024 * 1024
@@ -2091,6 +2102,8 @@ async def start_api_server(
 
     # Visible notice + pct reset when auto-compaction fires on a dashboard session
     state.wire_session_compact_callback()
+    # Visible notice when the watchdog recycles a dashboard session (e.g. RSS)
+    state.wire_session_recycle_callback()
 
     app = web.Application(
         client_max_size=60 * 1024 * 1024

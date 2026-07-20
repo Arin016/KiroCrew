@@ -285,6 +285,10 @@ _AUTO_COMPACT_FAILED_NOTICE = (
     "⚠ Auto-compact failed at {pct:.0f}% — will retry after cooldown. "
     "You can run `/compact` manually."
 )
+_SESSION_RECYCLED_NOTICE = (
+    "♻️ This session was recycled by the watchdog ({reason}). "
+    "Conversation history is preserved — your next message starts a fresh process."
+)
 _MAX_SLOT_MESSAGES = 10000  # Keep all messages — virtual scrolling handles performance
 # FIFO ceiling on a slot's pending-context queue (app-kit context inject +
 # Slack thread backfill). Shared so the two eviction sites cannot drift.
@@ -658,6 +662,7 @@ class _ChatSlot:
         "_browse_mode",
         "_side",
         "_acp_client",
+        "_pending_steers",
     )
 
     def __init__(
@@ -818,6 +823,16 @@ class _ChatSlot:
         # dashboard steer handler) reach the running session's client to inject
         # a mid-turn steer. None when idle.
         self._acp_client = None
+        # Mid-turn steers handed to the backend but not yet confirmed consumed
+        # (no steering_consumed / EVENT_STEER_CONSUMED echo yet). Appended by
+        # the dashboard steer handler BEFORE the steer RPC's await (so a turn
+        # dying mid-write still sees it), settled by _run_chat when the
+        # consumed echo arrives (matched against the echo's snapshot text),
+        # and — the point of the mechanism — REQUEUED as ordinary queue cards
+        # by _run_chat's finally when the turn dies first (stall-cancel, user
+        # STOP, error). Without this, a steer swallowed by a dying turn
+        # vanished with no trace (2026-07-17 incident; see the requeue site).
+        self._pending_steers: list[str] = []
 
     @property
     def _plan_stage_count(self) -> int:
@@ -1330,6 +1345,35 @@ class DashboardState:
                     )
 
         self.sessions.set_compact_callback(_on_compacted)
+
+    def wire_session_recycle_callback(self) -> None:
+        """Register the dashboard's recycle-notification callback.
+
+        Fired when the watchdog recycles a session (e.g. RSS threshold). Posts a
+        notice into the slot so the user understands why their session reset.
+        """
+
+        async def _on_recycled(key: str, *, reason: str) -> None:
+            if not key.startswith("dashboard:"):
+                return
+            slot_key = key[len("dashboard:"):]
+            slot = self.get_slot(slot_key)
+            if slot is None:
+                return
+            message = _SESSION_RECYCLED_NOTICE.format(reason=reason)
+            try:
+                # Tag kind="compaction" so the dashboard's follow-up [OPTIONS:]
+                # backward scan skips this proactive system notice, matching the
+                # auto-compact notice invariant.
+                slot.append(
+                    "assistant", message, "msg msg-a", meta={"kind": "compaction"}
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to append recycle notice to slot %s", slot_key
+                )
+
+        self.sessions.set_recycle_callback(_on_recycled)
 
     def _count_lessons(self) -> int:
         """Count lessons from JSONL store + vector store (if enabled)."""

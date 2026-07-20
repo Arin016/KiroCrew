@@ -258,7 +258,7 @@ function TerminalView({ sessionId, visible }: { sessionId: string; visible: bool
 }
 
 /* ── Main panel ── */
-export default function CliPanel() {
+export default function CliPanel({ embedded = false }: { embedded?: boolean } = {}) {
   const dispatch = useAppDispatch()
   const { position, sessions, activeSessionId } = useAppSelector(s => s.terminal)
   const isBottom = position === 'bottom'
@@ -397,13 +397,13 @@ export default function CliPanel() {
 
   return (
     <motion.div
-      initial={isBottom ? { height: 0, width: '100%' } : { width: 0, height: '100%' }}
-      animate={isBottom ? { height: size, width: '100%' } : { width: size, height: '100%' }}
-      exit={isBottom ? { height: 0, width: '100%' } : { width: 0, height: '100%' }}
+      initial={embedded ? false : (isBottom ? { height: 0, width: '100%' } : { width: 0, height: '100%' })}
+      animate={embedded ? { width: '100%', height: '100%' } : (isBottom ? { height: size, width: '100%' } : { width: size, height: '100%' })}
+      exit={embedded ? undefined : (isBottom ? { height: 0, width: '100%' } : { width: 0, height: '100%' })}
       transition={{ type: 'spring', bounce: 0, duration: 0.3 }}
       onAnimationComplete={refitAll}
-      className={`shrink-0 overflow-hidden border border-border rounded-lg bg-bg ${isBottom ? 'ml-0 mr-2 mb-2 mt-0' : 'ml-0 mr-2 my-2'}`}
-      style={isBottom ? undefined : { minWidth: MIN_W }}
+      className={embedded ? 'w-full h-full overflow-hidden bg-bg' : `shrink-0 overflow-hidden border border-border rounded-lg bg-bg ${isBottom ? 'ml-0 mr-2 mb-2 mt-0' : 'ml-0 mr-2 my-2'}`}
+      style={embedded ? undefined : (isBottom ? undefined : { minWidth: MIN_W })}
     >
       <div
         className="flex flex-col overflow-hidden relative w-full h-full"
@@ -411,7 +411,9 @@ export default function CliPanel() {
         {/* Resize handle — a Pointer-Events drag splitter (mouse + touch) carrying
             the correct role="separator"/aria-orientation semantics. The rule treats
             "separator" as non-interactive, so the drag handlers are flagged despite
-            the role being the ARIA-correct choice for a resizer. */}
+            the role being the ARIA-correct choice for a resizer. Only rendered when
+            floating/docked, not as a SidePanel tab. */}
+        {!embedded && (
         <div
           role="separator"
           aria-orientation={isBottom ? 'horizontal' : 'vertical'}
@@ -429,6 +431,7 @@ export default function CliPanel() {
             }`}
           />
         </div>
+        )}
 
         {/* Header */}
         <div className="flex items-center gap-1.5 px-3 h-9 shrink-0 border-b border-border">
@@ -455,15 +458,17 @@ export default function CliPanel() {
 
           <button
             onClick={() => dispatch(setCliPanelPosition(isBottom ? 'right' : 'bottom'))}
-            className="p-1 rounded text-text-muted hover:text-text-strong hover:bg-bg-hover transition-colors"
+            className={`p-1 rounded text-text-muted hover:text-text-strong hover:bg-bg-hover transition-colors ${embedded ? 'hidden' : ''}`}
             title={`Move to ${isBottom ? 'right' : 'bottom'}`}
+            aria-label={`Move to ${isBottom ? 'right' : 'bottom'}`}
           >
             <ArrowUpDown size={14} />
           </button>
           <button
             onClick={() => dispatch(closeCliPanel())}
-            className="p-1 rounded text-text-muted hover:text-text-strong hover:bg-bg-hover transition-colors"
+            className={`p-1 rounded text-text-muted hover:text-text-strong hover:bg-bg-hover transition-colors ${embedded ? 'hidden' : ''}`}
             title="Close terminal"
+            aria-label="Close terminal"
           >
             <X size={14} />
           </button>

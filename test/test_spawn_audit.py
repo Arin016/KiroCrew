@@ -79,7 +79,7 @@ _ROUTED_TOKENS = ("sandboxed_spawn_argv", "wrap_argv")
 # filesystem + credential isolation, this gives it a fork-bomb / resource
 # ceiling. Functions whose ONLY spawns are fixed-argv internal probes (no
 # agent-influenced child) are exempted in ``PREEXEC_EXEMPT`` below.
-_PREEXEC_TOKEN = "resource_limit_preexec"
+_PREEXEC_TOKENS = ("resource_limit_preexec", "session_host_preexec")
 
 # Routed functions exempt from the resource-limit requirement: the enclosing
 # function is sandbox-routed (so it appears routed) but the specific spawn is a
@@ -111,10 +111,8 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "cli.py::_node_ok",
         "cli.py::main",
         "cli_chat.py::_tui",
-        "cli_doctor.py::_detect_docker_ollama",
         "cli_doctor.py::_doctor",
         "cli_doctor.py::_doctor_mcp_tools",
-        "cli_doctor.py::_doctor_ollama_install",
         "cli_server.py::_logs_cmd",
         "cli_server.py::_spawn_detached_gateway",
         "cli_server.py::_update",
@@ -145,12 +143,6 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "dashboard/handlers_system.py::_collect_system_metrics",
         "dashboard/handlers_system.py::_get_static_system_info",
         "dashboard/port_reclaim.py::_listeners_on_port",
-        "embeddings.py::_install_docker_ollama",
-        "embeddings.py::_run_docker",
-        "embeddings.py::_sudo_docker",
-        "embeddings.py::install_ollama",
-        "embeddings.py::pull_model",
-        "embeddings.py::start_server",
         "env.py::_run",
         "env.py::activate_mise",
         "frontend.py::build_frontend_async",
@@ -274,7 +266,7 @@ def _collect_routed_spawns_without_preexec() -> set[str]:
     return {
         key
         for key, fsrc in _collect_spawn_functions().items()
-        if any(tok in fsrc for tok in _ROUTED_TOKENS) and _PREEXEC_TOKEN not in fsrc
+        if any(tok in fsrc for tok in _ROUTED_TOKENS) and not any(tok in fsrc for tok in _PREEXEC_TOKENS)
     }
 
 

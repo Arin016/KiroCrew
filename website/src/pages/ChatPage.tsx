@@ -13,7 +13,7 @@ import {
   setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, editQueuedMessage,
   selectComposerBusy,
   setVoiceAudio,
-  toggleActivity, openActivityToTab,
+  toggleActivity, openActivityPanel,
   setActiveSlot, truncateAfterIndex, replaceMessages,
   requestStop, clearQuestionCard,
 } from '../store/chatSlice'
@@ -28,9 +28,7 @@ import { fileReadUrl } from '../utils/fileReadUrl'
 import { safeSetItem, safeSetSessionItem } from '../utils/safeStorage'
 import { handleStopPress, isEscalationState } from '../utils/stopDebounce'
 import { EmptyState, Btn, Input } from '../components/ui'
-import MarkdownPanel from '../components/MarkdownPanel'
-import DiffPanel from '../components/DiffPanel'
-import { type FileChangeEntry, countLines } from '../components/FileChangeChips'
+import { type FileChangeEntry } from '../components/FileChangeChips'
 import PastedChip from '../components/PastedChip'
 import SnipOverlay from '../components/SnipOverlay'
 import { captureScreen, screenSnipSupported } from '../hooks/useScreenSnip'
@@ -56,7 +54,7 @@ const SCROLL_AFTER_RENDER_MS = 100
 export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import WelcomeView from '../components/WelcomeView'
-import { usePanelState, useDiffPanel } from '../hooks/usePanelState'
+import { usePanelTabs } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
@@ -86,10 +84,11 @@ import { useVoiceInput, voiceInputSupported } from '../hooks/useVoiceInput'
 import VoiceDisabledModal from '../components/VoiceDisabledModal'
 import { ChatFooter, AssistantMessage, UserMessage } from './chat'
 import MarkdownRenderer from '../components/MarkdownRenderer'
+import MessageErrorBoundary from '../components/MessageErrorBoundary'
 import TypewriterText from '../components/TypewriterText'
-import ActivityViewer from './chat/ActivityViewer'
 import { useChatNavigation } from '../hooks/useChatNavigation'
 import SubagentProgressBar from './chat/SubagentProgressBar'
+import SidePanel, { SIDE_PANEL_MIN_W, measureSidePanelReservedW } from './chat/SidePanel'
 import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
 import { toSlug } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
@@ -101,7 +100,7 @@ import OverlayDrawer from '../components/OverlayDrawer'
 import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSettings'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
-import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Circle, Wrench, Loader, AlertTriangle, PanelRight, PanelLeftOpen, PanelLeftClose, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Hash, Undo2, Check, Columns2, ExternalLink } from 'lucide-react'
+import { ShieldCheck, BookOpen, Handshake, Rocket, EyeOff, Loader, PanelLeftOpen, PanelLeftClose, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, ArrowUp, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Undo2, Check, Columns2, ExternalLink } from 'lucide-react'
 
 import InfoTip from '../components/InfoTip'
 import { FileCard } from '../components/FileCard'
@@ -129,9 +128,6 @@ import { tryQuickSend } from '../lib/quickSend'
 import { rewindWithRollback } from '../lib/rewindCall'
 
 
-const IDLE_DEFAULT = { kind: 'idle', text: 'Ready', ts: 0 } as const
-
-/** Live session status badge — shows current phase with elapsed timer. */
 export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: {
   activeSlot: string | null; agent?: string; onReveal?: () => void; onRename?: () => void; mode?: string
 }) {
@@ -191,37 +187,6 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: 
   )
 }
 
-function SessionStatus() {
-  const detail = useAppSelector(s => s.chat.slotStatusDetail[s.chat.activeSlot ?? '']) ?? IDLE_DEFAULT
-  const [elapsed, setElapsed] = useState(0)
-  const tsRef = useRef(detail.ts)
-  tsRef.current = detail.ts
-  useEffect(() => {
-    if (detail.kind === 'idle') { setElapsed(0); return }
-    setElapsed(0)
-    const t = setInterval(() => setElapsed(Math.round((Date.now() - tsRef.current) / 1000)), 1000)
-    return () => clearInterval(t)
-  }, [detail.kind])
-
-  // The PanelRight glyph is the activity-panel toggle affordance and must stay
-  // visible at all times, including mid-turn. When the agent is busy we append
-  // a live status icon + label after it, rather than replacing the toggle. The
-  // old behaviour swapped PanelRight out for the status icon, so the panel
-  // toggle disappeared whenever the session was thinking/streaming/tool-running.
-  const busyIcon = detail.kind === 'thinking' ? <Loader size={11} className="animate-spin" /> : detail.kind === 'streaming' ? <Circle size={9} fill="currentColor" /> : detail.kind === 'tool' ? <Wrench size={11} /> : detail.kind === 'idle' ? null : <Loader size={11} className="animate-spin" />
-  const warn = (detail.kind === 'thinking' && elapsed > 30) || (detail.kind === 'streaming' && elapsed > 15)
-  const label = detail.kind === 'idle' ? null : warn ? <><AlertTriangle size={11} /> Slow ({elapsed}s)</> : <><span className="truncate">{detail.text}</span><span className="shrink-0"> ({elapsed}s)</span></>
-
-  return (
-    <span className={`inline-flex items-center gap-1.5 text-[11px] font-mono max-w-[30vw] rounded-md px-1.5 py-0.5 bg-bg/80 backdrop-blur-sm ${warn ? 'text-amber-400' : 'text-muted'}`} title={detail.kind === 'idle' ? 'Ready' : `${detail.text} · ${new Date(detail.ts).toLocaleTimeString()}`}>
-      <span className="shrink-0"><PanelRight size={14} /></span>
-      {busyIcon && <span className="shrink-0">{busyIcon}</span>}
-      {label}
-    </span>
-  )
-}
-
-
 /** Render user message content with file chips and image markdown. Handles:
  *  - Fresh messages: meta.files present, displayTxt has @relative/path tokens
  *  - Replayed history: no meta.files, content has [attached_file N] /full/path
@@ -254,6 +219,17 @@ function KnowledgeBubbleChip({ knowledge }: { knowledge: { items: number; tokens
 }
 
 export function renderUserContent(content: string, meta: Record<string, unknown> | undefined, onFileOpen: (path: string) => void) {
+  // Per-message containment (React #290 defense-in-depth): a render crash in a
+  // user/inject bubble must degrade to a per-message fallback, not unwind to
+  // the root boundary and blank the whole dashboard.
+  return (
+    <MessageErrorBoundary rawContent={content}>
+      {renderUserContentInner(content, meta, onFileOpen)}
+    </MessageErrorBoundary>
+  )
+}
+
+function renderUserContentInner(content: string, meta: Record<string, unknown> | undefined, onFileOpen: (path: string) => void) {
   const pastes = (meta?.pastes as PasteBlock[] | undefined) || []
   const knowledge = meta?.knowledge as { items: number; tokens: number; titles: string[]; content?: { title: string; text: string }[] } | undefined
 
@@ -501,6 +477,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     if (saveDraftsTimer.current) { clearTimeout(saveDraftsTimer.current); saveDraftsTimer.current = null }
     saveDrafts()
   }, [saveDrafts])
+  // Outgoing-slot flush key, advanced inside the slot-change effect after it
+  // flushes that slot's draft. Distinct from composerSlotRef (the live persist
+  // key); both must trail their writes or the draft smear returns. Mesh-2908.
   const prevSlot = useRef<string | null>(null)
   // Latest-value ref for `activeSlot`, updated every render. Used by async
   // upload callbacks (takeScreenshot, uploadFiles) to detect when the user
@@ -508,6 +487,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // so the uploaded file lands in the original slot's draft instead of
   // silently appearing in whatever slot is now active.
   const activeSlotRef = useRef(activeSlot); activeSlotRef.current = activeSlot
+  // The slot the live composer state belongs to; the per-composer persist
+  // effects key off this, not `activeSlot`. Advanced by a dedicated effect
+  // declared AFTER those effects so a batched keystroke+switch can't smear one
+  // slot's draft onto another. See that advance effect for the full rationale. Mesh-2908.
+  const composerSlotRef = useRef(activeSlot)
   const [input, setInput] = useState(() => activeSlot ? drafts.current[activeSlot] ?? '' : '')
 
   // History suggestions ("Continue a previous chat?") shown above the input on the welcome screen.
@@ -871,7 +855,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     })()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { inputRef.current = input; if (activeSlot) { setDraft(drafts.current, activeSlot, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- activeSlot intentionally omitted; slot-change effect handles that transition
+  // Persist the composer text against the slot it BELONGS to (composerSlotRef),
+  // not the live activeSlot (see the composerSlotRef note above). Mesh-2908.
+  useEffect(() => { inputRef.current = input; const s = composerSlotRef.current; if (s) { setDraft(drafts.current, s, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- draft key is composerSlotRef; slot-change effect handles the transition
   // Per-slot draft: save current → restore target (persisted to localStorage)
   useEffect(() => {
     // Re-hydrate from localStorage — only pull in keys we don't already have
@@ -958,14 +944,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const pendingFilesRef = useRef(pendingFiles)
   useEffect(() => {
     pendingFilesRef.current = pendingFiles
-    if (activeSlot) {
-      setFileDraft(fileDrafts.current, activeSlot, pendingFiles)
+    // Key off composerSlotRef, not activeSlot (see the composerSlotRef note). Mesh-2908.
+    const s = composerSlotRef.current
+    if (s) {
+      setFileDraft(fileDrafts.current, s, pendingFiles)
       saveDraftsDebounced()
     }
-    // `activeSlot` is intentionally omitted; the slot-change effect handles the
-    // draft transition when the slot changes, so re-running here on activeSlot
-    // would double-write / clobber the freshly loaded draft.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- draft key is
+    // composerSlotRef; slot-change effect handles that transition
   }, [pendingFiles, saveDraftsDebounced])
   // Collapsed paste blocks backing the `[ Paste #N · M lines ]` tokens in
   // `input`. Persisted per-slot via chatPasteDrafts (localStorage, 30-day TTL)
@@ -974,15 +960,24 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const pasteBlocksRef = useRef(pasteBlocks)
   useEffect(() => {
     pasteBlocksRef.current = pasteBlocks
-    // Live-persist the active slot's blocks so a slot switch / refresh restores
+    // Live-persist the composer's blocks so a slot switch / refresh restores
     // them alongside the text draft (mirrors the pendingFiles effect above).
-    if (activeSlot) {
-      setPasteDraft(pasteDrafts.current, activeSlot, pasteBlocks)
+    // Key off composerSlotRef, not activeSlot (see the composerSlotRef note). Mesh-2908.
+    const s = composerSlotRef.current
+    if (s) {
+      setPasteDraft(pasteDrafts.current, s, pasteBlocks)
       saveDraftsDebounced()
     }
-    // activeSlot intentionally omitted; slot-change effect handles that transition.
+    // draft key is composerSlotRef; slot-change effect handles that transition.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pasteBlocks, saveDraftsDebounced])
+  // Advance the composer draft key AFTER the three persist effects above. React
+  // runs effects in declaration order, so on a slot switch each persist effect
+  // has already written its changed value against the OUTGOING slot before this
+  // repoints the key at the incoming one. Declared last on purpose. Moving it
+  // earlier (or back into the slot-change effect) would let a file/paste change
+  // batched with the switch smear onto the new slot. Mesh-2908.
+  useEffect(() => { composerSlotRef.current = activeSlot }, [activeSlot])
   const [uploadError, setUploadError] = useState('')
   const [uploadNotice, setUploadNotice] = useState('')
   const isMac = useAppSelector(s => s.dashboard.status?.platform) === 'darwin'
@@ -1072,14 +1067,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // here is racy because `useVoiceInput` flips its returned `recording` to the
   // batch value on the same render that `streamEnabled` goes false.)
 
-  const panel = usePanelState()
-  const diffPanel = useDiffPanel()
+  const tabsCtl = usePanelTabs(activeSlot)
   // Find/search pane state. Declared above handleFileOpen / handleOpenDiff so
   // those handlers can call search.close() directly when opening a dock panel
   // (the right-hand dock is a single slot and the file/diff panes are
   // render-gated behind !search.isOpen).
   const search = useMessageSearch(messages, activeSlot)
-  const [diffLineNumbers, setDiffLineNumbers] = useState(false)
   const touchedFiles = useTouchedFiles(activeSlot ?? undefined)
 
   // Auto-track files touched by tool calls (read, write, grep, glob)
@@ -1133,7 +1126,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // The `ok` flag gates whether the file is recorded in history — 404s and
   // other HTTP failures show a placeholder in the panel but should NOT
   // pollute the history list with files that don't exist on disk.
-  const handleFileOpen = useCallback(async (filePath: string) => {
+  const handleFileOpen = useCallback(async (filePath: string, opts?: { replaceId?: string }) => {
     // Plugin host integration: notify the IntelliJ plugin (if active) so
     // it can open the file natively in the IDE editor. If the plugin
     // handles file opens, skip the dashboard's DiffPanel — the user wanted
@@ -1160,16 +1153,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
           queryFn: () => api.fileDiff(filePath),
         }),
       ])
-      panel.openPanel(filePath, text, activeSlotRef.current ?? null)
-      diffPanel.closeDiff()
+      tabsCtl.openFile(filePath, text, activeSlotRef.current ?? null, opts)
+      dispatch(openActivityPanel())
       // The right-hand dock is a single slot; the file viewer is render-gated
       // behind !search.isOpen. Close the find pane so the opened file actually
       // shows instead of being silently suppressed.
       search.close()
       if (ok) touchedFiles.addFile(filePath, 'history')
     } catch {
-      panel.openPanel(filePath, '_Error reading file_', activeSlotRef.current ?? null)
-      diffPanel.closeDiff()
+      tabsCtl.openFile(filePath, '_Error reading file_', activeSlotRef.current ?? null, opts)
+      dispatch(openActivityPanel())
       search.close()
     }
     // Depend on the stable `search.close` (useCallback([]) in useMessageSearch),
@@ -1177,7 +1170,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // search-state change (isOpen/term/matches) and would needlessly recreate
     // this callback and re-render its consumers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryClient, panel, diffPanel, search.close, touchedFiles])
+  }, [queryClient, tabsCtl, dispatch, search.close, touchedFiles])
 
   // Open the Monaco diff panel from a file-change chip click. Closes the
   // markdown viewer and the activity panel so panels stay mutually exclusive.
@@ -1196,9 +1189,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // all-additions block, which hurts readability. Open the normal readable
     // file view instead — there's no meaningful "before" to compare against.
     if (!original || !original.trim()) { handleFileOpen(filePath); return }
-    panel.closePanel()
-    if (activityOpen) dispatch(toggleActivity())
-    diffPanel.openDiff(filePath, modified, original)
+    tabsCtl.openDiff(filePath, modified, original)
+    dispatch(openActivityPanel())
     // Diff pane is render-gated behind !search.isOpen (single right-dock slot);
     // close the find pane so the diff shows instead of opening underneath it.
     search.close()
@@ -1206,7 +1198,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // handleFileOpen above) — avoids recreating this callback on search-state
     // changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panel, activityOpen, dispatch, diffPanel, search.close, handleFileOpen])
+  }, [tabsCtl, dispatch, search.close, handleFileOpen])
 
   // Save a document chip from chat into the artifact library (materialize +
   // pin). Fire-and-forget; the artifact library refetches on its own.
@@ -1795,9 +1787,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     widgetPrefillRef.current = null
     if (!raw && !pendingFilesRef.current.length) return
 
+    // The session actually on screen at send time. Read from the ref (fresh
+    // every render), not the closure `activeSlot` (stale until send() is
+    // re-memoized). Under lag a reducer-driven activeSlot change can move the
+    // active slot before ChatPage re-renders, so the closure would route into
+    // the slot the user just left. Used for slash routing, the composer draft
+    // clear, and (below) the send target. Mesh-2908.
+    const uiSlot = activeSlotRef.current
+
     // Slash command interception (e.g. /side): runs before knowledge so a
     // bare prefix like /side returns immediately without touching input parse.
-    const slashResult = await interceptSlashCommand(raw, activeSlot, dispatch)
+    const slashResult = await interceptSlashCommand(raw, uiSlot, dispatch)
     if (slashResult.intercepted) {
       if (!optionText) { setInput(''); setPasteBlocks([]) }
       return
@@ -1829,14 +1829,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
     setPrefillHint(false)
     if (!optionText) {
-      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (activeSlot) { delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; saveDrafts() }
+      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (uiSlot) { delete drafts.current[uiSlot]; delete fileDrafts.current[uiSlot]; delete pasteDrafts.current[uiSlot]; saveDrafts() }
       // The challenge-handoff prompt is seeded into PREFILL_STORAGE_KEY and the
       // slot-restore effect re-applies it on slot changes. Once that prompt is
       // sent, clear the seed so a later slot-restore can't re-fill the (now
       // empty) composer with the already-sent text.
       try { sessionStorage.removeItem(PREFILL_STORAGE_KEY) } catch { /* sessionStorage unavailable */ }
     }
-    let slot = targetSlot ?? activeSlot
+    // Target the slot the user is actually looking at (uiSlot, from the ref),
+    // not the stale closure `activeSlot`. See the uiSlot note above. Mesh-2908.
+    let slot = targetSlot ?? uiSlot
     // Only a normal (non-targeted) send consumes the one-shot "new session"
     // intent. A targeted send — e.g. submitting document comments to the
     // document's origin slot — must leave it intact for the user's next send.
@@ -1920,6 +1922,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // are stable, and defaultAgent is only a creation-time fallback — pulling
     // them into the dep array would defeat that stability without changing
     // outcomes.
+    // send() no longer reads the closure `activeSlot` for its target. It reads
+    // uiSlot = activeSlotRef.current, so it routes to the on-screen slot even
+    // between the reducer flip and this callback's re-memoization (Mesh-2908).
+    // activeSlot is left in deps as a harmless no-op: dropping it churns the
+    // array for no behavior change (the ref is always current regardless).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlot, dispatch, connected])
 
@@ -1930,10 +1937,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // synchronously, but send()'s closure activeSlot is stale until re-render,
   // so the origin slot is passed to send() explicitly.
   const submitComments = useCallback((message: string) => {
-    const target = panel.slot
+    const target = tabsCtl.activeTab?.slot ?? null
     if (target && target !== activeSlot) dispatch(switchSlot(target))
     send(message, target ?? undefined)
-  }, [panel.slot, activeSlot, dispatch, send])
+  }, [tabsCtl.activeTab, activeSlot, dispatch, send])
 
   // Auto-send when navigated with ?autoSend=1 or ?token= with prompt
   useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected, autoSendTick])  
@@ -2174,7 +2181,56 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
   const lastRole = messages[messages.length - 1]?.role ?? ''
   // Precompute: index of last finalized assistant message (tools after this are "trailing")
-  const toggleAct = useCallback(() => { panel.closePanel(); diffPanel.closeDiff(); dispatch(toggleActivity()) }, [dispatch, panel, diffPanel])
+  // Auto-collapse the activity panel when the window shrinks past the point
+  // where its minimum width still fits beside the chat's reserved minimum;
+  // reopen automatically when space returns. Crossing-based (compares against
+  // the previous window width) so a deliberate manual open on an
+  // already-narrow window is respected rather than instantly fought.
+  const autoCollapsedRef = useRef(false)
+  const activityOpenRef = useRef(activityOpen); activityOpenRef.current = activityOpen
+  useEffect(() => {
+    if (isMobile || embedMode) return
+    let lastW = window.innerWidth
+    const onResize = () => {
+      // Live threshold: the reserve includes the header row's content need
+      // (wide readout capsule etc.), so it's re-measured per event rather
+      // than fixed at the static constant.
+      const THRESHOLD = SIDE_PANEL_MIN_W + measureSidePanelReservedW()
+      const w = window.innerWidth
+      const crossedBelow = lastW >= THRESHOLD && w < THRESHOLD
+      const crossedAbove = lastW < THRESHOLD + 40 && w >= THRESHOLD + 40 // small hysteresis
+      lastW = w
+      if (crossedBelow && activityOpenRef.current) {
+        autoCollapsedRef.current = true
+        dispatch(toggleActivity())
+      } else if (crossedAbove && autoCollapsedRef.current && !activityOpenRef.current) {
+        autoCollapsedRef.current = false
+        dispatch(openActivityPanel())
+      }
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [isMobile, embedMode, dispatch])
+  const toggleAct = useCallback(() => {
+    autoCollapsedRef.current = false
+    // Opening with no tabs shows the empty-state launcher grid (no seeded
+    // default view) -- the user picks what to open.
+    dispatch(toggleActivity())
+  }, [dispatch])
+  // Header-launched toggle: the top-bar Activity button (App.tsx) dispatches
+  // this event so the panel-close coordination above stays in ChatPage.
+  useEffect(() => {
+    const h = () => toggleAct()
+    window.addEventListener('toggle-activity-panel', h)
+    return () => window.removeEventListener('toggle-activity-panel', h)
+  }, [toggleAct])
+  // Bridge explicit view requests (e.g. the /side slash command dispatches
+  // openActivityToTab('side')) into the tab model.
+  const activityTab = useAppSelector(s => s.chat.activityTab)
+  useEffect(() => {
+    if (activityOpen) tabsCtl.openView(activityTab === ('nav' as string) ? 'files' : activityTab)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activityTab])
   const displayItems = useMemo<DisplayItem[]>(() => {
     // Phase 1: build raw items (singles + groups)
     const raw: TurnItem[] = []
@@ -2553,7 +2609,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                 : m.content
               return <>
                 {cronLabel && <span className="text-muted text-[11px] font-medium px-1 mb-0.5"><Clock className="lucide-inline" /> {cronLabel}</span>}
-                <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warning-subtle text-fg border border-warning/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}><MarkdownRenderer content={cleanContent} /></div>
+                <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warning-subtle text-fg border border-warning/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}><MessageErrorBoundary rawContent={cleanContent}><MarkdownRenderer content={cleanContent} /></MessageErrorBoundary></div>
                 {chatConfig.showTimestamps && msgTime && <span className="text-muted text-[12px] font-mono px-1">{msgTime}</span>}
               </>
             })()
@@ -2612,6 +2668,30 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+  // Full-height activity bar slot in the App shell grid (desktop dashboard
+  // only): the Activity panel portals into it so it spans the window
+  // top-to-bottom. The header row ends at the slot's left edge,
+  // so the top-bar right cluster (capsule, terminal, bell, gear) shifts left
+  // when the panel opens. Null on mobile / embed frames -> inline fallback.
+  const [activitySlot, setActivitySlot] = useState<HTMLElement | null>(null)
+  useEffect(() => {
+    if (isMobile || embedMode) { setActivitySlot(null); return }
+    const el = document.getElementById('activity-bar-slot')
+    if (el) { setActivitySlot(el); return }
+    // Slot not in the DOM yet. On a mobile -> desktop crossing, this
+    // component's media-query subscription can flush (and run this effect)
+    // before the App shell re-renders the slot div -- a one-shot lookup here
+    // would miss it forever and strand the panel on the inline fallback
+    // (rendering below the header instead of in the full-height column).
+    // Watch the DOM until the slot appears, then latch it and stop.
+    setActivitySlot(null)
+    const mo = new MutationObserver(() => {
+      const found = document.getElementById('activity-bar-slot')
+      if (found) { setActivitySlot(found); mo.disconnect() }
+    })
+    mo.observe(document.body, { childList: true, subtree: true })
+    return () => mo.disconnect()
+  }, [isMobile, embedMode])
   const openSidebar = useCallback(() => setMobileSessions(true), [])
   const closeSidebar = useCallback(() => setMobileSessions(false), [])
   useSwipeEdge(chatContainerRef, { enabled: isMobile && !mobileSessions, edge: 'left', edgeZone: 0.35, onSwipe: openSidebar })
@@ -2731,7 +2811,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
       {/* Chat pane */}
       {embedMode !== 'sessions' && (
-      <div className={`relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden ${panel.isOpen || activityOpen || search.isOpen ? 'flex-[1_1_60%]' : 'flex-1'}`} style={{ transition: 'flex 0.2s', ...(!sidebarOpen && !isMobile ? { marginLeft: '-0.5rem' } : {}), '--mc-content-width': CONTENT_WIDTH[chatConfig.contentWidth].messages, '--mc-input-width': CONTENT_WIDTH[chatConfig.contentWidth].input } as React.CSSProperties}>
+      <div className={`relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden ${(activityOpen && !activitySlot) || search.isOpen ? 'flex-[1_1_60%]' : 'flex-1'}`} style={{ transition: 'flex 0.2s', ...(!sidebarOpen && !isMobile ? { marginLeft: '-0.5rem' } : {}), '--mc-content-width': CONTENT_WIDTH[chatConfig.contentWidth].messages, '--mc-input-width': CONTENT_WIDTH[chatConfig.contentWidth].input } as React.CSSProperties}>
         {snipFrame && (
           <SnipOverlay
             frame={snipFrame}
@@ -2848,9 +2928,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                 <Columns2 size={14} />
               </Clickable>
               ))}
-              {embedMode !== 'chat' && !activityOpen && <Clickable className="flex items-center opacity-40 hover:opacity-100 transition-opacity cursor-pointer pointer-events-auto" onClick={toggleAct} aria-label="Toggle activity panel">
-                <SessionStatus />
-              </Clickable>}
               </div>
               </div>
               <div className="h-6 bg-gradient-to-b from-bg to-transparent" />
@@ -3371,43 +3448,57 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
           </DetailPanel>
         )}
       <AnimatePresence>
-        {diffPanel.isOpen && !panel.isOpen && !search.isOpen && (
-          <DetailPanel
-            key="diff-panel"
-            title={
-              <span className="flex items-center gap-2">
-                <button className="truncate hover:text-accent cursor-pointer transition-colors" onClick={() => { diffPanel.closeDiff(); handleFileOpen(diffPanel.filePath) }}>
-                  {diffPanel.filePath.split('/').pop() || 'Diff'}
-                </button>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium shrink-0">CHANGE</span>
-                {(() => { const { added, removed } = countLines(diffPanel.original, diffPanel.modified); return (added > 0 || removed > 0) ? <span className="text-[10px] font-mono shrink-0">{added > 0 && <span className="text-ok">+{added}</span>}{removed > 0 && <span className="text-danger ml-0.5">-{removed}</span>}</span> : null })()}
-              </span>
-            }
-            onClose={() => { diffPanel.closeDiff(); dispatch(openActivityToTab('files')) }}
-            initialWidth={600}
-            reserveWidth={panelReserve}
-            storageKey="mc-panel-width"
-            noPadding
-            headerClassName="diff-panel-header"
-            headerActions={
-              <>
-                <button onClick={() => { diffPanel.closeDiff(); handleFileOpen(diffPanel.filePath) }} className="p-1 rounded cursor-pointer transition-colors text-muted hover:text-text" title="Open in Editor" aria-label="Open in Editor"><Pen size={14} /></button>
-                <button onClick={() => setDiffLineNumbers(v => !v)} className={`p-1 rounded cursor-pointer transition-colors ${diffLineNumbers ? 'text-accent' : 'text-muted hover:text-text'}`} title={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'} aria-label={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'}><Hash size={14} /></button>
-              </>
-            }
+        {/* Inline side panel — mobile / embed frames where there's no actbar
+            grid column. Desktop uses the actbar portal below. */}
+        {activityOpen && !search.isOpen && !activitySlot && (
+          <motion.div
+            key="side-panel-inline"
+            initial={{ width: 0 }}
+            animate={{ width: 'auto' }}
+            exit={{ width: 0 }}
+            transition={{ duration: 0.4, ease: [0.32, 0.72, 0, 1] }}
+            className="h-full overflow-hidden flex justify-end shrink-0"
           >
-            <DiffPanel filePath={diffPanel.filePath} original={diffPanel.original} modified={diffPanel.modified} lineNumbers={diffLineNumbers} />
-          </DetailPanel>
-        )}
-        {panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
-          <MarkdownPanel key="md-panel" filePath={panel.filePath} content={panel.content} onContentChange={panel.setContent} onSave={handleFileSave} onClose={panel.closePanel} liveWatch onSubmitComments={submitComments} reserveWidth={panelReserve} />
-        )}
-        {activityOpen && !panel.isOpen && !diffPanel.isOpen && !search.isOpen && (
-          <DetailPanel key="activity-panel" title="Activity" onClose={toggleAct} initialWidth={420} reserveWidth={panelReserve} storageKey="mc-activity-width">
-            <ActivityViewer subagents={subagents} toolLog={toolLog} open={true} onToggle={toggleAct} slot={activeSlot || ''} files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource} projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving} />
-          </DetailPanel>
+            <SidePanel
+              tabsCtl={tabsCtl}
+              subagents={subagents} toolLog={toolLog} slot={activeSlot || ''}
+              files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource}
+              projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving}
+              onSubmitComments={submitComments} onFileSave={handleFileSave} onClose={toggleAct}
+            />
+          </motion.div>
         )}
       </AnimatePresence>
+      {/* Full-height tabbed side panel: portaled into the App shell's
+          'actbar' grid column so it spans the window top-to-bottom; the header
+          row ends at its left edge, shifting the top-bar buttons left.
+          The motion wrapper animates the column width 0 -> auto: the actbar
+          grid column tracks it frame-by-frame, so the chat pane slides left in
+          sync while the panel (right-anchored via justify-end) slides out from
+          the window edge — both sides move together instead of snapping. */}
+      {activitySlot && createPortal(
+        <AnimatePresence>
+          {activityOpen && !search.isOpen && (
+            <motion.div
+              key="side-panel"
+              initial={{ width: 0 }}
+              animate={{ width: 'auto' }}
+              exit={{ width: 0 }}
+              transition={{ duration: 0.4, ease: [0.32, 0.72, 0, 1] }}
+              className="h-full overflow-hidden flex justify-end"
+            >
+              <SidePanel
+                tabsCtl={tabsCtl}
+                subagents={subagents} toolLog={toolLog} slot={activeSlot || ''}
+                files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource}
+                projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving}
+                onSubmitComments={submitComments} onFileSave={handleFileSave} onClose={toggleAct}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        activitySlot
+      )}
     </div>
     </TagPopoverProvider>
   )

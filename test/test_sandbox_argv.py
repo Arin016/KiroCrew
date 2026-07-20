@@ -350,6 +350,88 @@ class TestLauncherStdlibShadowing:
             )
 
 
+class TestSignalBroadcastGuard:
+    """seccomp kill(-1) broadcast denial + KIROCREW_HOST_PID export.
+
+    Redo of the reverted PID-namespace isolation (24c320f6 → 14fb9442): the
+    broadcast accident is contained by a static seccomp arg filter instead of
+    a namespace, so the subtree's view of pids — and every host-PID-coupled
+    mechanism (session identity, claim-push, systemd) — stays intact.
+    """
+
+    def test_launcher_script_contains_kill_filter(self):
+        """Static: the generated launcher carries the kill-broadcast filter
+        (arg-inspection block) and per-arch kill syscall numbers."""
+        script = _build_launcher_script("standard")
+        assert "_KILL_NR = 62" in script  # x86_64 kill
+        assert "_KILL_NR = 129" in script  # aarch64 kill
+        # arg-inspection: args[0] LOW word only, at seccomp_data offset 16.
+        # The high word (offset 20) must NOT be matched: pid_t is a 32-bit
+        # int and the x86-64 ABI leaves the upper register half undefined
+        # (glibc zero-extends, so a high==0xFFFFFFFF check never fires).
+        assert "0, 0, 16))" in script
+        assert "0, 0, 20))" not in script
+        assert "0xFFFFFFFF" in script  # 32-bit pid -1 comparison
+
+    def test_launcher_script_exports_host_pid(self):
+        """Static: launcher exports KIROCREW_HOST_PID before fork so the
+        whole subtree can resolve session_pid files by the recorded pid."""
+        script = _build_launcher_script("standard")
+        assert 'os.environ["KIROCREW_HOST_PID"] = str(os.getpid())' in script
+        # Must appear in main() BEFORE the fork so the child inherits it.
+        assert script.index("KIROCREW_HOST_PID") < script.index("os.fork()")
+
+    def test_kill_broadcast_denied_targeted_allowed_e2e(self, tmp_path):
+        """Live e2e through the real launcher: inside the sandbox,
+        ``os.kill(-1, 0)`` must fail with EPERM (seccomp) while a targeted
+        ``os.kill(own_pid, 0)`` succeeds and KIROCREW_HOST_PID is present.
+
+        Safe by construction: signal 0 is a pure permission/existence probe —
+        no signal is ever delivered, even if the filter were absent.
+        """
+        if sys.platform != "linux":
+            pytest.skip("sandbox launcher is Linux-only")
+        import kiro_crew.sandbox as _sb
+
+        if not _sb._probe_unshare():
+            # Probes CLONE_NEWUSER|CLONE_NEWNS — fails closed on CI hosts
+            # (e.g. GitHub Actions) where the mount namespace is blocked.
+            pytest.skip("user+mount namespaces unavailable on this host")
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import os, sys\n"
+            "try:\n"
+            "    os.kill(-1, 0)\n"
+            "    print('BROADCAST_ALLOWED')\n"
+            "except PermissionError:\n"
+            "    print('BROADCAST_EPERM')\n"
+            "except OSError as e:\n"
+            "    print(f'BROADCAST_OSERROR_{e.errno}')\n"
+            "os.kill(os.getpid(), 0)\n"
+            "print('TARGETED_OK')\n"
+            "print('HOSTPID_' + ('SET' if os.environ.get('KIROCREW_HOST_PID', '').isdigit() else 'MISSING'))\n"
+        )
+        launcher = tmp_path / "launcher.py"
+        launcher.write_text(_build_launcher_script("standard"))
+        result = subprocess.run(
+            [sys.executable, str(launcher), sys.executable, str(probe)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if (
+            "unshare(NEWUSER) failed" in result.stderr
+            or "unshare(NEWNS) failed" in result.stderr
+        ):
+            pytest.skip("namespaces unavailable on this host")
+        assert result.returncode == 0, result.stderr
+        assert "BROADCAST_EPERM" in result.stdout, (
+            f"kill(-1, 0) not denied: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "TARGETED_OK" in result.stdout, result.stdout
+        assert "HOSTPID_SET" in result.stdout, result.stdout
+
+
 class TestSandboxExecArgv:
     @patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "fake", "SSH_AUTH_SOCK": "/tmp/ssh"})
     def test_includes_env_unset_flags(self):
@@ -613,6 +695,68 @@ class TestResourceLimitPreexec:
             self._reset_cache()
 
 
+class TestSessionHostPreexec:
+    """session_host_preexec() raises NOFILE to the hard limit for trusted
+    session host processes (kiro-cli-chat), preventing EMFILE crashes when
+    managing many MCP server subprocesses."""
+
+    def _reset_cache(self):
+        import kiro_crew.sandbox as sb
+
+        sb._SESSION_HOST_PREEXEC = sb._UNSET
+
+    def test_returns_callable_and_caches(self):
+        import kiro_crew.sandbox as sb
+
+        self._reset_cache()
+        try:
+            first = sb.session_host_preexec()
+            second = sb.session_host_preexec()
+            assert callable(first)
+            assert first is second
+        finally:
+            self._reset_cache()
+
+    def test_raises_nofile_to_hard_limit(self):
+        """The preexec callable raises NOFILE soft to the hard limit."""
+        import resource
+
+        import kiro_crew.sandbox as sb
+
+        self._reset_cache()
+        try:
+            fn = sb.session_host_preexec()
+            assert fn is not None
+            # Save current limits, lower soft to simulate the problem.
+            orig_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if hard < 2048:
+                pytest.skip("hard limit too low for test")
+            resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard))
+            try:
+                fn()
+                new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+                if hard == resource.RLIM_INFINITY:
+                    # Implementation contract: unlimited hard (macOS) caps the
+                    # soft limit at max(inherited_soft, 65536), never infinity.
+                    assert new_soft == 65536
+                else:
+                    assert new_soft == hard
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (orig_soft, hard))
+        finally:
+            self._reset_cache()
+
+    def test_non_posix_returns_none(self):
+        import kiro_crew.sandbox as sb
+
+        self._reset_cache()
+        try:
+            with patch("kiro_crew.sandbox.os.name", "nt"):
+                assert sb.session_host_preexec() is None
+        finally:
+            self._reset_cache()
+
+
 class TestCgroupScopeArgv:
     """cgroup_scope_argv() wraps agent spawns in a transient systemd --user
     --scope with pids.max + memory.max — the default-on fork-bomb / memory-DoS
@@ -633,16 +777,86 @@ class TestCgroupScopeArgv:
                 patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
                 patch(
                     "kiro_crew.sandbox._cgroup_limits_from_config",
-                    return_value=(1024, 8192),
+                    return_value=(8192, 8192, 50, 0),
                 ),
+                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=True),
             ):
                 out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
             assert out[0] == "systemd-run"
             assert "--user" in out and "--scope" in out
-            assert "TasksMax=1024" in out
+            assert "TasksMax=8192" in out
             assert "MemoryMax=8192M" in out
             assert "MemorySwapMax=0" in out
+            assert "CPUWeight=50" in out
+            # CPUQuota is opt-in: absent unless max_cpu_percent > 0.
+            assert not any(a.startswith("CPUQuota=") for a in out)
             assert out[out.index("--") + 1 :] == ["kiro-cli", "chat"]
+        finally:
+            self._reset_probe()
+
+    def test_cpu_controller_delegated_real_path(self):
+        """Cover the uncached probe body: reads the user-slice controllers file
+        and reports cpu presence; failures report False (skip CPU properties,
+        keep pids/memory enforcement)."""
+        from unittest.mock import mock_open
+
+        import kiro_crew.sandbox as sb
+
+        try:
+            sb._CPU_DELEGATED = None
+            with patch("builtins.open", mock_open(read_data="cpu memory pids\n")):
+                assert sb._cpu_controller_delegated() is True
+            sb._CPU_DELEGATED = None
+            with patch("builtins.open", mock_open(read_data="memory pids\n")):
+                assert sb._cpu_controller_delegated() is False
+            sb._CPU_DELEGATED = None
+            with patch("builtins.open", side_effect=OSError("no cgroup")):
+                assert sb._cpu_controller_delegated() is False
+            # Cached: second call must not re-read.
+            with patch("builtins.open", side_effect=AssertionError("must not open")):
+                assert sb._cpu_controller_delegated() is False
+        finally:
+            sb._CPU_DELEGATED = None
+
+    def test_cpu_quota_emitted_when_configured(self):
+        import kiro_crew.sandbox as sb
+
+        self._reset_probe()
+        try:
+            with (
+                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch(
+                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    return_value=(8192, 8192, 75, 200),
+                ),
+                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=True),
+            ):
+                out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
+            assert "CPUWeight=75" in out
+            assert "CPUQuota=200%" in out
+        finally:
+            self._reset_probe()
+
+    def test_no_cpu_properties_without_cpu_delegation(self):
+        """pids/memory enforcement must not be lost when only cpu delegation
+        is missing — the scope is still created, minus the CPU properties."""
+        import kiro_crew.sandbox as sb
+
+        self._reset_probe()
+        try:
+            with (
+                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch(
+                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    return_value=(8192, 8192, 50, 200),
+                ),
+                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=False),
+            ):
+                out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
+            assert out[0] == "systemd-run"
+            assert "TasksMax=8192" in out
+            assert not any(a.startswith("CPUWeight=") for a in out)
+            assert not any(a.startswith("CPUQuota=") for a in out)
         finally:
             self._reset_probe()
 
@@ -675,11 +889,20 @@ class TestCgroupScopeArgv:
         try:
             with patch(
                 "kiro_crew.config.loader._raw_config",
-                return_value={"resource_limits": {"max_processes": 200, "max_memory_mb": 2048}},
+                return_value={
+                    "resource_limits": {
+                        "max_processes": 200,
+                        "max_memory_mb": 2048,
+                        "cpu_weight": 80,
+                        "max_cpu_percent": 400,
+                    }
+                },
             ):
-                procs, mem = sb._cgroup_limits_from_config()
+                procs, mem, weight, quota = sb._cgroup_limits_from_config()
             assert procs == 200
             assert mem == 2048
+            assert weight == 80
+            assert quota == 400
         finally:
             self._reset_probe()
 
@@ -691,16 +914,27 @@ class TestCgroupScopeArgv:
             # Missing block -> module defaults (never leave the cgroup ceiling
             # unset). Memory default is host-proportional (65% of RAM).
             with patch("kiro_crew.config.loader._raw_config", return_value={}):
-                procs, mem = sb._cgroup_limits_from_config()
+                procs, mem, weight, quota = sb._cgroup_limits_from_config()
             assert procs == sb._CGROUP_DEFAULT_MAX_PROCESSES
             assert mem == sb._default_max_memory_mb()
+            assert weight == sb._CGROUP_DEFAULT_CPU_WEIGHT
+            assert quota == 0  # opt-in: no CPUQuota by default
             with patch(
                 "kiro_crew.config.loader._raw_config",
-                return_value={"resource_limits": {"max_processes": 0, "max_memory_mb": "x"}},
+                return_value={
+                    "resource_limits": {
+                        "max_processes": 0,
+                        "max_memory_mb": "x",
+                        "cpu_weight": 0,
+                        "max_cpu_percent": -5,
+                    }
+                },
             ):
-                procs, mem = sb._cgroup_limits_from_config()
+                procs, mem, weight, quota = sb._cgroup_limits_from_config()
             assert procs == sb._CGROUP_DEFAULT_MAX_PROCESSES
             assert mem == sb._default_max_memory_mb()
+            assert weight == sb._CGROUP_DEFAULT_CPU_WEIGHT
+            assert quota == 0
         finally:
             self._reset_probe()
 
@@ -737,7 +971,7 @@ class TestCgroupScopeArgv:
             available, _ = sb._probe_cgroup_scope()
             if not available:
                 pytest.skip("no cgroup v2 delegation on this host")
-            with patch("kiro_crew.sandbox._cgroup_limits_from_config", return_value=(20, 8192)):
+            with patch("kiro_crew.sandbox._cgroup_limits_from_config", return_value=(20, 8192, 50, 0)):
                 argv = sb.cgroup_scope_argv(
                     [
                         sys.executable,

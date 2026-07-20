@@ -25,8 +25,8 @@ of failure.
 | ACP prompt timeout | `acp/client.py` | Per-prompt | 2 hr (`_DEFAULT_PROMPT_TIMEOUT`) | No | Raises `AcpTimeoutError` |
 | ACP read timeout | `acp/client.py` | Per-readline | 20s (`_READ_TIMEOUT`) | No | Allows `CancelledError` delivery at each yield point |
 | Process group kill | `acp/client.py` | Process cleanup | Immediate | No | `killpg(SIGTERM)` → `killpg(SIGKILL)` → `_kill_escaped_children` for different-PGID descendants |
-| Per-process resource limits | `security.py` (`apply_resource_limits`) via `sandbox.py` (`resource_limit_preexec`) | Every agent-influenced spawn (root agent, ACP subagents/runtime, MCP servers, app backends, cron scripts, git, hooks, voice) | Kernel-enforced `RLIMIT_NOFILE=1024` default-on; `RLIMIT_NPROC`/`RLIMIT_CPU`/`RLIMIT_AS` opt-in (default off) | Yes — kernel enforces at fork/alloc/open time, no sweep needed | Kernel refuses `open()` past the FD cap (EMFILE); on opt-in NPROC/CPU/AS, EAGAIN / SIGXCPU / ENOMEM |
-| cgroup v2 scope (fork bomb + memory) | `sandbox.py` (`cgroup_scope_argv`) | Every agent-influenced spawn tree (root agent + all its MCP servers/subagents as one scope; each cron/app-backend/hook/git/tool spawn its own) | `pids.max=1024` (`TasksMax`) + `memory.max=65% of host RAM` (`MemoryMax`, `MemorySwapMax=0`) per transient `systemd --user --scope` under `kirocrew-agents.slice`, default-on where cgroup v2 delegation exists | Yes — kernel enforces at fork()/alloc time; OOM-kills the scope on memory breach, `fork()` fails EAGAIN past `pids.max` | Fork bomb bounded to `pids.max`; memory balloon OOM-killed at `memory.max`. Unavailable (no delegation/macOS) → no-op + one loud SECURITY warning; RLIMIT_NOFILE still applies |
+| Per-process resource limits | `security.py` (`apply_resource_limits`) via `sandbox.py` (`resource_limit_preexec`) | Every agent-influenced spawn (MCP servers, app backends, cron scripts, git, hooks, voice). Exception: the trusted ACP session-host spawns (`acp/client.py`, `acp/runtime.py`) use `sandbox.py:session_host_preexec()`, which RAISES NOFILE to the inherited hard limit instead — a session host multiplexes many MCP pipe pairs and the 1024 cap caused EMFILE crashes | Kernel-enforced `RLIMIT_NOFILE=1024` default-on; `RLIMIT_NPROC`/`RLIMIT_CPU`/`RLIMIT_AS` opt-in (default off) | Yes — kernel enforces at fork/alloc/open time, no sweep needed | Kernel refuses `open()` past the FD cap (EMFILE); on opt-in NPROC/CPU/AS, EAGAIN / SIGXCPU / ENOMEM |
+| cgroup v2 scope (fork bomb + memory) | `sandbox.py` (`cgroup_scope_argv`) | Every agent-influenced spawn tree (root agent + all its MCP servers/subagents as one scope; each cron/app-backend/hook/git/tool spawn its own) | `pids.max=8192` (`TasksMax`) + `memory.max=65% of host RAM` (`MemoryMax`, `MemorySwapMax=0`) per transient `systemd --user --scope` under `kirocrew-agents.slice`, default-on where cgroup v2 delegation exists. Note: `pids.max` counts tasks (threads), not processes — 8192 accommodates JVM build trees while still bounding fork bombs. | Yes — kernel enforces at fork()/alloc time; OOM-kills the scope on memory breach, `fork()` fails EAGAIN past `pids.max` | Fork bomb bounded to `pids.max`; memory balloon OOM-killed at `memory.max`. Unavailable (no delegation/macOS) → no-op + one loud SECURITY warning; RLIMIT_NOFILE still applies |
 | Bounded restart shutdown | `dashboard/handlers.py` | Dashboard ⚡ Apply & Restart | 5s (`_SHUTDOWN_TIMEOUT_SECS`) | No | `asyncio.wait_for` on `provider.shutdown()`; `_sync_kill_provider` fallback on timeout |
 | Subagent injection outer cap | `subagent.py _run()` | Per-subagent completion | 1200s (`_ON_DONE_TIMEOUT`) | No | Semaphore wait + injection combined; on timeout kills stuck kiro-cli via `sessions.reset()` and queues failure event for parent to drain |
 | Subagent injection inner cap | `gateway.py` | Per `stream_and_collect` | 300s (`INJECTION_TIMEOUT`) | No | `_inject_with_retry` up to 2 retries (3 attempts) with backoff; bounded by outer 1200s cap |
@@ -67,8 +67,11 @@ of failure.
 3. **Per-process resource limits — implemented and wired (Talos bdf0d7e5 / V2285983353).**
    `security.py:apply_resource_limits(config)` returns a `preexec_fn` that applies POSIX
    `setrlimit` caps in the child (post-fork, pre-exec), and `sandbox.py:resource_limit_preexec()`
-   is the cached accessor every agent-influenced spawn passes as `preexec_fn=` — the root agent
-   and ACP subagents/runtime (`acp/client.py`, `acp/runtime.py`), MCP server probes
+   is the cached accessor every agent-influenced spawn passes as `preexec_fn=` — the ACP
+   session-host spawns (`acp/client.py`, `acp/runtime.py`) now use
+   `sandbox.py:session_host_preexec()` instead, which RAISES NOFILE to the inherited hard limit
+   for the trusted session host (it multiplexes many MCP pipe pairs); all other
+   agent-influenced spawns keep `resource_limit_preexec` — MCP server probes
    (`mcp_discovery.py`), app backends and their dependency installs (`apps/backend.py`), the app
    registry's git clone/build spawns (`apps/registry.py`, `apps/routes.py`), builtin app
    subprocesses (deploy_web, file_explorer), cron scripts/commands
@@ -118,9 +121,12 @@ of failure.
    resident memory), the actual default-on defense is a **cgroup v2 scope** applied by
    `sandbox.py:cgroup_scope_argv()`. Every agent-influenced spawn is wrapped in a transient
    `systemd-run --user --scope` (nested under `kirocrew-agents.slice`) with:
-   - `TasksMax` = `pids.max` (default **1024**, from `max_processes`) — the **fork-bomb**
-     ceiling. Per-cgroup, so it bounds the agent + all its MCP-server/tool descendants as one
-     unit without the per-UID footgun; `fork()` fails `EAGAIN` past it.
+   - `TasksMax` = `pids.max` (default **8192**, from `max_processes`) — the **fork-bomb**
+     ceiling. `pids.max` counts tasks (threads), not processes; 1024 starved legitimate JVM
+     build trees (Gradle + parallel test workers need thousands of threads). 8192 still bounds
+     fork bombs which spawn tens of thousands of tasks near-instantly. Per-cgroup, so it bounds
+     the agent + all its MCP-server/tool descendants as one unit without the per-UID footgun;
+     `fork()` fails `EAGAIN` past it.
    - `MemoryMax` + `MemorySwapMax=0` = `memory.max` (default **65% of physical RAM** — e.g.
      ~10.6 GB on a 16 GB box, ~21.3 GB on 32 GB; overridable via `max_memory_mb`, and an
      8192 MB fallback when host RAM can't be read) — the **memory-balloon** ceiling. It scales
@@ -129,6 +135,17 @@ of failure.
      aggregate guarantee across many concurrent scopes. This is a true RSS cap (not virtual),
      so it does not trip on Node/V8's large virtual mappings; the kernel OOM-kills the scope on
      breach.
+   - `CPUWeight` (default **50**, from `cpu_weight`; systemd's default weight is 100) — the
+     **CPU fair-share** control, emitted only when the `cpu` controller is delegated. It is a
+     proportional share, never a hard throttle: agent scopes use 100% of an idle host but
+     yield to interactive work under CPU contention. A hard cap, `CPUQuota`, is available as
+     **opt-in only** via `max_cpu_percent` (e.g. `200` = 2 cores); it is off by default
+     because hard quotas slow legitimate builds — grok-build and OpenClaw likewise ship no
+     default CPU quota, relying on fair scheduling plus timeouts.
+
+   The RLIMIT preexec additionally writes `oom_score_adj=1000` on every spawned child
+   (inherited by its descendants), biasing the kernel OOM killer toward tool subprocesses so a
+   memory-ballooning command is killed *before* `memory.max` takes out the entire agent scope.
 
    The kernel enforces both at `fork()`/allocation time — no reaper race. `--scope` execs into
    the target (it does not fork a wrapper), so the gateway's PID tracking / `killpg` /

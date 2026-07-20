@@ -207,6 +207,7 @@ Jane Doe (janedoe), John Smith (jsmith)
 | `autonudge.py` | Reactive same-session self-nudge service |
 | `snapshot.py` | Portable snapshot and restore for KiroCrew state |
 | `vector_memory.py` | Vector-based semantic memory with FAISS |
+| `watchdog.py` | Session cleanup watchdog (CleanupHook dispatcher; RSS-threshold recycle) |
 | `voice_reply.py` | Voice reply synthesis |
 | `atomic_write.py` | Atomic file write utilities |
 | `constants.py` | Shared constants |
@@ -237,7 +238,8 @@ Jane Doe (janedoe), John Smith (jsmith)
 | `dashboard/stt_stream.py` | Streaming speech-to-text WebSocket |
 | `dashboard/_types.py` | Dashboard type definitions |
 | `validation.py` | Input validation for cron, config, user actions |
-| `embeddings.py` | Embedding provider with LRU cache (128 entries) |
+| `embeddings.py` | In-process embedding runtime (vendored llama-cpp-python) behind the `EmbeddingBackend` ABC (swap seam via `register_embedding_backend`) + background model download; LRU embed cache (128 entries, keyed by text + model_id) |
+| `_vendor/` | Vendored llama-cpp-python 0.3.34 (MIT) + per-platform native libs — never edit by hand; see `_vendor/README.md` for the upgrade procedure. Excluded from all linters |
 | `session_map.py` | Session key → CWD/provider persistence (split from session.py) |
 | `session_pid.py` | PID tracking for ACP processes (split from session.py) |
 | `optimizer.py` | Native prompt optimizer (Cmd+Shift+Enter) |

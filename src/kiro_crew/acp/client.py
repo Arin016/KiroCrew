@@ -98,8 +98,8 @@ from kiro_crew.hooks import (
 from kiro_crew.mcp_gateway.claim import schedule_claim
 from kiro_crew.sandbox import (
     cgroup_scope_argv,
-    resource_limit_preexec,
     scrub_agent_denied_env,
+    session_host_preexec,
     wrap_argv,
 )
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -1652,7 +1652,7 @@ class AcpClient:
             env=env,
             start_new_session=platform_compat.IS_POSIX,
             creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
-            preexec_fn=resource_limit_preexec(),
+            preexec_fn=session_host_preexec(),
         )
         self._pid = self._process.pid
         self._start_time = await asyncio.get_running_loop().run_in_executor(

@@ -1043,6 +1043,67 @@ class TestArtifactPostCommentTool:
         assert len(payload["text"]) <= ARTIFACT_COMMENT_TEXT_MAX
 
 
+class TestArtifactReplyCommentTool:
+    """The artifact_reply_comment MCP tool POSTs the parent thread's reply route
+    with the body verbatim + is_agent flag, redacting the body before sending
+    (no emoji — provenance rides on the structured flag)."""
+
+    def test_reply_comment_posts_to_parent_thread(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"comment": {"id": "c2", "sync_state": "local_only"}},
+        ) as post:
+            result = _call_tool_inner(
+                "artifact_reply_comment",
+                {"slug": "doc", "parent_id": "c1", "text": "done"},
+            )
+        post.assert_called_once()
+        path, payload = post.call_args.args
+        assert path == "/api/artifacts/doc/comments/c1/reply"
+        # Body stored verbatim (no emoji watermark); provenance is is_agent.
+        assert payload["text"] == "done"
+        assert "\U0001f916" not in payload["text"]
+        assert payload["is_agent"] is True
+        assert payload["author"] == "agent"
+        assert "posted" in result.lower()
+
+    def test_reply_comment_redacts_credentials_in_body(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"comment": {"id": "c2", "sync_state": "local"}},
+        ) as post:
+            _call_tool_inner(
+                "artifact_reply_comment",
+                {"slug": "doc", "parent_id": "c1",
+                 "text": "key AKIAIOSFODNN7EXAMPLE leaked"},
+            )
+        _, payload = post.call_args.args
+        assert "AKIAIOSFODNN7EXAMPLE" not in payload["text"]
+
+    def test_reply_comment_surfaces_backend_error(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"error": "parent comment not found"},
+        ):
+            result = _call_tool_inner(
+                "artifact_reply_comment",
+                {"slug": "doc", "parent_id": "gone", "text": "hi"},
+            )
+        assert result.startswith("Error:")
+        assert "parent comment not found" in result
+
+    def test_reply_comment_rejects_bad_parent_id(self) -> None:
+        from kiro_crew.validation import ValidationError
+
+        with patch("kiro_crew.mcp_core._post") as post:
+            with pytest.raises(ValidationError):
+                _call_tool_inner(
+                    "artifact_reply_comment",
+                    {"slug": "doc", "parent_id": "../etc/passwd", "text": "hi"},
+                )
+        post.assert_not_called()
+
+
 class TestArtifactMarkReviewTool:
     """The artifact_mark_review MCP tool POSTs the review route — agents may
     advance a thread to REVIEW but never resolve it."""

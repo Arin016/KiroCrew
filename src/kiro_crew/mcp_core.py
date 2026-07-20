@@ -48,7 +48,12 @@ from kiro_crew.knowledge.dedup import dedup_sweep
 from kiro_crew.knowledge.embedder import create_embedder_from_config
 from kiro_crew.knowledge.retrieval import HybridRetriever
 from kiro_crew.knowledge.store import KnowledgeStore
-from kiro_crew.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
+from kiro_crew.mcp_shared import (
+    ToolCancelled,
+    call_tool_with_logging,
+    is_tool_cancelled,
+    run_mcp_stdio_loop,
+)
 from kiro_crew.platform import redact_via_context as redact
 from kiro_crew.security import (
     BINARY_MIME_ALLOWLIST,
@@ -75,6 +80,7 @@ from kiro_crew.validation import (
     ARTIFACT_MARK_REVIEW_SCHEMA,
     ARTIFACT_MOVE_SCHEMA,
     ARTIFACT_POST_COMMENT_SCHEMA,
+    ARTIFACT_REPLY_COMMENT_SCHEMA,
     ARTIFACT_REVERT_SCHEMA,
     ARTIFACT_SAVE_SCHEMA,
     ARTIFACT_UPDATE_SCHEMA,
@@ -937,6 +943,31 @@ def _list_tools() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "artifact_reply_comment",
+            "description": (
+                "Reply to an existing comment thread on an artifact. "
+                "If the parent is provider-origin, the reply posts back."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Artifact slug.",
+                    },
+                    "parent_id": {
+                        "type": "string",
+                        "description": "ID of the comment to reply to.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Reply body text.",
+                    },
+                },
+                "required": ["slug", "parent_id", "text"],
+            },
+        },
+        {
             "name": "artifact_mark_review",
             "description": (
                 "Advance a comment thread to REVIEW status, signaling "
@@ -1633,7 +1664,7 @@ def _get_ppid(pid: int) -> int:
 # local_knowledge_search runs per LLM tool call in a long-lived MCP server.
 # Rebuilding KnowledgeStore every call re-runs the schema DDL, an orphan-cleanup
 # DELETE transaction, and a full SELECT of all entities/relations into the
-# in-memory graph; rebuilding the embedder re-runs Ollama's /api/tags probe
+# in-memory graph; rebuilding the embedder re-runs the model availability probe
 # (up to 3s when configured). We cache both, keyed on a signature of the DB
 # files (main + -wal, since WAL commits land in -wal) and config.json, so
 # out-of-band dashboard ingestion or config edits trigger a rebuild on the next
@@ -1666,7 +1697,7 @@ def _get_knowledge_search(db_path: Path, cfg_path: Path) -> tuple[Any, Any]:
 
     Rebuilds (and closes the prior connection) only when the DB/WAL/config
     signature changes; otherwise reuses the live store + embedder, avoiding the
-    per-call schema/migrate/graph-load and Ollama availability probe.
+    per-call schema/migrate/graph-load and embedder availability probe.
     """
     global _KNOWLEDGE_CACHE
     sig = _knowledge_db_signature(db_path, cfg_path)
@@ -1716,6 +1747,15 @@ def _resolve_session_key() -> str:
         return sk
     try:
         cfg_dir = config_dir()
+        # Sandbox launcher exports its own HOST pid (the pid the gateway keys
+        # session_pid files by) — direct lookup works even when this
+        # process's pid view diverges from the host's (PID-namespace
+        # sandboxing), where the ancestor walk below can never match.
+        host_pid = os.environ.get("KIROCREW_HOST_PID", "")
+        if host_pid.isdigit():
+            pid_file = cfg_dir / f"session_pid_{host_pid}.txt"
+            if pid_file.exists():
+                return pid_file.read_text(encoding="utf-8").strip()
         pid = os.getppid()
         seen: set[int] = set()
         while pid > 1 and pid not in seen:
@@ -2502,10 +2542,31 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             agent_names.append(a)
 
         spawn_lines: list[str] = []
-        if agent_ids:
+        if not parent_session and agent_ids:
+            # Orphan alert: without a parent session key the subagents cannot
+            # deliver completion events back to this conversation and will
+            # not appear in the Subagents panel for this session. This has
+            # historically failed silently (Mesh ticket 8abcd9fe) — say it
+            # loudly so the agent/user can fall back to spawn_list +
+            # result.txt polling instead of waiting forever.
             spawn_lines.append(
-                f"Spawned {len(agent_ids)} subagent(s). Results will arrive as completion events:"
+                "⚠ parent_session UNRESOLVED — these subagents are orphaned: "
+                "completion events will NOT arrive in this conversation. "
+                "Poll spawn_list and read ~/.kirocrew/subagents/<id>/result.txt "
+                "instead. (Identity plumbing issue — check KIROCREW_HOST_PID / "
+                "session_pid / claim-push.)"
             )
+        if agent_ids:
+            if parent_session:
+                spawn_lines.append(
+                    f"Spawned {len(agent_ids)} subagent(s). Results will arrive as completion events:"
+                )
+            else:
+                # Orphaned (warning above): completion events cannot be
+                # delivered — do not promise them in the same breath.
+                spawn_lines.append(
+                    f"Spawned {len(agent_ids)} subagent(s). Monitor results via polling:"
+                )
             for aid, a, t in zip(agent_ids, agent_names, task_list):
                 label = f"{aid} ({a})" if a else aid
                 spawn_lines.append(f"  {label}: {t[:80]}")
@@ -2514,12 +2575,25 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             for e in errors:
                 spawn_lines.append(f"  - {e}")
         if agent_ids:
-            spawn_lines.append(
-                "\n⚠️ END YOUR TURN NOW — do no further work this turn."
-                " Wait for the [Subagent completion event] messages, which will resume you."
-            )
+            if parent_session:
+                spawn_lines.append(
+                    "\n⚠️ END YOUR TURN NOW — do no further work this turn."
+                    " Wait for the [Subagent completion event] messages, which will resume you."
+                )
+            else:
+                spawn_lines.append(
+                    "\nDo NOT wait for completion events — poll spawn_list and read "
+                    "result.txt files instead."
+                )
         else:
-            spawn_lines.append("All tasks queued — results will arrive as completion events.")
+            if parent_session:
+                spawn_lines.append("All tasks queued — results will arrive as completion events.")
+            else:
+                spawn_lines.append(
+                    "All tasks queued — parent_session UNRESOLVED, so completion "
+                    "events will NOT arrive: poll spawn_list and read "
+                    "~/.kirocrew/subagents/<id>/result.txt instead."
+                )
         return "\n".join(spawn_lines)
 
     if name == "spawn_sub_agents":
@@ -2908,6 +2982,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             remaining = deadline - now
             if remaining <= 0:
                 break
+            # Check for cancellation from notifications/cancelled handler
+            if is_tool_cancelled():
+                raise ToolCancelled(f"wait cancelled after {seconds - remaining:.0f}s")
             if now >= _next_ping:
                 try:
                     _post("/api/session-keepalive", {})
@@ -3571,6 +3648,30 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         cmt = d.get("comment", {})
         return f"Comment posted (id={cmt.get('id', '?')}, sync={cmt.get('sync_state', '?')})"
 
+    if name == "artifact_reply_comment":
+        args = validate_tool_args(args, ARTIFACT_REPLY_COMMENT_SCHEMA)
+        slug = args["slug"]
+        parent_id = args["parent_id"]
+        text = args["text"]
+        # Never trust LLM output — redact before posting to the dashboard. Route
+        # through the canonical context-aware shim so a companion's extra
+        # credential patterns apply on this egress path too.
+        text = redact(text)
+        d = _post(
+            f"/api/artifacts/{slug}/comments/{parent_id}/reply",
+            {
+                # Store the body verbatim; agent provenance is the structured
+                # is_agent flag (no emoji persisted into the body — CLAUDE.md).
+                "text": text,
+                "is_agent": True,
+                "author": "agent",
+            },
+        )
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        cmt = d.get("comment", {})
+        return f"Reply posted (id={cmt.get('id', '?')}, sync={cmt.get('sync_state', '?')})"
+
     if name == "artifact_mark_review":
         args = validate_tool_args(args, ARTIFACT_MARK_REVIEW_SCHEMA)
         slug = args["slug"]
@@ -4081,7 +4182,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         # Reuse a cached store + embedder across calls; rebuilt only when the
         # knowledge DB (or its -wal) or config.json changes (see
         # _get_knowledge_search). Avoids the per-call schema/migrate/graph-load
-        # and the Ollama availability probe.
+        # and the embedder availability probe.
         cfg_path = Path(config_dir()) / "config.json"
         store, embedder = _get_knowledge_search(db_path, cfg_path)
         embed_fn = embedder.embed if embedder and embedder.is_available() else None

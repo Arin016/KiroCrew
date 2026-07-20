@@ -14,6 +14,7 @@ import re
 import shlex
 import socket
 import string
+import sys
 import uuid
 from collections import Counter
 
@@ -2871,7 +2872,7 @@ _RLIMIT_DEFAULTS = {
     # NOTE: the fork-bomb defense that IS default-on is the cgroup v2 scope
     # (sandbox.cgroup_scope_argv → pids.max), which is per-cgroup not per-UID.
     # This same ``max_processes`` key sets that cgroup pids.max ceiling (default
-    # 1024 there); the RLIMIT_NPROC path below stays opt-in for the reasons above.
+    # 8192 there); the RLIMIT_NPROC path below stays opt-in for the reasons above.
     "max_processes": 0,
     # RLIMIT_CPU: CPU-seconds. 0 = disabled (default). CAVEAT: this counts
     # against the WHOLE lifetime of a long-lived process — the root agent runs
@@ -2893,6 +2894,27 @@ _RLIMIT_DEFAULTS = {
     # overrides; the RLIMIT_AS path here stays opt-in for non-Node fleets.
     "max_memory_mb": 0,
 }
+
+
+def _bias_child_oom_score() -> None:
+    """Bias the kernel OOM killer toward the calling process (``oom_score_adj``
+    = 1000, inherited by descendants) so a memory-ballooning tool subprocess is
+    killed BEFORE the cgroup ``memory.max`` ceiling takes out the whole agent
+    scope. Linux-only, unprivileged, best-effort — never raises. Kept
+    async-signal-safe (single open/write/close, no allocation-heavy work) so it
+    is callable from a ``preexec_fn``. Pattern from OpenClaw's linux-oom-score
+    child shim.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        fd = os.open("/proc/self/oom_score_adj", os.O_WRONLY)
+        try:
+            os.write(fd, b"1000")
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def apply_resource_limits(config: dict | None = None) -> "Callable[[], None]":
@@ -2983,5 +3005,7 @@ def apply_resource_limits(config: dict | None = None) -> "Callable[[], None]":
                 # Platform doesn't support this rlimit, or the kernel rejected
                 # the value — leave it inherited rather than fail the spawn.
                 continue
+        # Bias the OOM killer toward this child (see _bias_child_oom_score).
+        _bias_child_oom_score()
 
     return _set_limits

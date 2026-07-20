@@ -19,8 +19,10 @@ Config: ``"sandbox": "auto" | "off"`` in ``~/.kirocrew/config.json``.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import ctypes.util
+import errno
 import functools
 import json
 import logging
@@ -30,12 +32,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kiro_crew import platform_compat
 from kiro_crew.platform import current_context
+
+try:
+    import resource as _resource_mod
+except ImportError:  # non-POSIX (Windows)
+    _resource_mod = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -158,24 +166,195 @@ def _sandbox_policy():
 # ── Availability probes ──
 
 
-def _probe_unshare() -> bool:
-    """Return True if user + mount namespaces work (Linux)."""
-    if sys.platform != "linux":
-        return False
+# unshare(2) flags for the userns probe.
+_CLONE_NEWUSER = 0x10000000
+_CLONE_NEWNS = 0x00020000
+
+# Errnos that indicate a TRANSIENT resource failure (fork/CDLL under momentary
+# pressure) — the kernel supports user namespaces, we just couldn't verify it
+# right now. These must never be treated as "this host has no sandbox backend"
+# (incident 2026-07-18: one EAGAIN during a cron spawn burst fail-closed every
+# subsequent spawn for an hour because the failed probe result was cached).
+_TRANSIENT_PROBE_ERRNOS = frozenset(
+    {errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE, errno.ENOSPC}
+)
+
+# Delay before the single in-probe retry on a transient failure.
+_PROBE_TRANSIENT_RETRY_DELAY_SECS = 0.05
+
+# Detail of the most recent failed userns probe: (transient, reason).
+# ``None`` means the last probe succeeded (or none has run yet). Consumed by
+# detect_backend() for cache policy and by wrap_argv() for error reporting.
+_last_unshare_failure: tuple[bool, str] | None = None
+
+
+def _probe_unshare_once() -> tuple[bool, bool, str]:
+    """One unshare(CLONE_NEWUSER|CLONE_NEWNS) attempt: ``(ok, transient, reason)``.
+
+    The forked child exits with the unshare(2) errno so the parent can
+    distinguish a kernel that refuses user namespaces (EPERM/EINVAL/ENOSYS —
+    permanent) from momentary resource exhaustion (EAGAIN/ENOMEM/... —
+    transient).
+    """
     try:
-        _clone_newuser = 0x10000000
-        _clone_newns = 0x00020000
         _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         _libc.unshare.argtypes = [ctypes.c_int]
         _libc.unshare.restype = ctypes.c_int
+    except OSError as exc:
+        return (False, exc.errno in _TRANSIENT_PROBE_ERRNOS, f"libc load failed: {exc}")
+    except Exception as exc:  # find_library returning junk, ABI issues, ...
+        return (False, False, f"libc load failed: {exc}")
+    try:
         pid = os.fork()
-        if pid == 0:
-            ret = _libc.unshare(_clone_newuser | _clone_newns)
-            os._exit(0 if ret == 0 else 1)
+    except OSError as exc:
+        name = errno.errorcode.get(exc.errno or 0, "?")
+        transient = exc.errno in _TRANSIENT_PROBE_ERRNOS
+        return (False, transient, f"fork failed with errno {exc.errno} ({name})")
+    if pid == 0:
+        try:
+            ret = _libc.unshare(_CLONE_NEWUSER | _CLONE_NEWNS)
+            err = ctypes.get_errno() if ret != 0 else 0
+            os._exit(0 if ret == 0 else (err if 0 < err < 256 else 1))
+        except BaseException:
+            os._exit(1)
+    try:
         _, status = os.waitpid(pid, 0)
-        return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-    except Exception:
+    except OSError as exc:
+        return (False, True, f"waitpid failed: {exc}")
+    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+        return (True, False, "ok")
+    if not os.WIFEXITED(status):
+        sig = os.WTERMSIG(status) if os.WIFSIGNALED(status) else 0
+        return (
+            False,
+            True,  # child killed by signal is always transient
+            f"probe child killed by signal {sig}",
+        )
+    child_errno = os.WEXITSTATUS(status)
+    name = errno.errorcode.get(child_errno, "?")
+    transient = child_errno in _TRANSIENT_PROBE_ERRNOS
+    return (
+        False,
+        transient,
+        f"unshare(CLONE_NEWUSER|CLONE_NEWNS) failed with errno {child_errno} ({name})",
+    )
+
+
+# ── Background warm thread (never-block-on-loop policy) ──
+# The event loop NEVER executes fork/waitpid/sleep for the probe. On-loop
+# callers with a cold cache get an immediate transient "none" (fail-closed,
+# self-heals in ms) and fire a background daemon thread that populates the
+# cache off-loop. Boot sites call prewarm_backend() to fill the cache before
+# any on-loop caller ever reaches detect_backend(), so the transient path is
+# typically never hit in production.
+
+_warm_thread: threading.Thread | None = None
+
+
+def _background_warm() -> None:
+    """Run the probe off-loop and populate the cache. Thread target."""
+    global _backend, _last_unshare_failure
+    for attempt in (1, 2):
+        ok, transient, reason = _probe_unshare_once()
+        if ok:
+            _last_unshare_failure = None
+            _backend = "namespace"
+            logger.info("Background warm: sandbox backend = namespace")
+            return
+        _last_unshare_failure = (transient, reason)
+        if not transient:
+            logger.warning("Background warm: probe permanent failure: %s", reason)
+            _backend = "none"
+            return
+        logger.warning("Background warm: probe transient (attempt %d/2): %s", attempt, reason)
+        if attempt == 1:
+            time.sleep(_PROBE_TRANSIENT_RETRY_DELAY_SECS)
+    # Both attempts transient — leave cache uncached (None) so next call re-tries
+    logger.warning("Background warm: both attempts transient, cache stays cold")
+
+
+def _kick_background_warm() -> None:
+    """Start the background warm thread if not already running."""
+    global _warm_thread
+    if _warm_thread is not None and _warm_thread.is_alive():
+        return  # dedupe: warm already in progress
+    _warm_thread = threading.Thread(
+        target=_background_warm, name="sandbox-probe-warm", daemon=True
+    )
+    _warm_thread.start()
+
+
+def prewarm_backend() -> None:
+    """Fire-and-forget boot hook: start background probe to fill the cache.
+
+    Call early in gateway startup (slack/gateway.py, mcp_gateway/gatewayd.py)
+    so the cache is warm before any on-loop spawn path reaches detect_backend().
+    """
+    if sys.platform != "linux":
+        return  # probes are Linux-only
+    _kick_background_warm()
+
+
+def _probe_unshare() -> bool:
+    """Return True if user + mount namespaces work (Linux).
+
+    Failures are logged with their errno and classified transient vs
+    permanent in :data:`_last_unshare_failure`; a transient failure gets one
+    immediate retry (off-loop only).
+
+    **Never-block-on-loop invariant**: when called from a running asyncio
+    event loop with a cold cache, this function does NOT probe — it fires
+    ``_kick_background_warm()`` and returns False with a transient reason.
+    The background thread populates the cache in ms; the next spawn re-checks
+    and finds a warm cache. Boot prewarm ensures this path is rarely hit.
+
+    Callers deciding cache policy (detect_backend) MUST consult the
+    classification — a transient result is not evidence that the host lacks
+    a sandbox backend.
+    """
+    global _last_unshare_failure
+    if sys.platform != "linux":
+        _last_unshare_failure = (False, "not Linux")
         return False
+
+    # Fast path: the cache already proved user namespaces work -- no probe
+    # needed. Keeps on-loop callers correct after prewarm instead of
+    # deferring and returning False.
+    if _backend == "namespace":
+        return True
+
+    # Detect running event loop — governs whether we probe directly or defer.
+    on_loop = False
+    try:
+        asyncio.get_running_loop()
+        on_loop = True
+    except RuntimeError:
+        pass
+
+    if on_loop:
+        # NEVER probe on the event loop. Kick background warm and fail transient.
+        _kick_background_warm()
+        _last_unshare_failure = (
+            True,
+            "probe deferred to background thread (cold cache on event loop); "
+            "cache warms in ms — retry",
+        )
+        return False
+
+    # Off-loop: direct probe with one retry on transient failure.
+    for attempt in (1, 2):
+        ok, transient, reason = _probe_unshare_once()
+        if ok:
+            _last_unshare_failure = None
+            return True
+        _last_unshare_failure = (transient, reason)
+        if not transient:
+            logger.warning("userns probe failed (permanent): %s", reason)
+            return False
+        logger.warning("userns probe failed (transient, attempt %d/2): %s", attempt, reason)
+        if attempt == 1:
+            time.sleep(_PROBE_TRANSIENT_RETRY_DELAY_SECS)
+    return False
 
 
 def userns_available() -> bool:
@@ -422,6 +601,14 @@ def main():
     if not argv:
         sys.exit("sandbox_launcher: no command given")
 
+    # Export this launcher's HOST pid before any fork/namespace work. The
+    # gateway records exactly this pid (its direct Popen child) when it
+    # writes ``session_pid_<pid>.txt`` on session claim, so in-sandbox
+    # identity resolvers can look the file up directly via this env var
+    # instead of walking /proc — which breaks whenever the subtree's view
+    # of pids diverges from the host's (PID-namespace sandboxing).
+    os.environ["KIROCREW_HOST_PID"] = str(os.getpid())
+
     # Two pipes for parent↔child synchronization
     c2p_r, c2p_w = os.pipe()  # child signals "unshare done"
     p2c_r, p2c_w = os.pipe()  # parent signals "maps written"
@@ -588,6 +775,19 @@ def main():
         # Deny mount/umount2/unshare/setns/pivot_root/link/linkat to prevent
         # the sandboxed process from undoing bind-mounts or creating hardlinks
         # to protected credential inodes (P472042777).
+        #
+        # Additionally deny kill(-1, sig) — the signal BROADCAST that reaches
+        # every same-uid process on the host (gateway, other sessions). This
+        # is the accident-containment redo of the reverted PID-namespace
+        # isolation (24c320f6): a static arg filter blocks the hand-slip /
+        # runaway-script broadcast without changing the subtree's view of
+        # pids, so session identity, claim-push, and systemd stay intact.
+        # Only ``kill`` needs arg inspection: tkill/tgkill/pidfd_send_signal
+        # are inherently targeted (no broadcast semantics). pid==0 and
+        # negative process-group targets stay ALLOWED on purpose — the spawn
+        # already setsid()s, so every reachable process group is inside the
+        # sandbox session, and denying killpg breaks legitimate tooling
+        # (timeout(1), shell job control, cleanup traps).
         if _libc.prctl:
             _PR_SET_SECCOMP = 22
             _SECCOMP_MODE_FILTER = 2
@@ -602,17 +802,20 @@ def main():
             _BPF_K = 0x00
             _BPF_RET = 0x06
             # Syscall numbers (x86_64): mount=165, umount2=166, unshare=272,
-            # setns=308, pivot_root=155, link=86, linkat=265
+            # setns=308, pivot_root=155, link=86, linkat=265, kill=62
             # aarch64: mount=40, umount2=39, unshare=97, setns=268,
-            # pivot_root=41, link=N/A(use linkat=37), linkat=37
+            # pivot_root=41, link=N/A(use linkat=37), linkat=37, kill=129
             import platform as _plat
             _machine = _plat.machine()
             if _machine == "x86_64":
                 _DENY_SYSCALLS = (165, 166, 272, 308, 155, 86, 265)
+                _KILL_NR = 62
             elif _machine == "aarch64":
                 _DENY_SYSCALLS = (40, 39, 97, 268, 41, 37)
+                _KILL_NR = 129
             else:
                 _DENY_SYSCALLS = ()  # unknown arch — skip seccomp
+                _KILL_NR = None
 
             if _DENY_SYSCALLS:
                 # Architecture constants for seccomp arch validation
@@ -621,8 +824,26 @@ def main():
                 _SECCOMP_RET_KILL = 0x00000000
                 _expected_arch = _AUDIT_ARCH_X86_64 if _machine == "x86_64" else _AUDIT_ARCH_AARCH64
 
-                # BPF program: validate arch, load syscall number, compare
-                # against deny list, return ERRNO(EPERM) on match, ALLOW otherwise.
+                # BPF program layout (indices relative to start):
+                #   0: LD arch
+                #   1: JEQ expected_arch ? skip 1 : fall through
+                #   2: RET KILL                (unexpected arch)
+                #   3: LD syscall nr
+                #   4..4+n-1: JEQ deny_i -> DENY
+                #   k   = 4+n: JEQ kill_nr ? fall into arg check : jump ALLOW
+                #   k+1: LD args[0] low 32 bits    (seccomp_data offset 16)
+                #   k+2: JEQ 0xFFFFFFFF ? jump DENY : fall through
+                #   ALLOW = k+3: RET ALLOW
+                #   DENY  = k+4: RET ERRNO|EPERM
+                #
+                # Only the LOW 32 bits of args[0] are inspected. pid_t is a
+                # 32-bit int: the kernel truncates the register to 32 bits, so
+                # low==0xFFFFFFFF is exactly "pid == -1" regardless of what the
+                # upper half holds. The upper half MUST NOT be matched — the
+                # x86-64 ABI leaves it undefined for int arguments, and glibc's
+                # ``movl`` zero-extends, so kill(-1) typically arrives as
+                # 0x00000000_FFFFFFFF (a high==0xFFFFFFFF check silently never
+                # fires, which is a filter bypass, not a compat issue).
                 _insns = []
                 # Load arch: BPF_LD | BPF_W | BPF_ABS, offset=4 (seccomp_data.arch)
                 _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 4))
@@ -632,12 +853,20 @@ def main():
                 _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_KILL))
                 # Load syscall number: BPF_LD | BPF_W | BPF_ABS, offset=0
                 _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 0))
-                # For each denied syscall: JEQ -> deny
+                # For each denied syscall: JEQ -> DENY (at index k+4)
                 _n_deny = len(_DENY_SYSCALLS)
                 for _i, _nr in enumerate(_DENY_SYSCALLS):
-                    _jt = _n_deny - _i  # jumps to the DENY RET
+                    _jt = (_n_deny - _i - 1) + 4  # jumps to the DENY RET at k+4
                     _insns.append(_struct.pack("<HBBI",
                         _BPF_JMP | _BPF_JEQ | _BPF_K, _jt, 0, _nr))
+                # k: nr == kill ? fall into arg check : jump to ALLOW (k+3)
+                _insns.append(_struct.pack("<HBBI",
+                    _BPF_JMP | _BPF_JEQ | _BPF_K, 0, 2, _KILL_NR))
+                # k+1: load args[0] low word (offset 16, little-endian layout)
+                _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 16))
+                # k+2: low == 0xFFFFFFFF (pid -1) ? DENY (skip 1) : fall to ALLOW
+                _insns.append(_struct.pack("<HBBI",
+                    _BPF_JMP | _BPF_JEQ | _BPF_K, 1, 0, 0xFFFFFFFF))
                 # ALLOW: return SECCOMP_RET_ALLOW
                 _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_ALLOW))
                 # DENY: return SECCOMP_RET_ERRNO | EPERM
@@ -976,7 +1205,6 @@ def cleanup_stale_sandbox_profiles(*, legacy_dir: str | None = None) -> int:
 # ── Public API ──
 
 _backend: str | None = None  # "namespace", "sandbox-exec", "none"
-_backend_config_mode: str | None = None  # config mode when backend was cached
 
 
 def _allow_no_isolation() -> bool:
@@ -1053,23 +1281,38 @@ def _warn_no_isolation(mode: str) -> None:
 def detect_backend(config_mode: str = "auto") -> str:
     """Detect the best available sandbox backend.
 
-    Cached after first call; cache is invalidated if *config_mode* changes
-    (e.g. user toggles agent.sandbox between "auto" and "off").
+    Cache policy (incident 2026-07-18 — one transient fork failure poisoned
+    the cache and fail-closed every spawn for an hour until restart):
+
+    - A positive result (``"namespace"``/``"sandbox-exec"``) is cached for the
+      process lifetime — kernel capability does not change while running.
+    - ``"none"`` is cached ONLY when the userns probe failure looks permanent
+      (kernel refuses user namespaces: EPERM/EINVAL/ENOSYS). A transient
+      resource failure (fork EAGAIN, EMFILE, ...) is never cached — the next
+      spawn re-probes and self-heals.
+    - ``config_mode="off"`` short-circuits to ``"none"`` without probing and
+      without touching the cache. All other modes share one cache entry:
+      backend capability is mode-independent, so mode alternation no longer
+      forces pointless re-probes.
     """
-    global _backend, _backend_config_mode
-    if _backend is not None and _backend_config_mode == config_mode:
-        return _backend
-    # Invalidate on config change
-    if _backend_config_mode != config_mode:
-        _backend = None
-        _backend_config_mode = config_mode
+    global _backend
     if config_mode == "off":
-        _backend = "none"
-    elif userns_available():
+        return "none"
+    if _backend is not None:
+        return _backend
+    if userns_available():
         _backend = "namespace"
     elif _probe_sandbox_exec():
         _backend = "sandbox-exec"
     else:
+        transient, reason = _last_unshare_failure or (False, "no probe detail recorded")
+        if transient:
+            logger.warning(
+                "Sandbox backend probe failed transiently (%s); result NOT cached — "
+                "the next spawn re-probes",
+                reason,
+            )
+            return "none"
         _backend = "none"
     logger.info("Sandbox backend: %s (config_mode=%s)", _backend, config_mode)
     return _backend
@@ -1077,9 +1320,9 @@ def detect_backend(config_mode: str = "auto") -> str:
 
 def reset_backend() -> None:
     """Reset cached backend (for testing or config change)."""
-    global _backend, _backend_config_mode
+    global _backend, _last_unshare_failure
     _backend = None
-    _backend_config_mode = None
+    _last_unshare_failure = None
 
 
 # wrap_argv's ``mode`` vocabulary is a superset of the governance ``sandbox``
@@ -1193,6 +1436,25 @@ def wrap_argv(
         # returned unmodified argv, allowing the agent subprocess to access all
         # credential paths without any OS-level isolation.
         if not _allow_unsandboxed_exec():
+            transient, probe_reason = _last_unshare_failure or (
+                False,
+                "no probe detail recorded",
+            )
+            if transient:
+                guidance = (
+                    "This probe failure looks TRANSIENT (momentary resource "
+                    "pressure) — it is not cached and the next spawn re-probes "
+                    "automatically. Do NOT disable the sandbox for this; retry "
+                    "instead. "
+                )
+            else:
+                guidance = (
+                    "If this host genuinely lacks a sandbox backend, set "
+                    "agent.sandbox_allow_unsandboxed_exec=true in "
+                    "~/.kirocrew/config.json to explicitly allow unsandboxed "
+                    "execution, or install a supported sandbox backend "
+                    "(Linux user namespaces, or macOS sandbox-exec). "
+                )
             # Emit SEL audit event for this security-relevant denial so it
             # appears in the tamper-evident audit log (AutoSDE requirement).
             try:
@@ -1205,17 +1467,18 @@ def wrap_argv(
                     tool_name=argv[0] if argv else "unknown",
                     tool_kind="subprocess",
                     outcome="denied",
-                    error="No sandbox backend available and allow_unsandboxed_exec is not set",
+                    error=(
+                        "No sandbox backend available and allow_unsandboxed_exec "
+                        f"is not set (probe: {probe_reason})"
+                    ),
                 )
             except Exception:
                 logger.warning("Failed to emit SEL audit event for sandbox denial", exc_info=True)
             raise RuntimeError(
                 "Sandbox backend unavailable and allow_unsandboxed_exec is not set. "
                 "No OS-level sandbox backend is available on this host, and the "
-                "agent subprocess cannot be safely isolated. Set "
-                "agent.sandbox_allow_unsandboxed_exec=true in ~/.kirocrew/config.json "
-                "to explicitly allow unsandboxed execution, or install a supported "
-                "sandbox backend (Linux user namespaces, or macOS sandbox-exec)."
+                "agent subprocess cannot be safely isolated. "
+                f"Probe detail: {probe_reason}. " + guidance
             )
         # Opted in: warn (or info) and return unmodified argv
         _warn_no_isolation(mode)
@@ -1352,7 +1615,18 @@ def sandboxed_spawn_argv(
 
 # Default cgroup ceilings (per agent scope). Overridable via the same
 # ``resource_limits`` config block used by apply_resource_limits.
-_CGROUP_DEFAULT_MAX_PROCESSES = 1024  # pids.max — bounds fork bombs
+_CGROUP_DEFAULT_MAX_PROCESSES = 8192  # pids.max counts TASKS (threads), not processes;
+# 1024 starved legitimate JVM build trees (Gradle + parallel test workers need
+# thousands of threads -> pthread_create EAGAIN / 'unable to create native thread'
+# while the host is idle); 8192 still bounds fork bombs which spawn tens of
+# thousands of tasks near-instantly. Override via resource_limits.max_processes.
+
+# CPUWeight — proportional CPU share for agent scopes (systemd default is 100).
+# Setting 50 makes agent scopes yield to interactive work under CPU contention
+# while still using 100% of idle CPU — proportional share, never a hard throttle.
+# Both grok-build and OpenClaw ship no default CPU quota; fair-share weight is
+# the correct default for agent workloads that include legitimate builds.
+_CGROUP_DEFAULT_CPU_WEIGHT = 50
 
 # The memory.max default is HOST-PROPORTIONAL, not a flat cap: the agent
 # subprocess tree may occupy up to this fraction of physical RAM before the
@@ -1438,18 +1712,55 @@ def _compute_cgroup_scope_probe() -> tuple[bool, str]:
     return (True, "ok")
 
 
-def _cgroup_limits_from_config() -> tuple[int, int]:
-    """Return ``(max_processes, max_memory_mb)`` for the cgroup scope.
+_CPU_DELEGATED: bool | None = None
+
+
+def _cpu_controller_delegated() -> bool:
+    """Return True when the ``cpu`` controller is delegated to our user slice.
+
+    CPUWeight / CPUQuota on a ``systemd-run --user`` scope are only enforced
+    when the cpu controller is delegated; emitting them without delegation is
+    a silent no-op at best and a warning at worst, so callers gate the CPU
+    properties on this check. Cached alongside the main probe (the environment
+    is process-stable). Failure to read → False (skip CPU properties, keep
+    pids/memory enforcement).
+    """
+    global _CPU_DELEGATED
+    if _CPU_DELEGATED is None:
+        try:
+            uid = os.getuid()
+            ctrl_path = f"/sys/fs/cgroup/user.slice/user-{uid}.slice/cgroup.controllers"
+            with open(ctrl_path, encoding="utf-8") as fh:
+                _CPU_DELEGATED = "cpu" in fh.read().split()
+        except OSError:
+            _CPU_DELEGATED = False
+    return _CPU_DELEGATED
+
+
+def _cgroup_limits_from_config() -> tuple[int, int, int, int]:
+    """Return ``(max_processes, max_memory_mb, cpu_weight, max_cpu_percent)``
+    for the cgroup scope.
 
     Reads the same ``resource_limits`` config block as apply_resource_limits;
     falls back to the module defaults. ``0`` (or junk) means "use default" for
     the cgroup ceiling — unlike the RLIMIT path, we never leave the cgroup DoS
     ceiling unset by default (that is the whole point of this control). The
     memory default is host-proportional (see :func:`_default_max_memory_mb`).
+
+    ``max_cpu_percent`` is the OPT-IN hard CPU quota (``CPUQuota``): ``0``
+    (the default) means "no quota property emitted at all" — hard CPU caps
+    slow legitimate builds, so unlike the other ceilings this one is off
+    unless an operator explicitly sets ``resource_limits.max_cpu_percent``.
     """
     max_procs = _CGROUP_DEFAULT_MAX_PROCESSES
     max_mem_mb = _default_max_memory_mb()
+    cpu_weight = _CGROUP_DEFAULT_CPU_WEIGHT
+    max_cpu_percent = 0  # opt-in: 0 = emit no CPUQuota
     try:
+        # circular import: sandbox is a low-level module imported by
+        # config/security consumers — importing kiro_crew.config.loader at
+        # module load would create an import cycle, so it stays function-level
+        # (same pattern as resource_limit_preexec below).
         from kiro_crew.config.loader import _raw_config
 
         rl = _raw_config().get("resource_limits")
@@ -1460,17 +1771,28 @@ def _cgroup_limits_from_config() -> tuple[int, int]:
             m = rl.get("max_memory_mb")
             if isinstance(m, (int, float)) and not isinstance(m, bool) and m > 0:
                 max_mem_mb = int(m)
+            w = rl.get("cpu_weight")
+            if isinstance(w, (int, float)) and not isinstance(w, bool) and 1 <= w <= 10000:
+                cpu_weight = int(w)
+            q = rl.get("max_cpu_percent")
+            if isinstance(q, (int, float)) and not isinstance(q, bool) and q > 0:
+                max_cpu_percent = int(q)
     except Exception:
         logger.debug("cgroup limits: config unavailable, using defaults")
-    return max_procs, max_mem_mb
+    return max_procs, max_mem_mb, cpu_weight, max_cpu_percent
 
 
 def cgroup_scope_argv(argv: list[str]) -> list[str]:
     """Wrap *argv* in a transient systemd --user --scope with cgroup v2 limits.
 
     Prepends ``systemd-run --user --scope`` with ``TasksMax`` (pids.max, the
-    fork-bomb ceiling) and ``MemoryMax`` + ``MemorySwapMax=0`` (memory.max, the
-    RSS balloon ceiling), so the spawned agent AND all its MCP-server/tool
+    fork-bomb ceiling), ``MemoryMax`` + ``MemorySwapMax=0`` (memory.max, the
+    RSS balloon ceiling), and — when the cpu controller is delegated —
+    ``CPUWeight`` (proportional fair-share: agents run full speed on an idle
+    host but yield to interactive work under contention; never a hard
+    throttle) plus an OPT-IN ``CPUQuota`` hard cap
+    (``resource_limits.max_cpu_percent``, off by default because hard quotas
+    slow legitimate builds), so the spawned agent AND all its MCP-server/tool
     descendants are bounded as one cgroup and the kernel kills the scope on
     breach. ``--scope`` execs into the target (it does NOT fork a wrapper), so
     the returned argv's eventual PID is the real child — parent PID tracking,
@@ -1497,19 +1819,28 @@ def cgroup_scope_argv(argv: list[str]) -> list[str]:
                 reason,
             )
         return argv
-    max_procs, max_mem_mb = _cgroup_limits_from_config()
-    return [
-        "systemd-run",
-        "--user",
-        "--scope",
-        "-q",
-        "--slice=kirocrew-agents.slice",
+    max_procs, max_mem_mb, cpu_weight, max_cpu_percent = _cgroup_limits_from_config()
+    props = [
         "-p",
         f"TasksMax={max_procs}",
         "-p",
         f"MemoryMax={max_mem_mb}M",
         "-p",
         "MemorySwapMax=0",
+    ]
+    # CPU properties only when the cpu controller is delegated — otherwise the
+    # kernel won't enforce them and systemd may warn on every spawn.
+    if _cpu_controller_delegated():
+        props += ["-p", f"CPUWeight={cpu_weight}"]
+        if max_cpu_percent > 0:
+            props += ["-p", f"CPUQuota={max_cpu_percent}%"]
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "-q",
+        "--slice=kirocrew-agents.slice",
+        *props,
         "--",
         *argv,
     ]
@@ -1569,3 +1900,59 @@ def resource_limit_preexec() -> "Callable[[], None] | None":
         # every limit is disabled). Cache it; passing a no-op preexec_fn is fine.
         _RESOURCE_PREEXEC = apply_resource_limits(cfg)
     return _RESOURCE_PREEXEC  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Session host preexec — the inverse of resource_limit_preexec.
+# ---------------------------------------------------------------------------
+
+_SESSION_HOST_PREEXEC: object = _UNSET
+
+
+def session_host_preexec() -> "Callable[[], None] | None":
+    """Return a ``preexec_fn`` that *raises* NOFILE for a session host process.
+
+    Session hosts (kiro-cli-chat / claude-agent-acp) are **trusted** internal
+    processes — they manage a tree of MCP server subprocesses, each consuming
+    pipe fd pairs for stdin/stdout communication.  A single session host may
+    hold 100-200 fds under normal operation (10+ MCP servers × pipe pairs +
+    sockets + log files).
+
+    The default ``resource_limit_preexec()`` caps NOFILE at 1024 to defend
+    against compromised *tool* processes, but applying the same cap to the
+    trusted session host causes "Too many open files" crashes when subagent
+    concurrency or MCP server count is high.
+
+    This preexec raises NOFILE soft+hard to the *gateway's* inherited hard
+    limit (typically 10240 from the systemd unit, or 524288 kernel max) so
+    the session host has headroom proportional to the gateway itself.  Other
+    resource limits (NPROC, CPU, AS) are left at their sandbox values — a
+    session host has no legitimate reason to fork-bomb or allocate unbounded
+    memory.
+
+    Returns ``None`` on non-POSIX platforms (preexec_fn must be None there).
+    """
+    global _SESSION_HOST_PREEXEC
+    if _SESSION_HOST_PREEXEC is _UNSET:
+        if os.name != "posix" or _resource_mod is None:
+            _SESSION_HOST_PREEXEC = None
+            return None
+
+        res = _resource_mod
+
+        def _raise_nofile() -> None:
+            """Raise NOFILE to the hard limit in the child process."""
+            try:
+                _soft, hard = res.getrlimit(res.RLIMIT_NOFILE)
+                if hard == res.RLIM_INFINITY:
+                    # Kernel allows unlimited — cap at a sane maximum but never
+                    # reduce below the inherited soft limit.
+                    target = max(_soft, 65536)
+                else:
+                    target = hard
+                res.setrlimit(res.RLIMIT_NOFILE, (target, hard))
+            except (ValueError, OSError):
+                pass  # Leave inherited — better than failing the spawn.
+
+        _SESSION_HOST_PREEXEC = _raise_nofile
+    return _SESSION_HOST_PREEXEC  # type: ignore[return-value]

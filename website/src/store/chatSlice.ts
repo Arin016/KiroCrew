@@ -4,7 +4,7 @@ import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetc
 import { resolveDefaultColor } from '../utils/sessionColors'
 import { gcSessionStorage } from '../utils/storageGc'
 import type { RootState } from './index'
-import type { ChatMessage, SessionInfo, SubagentActivity, ToolActivity } from '../types'
+import type { ChatMessage, ChatSlot, SessionInfo, SubagentActivity, ToolActivity } from '../types'
 import { SOFT_STOP_DEBOUNCE_MS } from '../pages/chat/types'
 import { mergePreservedPastes } from '../utils/pasteTokens'
 
@@ -408,9 +408,13 @@ export const warmSlotCache = createAsyncThunk(
   },
 )
 
-export const createSlot = createAsyncThunk(
+export const createSlot = createAsyncThunk<
+  ChatSlot,
+  { agent?: string; model?: string; mode?: string; memory_mode?: string; clean_mode?: boolean; folder_id?: string | null; color_index?: number | null; project?: string | null } | string | undefined,
+  { fulfilledMeta: { originActiveSlot: string | null } }
+>(
   'chat/createSlot',
-  async (opts: { agent?: string; model?: string; mode?: string; memory_mode?: string; clean_mode?: boolean; folder_id?: string | null; color_index?: number | null; project?: string | null } | string | undefined, { dispatch, getState }) => {
+  async (opts, { dispatch, getState, fulfillWithValue }) => {
     const agent = typeof opts === 'string' ? opts : opts?.agent
     const model = typeof opts === 'string' ? undefined : opts?.model
     const mode = typeof opts === 'string' ? undefined : opts?.mode
@@ -419,6 +423,12 @@ export const createSlot = createAsyncThunk(
     const folderId = typeof opts === 'string' ? undefined : opts?.folder_id
     const explicitColor = typeof opts === 'string' ? undefined : opts?.color_index
     const project = typeof opts === 'string' ? undefined : opts?.project
+    // Capture the active slot BEFORE the (potentially slow) create round-trip.
+    // The fulfilled reducer compares this against the active slot at resolution
+    // time: if the user switched to a different session while the create was
+    // pending (e.g. New Chat spun on "Creating" under memory pressure and they
+    // moved to another tab), the new slot must NOT hijack the view. Mesh-2908.
+    const originActiveSlot = (getState() as RootState).chat.activeSlot
     const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, undefined, clean_mode)
     const dashState = (getState() as RootState).dashboard
     // An explicit color (e.g. carried from a slot being recreated on a
@@ -445,7 +455,11 @@ export const createSlot = createAsyncThunk(
       api.chatSlotProject(slot.key, project).catch(() => {})
     }
     dispatch(addSlotOptimistic(slot))
-    return slot
+    // Carry the origin slot in the action meta (fulfillWithValue) rather than on
+    // the payload, so it can never leak into the persisted slot object. The
+    // fulfilled reducer reads action.meta.originActiveSlot to decide whether
+    // activating the new slot is safe.
+    return fulfillWithValue(slot, { originActiveSlot })
   },
 )
 
@@ -750,6 +764,7 @@ const chatSlice = createSlice({
     setVoicePlaying(state, action: PayloadAction<boolean>) { state.voicePlaying = action.payload },
     setVoiceAudio(state, action: PayloadAction<string | null>) { state.voiceAudio = action.payload },
     toggleActivity(state) { state.activityOpen = !state.activityOpen; if (!state.activityOpen) state.focusToolCallId = null },
+    openActivityPanel(state) { state.activityOpen = true },
     openActivityToTab(state, action: PayloadAction<'subagents' | 'workflows' | 'logs' | 'files' | 'side' | 'artifacts'>) { state.activityOpen = true; state.activityTab = action.payload; state.focusToolCallId = null },
     /** Tools tab is deprecated — tool details now expand inline in the chat. This action
      *  signals the matching ToolCallLine pill to auto-expand and scroll into view. */
@@ -1492,7 +1507,26 @@ const chatSlice = createSlice({
       .addCase(createSlot.pending, (state) => { state.creatingSlot = true })
       .addCase(createSlot.rejected, (state) => { state.creatingSlot = false })
       .addCase(createSlot.fulfilled, (state, action) => {
+        // The create POST resolved, so clear the pending flag regardless of
+        // whether we activate below. Otherwise the switched-away early-return
+        // would strand the "Creating…" spinner on forever.
         state.creatingSlot = false
+        // Switched-away guard (Mesh-2908): if the user moved to a different
+        // session while this create was pending (a slow "Creating…" under memory
+        // pressure), do NOT hijack the view. The new slot is already registered
+        // via addSlotOptimistic; just leave the user where they are. Mirrors the
+        // guard switchSlot/refreshSlot/warmSlotCache already have. `send()`'s
+        // forceNew path and welcome-screen New Chat both leave activeSlot equal
+        // to the origin, so they still activate normally.
+        //
+        // Conscious edge: a rapid double New Chat from the same slot makes both
+        // creates capture the same origin; the first fulfilled activates its
+        // slot (moving activeSlot), so the second sees activeSlot !== origin and
+        // stays put. "First create wins" rather than the prior "last wins". Both
+        // slots exist in the sidebar and both land the user on an empty chat, so
+        // the outcomes are equivalent, accepted over re-stealing focus.
+        const origin = action.meta.originActiveSlot ?? null
+        if (state.activeSlot !== origin) return
         if (state.activeSlot) {
           state.slotActivity[state.activeSlot] = { toolLog: state.toolLog, subagents: state.subagents, activityTab: state.activityTab }
           state.slotHistory = pushHistory(state.slotHistory, state.activeSlot)
@@ -1573,7 +1607,7 @@ export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
   removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
-  toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
+  toggleActivity, openActivityToTab, openActivityPanel, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,
   sseWorkflowEvent, clearWorkflowRun,
   sseSideResult, sideClose, sideOptimisticAppend, sideOptimisticRollback,
