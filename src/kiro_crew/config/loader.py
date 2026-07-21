@@ -172,6 +172,14 @@ def _safe_int(value: object, default: int) -> int:
         return default
 
 
+def _safe_float(value: object, default: float) -> float:
+    """Convert *value* to float, returning *default* on failure."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def _session_work_dir(session_key: str | None) -> Path:
     """Return a per-session subdirectory under workspace_root()."""
     root = workspace_root()
@@ -929,6 +937,17 @@ class KnowledgeConfig:
             "Artifact kinds eligible for auto-ingest. Defaults to substantial "
             "document kinds (markdown, text, html, json); widget is excluded "
             "(UI/dashboards, not documents) and svg has no reader support.",
+        ),
+    )
+    max_ingest_file_mb: float = field(
+        default=100.0,
+        metadata=_meta(
+            "Max Ingest File Size (MB)",
+            "Per-file size cap for Knowledge Library ingestion. Oversized files "
+            "are skipped with a WARNING naming the file instead of being chunked "
+            "-- chunking a very large file (e.g. a tens-of-MB CSV->MD conversion) "
+            "is CPU-bound and previously hung gateway startup. Set 0 to disable "
+            "the cap.",
         ),
     )
     embed_timeout_secs: float = field(
@@ -2655,6 +2674,12 @@ class KiroCrewConfig:
         telemetry_data = data.get("telemetry", {})
         if not isinstance(telemetry_data, dict):
             telemetry_data = {}
+        orchestrator_data = data.get("orchestrator", {})
+        if not isinstance(orchestrator_data, dict):
+            orchestrator_data = {}
+        watchdog_data = data.get("watchdog", {})
+        if not isinstance(watchdog_data, dict):
+            watchdog_data = {}
 
         # Parse agents section into dict[str, KiroCrewAgentConfig]
         raw_agents = data.get("agents", {})
@@ -2780,6 +2805,36 @@ class KiroCrewConfig:
                 daily_reset_hour=_coerce_int(messaging_data.get("daily_reset_hour"), -1),
                 queue_mode=str(messaging_data.get("queue_mode", "steer")),
             ),
+            # orchestrator/watchdog were advertised in config-baseline.json and
+            # served by /api/config/schema, and real consumers read them
+            # (acp/session_handle.py, dashboard/chat_orchestrator.py), but load()
+            # never passed these kwargs — so config.json values were silently
+            # ignored and the dataclass defaults always won.
+            orchestrator=OrchestratorConfig(
+                stage_timeout_seconds=_safe_int(
+                    orchestrator_data.get("stage_timeout_seconds", 1800), 1800
+                ),
+            ),
+            watchdog=WatchdogConfig(
+                check_after_secs=_safe_float(
+                    watchdog_data.get("check_after_secs", 60.0), 60.0
+                ),
+                stale_window_secs=_safe_float(
+                    watchdog_data.get("stale_window_secs", 300.0), 300.0
+                ),
+                tool_stall_suspect_secs=_safe_float(
+                    watchdog_data.get("tool_stall_suspect_secs", 600.0), 600.0
+                ),
+                tool_stall_hard_cap_secs=_safe_float(
+                    watchdog_data.get("tool_stall_hard_cap_secs", 2700.0), 2700.0
+                ),
+                model_silent_probe_secs=_safe_float(
+                    watchdog_data.get("model_silent_probe_secs", 900.0), 900.0
+                ),
+                wellness_sample_secs=_safe_float(
+                    watchdog_data.get("wellness_sample_secs", 3.0), 3.0
+                ),
+            ),
             telemetry=TelemetryConfig(
                 enabled=bool(telemetry_data.get("enabled", False)),
                 local_dir=str(telemetry_data.get("local_dir", "")),
@@ -2810,6 +2865,16 @@ class KiroCrewConfig:
                     )
                     if isinstance(k, str)
                 ],
+                max_ingest_file_mb=(
+                    float(mb)
+                    if isinstance(
+                        (mb := knowledge_data.get("max_ingest_file_mb", 100.0)),
+                        (int, float),
+                    )
+                    and not isinstance(mb, bool)
+                    and mb >= 0
+                    else 100.0
+                ),
                 embed_timeout_secs=float(knowledge_data.get("embed_timeout_secs", 10.0)),
                 embed_content_budget=int(knowledge_data.get("embed_content_budget", 0)),
                 pool_idle_ttl_secs=(
