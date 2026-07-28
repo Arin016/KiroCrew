@@ -161,6 +161,33 @@ jobs:
       appimage_artifact: build-linux-x64
     secrets: inherit
 
+  # ── Windows desktop publish ───────────────────────────────────────────
+  # Publishes the Squirrel.Windows installer + update package + RELEASES
+  # pointer + feed/nightly/latest-win.json. Its own lane beside
+  # publish-linux for the same reason: Windows takes no part in the macOS
+  # trust chain, and needing only build-desktop means neither a wheel nor a
+  # macOS signing failure can block it (per-platform releases).
+  #
+  # NOTE the interaction with build-desktop's windows_soft_fail: that flag
+  # keeps a Windows PACKAGING failure from skipping this run's other
+  # publish lanes, which means this job can be reached with no artifact.
+  # It fails loudly in that case by design -- a silent skip would serve a
+  # stale Windows feed under a green run.
+  publish-windows:
+    name: Publish Windows Desktop (nightly channel)
+    needs: [version, build-desktop]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/publish-windows.yml
+    with:
+      channel: nightly
+      version: ${{ needs.version.outputs.nightly_version }}
+      publish: true
+      windows_artifact: build-windows-x64
+    secrets: inherit
+
   # ── Docker image publish ──────────────────────────────────────────────
   # Builds the multi-arch gateway image FROM THE SAME WHEEL publish-cli
   # ships and pushes it to ghcr.io (GITHUB_TOKEN only — no AWS credentials,

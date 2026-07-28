@@ -5,22 +5,50 @@ The cross-platform process / signal / file-lock / metrics behavior is routed
 through `kiro_crew.platform_compat`, so macOS + Linux behavior is unchanged and
 the same code path also runs on Windows.
 
-## Desktop installer (preview, CI-built)
+## Desktop installer (download)
 
-CI's desktop lane (`build-desktop.yml`) also builds a Windows desktop app:
+CI's desktop lane (`build-desktop.yml`) builds a Windows desktop app —
 `KiroCrew Setup.exe` plus the Squirrel.Windows `RELEASES`/`.nupkg` pair, with
-the backend bundled (no separate Python install needed). Current status:
+the backend bundled (no separate Python install needed) — and
+`publish-windows.yml` publishes it to the download CDN on every channel.
 
-- **CI artifact only** — produced on nightly/release runs and the manual
-  `workflow_dispatch` probe; not yet published to the download CDN (that is
-  the upcoming `publish-windows.yml` lane).
+Direct download (installer, ~arch-qualified, always the newest build on that
+channel):
+
+```
+https://download.crew.kiro.dev/desktop/nightly/latest/KiroCrew-Setup-x64.exe
+https://download.crew.kiro.dev/desktop/insider/latest/KiroCrew-Setup-x64.exe
+https://download.crew.kiro.dev/desktop/stable/latest/KiroCrew-Setup-x64.exe
+```
+
+A specific build stays available forever at its immutable versioned key:
+
+```
+https://download.crew.kiro.dev/desktop/<channel>/<version>/KiroCrew-Setup-x64.exe
+```
+
+Machine-readable channel pointer (version, installer URL, sha256, publish
+date), same role as `latest-mac.json`:
+
+```
+https://updates.crew.kiro.dev/feed/<channel>/latest-win.json
+```
+
+Current caveats:
+
 - **Unsigned** — SmartScreen shows an "unrecognized app" interstitial
   (More info > Run anyway). Authenticode signing is a tracked follow-up.
-- **No auto-update yet** — the app does not consume the Squirrel feed on
-  win32 until the publish + updater lane lands; installs update by running a
-  newer Setup.exe.
+- **In-app auto-update is not wired yet.** The publish lane produces the
+  Squirrel update feed (`RELEASES` + `.nupkg` under
+  `desktop/<channel>/win/`), but `auto-update.js` does not consume it on
+  win32 yet, so installs update by running a newer `Setup.exe`. The feed is
+  published ahead of the client so the client change is a pure client
+  change.
+- A channel only has these URLs once it has published at least one Windows
+  build; `nightly` publishes on every nightly run, `insider`/`stable` on tag.
 
-The source install below remains the fully supported path.
+The source install below remains fully supported and is the fastest path for
+development work.
 
 ## Prerequisites
 

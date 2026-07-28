@@ -1,0 +1,364 @@
+name: Publish Windows Desktop (reusable)
+
+# Reusable workflow: publish an already-built Windows desktop release to a
+# channel on the distribution CDN. Called by nightly.yml (channel: nightly)
+# and release.yml (channel: insider | stable) as its own lane BESIDE
+# publish-linux.yml and the macOS sign-and-notarize workflow. Windows takes
+# no part in the macOS trust chain, so it does not live in that workflow;
+# depending only on build-desktop at the caller means neither a wheel build
+# nor a macOS signing failure can block the Windows artifacts
+# (per-platform releases, see docs/RELEASE_AUTOMATION.md).
+#
+# WHAT SQUIRREL.WINDOWS REQUIRES, AND WHY THE LAYOUT LOOKS LIKE THIS
+#
+# Squirrel.Windows' updater is handed ONE directory URL. It fetches
+# `RELEASES` from that directory and resolves each entry's `.nupkg`
+# filename RELATIVE to the same directory. Pointer and bytes are therefore
+# coupled into a single prefix by the protocol -- our usual
+# updates.crew.kiro.dev (pointers) / download.crew.kiro.dev (bytes) split
+# cannot be honored inside it. Resolution: the whole Squirrel directory
+# lives on the BYTE host (the .nupkg payloads dominate it), and the true
+# pointer a client or a download button reads --
+# feed/<channel>/latest-win.json -- stays on the feed prefix like every
+# other channel. Published keys:
+#
+#   desktop/<channel>/<version>/KiroCrew-Setup-x64.exe   immutable installer
+#   desktop/<channel>/latest/KiroCrew-Setup-x64.exe      mutable permalink
+#   desktop/<channel>/win/<Product>-<ver>-full.nupkg     immutable update payload
+#   desktop/<channel>/win/RELEASES                       mutable Squirrel pointer
+#   feed/<channel>/latest-win.json                       mutable channel pointer
+#
+# The Squirrel feed URL for a channel is the DIRECTORY:
+#   <CDN>/desktop/<channel>/win/
+#
+# Key properties:
+#   - Versioned keys are immutable-cached by CloudFront and are never
+#     republished with different bytes (--if-none-match conditional write;
+#     a 412 on a job re-run verifies the published bytes are identical
+#     before continuing, and refuses to repoint any alias if they are not).
+#     The .nupkg is immutable by FILENAME (it carries the version), which is
+#     what lets Squirrel's directory accumulate versions safely.
+#   - Mutable pointers (latest alias, RELEASES, latest-win.json) are written
+#     AFTER the bytes they describe, so a pointer never references bytes
+#     that are not yet live. RELEASES is written after its .nupkg;
+#     latest-win.json is written last of all.
+#   - Arch-qualified published filename (KiroCrew-Setup-x64.exe): Windows
+#     has no universal binary, so per-arch filenames are the contract. A
+#     future arm64 lane publishes KiroCrew-Setup-arm64.exe beside this one.
+#   - RELEASES is published AS BUILT (single full entry, no deltas). We ship
+#     full packages only, so one entry is sufficient: Squirrel compares the
+#     installed version against the newest entry and downloads that full
+#     package from any older version. Accumulating entries would be needed
+#     only for delta updates, and would require a read-modify-write of a
+#     mutable object -- a race we deliberately avoid. If deltas are ever
+#     wanted, that merge needs a conditional write and its own design.
+#   - Unsigned by design for now, exactly like the AppImage: SmartScreen
+#     shows an "unrecognized app" interstitial. Authenticode signing is a
+#     tracked follow-up; when it lands it slots in before the attestation
+#     step below, and this lane's keys/pointers do not change.
+#   - HARD dependency on the build artifact, on purpose. build-desktop.yml
+#     marks its Windows matrix leg continue-on-error for publishing callers
+#     (so a Windows packaging failure cannot skip the Linux/mac publish
+#     lanes). The cost of that isolation is that this lane can be reached
+#     with no artifact to publish -- and a silent skip there would leave a
+#     STALE Windows feed while the run looked green. So a missing artifact
+#     fails this job loudly: the other lanes still publish, the run goes
+#     red, and nobody is served a stale pointer. (Closes the revisit item
+#     recorded in issue #487.)
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: "Release channel: nightly | insider | stable"
+        required: true
+        type: string
+      version:
+        description: "Version label used in S3 keys and the feed body"
+        required: true
+        type: string
+      publish:
+        description: "Publish to the public CDN; false skips the job entirely"
+        required: false
+        type: boolean
+        default: true
+      windows_artifact:
+        description: "Name of the uploaded artifact containing Setup.exe + .nupkg + RELEASES"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  publish-windows:
+    name: Publish Windows Desktop (${{ inputs.channel }})
+    # Public-distribution gates: skipped when the caller runs publish-less or
+    # the CDN is not configured (fork). BOTH variables are required -- the
+    # bucket receives the upload and the CDN base is baked into the public
+    # URLs and used by the 412 re-run byte-verify; with either missing the
+    # job skips rather than publishing objects it cannot verify or address.
+    if: ${{ inputs.publish && vars.CLI_DIST_BUCKET != '' && vars.CLI_CDN_BASE != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # REQUIRED: the publish role's OIDC trust accepts exactly two subjects,
+    # ref:refs/heads/main and environment:prod. Declaring the environment
+    # keeps tag-triggered (release) runs on the accepted subject, same as
+    # publish-cli.yml, publish-linux.yml, and sign-and-notarize.yml.
+    environment: prod
+    env:
+      HAS_SIGNING_SECRETS: ${{ secrets.AWS_SIGNING_ROLE_ARN != '' && 'true' || '' }}
+      CHANNEL: ${{ inputs.channel }}
+      VERSION: ${{ inputs.version }}
+      # Pinned published basename, arch-qualified. The BUILT name varies
+      # (electron-builder's default embeds productName + version, and the
+      # nightly channel builds under a different product name), so the
+      # published contract is pinned here and the built file is located by
+      # glob below.
+      WIN_SETUP_BASENAME: KiroCrew-Setup-x64
+    steps:
+      - name: Configure AWS credentials
+        if: env.HAS_SIGNING_SECRETS
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Download desktop build artifact
+        if: env.HAS_SIGNING_SECRETS
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.windows_artifact }}
+          path: artifacts
+
+      # Locate all three Squirrel outputs and fail loudly on anything
+      # unexpected. A missing artifact means the Windows build leg
+      # soft-failed upstream (see the header): failing here is deliberate --
+      # it keeps a stale feed from being served under a green run.
+      - name: Locate Windows release outputs
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          mapfile -t SETUPS < <(find artifacts -type f -name '*.exe')
+          mapfile -t NUPKGS < <(find artifacts -type f -name '*-full.nupkg')
+          mapfile -t RELEASES_FILES < <(find artifacts -type f -name 'RELEASES')
+
+          fail=0
+          if [ "${#SETUPS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one Setup .exe in the Windows artifact, found ${#SETUPS[@]}"
+            printf '  %s\n' "${SETUPS[@]:-<none>}"; fail=1
+          fi
+          if [ "${#NUPKGS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one *-full.nupkg in the Windows artifact, found ${#NUPKGS[@]}"
+            printf '  %s\n' "${NUPKGS[@]:-<none>}"; fail=1
+          fi
+          if [ "${#RELEASES_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one RELEASES file in the Windows artifact, found ${#RELEASES_FILES[@]}"
+            printf '  %s\n' "${RELEASES_FILES[@]:-<none>}"; fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+
+          echo "SETUP_PATH=${SETUPS[0]}" >> "$GITHUB_ENV"
+          echo "NUPKG_PATH=${NUPKGS[0]}" >> "$GITHUB_ENV"
+          echo "NUPKG_NAME=$(basename "${NUPKGS[0]}")" >> "$GITHUB_ENV"
+          echo "RELEASES_PATH=${RELEASES_FILES[0]}" >> "$GITHUB_ENV"
+          ls -la "${SETUPS[0]}" "${NUPKGS[0]}" "${RELEASES_FILES[0]}"
+
+      # The RELEASES entry Squirrel will read must name the .nupkg we are
+      # about to publish, or every client update 404s against the published
+      # directory. electron-builder generates both together, so a mismatch
+      # means the artifact was assembled wrongly -- check before publishing
+      # rather than discovering it from a user's failed update.
+      - name: Verify RELEASES references the published nupkg
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          echo "RELEASES contents:"; cat "${RELEASES_PATH}"
+          if ! grep -Fq "${NUPKG_NAME}" "${RELEASES_PATH}"; then
+            echo "::error::RELEASES does not reference ${NUPKG_NAME}; Squirrel clients would 404 on update."
+            exit 1
+          fi
+          # Squirrel resolves entries relative to the RELEASES directory, so
+          # an entry carrying a path separator or an absolute URL would
+          # escape the published prefix.
+          if grep -Eq '(https?://|[\\]|/)' <<< "$(awk '{print $2}' "${RELEASES_PATH}")"; then
+            echo "::error::RELEASES contains a non-relative filename; refusing to publish."
+            exit 1
+          fi
+          echo "RELEASES references the published nupkg by bare filename: OK"
+
+      # Signed SLSA provenance for the EXACT bytes this lane uploads,
+      # attested BEFORE anything reaches S3 -- same discipline as
+      # publish-linux.yml. Both payloads are attested: the installer humans
+      # download and the update package Squirrel downloads. If attestation
+      # fails, the job fails and nothing is published.
+      - name: Attest Windows artifact provenance
+        if: env.HAS_SIGNING_SECRETS
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: |
+            ${{ env.SETUP_PATH }}
+            ${{ env.NUPKG_PATH }}
+
+      - name: Publish Setup.exe to distribution bucket
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          SETUP_KEY="desktop/${CHANNEL}/${VERSION}/${WIN_SETUP_BASENAME}.exe"
+          set +e
+          PUT_OUT=$(aws s3api put-object \
+            --bucket "${{ vars.CLI_DIST_BUCKET }}" \
+            --key "${SETUP_KEY}" \
+            --body "${SETUP_PATH}" \
+            --if-none-match '*' \
+            --content-type application/vnd.microsoft.portable-executable \
+            --cache-control "public, max-age=31536000, immutable" 2>&1)
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            if echo "$PUT_OUT" | grep -q "PreconditionFailed"; then
+              # Job re-run: the immutable key exists. Verify the published
+              # bytes are IDENTICAL before continuing -- a re-run can build
+              # different bytes for the same version, and proceeding would
+              # let the mutable pointers diverge from the immutable key.
+              # The compare goes through the public CDN because the publish
+              # role's S3 read-back grant covers cli/* only.
+              echo "Key already published (job re-run) -- verifying bytes match: ${SETUP_KEY}"
+              curl -fsSL --retry 3 "${{ vars.CLI_CDN_BASE }}/${SETUP_KEY}" -o /tmp/published-setup.exe
+              PUBLISHED_SHA=$(sha256sum /tmp/published-setup.exe | awk '{print $1}')
+              LOCAL_SHA=$(sha256sum "${SETUP_PATH}" | awk '{print $1}')
+              rm -f /tmp/published-setup.exe
+              if [ "$PUBLISHED_SHA" != "$LOCAL_SHA" ]; then
+                echo "::error::Immutable key ${SETUP_KEY} already holds DIFFERENT bytes (published ${PUBLISHED_SHA}, this build ${LOCAL_SHA}). The version string is burned -- cut a new version instead of re-running. Refusing to repoint any pointer."
+                exit 1
+              fi
+              echo "Published bytes identical -- keeping existing object and continuing."
+            else
+              echo "$PUT_OUT"
+              exit $RC
+            fi
+          fi
+          echo "SETUP_KEY=${SETUP_KEY}" >> "$GITHUB_ENV"
+          echo "SETUP_SHA256=$(sha256sum "${SETUP_PATH}" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "Public installer: ${{ vars.CLI_CDN_BASE }}/${SETUP_KEY}"
+
+      # The update payload lands in the Squirrel directory under its BUILT
+      # filename (which carries the version), so the directory accumulates
+      # one immutable object per release -- exactly what Squirrel's
+      # RELEASES-relative resolution expects. Written BEFORE RELEASES so
+      # the pointer never names bytes that are not yet live.
+      - name: Publish update package to Squirrel directory
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          NUPKG_KEY="desktop/${CHANNEL}/win/${NUPKG_NAME}"
+          set +e
+          PUT_OUT=$(aws s3api put-object \
+            --bucket "${{ vars.CLI_DIST_BUCKET }}" \
+            --key "${NUPKG_KEY}" \
+            --body "${NUPKG_PATH}" \
+            --if-none-match '*' \
+            --content-type application/octet-stream \
+            --cache-control "public, max-age=31536000, immutable" 2>&1)
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            if echo "$PUT_OUT" | grep -q "PreconditionFailed"; then
+              echo "Package already published (job re-run) -- verifying bytes match: ${NUPKG_KEY}"
+              curl -fsSL --retry 3 "${{ vars.CLI_CDN_BASE }}/${NUPKG_KEY}" -o /tmp/published.nupkg
+              PUBLISHED_SHA=$(sha256sum /tmp/published.nupkg | awk '{print $1}')
+              LOCAL_SHA=$(sha256sum "${NUPKG_PATH}" | awk '{print $1}')
+              rm -f /tmp/published.nupkg
+              if [ "$PUBLISHED_SHA" != "$LOCAL_SHA" ]; then
+                echo "::error::Immutable key ${NUPKG_KEY} already holds DIFFERENT bytes (published ${PUBLISHED_SHA}, this build ${LOCAL_SHA}). Refusing to publish a RELEASES pointer that would disagree with it."
+                exit 1
+              fi
+              echo "Published bytes identical -- keeping existing object and continuing."
+            else
+              echo "$PUT_OUT"
+              exit $RC
+            fi
+          fi
+          echo "NUPKG_KEY=${NUPKG_KEY}" >> "$GITHUB_ENV"
+          echo "Update package: ${{ vars.CLI_CDN_BASE }}/${NUPKG_KEY}"
+
+      # RELEASES is the Squirrel updater's go-live switch for this channel:
+      # a mutable pointer, written only after its .nupkg is live. Short TTL
+      # so a published update is discoverable within minutes, matching the
+      # other mutable pointers in this system.
+      - name: Update Squirrel RELEASES pointer
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          RELEASES_KEY="desktop/${CHANNEL}/win/RELEASES"
+          aws s3api put-object \
+            --bucket "${{ vars.CLI_DIST_BUCKET }}" \
+            --key "${RELEASES_KEY}" \
+            --body "${RELEASES_PATH}" \
+            --content-type text/plain \
+            --cache-control "public, max-age=300" > /dev/null
+          echo "RELEASES_KEY=${RELEASES_KEY}" >> "$GITHUB_ENV"
+          echo "Squirrel feed directory: ${{ vars.CLI_CDN_BASE }}/desktop/${CHANNEL}/win/"
+
+      # Human-clickable permalink to the current installer:
+      #   <CDN>/desktop/<channel>/latest/KiroCrew-Setup-x64.exe
+      # Same mutable-alias semantics as the latest DMG/AppImage aliases:
+      # plain overwrite, max-age=300, written AFTER the versioned key.
+      - name: Update latest installer alias
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          LATEST_SETUP_KEY="desktop/${CHANNEL}/latest/${WIN_SETUP_BASENAME}.exe"
+          aws s3api put-object \
+            --bucket "${{ vars.CLI_DIST_BUCKET }}" \
+            --key "${LATEST_SETUP_KEY}" \
+            --body "${SETUP_PATH}" \
+            --content-type application/vnd.microsoft.portable-executable \
+            --cache-control "public, max-age=300" > /dev/null
+          echo "LATEST_SETUP_KEY=${LATEST_SETUP_KEY}" >> "$GITHUB_ENV"
+          echo "Latest installer alias: ${{ vars.CLI_CDN_BASE }}/${LATEST_SETUP_KEY}"
+
+      # The channel pointer, written LAST -- after every byte it names is
+      # live. Mirrors latest-mac.json's shape and adds what a Windows client
+      # needs: `releases` is the DIRECTORY URL Squirrel is handed (its
+      # protocol resolves RELEASES and each .nupkg relative to it), and
+      # `sha256` covers the installer so a download can be verified
+      # fail-closed without trusting the transport.
+      - name: Write update feed
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          set -euo pipefail
+          cat > /tmp/latest-win.json <<EOF
+          {
+            "version": "${VERSION}",
+            "setup": "${{ vars.CLI_CDN_BASE }}/${SETUP_KEY}",
+            "releases": "${{ vars.CLI_CDN_BASE }}/desktop/${CHANNEL}/win/",
+            "nupkg": "${{ vars.CLI_CDN_BASE }}/${NUPKG_KEY}",
+            "sha256": "${SETUP_SHA256}",
+            "name": "${VERSION}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat /tmp/latest-win.json
+          aws s3 cp /tmp/latest-win.json \
+            "s3://${{ vars.CLI_DIST_BUCKET }}/feed/${CHANNEL}/latest-win.json" \
+            --content-type application/json \
+            --cache-control "public, max-age=300"
+          echo "Feed written: feed/${CHANNEL}/latest-win.json"
+
+      - name: Summary
+        if: env.HAS_SIGNING_SECRETS
+        run: |
+          {
+            echo "## Publish Windows (${CHANNEL})"
+            echo "- Version: ${VERSION}"
+            echo "- Installer: ${{ vars.CLI_CDN_BASE }}/${SETUP_KEY}"
+            echo "- Latest installer alias: ${{ vars.CLI_CDN_BASE }}/${LATEST_SETUP_KEY}"
+            echo "- Squirrel feed directory: ${{ vars.CLI_CDN_BASE }}/desktop/${CHANNEL}/win/"
+            echo "- Update package: ${{ vars.CLI_CDN_BASE }}/${NUPKG_KEY}"
+            echo "- Channel pointer: ${{ vars.CLI_CDN_BASE }}/feed/${CHANNEL}/latest-win.json"
+            echo ""
+            echo "Unsigned installer: SmartScreen shows an \"unrecognized app\" interstitial (More info > Run anyway). Authenticode signing is a tracked follow-up."
+          } >> "$GITHUB_STEP_SUMMARY"
