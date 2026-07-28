@@ -362,6 +362,19 @@ class TestKiroPrerequisiteHelpers:
                 environ={},
             )
 
+    @pytest.mark.skipif(
+        not platform_compat.IS_POSIX,
+        reason=(
+            "execute-bit semantics are POSIX-only, so this rejection is "
+            "unobservable on a Windows HOST: chmod(0o600) cannot clear a POSIX "
+            "exec bit there, and is_executable_file() deliberately accepts any "
+            "existing regular file for an explicit POSIX target (a Windows host "
+            "cannot represent POSIX exec bits). The candidate is therefore always "
+            "'runnable' and no ValueError is raised. The size-based rejection in "
+            "test_rejects_zero_byte_candidate is platform-independent and keeps "
+            "the not-runnable gate covered on Windows."
+        ),
+    )
     @pytest.mark.parametrize("platform_name", ["darwin", "linux"])
     def test_rejects_non_runnable_candidate(
         self,
