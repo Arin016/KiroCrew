@@ -16,14 +16,20 @@
 
 // Default update feed host: updates.crew.kiro.dev, the pointer hostname of
 // the public distribution CDN (CloudFront + OAC over the kirocrew-updates
-// bucket). The feed is a STATIC JSON file at <base>/<channel>/latest-mac.json
-// written by CI after notarization; the artifact URLs inside it point at the
-// byte hostname (download.crew.kiro.dev, CI's CLI_CDN_BASE). There is no
-// 200/204 server endpoint: safeCheck() fetches the feed itself and compares
-// versions CLIENT-SIDE, engaging Squirrel.Mac only when the feed version
-// differs from the running app. (Squirrel treats any 200 feed response as
-// "update available", so gating on the client compare is what prevents a
-// re-download loop against a static file.)
+// bucket). The feed is a STATIC JSON file at
+// <base>/<channel>/<latest-mac.json | latest-win.json> written by CI after
+// the platform's publish lane; the artifact URLs inside it point at the byte
+// hostname (download.crew.kiro.dev, CI's CLI_CDN_BASE). There is no 200/204
+// server endpoint: safeCheck() fetches the pointer itself and compares
+// versions CLIENT-SIDE, engaging Squirrel only when the feed version differs
+// from the running app. (Squirrel treats any 200 feed response as "update
+// available", so gating on the client compare is what prevents a re-download
+// loop against a static file.)
+//
+// One asymmetry, contained to configureFeed()/startDownload(): Squirrel.Mac
+// consumes this JSON directly, while Squirrel.Windows consumes a DIRECTORY
+// (RELEASES + .nupkg resolved relative to it) that the feed body names in
+// its `releases` field.
 const DEFAULT_FEED_BASE = "https://updates.crew.kiro.dev/feed";
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // every 4h while running
 const LAUNCH_CHECK_DELAY_MS = 30 * 1000; // let startup settle first
@@ -88,13 +94,41 @@ function resolveChannel(stamped, preference) {
 }
 
 /**
- * Build the static feed URL for a channel. Pure + testable.
- * @param {{base:string, channel:string}} o
+ * Per-platform channel-pointer filename. The pointer is OUR json (version +
+ * payload URLs + sha256), written by CI per channel; it is what drives the
+ * client-side version compare and the consent card on every platform. The
+ * platform-specific part is only which file and which payload field:
+ *
+ *   darwin -> latest-mac.json  { version, url (zip), dmg, ... }
+ *   win32  -> latest-win.json  { version, setup, releases (Squirrel dir), nupkg, sha256, ... }
+ *
+ * Linux has no pointer yet (no updater consumes one), so it is absent here
+ * and the platform guard in initAutoUpdate keeps auto-update disabled there.
+ */
+const FEED_FILENAME = Object.freeze({
+  darwin: "latest-mac.json",
+  win32: "latest-win.json",
+});
+
+/**
+ * Build the static channel-pointer URL for a platform + channel. Pure + testable.
+ *
+ * `platform` is REQUIRED and is an os key (process.platform), not a
+ * "darwin-arm64" display string. It is deliberately not defaulted: silently
+ * falling back to the mac pointer would serve Windows clients a feed whose
+ * payload field they cannot use, and the failure would surface as a confusing
+ * "feed missing ..." error rather than a wiring mistake.
+ *
+ * @param {{base:string, channel:string, platform:string}} o
  * @returns {string}
  */
-function buildFeedUrl({ base, channel }) {
+function buildFeedUrl({ base, channel, platform }) {
+  const filename = FEED_FILENAME[platform];
+  if (!filename) {
+    throw new Error(`no update feed for platform ${String(platform)}`);
+  }
   const b = (base || DEFAULT_FEED_BASE).replace(/\/+$/, "");
-  return `${b}/${encodeURIComponent(channel)}/latest-mac.json`;
+  return `${b}/${encodeURIComponent(channel)}/${filename}`;
 }
 
 /**
@@ -222,10 +256,17 @@ function initAutoUpdate(deps) {
     log.info("[update] dev build — auto-update disabled");
     return { check: () => {}, install: async () => {}, getInfo, disabled: "dev" };
   }
-  if (process.platform !== "darwin") {
-    log.info("[update] non-darwin — auto-update disabled (Squirrel.Mac only)");
+  // Platforms with a published channel pointer AND a Squirrel implementation
+  // Electron's built-in autoUpdater can drive: macOS (Squirrel.Mac) and
+  // Windows (Squirrel.Windows). Linux has neither a pointer nor an updater
+  // (the AppImage is replaced by hand), so it stays disabled and the About
+  // panel reports `disabled: "platform"` rather than showing dead controls.
+  const osPlatform = process.platform;
+  if (!FEED_FILENAME[osPlatform]) {
+    log.info(`[update] ${osPlatform} — auto-update disabled (no channel feed / updater)`);
     return { check: () => {}, install: async () => {}, getInfo, disabled: "platform" };
   }
+  const isWindows = osPlatform === "win32";
 
   let updateReady = false;
   let downloading = false; // Squirrel download/extract in flight
@@ -234,12 +275,51 @@ function initAutoUpdate(deps) {
   let installing = false;
   let quitHandled = false;
 
+  /**
+   * Resolve this check's channel-pointer URL, and on macOS also hand it to
+   * Squirrel.
+   *
+   * The platforms diverge here, and only here. Squirrel.MAC consumes a JSON
+   * feed, so the pointer URL IS its feed URL. Squirrel.WINDOWS consumes a
+   * DIRECTORY: it fetches `RELEASES` from it and resolves each `.nupkg`
+   * relative to it. That directory is not derivable from the pointer host --
+   * pointers live on the updates hostname, the Squirrel directory on the byte
+   * hostname (its protocol couples RELEASES and the payloads into one prefix,
+   * so publish-windows.yml puts the whole directory on the byte host). Rather
+   * than hardcode a second base in the client, the feed body TELLS us the
+   * directory (`releases`), and it is applied at consent time in
+   * startDownload(). That keeps the server authoritative: the directory can
+   * move without shipping a client.
+   */
   function configureFeed() {
     const channel = currentChannel();
-    const url = buildFeedUrl({ base: feedBase, channel });
-    autoUpdater.setFeedURL({ url });
+    const url = buildFeedUrl({ base: feedBase, channel, platform: osPlatform });
+    if (!isWindows) {
+      autoUpdater.setFeedURL({ url });
+    }
     log.info(`[update] feed: ${url}`);
     return url;
+  }
+
+  /**
+   * Validate + normalize the Squirrel.Windows directory URL taken from the
+   * feed body. Same transport discipline as fetchFeedHttps: HTTPS everywhere,
+   * plain HTTP only for loopback so the local update harness works. A
+   * trailing slash is required by Squirrel's relative resolution, so add one
+   * if the feed omitted it.
+   * @param {string} raw
+   * @returns {string}
+   */
+  function squirrelDirFromFeed(raw) {
+    if (typeof raw !== "string" || !raw) {
+      throw new Error("feed missing releases (Squirrel directory) for win32");
+    }
+    const parsed = new URL(raw);
+    const isLoopback = ["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsed.hostname);
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback)) {
+      throw new Error(`refusing non-HTTPS Squirrel directory: ${parsed.protocol}//${parsed.hostname}`);
+    }
+    return raw.endsWith("/") ? raw : `${raw}/`;
   }
 
   let checking = false;
@@ -266,8 +346,15 @@ function initAutoUpdate(deps) {
       const url = configureFeed(); // re-read flavor/channel each check
       emit("checking");
       const feed = await fetchFeed(url);
-      if (!feed || typeof feed.version !== "string" || typeof feed.url !== "string") {
-        throw new Error("feed missing version/url");
+      // Per-platform payload field. Rejecting the wrong shape here (rather
+      // than discovering it when Squirrel is engaged) is what turns a
+      // mis-published feed into a visible error instead of a silent
+      // no-op download. mac: `url` is the zip Squirrel.Mac fetches.
+      // win32: `releases` is the DIRECTORY Squirrel.Windows resolves
+      // RELEASES and the .nupkg against.
+      const payloadField = isWindows ? "releases" : "url";
+      if (!feed || typeof feed.version !== "string" || typeof feed[payloadField] !== "string") {
+        throw new Error(`feed missing version/${payloadField}`);
       }
       if (feed.version === app.getVersion()) {
         log.info(`[update] up to date (${feed.version})`);
@@ -326,20 +413,40 @@ function initAutoUpdate(deps) {
       stagedNotes = "";
     }
     configureFeed();
+    if (isWindows) {
+      // Squirrel.Windows is handed the DIRECTORY the feed named, not the
+      // pointer URL (see configureFeed). Applied here, at consent time,
+      // because it is only knowable after the pointer has been fetched --
+      // and a validation failure must abort BEFORE any download starts.
+      let dir;
+      try {
+        dir = squirrelDirFromFeed(foundFeed && foundFeed.releases);
+      } catch (err) {
+        log.error("[update] refusing to download", err);
+        emit("error", { message: String(err && err.message || err) });
+        return;
+      }
+      autoUpdater.setFeedURL({ url: dir });
+      log.info(`[update] squirrel directory: ${dir}`);
+    }
     log.info("[update] user consented — engaging Squirrel download");
     downloading = true;
     emit("downloading");
     autoUpdater.checkForUpdates();
   }
 
-  // ShipIt aborts the bundle swap with "App Still Running Error" (Code=-9)
-  // if ANY instance of the app is alive during its ~25s install window — and
-  // the user silently relaunches into the OLD version. If anything blocks the
-  // Electron quit (a renderer beforeunload, a lingering child holding the
-  // process open), force-exit so this instance is guaranteed gone.
+  // The installer needs this process GONE before it can replace the app.
+  //   macOS: ShipIt aborts the bundle swap with "App Still Running Error"
+  //     (Code=-9) if ANY instance is alive during its ~25s window, and the
+  //     user silently relaunches into the OLD version.
+  //   Windows: Update.exe cannot overwrite files that are still open, so a
+  //     lingering process yields a half-applied update instead.
+  // Either way, if anything blocks the Electron quit (a renderer
+  // beforeunload, a lingering child holding the process open), force-exit so
+  // the installer can proceed.
   function forceExitFailsafe(reason) {
     const t = setTimeout(() => {
-      log.error(`[update] process still alive ${FORCE_EXIT_AFTER_MS}ms after quitAndInstall (${reason}) — forcing exit so ShipIt can swap`);
+      log.error(`[update] process still alive ${FORCE_EXIT_AFTER_MS}ms after quitAndInstall (${reason}) — forcing exit so the installer can replace the app`);
       try { app.exit(0); } catch { process.exit(0); }
     }, FORCE_EXIT_AFTER_MS);
     if (typeof t.unref === "function") t.unref();
@@ -349,7 +456,11 @@ function initAutoUpdate(deps) {
     if (installing) return;
     installing = true;
     // STRICT ORDER: stop the gateway and await its exit, THEN quitAndInstall.
-    // A live gateway child during the bundle swap can leave a half-replaced app.
+    // A live gateway child during the swap can leave a half-replaced app --
+    // and on Windows this is not merely likely but mandatory: the bundled
+    // backend's files are OPEN while it runs, and Update.exe cannot overwrite
+    // open files, so skipping the stop produces a broken install rather than
+    // a retry.
     log.info("[update] stopping gateway before install");
     try {
       await stopGateway();

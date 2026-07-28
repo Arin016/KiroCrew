@@ -1815,11 +1815,13 @@ app.whenReady().then(async () => {
   await startGateway();
   await showLoadingThenConnect(win);
 
-  // Desktop auto-update (Squirrel.Mac). No-op in dev / non-darwin. KiroCrew
+  // Desktop auto-update (Squirrel.Mac on macOS, Squirrel.Windows on win32).
+  // No-op in dev and on Linux, which has no channel feed or updater. KiroCrew
   // ships a single "stable" channel. The gateway is stopped gracefully before
-  // any bundle swap. Update state is mirrored to the renderer so the in-app
-  // UpdateModal + Settings > About can drive the prompt; the native dialog
-  // stays as the fallback only when no UI is wired.
+  // any bundle swap -- mandatory on Windows, where Update.exe cannot overwrite
+  // the bundled backend's open files. Update state is mirrored to the renderer
+  // so the in-app UpdateModal + Settings > About can drive the prompt; the
+  // native dialog stays as the fallback only when no UI is wired.
   function broadcastUpdateState(payload) {
     try {
       for (const wc of webContents.getAllWebContents()) {

@@ -37,17 +37,36 @@ test("channelForFlavor defaults non-beta to stable", () => {
 });
 
 test("buildFeedUrl points at the channel's static latest-mac.json", () => {
-  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "insider" });
+  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "insider", platform: "darwin" });
   assert.strictEqual(url, "https://cdn.example.dev/feed/insider/latest-mac.json");
 });
 
+test("buildFeedUrl points win32 at latest-win.json", () => {
+  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "insider", platform: "win32" });
+  assert.strictEqual(url, "https://cdn.example.dev/feed/insider/latest-win.json");
+});
+
+test("buildFeedUrl refuses a platform with no published feed", () => {
+  // Not defaulted on purpose: silently falling back to the mac pointer would
+  // serve Windows a payload field it cannot use, surfacing as a confusing
+  // "feed missing ..." error instead of the wiring mistake it is.
+  assert.throws(
+    () => buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "stable", platform: "linux" }),
+    /no update feed for platform linux/,
+  );
+  assert.throws(
+    () => buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "stable" }),
+    /no update feed for platform undefined/,
+  );
+});
+
 test("buildFeedUrl strips trailing slashes from base", () => {
-  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed///", channel: "stable" });
+  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed///", channel: "stable", platform: "darwin" });
   assert.strictEqual(url, "https://cdn.example.dev/feed/stable/latest-mac.json");
 });
 
 test("buildFeedUrl url-encodes the channel segment", () => {
-  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "a b" });
+  const url = buildFeedUrl({ base: "https://cdn.example.dev/feed", channel: "a b", platform: "darwin" });
   assert.strictEqual(url, "https://cdn.example.dev/feed/a%20b/latest-mac.json");
 });
 
@@ -443,3 +462,169 @@ test("a throwing nudge callback does not break the check (found still emitted)",
     await new Promise((r) => setImmediate(r));
     assert.ok(calls.states.includes("found"), `states: ${calls.states}`);
   }));
+
+// ---------------------------------------------------------------------------
+// win32 (Squirrel.Windows). Same discovery/consent flow as macOS -- the ONLY
+// divergence is what Squirrel is handed: macOS gets the JSON pointer URL,
+// Windows gets the DIRECTORY the pointer names in `releases` (its protocol
+// resolves RELEASES and each .nupkg relative to that base). That directory
+// lives on the byte hostname while pointers live on the updates hostname, so
+// it is NOT derivable client-side -- the feed is authoritative and the value
+// is applied at consent time.
+// ---------------------------------------------------------------------------
+
+function withWin32(fn) {
+  const orig = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "win32" });
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => Object.defineProperty(process, "platform", orig));
+}
+
+const WIN_FEED = {
+  version: "1.0.1",
+  setup: "https://dl.example.dev/desktop/stable/1.0.1/KiroCrew-Setup-x64.exe",
+  releases: "https://dl.example.dev/desktop/stable/win/",
+  nupkg: "https://dl.example.dev/desktop/stable/win/KiroCrew-1.0.1-full.nupkg",
+  sha256: "0".repeat(64),
+};
+
+test("win32 auto-update is enabled (not disabled by platform)", () =>
+  withWin32(async () => {
+    const { deps } = makeDeps({ appVersion: "1.0.0", feed: WIN_FEED });
+    const u = initAutoUpdate(deps);
+    assert.strictEqual(u.disabled, undefined, "win32 must not report disabled");
+    assert.strictEqual(typeof u.download, "function", "win32 must expose the consent action");
+  }));
+
+test("win32 reads latest-win.json, not the mac pointer", () =>
+  withWin32(async () => {
+    const seen = [];
+    const { deps } = makeDeps({ appVersion: "1.0.0", feed: WIN_FEED });
+    deps.fetchFeed = async (url) => { seen.push(url); return WIN_FEED; };
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(
+      seen.some((u2) => u2.endsWith("/stable/latest-win.json")),
+      `expected latest-win.json, fetched: ${seen}`,
+    );
+    assert.ok(!seen.some((u2) => u2.includes("latest-mac.json")), "must not read the mac pointer");
+  }));
+
+test("win32 discovery does NOT engage Squirrel until consent", () =>
+  withWin32(async () => {
+    const { deps, calls } = makeDeps({ appVersion: "1.0.0", feed: WIN_FEED });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(calls.states.includes("found"), `states: ${calls.states}`);
+    assert.strictEqual(calls.checkForUpdates, 0, "discovery must not download");
+    // The Squirrel directory must NOT be set during discovery -- only at
+    // consent time, after the pointer has been fetched and validated.
+    assert.ok(
+      !calls.setFeedURL.includes(WIN_FEED.releases),
+      "squirrel directory set before consent",
+    );
+  }));
+
+test("win32 consent hands Squirrel the feed-named DIRECTORY", () =>
+  withWin32(async () => {
+    const { deps, calls } = makeDeps({ appVersion: "1.0.0", feed: WIN_FEED });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    await u.download();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(calls.checkForUpdates, 1, "consent must engage Squirrel");
+    assert.ok(
+      calls.setFeedURL.includes(WIN_FEED.releases),
+      `expected the Squirrel directory, saw: ${calls.setFeedURL}`,
+    );
+    // The JSON pointer must never be handed to Squirrel.Windows: it would
+    // read it as a directory and 404 on RELEASES.
+    assert.ok(
+      !calls.setFeedURL.some((u2) => u2.endsWith(".json")),
+      `a JSON pointer was handed to Squirrel.Windows: ${calls.setFeedURL}`,
+    );
+  }));
+
+test("win32 appends the trailing slash Squirrel's relative resolution needs", () =>
+  withWin32(async () => {
+    const feed = { ...WIN_FEED, releases: "https://dl.example.dev/desktop/stable/win" };
+    const { deps, calls } = makeDeps({ appVersion: "1.0.0", feed });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    await u.download();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(
+      calls.setFeedURL.includes("https://dl.example.dev/desktop/stable/win/"),
+      `expected a trailing slash, saw: ${calls.setFeedURL}`,
+    );
+  }));
+
+test("win32 refuses a non-HTTPS Squirrel directory and does not download", () =>
+  withWin32(async () => {
+    const feed = { ...WIN_FEED, releases: "http://evil.example.dev/desktop/stable/win/" };
+    const { deps, calls } = makeDeps({ appVersion: "1.0.0", feed });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    await u.download();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(calls.checkForUpdates, 0, "must not download over cleartext");
+    assert.ok(calls.states.includes("error"), `states: ${calls.states}`);
+  }));
+
+test("win32 allows loopback http so the local update harness works", () =>
+  withWin32(async () => {
+    const feed = { ...WIN_FEED, releases: "http://127.0.0.1:8799/desktop/stable/win/" };
+    const { deps, calls } = makeDeps({ appVersion: "1.0.0", feed });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    await u.download();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(calls.checkForUpdates, 1);
+    assert.ok(calls.setFeedURL.includes("http://127.0.0.1:8799/desktop/stable/win/"));
+  }));
+
+test("win32 rejects a mac-shaped feed (no releases directory)", () =>
+  withWin32(async () => {
+    const { deps, calls } = makeDeps({
+      appVersion: "1.0.0",
+      // A mis-published pointer carrying only the mac payload field.
+      feed: { version: "1.0.1", url: "https://dl.example.dev/x.zip" },
+    });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(calls.states.includes("error"), `states: ${calls.states}`);
+    assert.strictEqual(calls.checkForUpdates, 0);
+  }));
+
+test("win32 same version is up to date (no download loop on a static feed)", () =>
+  withWin32(async () => {
+    const { deps, calls } = makeDeps({
+      appVersion: "1.0.1",
+      feed: WIN_FEED,
+    });
+    const u = initAutoUpdate(deps);
+    await u.check();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(calls.states.includes("not-available"), `states: ${calls.states}`);
+    assert.strictEqual(calls.checkForUpdates, 0);
+  }));
+
+test("linux stays disabled (no feed, no updater)", () => {
+  const orig = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "linux" });
+  try {
+    const { deps } = makeDeps({ appVersion: "1.0.0", feed: WIN_FEED });
+    const u = initAutoUpdate(deps);
+    assert.strictEqual(u.disabled, "platform");
+  } finally {
+    Object.defineProperty(process, "platform", orig);
+  }
+});
