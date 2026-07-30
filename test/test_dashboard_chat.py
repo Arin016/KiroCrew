@@ -3184,7 +3184,7 @@ class TestTokenPersistenceBackfill:
 
         captured: list[tuple] = []
 
-        async def _fake_persist(slot_key, model, event, provider=""):
+        async def _fake_persist(slot_key, model, event, provider="", **kwargs):
             captured.append((slot_key, model, provider))
 
         monkeypatch.setattr(
@@ -3225,7 +3225,7 @@ class TestTokenPersistenceBackfill:
 
         captured: list[tuple] = []
 
-        async def _fake_persist(k, m, e, provider=""):
+        async def _fake_persist(k, m, e, provider="", **kwargs):
             captured.append((k, m, provider))
 
         monkeypatch.setattr(
@@ -3262,7 +3262,7 @@ class TestTokenPersistenceBackfill:
 
         captured: list[tuple] = []
 
-        async def _fake_persist(k, m, e, provider=""):
+        async def _fake_persist(k, m, e, provider="", **kwargs):
             captured.append((k, m, provider))
 
         monkeypatch.setattr(
@@ -3380,7 +3380,7 @@ class TestKiroBackfillProfileGuard:
 
         captured: list[tuple] = []
 
-        async def _fake_persist(k, m, e, provider=""):
+        async def _fake_persist(k, m, e, provider="", **kwargs):
             captured.append((k, m, provider))
 
         monkeypatch.setattr(
