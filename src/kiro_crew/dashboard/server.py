@@ -206,10 +206,17 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _DIST_DIR = _STATIC_DIR / "dist"
 
 
-# Strict internal API paths — exact paths that ONLY internal processes
-# (mcp-core, doctor, cron) call, never the browser. Access requires loopback
-# AND a matching ``X-Internal-Secret`` header; non-loopback is always denied and
-# there is no cookie fall-through (see token_auth.token_auth_middleware).
+# Strict internal API paths — exact paths that are gated to loopback and, for the
+# internal-process callers (mcp-core, doctor, cron), a matching
+# ``X-Internal-Secret`` header. Non-loopback is ALWAYS denied; that is the
+# invariant this set exists for.
+#
+# On loopback, a request WITHOUT the secret header falls through to normal
+# cookie/token validation (see token_auth.token_auth_middleware). Most paths here
+# are never called by a browser so that branch is unreachable for them — but
+# ``/api/browser/input`` relies on it deliberately: the dashboard SPA cannot hold
+# ``.local_secret``, so it authenticates as the signed-in user like any other
+# dashboard call while still being refused off-host.
 #
 # Module-level and shared by BOTH ``start_dashboard`` and ``start_api_server``
 # so the two entrypoints can never drift: the ``--slack-only`` headless server
@@ -222,6 +229,8 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         "/api/delete-message",
         "/api/browser-event",
         "/api/browser/frame",
+        "/api/browser/input",
+        "/api/browser/input-drain",
         "/api/browser/pump-audit",
         # Computer use: the ``kirocrew-computer`` stdio shim's forwarding leg.
         # STRICT (not mixed): no browser calls it, and it is the entry point to
@@ -703,6 +712,8 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/browser-event", handlers.api_browser_event)
     app.router.add_post("/api/browser-auth-retry", handlers.api_browser_auth_retry)
     app.router.add_post("/api/browser/frame", handlers.api_browser_frame)
+    app.router.add_post("/api/browser/input", handlers.api_browser_input)
+    app.router.add_post("/api/browser/input-drain", handlers.api_browser_input_drain)
     app.router.add_post("/api/browser/pump-audit", handlers.api_browser_pump_audit)
     app.router.add_get("/api/browser/config", handlers.api_browser_config_get)
     app.router.add_put("/api/browser/config", handlers.api_browser_config_save)

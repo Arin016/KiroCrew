@@ -5,6 +5,8 @@ import { safeSetItem } from '../utils/safeStorage'
 import { isScreenSnipSupported } from '../hooks/useScreenSnip'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useBrowserFrame } from '../hooks/useBrowserFrame'
+import { useBrowserInput } from '../hooks/useBrowserInput'
+import { browserKeyFromEvent } from '../utils/browserKeys'
 
 import { i18nT } from '../i18n/t'
 /**
@@ -312,6 +314,149 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
     window.dispatchEvent(new CustomEvent(PREVIEW_ENABLE_BROWSE_EVENT, { detail: { slot: sessionKey } }))
   }, [sessionKey])
 
+  // ── Input relay ────────────────────────────────────────────────────────────
+  //
+  // User gestures on the mirror go back to the page. This is deliberately NOT
+  // gated on the [BROWSE] toggle: a click the user performs here is attended and
+  // self-authorizing, whereas [BROWSE] grants the AGENT permission to act
+  // unattended. Gating the user's own click on it would conflate the two.
+  const sendInput = useBrowserInput(sessionKey)
+  const imgRef = useRef<HTMLImageElement | null>(null)
+  const surfaceRef = useRef<HTMLDivElement | null>(null)
+  const frameBoxRef = useRef<HTMLDivElement | null>(null)
+  const [keyboardBound, setKeyboardBound] = useState(false)
+  // Stable id linking the surface to its footer hint via aria-describedby. Derived
+  // from the session so two panels in one document cannot collide.
+  const surfaceHintId = `browse-surface-hint-${sessionKey || 'none'}`
+  // Pointer-down origin, and whether the gesture already resolved as a drag (so
+  // the trailing click event isn't sent as a second, spurious click).
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const draggedRef = useRef(false)
+
+  /** Event position as a 0..1 fraction of the rendered frame, or null if outside.
+   *
+   * Measured against the <img>'s own rect, which with `object-contain` and no
+   * explicit size IS the painted area — so letterbox padding falls outside [0,1]
+   * and is rejected rather than clamped onto the page edge. */
+  const framePoint = useCallback((clientX: number, clientY: number) => {
+    const el = imgRef.current
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return null
+    const x = (clientX - rect.left) / rect.width
+    const y = (clientY - rect.top) / rect.height
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null
+    return { x, y }
+  }, [])
+
+  const onSurfacePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const pt = framePoint(e.clientX, e.clientY)
+    dragStartRef.current = pt
+    draggedRef.current = false
+    // Focus on press so typing goes to the page without a separate click.
+    surfaceRef.current?.focus()
+  }, [framePoint])
+
+  const onSurfacePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const pt = framePoint(e.clientX, e.clientY)
+    if (!pt) return
+    // Only forward hover movement; while a button is held the gesture resolves as
+    // a drag on release, so intermediate positions would be noise.
+    if (dragStartRef.current === null) sendInput({ verb: 'move', x: pt.x, y: pt.y })
+  }, [framePoint, sendInput])
+
+  const onSurfacePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current
+    dragStartRef.current = null
+    const pt = framePoint(e.clientX, e.clientY)
+    if (!start || !pt) return
+    const el = imgRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    // Same 10px hysteresis usePointerDrag uses, expressed in frame fractions so
+    // the threshold is in screen pixels regardless of the frame's scale.
+    const movedPx = Math.hypot((pt.x - start.x) * rect.width, (pt.y - start.y) * rect.height)
+    if (movedPx >= 10) {
+      draggedRef.current = true
+      sendInput({ verb: 'drag', x: start.x, y: start.y, x2: pt.x, y2: pt.y })
+    }
+  }, [framePoint, sendInput])
+
+  const onSurfaceClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    // A drag already fired for this gesture; the browser still emits click.
+    if (draggedRef.current) {
+      draggedRef.current = false
+      return
+    }
+    const pt = framePoint(e.clientX, e.clientY)
+    if (!pt) return
+    // Always 1. The browser fires click twice for a double-click (detail 1 then
+    // 2), so forwarding e.detail would send 1 + 2 = 3 clicks and action an
+    // increment or submit control three times. Two forwarded single clicks in
+    // quick succession already form a dblclick in the target page.
+    sendInput({ verb: 'click', x: pt.x, y: pt.y, clickCount: 1 })
+  }, [framePoint, sendInput])
+
+  // Wheel must be a NATIVE non-passive listener: React 18 attaches its root
+  // `wheel` handler as passive, so preventDefault() inside onWheel is inert and
+  // the scroll would also move the dashboard container behind the panel (the same
+  // workaround FollowUpBar uses).
+  useEffect(() => {
+    const el = surfaceRef.current
+    if (!el || !isLive) return
+    const onWheel = (e: WheelEvent) => {
+      if (!framePoint(e.clientX, e.clientY)) return
+      e.preventDefault()
+      sendInput({ verb: 'wheel', dx: e.deltaX, dy: e.deltaY })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [framePoint, sendInput, isLive, frame])
+
+  const onSurfaceKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Escape releases the surface instead of reaching the page, so keyboard users
+    // are never trapped in a focusable region that swallows Tab.
+    if (e.key === 'Escape') {
+      // Move focus to the frame container rather than calling blur(): a bare
+      // blur() drops focus to document.body, so the next Tab restarts from the
+      // top of the document instead of continuing after the panel.
+      frameBoxRef.current?.focus()
+      surfaceRef.current?.blur()
+      return
+    }
+    // Mid-composition keystrokes belong to the IME, not the page — forwarding
+    // them double-types CJK input.
+    if (e.nativeEvent.isComposing) return
+    const key = browserKeyFromEvent(e)
+    if (!key) return
+    e.preventDefault()
+    sendInput({ verb: 'key', key })
+  }, [sendInput])
+
+  // Drive the capture viewport to the panel's size, so the page fills the panel
+  // instead of being letterboxed inside a fixed 16:9 capture. Trailing-debounced:
+  // a drag-resize would otherwise issue a viewport change per animation frame.
+  useEffect(() => {
+    const box = frameBoxRef.current
+    if (!box || !isLive) return
+    let timer: number | undefined
+    const observer = new ResizeObserver(entries => {
+      const rect = entries[0]?.contentRect
+      if (!rect) return
+      const width = Math.round(rect.width)
+      const height = Math.round(rect.height)
+      // Matches the server-side floor; also skips the collapsed-panel case.
+      if (width < 200 || height < 200) return
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => sendInput({ verb: 'resize', width, height }), 250)
+    })
+    observer.observe(box)
+    return () => {
+      window.clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [isLive, sendInput])
+
   const persist = useCallback((u: string) => {
     if (storageKey && u) safeSetItem(storageKey, u)
   }, [storageKey])
@@ -514,9 +659,49 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
             </button>
           )}
         </div>
-        <div className="relative bg-black flex-1 min-h-0 flex items-center justify-center">
+        <div ref={frameBoxRef} tabIndex={-1} className="relative bg-black flex-1 min-h-0 flex items-center justify-center outline-none">
           {frame ? (
-            <img src={frame} alt={i18nT('components.webPreviewPanel.live_browser_session')} className="max-w-full max-h-full object-contain" />
+            /* The input surface. role="application" (not "button") because this
+               forwards raw keys to a remote page rather than performing one
+               action; tabIndex + onKeyDown keep it keyboard-reachable, which is
+               also what satisfies the accessible-interactive-elements rule.
+
+               jsx-a11y classifies "application" as non-interactive and so flags
+               both the listeners and the tabIndex. That is a false positive for
+               this widget: role="application" exists precisely for a composite
+               surface that takes over the keyboard, and it MUST be focusable to
+               receive keys at all. Accessibility is handled deliberately here —
+               named via aria-label, reachable by Tab, and released with Escape
+               (see onSurfaceKeyDown) so focus is never trapped. */
+            /* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */
+            <div
+              role="application"
+              tabIndex={0}
+              aria-label={i18nT('components.webPreviewPanel.interactive_browser_view_click_type_and_scroll_t')}
+              /* WCAG 2.1.2 permits a non-standard exit from a keyboard trap only
+                 if the user is ADVISED of it. The footer text alone is visual, so
+                 point at it: a screen-reader user on this surface is told about
+                 Escape when they land on it. */
+              aria-describedby={`${surfaceHintId}`}
+              ref={surfaceRef}
+              onPointerDown={onSurfacePointerDown}
+              onPointerUp={onSurfacePointerUp}
+              onPointerMove={onSurfacePointerMove}
+              onClick={onSurfaceClick}
+              onKeyDown={onSurfaceKeyDown}
+              onFocus={() => setKeyboardBound(true)}
+              onBlur={() => setKeyboardBound(false)}
+              className="max-w-full max-h-full outline-none cursor-crosshair focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <img
+                ref={imgRef}
+                src={frame}
+                alt={i18nT('components.webPreviewPanel.live_browser_session')}
+                draggable={false}
+                className="max-w-full max-h-full object-contain select-none"
+              />
+            </div>
+            /* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */
           ) : (
             <div className="flex flex-col items-center gap-2 py-8 text-muted">
               <Monitor size={18} />
@@ -525,7 +710,11 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
           )}
         </div>
         <div className="px-3 py-1.5 border-t border-border text-[11px] text-muted flex items-center justify-between gap-2">
-          <span className="truncate">{i18nT('components.webPreviewPanel.view_only_clicks_here_don_t_reach_the_page')}</span>
+          <span className="truncate" id={surfaceHintId}>
+            {keyboardBound
+              ? i18nT('components.webPreviewPanel.keys_go_to_the_page_press_escape_to_release')
+              : i18nT('components.webPreviewPanel.click_scroll_or_type_here_to_use_the_page')}
+          </span>
           {lastTs && <span className="shrink-0">{i18nT('components.webPreviewPanel.updated')} {new Date(lastTs).toLocaleTimeString()}</span>}
         </div>
       </div>

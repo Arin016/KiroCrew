@@ -13,8 +13,9 @@ panel behind a gate, or an empty state that never mounts. When you change UI,
 same thing you did.
 
 This is the **self-verification** path: the screenshot is evidence, not
-decoration. It is view-only (navigate + screenshot); clicking and typing through
-a flow still needs the **Globe** toggle ("Let the agent use the browser"). Keep the frame count
+decoration. Capturing is navigate + screenshot; YOU driving a flow (clicking and
+typing as the agent) still needs the **Globe** toggle ("Let the agent use the
+browser") — the user can always drive the panel themselves. Keep the frame count
 bounded (see below) — restraint here is about context cost, not permission.
 
 ## Three ways to capture — name the one you used

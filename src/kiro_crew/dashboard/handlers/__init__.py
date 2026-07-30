@@ -220,6 +220,8 @@ from kiro_crew.dashboard.handlers.messaging import (  # noqa: E402, F401
     api_browser_config_save,
     api_browser_event,
     api_browser_frame,
+    api_browser_input,
+    api_browser_input_drain,
     api_browser_pump_audit,
     api_delete_message,
     api_discord_config_get,

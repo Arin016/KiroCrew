@@ -15,7 +15,13 @@ from aiohttp import web
 
 from kiro_crew import platform_compat
 from kiro_crew.browser.auth import ensure as browser_auth_ensure
-from kiro_crew.browser.screencast import BROWSER_FRAME_EVENT, build_frame_payload
+from kiro_crew.browser.input_queue import BrowserInputQueue
+from kiro_crew.browser.screencast import (
+    BROWSER_FRAME_EVENT,
+    build_frame_payload,
+    build_input_payload,
+    valid_session_key,
+)
 from kiro_crew.browser.setup import (
     get_extension_token,
     has_playwright_extension,
@@ -1669,6 +1675,148 @@ async def api_browser_frame(request: web.Request) -> web.Response:
     # Report the live WS-client count so the proxy's active pump can back off
     # (stop self-issuing screenshots) when no dashboard is actually watching.
     return web.json_response({"ok": True, "subscribers": state.ws_client_count()})
+
+
+_INPUT_QUEUE = BrowserInputQueue()
+
+# How long a drain request hangs waiting for the first event. Long enough that an
+# idle session costs ~1 request per interval, short enough to stay well inside
+# the proxy's own 10s urlopen timeout and any intermediary idle timeout.
+_INPUT_DRAIN_TIMEOUT_S = 5.0
+
+# Verb → the Playwright tool the proxy will inject. Duplicated here (rather than
+# imported from the proxy, which is a stdlib-only subprocess we must not import)
+# purely so the SEL audit can name the real tool. The proxy holds the
+# authoritative mapping; this is for the audit label.
+_INPUT_VERB_TOOLS = {
+    "click": "browser_mouse_click_xy",
+    "move": "browser_mouse_move_xy",
+    "wheel": "browser_mouse_wheel",
+    "drag": "browser_mouse_drag_xy",
+    "key": "browser_press_key",
+    "resize": "browser_resize",
+}
+
+
+async def api_browser_input(request: web.Request) -> web.Response:
+    """POST /api/browser/input — queue a user gesture for the browse session.
+
+    Posted by the dashboard's Browser panel when the user clicks, scrolls, drags
+    or types on the live mirror, and when the panel's size changes (the ``resize``
+    verb, which drives the capture viewport to match the panel so the page fills
+    it instead of letterboxing).
+
+    Auth: this is a strict-internal path, so off-host posts are always refused. On
+    loopback the dashboard authenticates with its own session cookie — the SPA
+    cannot hold ``.local_secret``, so unlike the proxy-side endpoints this leg
+    rides the normal token/cookie check. That is the correct boundary: a gesture
+    the user performs in their own dashboard on their own machine is attended and
+    self-authorizing, so it does not need the agent's ``[BROWSE]`` grant. The
+    ``[BROWSE]`` toggle keeps its narrower meaning — the AGENT may act unattended.
+
+    The body carries a verb from a closed enum and normalized (0..1) coordinates;
+    it never carries a tool name. See ``build_input_payload``.
+    """
+    if not is_loopback(request.remote or ""):
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_input",
+            outcome="denied",
+            downstream_service="browser",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_input",
+            outcome="invalid_input",
+            downstream_service="browser",
+            resources="invalid-json",
+        )
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    event = build_input_payload(body if isinstance(body, dict) else {})
+    if event is None:
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_input",
+            outcome="invalid_input",
+            downstream_service="browser",
+            resources="rejected-input-event",
+        )
+        return web.json_response({"error": "invalid input event"}, status=400)
+    # Which browse session to drive. Supplied by the panel and bounded to the
+    # session-key charset. Trusting the caller here is deliberate and safe: the
+    # request is already authenticated as this dashboard user, and every session
+    # it could name is that same user's own — choosing among them is exactly the
+    # choice the user is making by clicking in a particular panel.
+    raw_key = body.get("session_key") if isinstance(body, dict) else None
+    session_key = raw_key.removeprefix("dashboard:") if isinstance(raw_key, str) else ""
+    if not session_key or not valid_session_key(session_key):
+        return web.json_response({"error": "invalid session key"}, status=400)
+    _INPUT_QUEUE.push(session_key, event)
+    return web.json_response({"ok": True})
+
+
+async def api_browser_input_drain(request: web.Request) -> web.Response:
+    """POST /api/browser/input-drain — hand queued input to the Playwright proxy.
+
+    The proxy long-polls this and injects whatever it receives into the Playwright
+    subprocess over the pipe the frames already come back on.
+
+    Audit happens HERE rather than in a separate proxy-side call the way the pump
+    does it. That is a deliberate simplification with a stronger property: the
+    proxy can only ever inject events the gateway handed it, so if the gateway is
+    unreachable the proxy receives nothing and no unaudited input can execute.
+    The pump needs its own audit round-trip because it invents its own work; input
+    is gateway-issued by construction.
+
+    The posting proxy proves its session the same way the frame path does: it
+    sends its own pid and the gateway walks the process ancestry for a
+    gateway-signed ``session_pid`` sidecar. A proxy therefore cannot drain another
+    session's input even by asking.
+    """
+    if not is_loopback(request.remote or ""):
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="browser_input",
+            outcome="denied",
+            downstream_service="browser",
+            resources="non-loopback",
+        )
+        return web.json_response({"error": "loopback only"}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    resolved_key = await asyncio.to_thread(
+        _resolve_browse_session_key,
+        body.get("host_pid") if isinstance(body, dict) else None,
+    )
+    if not resolved_key:
+        # No verifiable session mapping — we cannot attribute input to a session,
+        # so deliver nothing. Answer with 503 rather than an empty 200: a 2xx here
+        # returns instantly, and the proxy's drain loop treats a successful empty
+        # poll as "re-poll immediately" (correct after a 5s long-poll). A warm-pool
+        # proxy with no published session_pid would therefore spin at full speed,
+        # consuming a request and an asyncio.to_thread slot per iteration. A
+        # non-2xx makes the proxy apply its error backoff instead.
+        return web.json_response(
+            {"error": "no resolvable browse session", "events": []}, status=503
+        )
+    session_key = resolved_key.removeprefix("dashboard:")
+    events = await _INPUT_QUEUE.drain(session_key, _INPUT_DRAIN_TIMEOUT_S)
+    for event in events:
+        _sel().log_tool_invocation(
+            session_key=session_key,
+            tool_name=_INPUT_VERB_TOOLS.get(str(event.get("verb")), "browser_input"),
+            outcome="injected",
+            downstream_service="browser",
+            source="user",
+        )
+    return web.json_response({"events": events})
 
 
 async def api_browser_pump_audit(request: web.Request) -> web.Response:

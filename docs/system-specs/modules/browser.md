@@ -185,8 +185,9 @@ lifecycle-driven, resizable, persisted overlay that auto-opens in the corner on
 the first frame of a browse session (minimize→chip, close→dismiss-this-session).
 It consumes the frame stream via `useBrowserFrame` and is threaded with the
 resolved session *title* (the raw `session_key` is only a client-side lookup key
-against the dashboard's own slot store). It is read-only — no interactive
-control channel.
+against the dashboard's own slot store). User gestures on the panel travel back
+to the page over a separate strict-internal input channel (see **Input relay**
+below); the frame stream itself remains one-directional.
 
 > Note: the chat side panel's **"Web Preview"** tab (`WebPreviewPanel`, opened
 > from the + menu) is a SEPARATE feature — a URL-addressable iframe that
@@ -248,6 +249,56 @@ control channel.
 | `browse_outline` | Compress snapshot text → compact outline with refs |
 | `browse_search` | Regex search snapshot text → matching lines only |
 
+### Input Relay (dashboard → browser)
+
+The return leg of the mirror: the user clicks, scrolls, drags or types on the
+panel and it reaches the page. Deliberately NOT gated on `[BROWSE]` — a gesture
+the user performs themselves is attended and self-authorizing, whereas `[BROWSE]`
+grants the AGENT permission to act unattended.
+
+Shape (and why):
+
+- **Pull, not push.** The proxy binds no socket and the gateway holds no handle
+  back to it. Giving the proxy an inbound listener would add a new loopback
+  control surface inside the one process whose design premise is "no inbound
+  control" — the same reasoning that rejected the CDP debug port. So the panel
+  POSTs to `/api/browser/input`, the event lands in a per-session queue, and the
+  proxy **long-polls** `/api/browser/input-drain` for it.
+- **Closed verb enum** — `click | move | wheel | drag | key | resize`. The wire
+  never carries a tool name, so the endpoint cannot reach a tool the caller was
+  not granted. This matters specifically because `browser_evaluate` requires
+  interactive confirmation; a pass-through tool name would launder it around that
+  gate. `build_input_payload` (`browser/screencast.py`) is the boundary.
+- **Two auth models, because the two legs differ.** The dashboard SPA cannot hold
+  `.local_secret`, so `/api/browser/input` authenticates by the normal session
+  cookie (strict-internal paths fall through to cookie validation on loopback).
+  The proxy leg uses `X-Internal-Secret` plus the signed `session_pid` ancestor
+  walk, so a proxy cannot drain another session's input even by asking.
+- **Normalized coordinates.** Positions travel as 0..1 fractions of the frame;
+  the proxy multiplies by the capture size it learned from the newest frame.
+  Pixels would misplace clicks for one frame after every viewport change, since
+  the panel's idea of the viewport is always one frame stale.
+- **Audit at hand-over.** The gateway emits the SEL event when it hands an event
+  to the proxy, rather than the proxy reporting separately as the pump does. The
+  proxy can only inject what the gateway gave it, so an unreachable gateway means
+  no input executes — unauditable injection is impossible by construction.
+- **Bounded + expiring queue.** Drops oldest when full (for pointer input the
+  newest position is the truthful one) and discards events past a short TTL, so
+  closing the panel cannot leave a delayed click armed.
+- **Viewport follows the panel.** The `resize` verb drives `browser_resize` →
+  `page.setViewportSize` on the open page (live, no restart), so the page fills
+  the panel instead of being letterboxed inside a fixed 1280×720 capture.
+- **Frame cadence bursts** while input is flowing (~0.15s) and falls back to the
+  idle rate (1.5s). Injection also refreshes the browse-activity clock, without
+  which the pump's idle gate would starve the mirror during interaction.
+- **Disabled in extension mode**, where the user drives their own Chrome window
+  and synthetic injection would be a surprising side effect.
+
+**Source:** `src/kiro_crew/browser/input_queue.py`, `build_input_payload` in
+`src/kiro_crew/browser/screencast.py`, `_input_loop` / `_input_event_to_call` in
+`src/kiro_crew/mcp_playwright_proxy.py`,
+`website/src/hooks/useBrowserInput.ts`, `website/src/utils/browserKeys.ts`.
+
 ### Dashboard Integration
 
 - **Globe button** in ChatInput toggles browse mode → sends `{ browse: true }` in POST
@@ -260,6 +311,8 @@ control channel.
   - `POST /api/browser-auth-retry` — retry auth (calls `ensure()`)
   - `POST /api/browser-event` — broadcast browser activity events via WebSocket
   - `POST /api/browser/frame` — ingest a browse screenshot, rebroadcast as `browser_frame` WS event, return live subscriber count (loopback-only, in `internal_paths`)
+  - `POST /api/browser/input` — queue a user gesture from the panel (closed verb enum, normalized coords; loopback-only, in `internal_paths`, cookie-authenticated)
+  - `POST /api/browser/input-drain` — long-poll handing queued input to the Playwright proxy, session-scoped via the signed `session_pid` walk (loopback-only, in `internal_paths`)
   - `POST /api/browser/pump-audit` — SEL audit for proxy active-pump screenshot injections (loopback-only, in `internal_paths`)
 
 ### Security

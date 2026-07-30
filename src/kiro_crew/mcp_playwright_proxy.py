@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -105,30 +106,148 @@ _FRAME_JPEG_QUALITY = _env_int("KIROCREW_BROWSE_JPEG_QUALITY", 70)
 _SESSION_KEY = os.environ.get("KIROCREW_SESSION_KEY", "")
 
 
-def _encode_frame(data: str, media_type: str) -> tuple[bytes, str]:
+def _image_size(img_bytes: bytes) -> tuple[int, int] | tuple[None, None]:
+    """Read (width, height) from PNG/JPEG bytes using only the stdlib.
+
+    PIL is optional here, but the CAPTURE size is load-bearing for input: a panel
+    click arrives as a normalized (0..1) fraction and is multiplied by this size
+    to get a page CSS pixel. Parsing the header ourselves keeps that mapping
+    available on installs without PIL, where guessing a viewport would silently
+    land clicks in the wrong place.
+
+    Returns ``(None, None)`` when the format is unrecognised or truncated.
+    """
+    try:
+        # PNG: 8-byte signature, then IHDR length+type, then width/height as BE u32.
+        if img_bytes[:8] == b"\x89PNG\r\n\x1a\n" and img_bytes[12:16] == b"IHDR":
+            w, h = struct.unpack(">II", img_bytes[16:24])
+            return int(w), int(h)
+        # JPEG: walk the marker chain to the first SOFn (excluding DHT/DAC/RSTn).
+        if img_bytes[:2] == b"\xff\xd8":
+            i, end = 2, len(img_bytes)
+            while i + 9 < end:
+                if img_bytes[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = img_bytes[i + 1]
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                seg_len = struct.unpack(">H", img_bytes[i + 2:i + 4])[0]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", img_bytes[i + 5:i + 9])
+                    return int(w), int(h)
+                i += 2 + seg_len
+    except Exception:
+        pass
+    return None, None
+
+
+def _encode_frame(data: str, media_type: str) -> tuple[bytes, str, int | None, int | None]:
     """Decode a base64 image; downscale + JPEG-encode if PIL is available.
 
-    Returns ``(bytes, ext)``. Shared by the on-disk save and the live-frame POST
-    so the (relatively expensive) decode/resize/encode runs once per screenshot.
+    Returns ``(bytes, ext, capture_width, capture_height)``. Shared by the
+    on-disk save and the live-frame POST so the (relatively expensive)
+    decode/resize/encode runs once per screenshot.
+
+    The reported size is the size BEFORE any downscale — i.e. the browser's own
+    capture size, which at the default deviceScaleFactor of 1 equals the page's
+    CSS-pixel viewport. That is the frame of reference input coordinates are
+    resolved against, so it must not be the (possibly shrunk) encoded size.
     """
     img_bytes = base64.b64decode(data)
     ext = "jpeg" if ("jpeg" in media_type or "jpg" in media_type) else "png"
+    src_w, src_h = _image_size(img_bytes)
     if _HAS_PIL:
         try:
             img: Image.Image = Image.open(io.BytesIO(img_bytes))
+            src_w, src_h = img.width, img.height
             if _MAX_FRAME_WIDTH and img.width > _MAX_FRAME_WIDTH:
                 ratio = _MAX_FRAME_WIDTH / img.width
                 resample = getattr(Image, "LANCZOS", getattr(Image, "ANTIALIAS", None))
                 img = img.resize((_MAX_FRAME_WIDTH, int(img.height * ratio)), resample)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=_FRAME_JPEG_QUALITY)
-            return buf.getvalue(), "jpeg"
+            return buf.getvalue(), "jpeg", src_w, src_h
         except Exception:
             pass
-    return img_bytes, ext
+    return img_bytes, ext, src_w, src_h
 
 
 _SCREENSHOT_KEEP = 200
+
+# Last known browser capture size, learned from the frames themselves rather than
+# tracked from our own resize calls. At the default deviceScaleFactor of 1 this
+# equals the page's CSS-pixel viewport, so it is the frame of reference for
+# resolving a normalized (0..1) input coordinate into a page pixel. Learning it
+# from the frame is self-correcting: it stays right if the config pins a viewport,
+# if the agent resizes, or if the page is reloaded.
+_capture_lock = threading.Lock()
+_capture_size: tuple[int, int] | None = None
+# Viewport we last asked the browser for via an injected browser_resize. This is
+# AUTHORITATIVE for coordinates when present: @playwright/mcp may downscale the
+# screenshot it returns, so the encoded image can be smaller than the page's CSS
+# viewport, and scaling a normalized coordinate by the image size would then bias
+# every click toward the top-left. The frame size is only a fallback for the
+# window before any resize has been issued.
+_requested_viewport: tuple[int, int] | None = None
+
+
+def _note_capture_size(width: int | None, height: int | None) -> None:
+    """Record the browser's capture size from a frame we just encoded."""
+    global _capture_size
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        with _capture_lock:
+            _capture_size = (width, height)
+
+
+def _note_requested_viewport(width: int, height: int) -> None:
+    """Record the viewport we just asked the browser to adopt."""
+    global _requested_viewport
+    with _capture_lock:
+        _requested_viewport = (width, height)
+
+
+def _note_agent_viewport_change(msg: dict[str, Any]) -> None:
+    """Track a ``browser_resize`` the AGENT issued, not us.
+
+    The panel is not the only thing that can resize the page: kiro-cli can call
+    ``browser_resize`` itself, and that request passes straight through this relay.
+    If only our own resizes updated the authority, an agent resize would leave
+    ``_requested_viewport`` describing a viewport that no longer exists and every
+    subsequent panel click would map against it. Both writers must feed the same
+    value, so observe the forwarded call too.
+    """
+    try:
+        if msg.get("method") != "tools/call":
+            return
+        params = msg.get("params") or {}
+        if params.get("name") != "browser_resize":
+            return
+        args = params.get("arguments") or {}
+        width, height = args.get("width"), args.get("height")
+        if (
+            isinstance(width, int)
+            and isinstance(height, int)
+            and not isinstance(width, bool)
+            and not isinstance(height, bool)
+            and width > 0
+            and height > 0
+        ):
+            _note_requested_viewport(width, height)
+    except Exception:
+        # Never let viewport bookkeeping break the relay.
+        pass
+
+
+def _current_capture_size() -> tuple[int, int] | None:
+    """The size to resolve normalized input against, or None if unknown.
+
+    Prefers the viewport we requested over the frame's own dimensions — see
+    ``_requested_viewport``.
+    """
+    with _capture_lock:
+        return _requested_viewport or _capture_size
 
 
 def _prune_screenshot_dir() -> None:
@@ -218,7 +337,13 @@ def _record_subscriber_count(body: bytes) -> None:
         pass
 
 
-def _post_frame_to_gateway(img_bytes: bytes, fmt: str, source: str = "agent") -> None:
+def _post_frame_to_gateway(
+    img_bytes: bytes,
+    fmt: str,
+    source: str = "agent",
+    width: int | None = None,
+    height: int | None = None,
+) -> None:
     """Best-effort POST of a browse frame to the gateway for the live dashboard mirror.
 
     Runs on a daemon thread so it never blocks the JSON-RPC relay (a synchronous
@@ -238,25 +363,32 @@ def _post_frame_to_gateway(img_bytes: bytes, fmt: str, source: str = "agent") ->
     def _send() -> None:
         try:
             b64 = base64.b64encode(img_bytes).decode("ascii")
-            body = json.dumps(
-                {
-                    "data": b64,
-                    "format": fmt,
-                    "source": source,
-                    # Frozen-env session key: correct for per-session spawns, but
-                    # empty for warm-pool workers (pre-spawned before a slot is
-                    # assigned, so KIROCREW_SESSION_KEY was never set). Sent as a
-                    # fallback only.
-                    "session_key": _SESSION_KEY,
-                    # This proxy's pid, so the gateway can resolve the AUTHORITATIVE
-                    # session key by walking our process ancestry to the kiro-cli
-                    # worker and verifying its gateway-signed session_pid sidecar
-                    # (the same per-turn mapping every managed MCP tool resolves).
-                    # This is what makes the live mirror work under the warm pool,
-                    # where the frozen env key above is empty.
-                    "host_pid": os.getpid(),
-                }
-            ).encode("utf-8")
+            payload: dict[str, Any] = {
+                "data": b64,
+                "format": fmt,
+                "source": source,
+                # Frozen-env session key: correct for per-session spawns, but
+                # empty for warm-pool workers (pre-spawned before a slot is
+                # assigned, so KIROCREW_SESSION_KEY was never set). Sent as a
+                # fallback only.
+                "session_key": _SESSION_KEY,
+                # This proxy's pid, so the gateway can resolve the AUTHORITATIVE
+                # session key by walking our process ancestry to the kiro-cli
+                # worker and verifying its gateway-signed session_pid sidecar
+                # (the same per-turn mapping every managed MCP tool resolves).
+                # This is what makes the live mirror work under the warm pool,
+                # where the frozen env key above is empty.
+                "host_pid": os.getpid(),
+            }
+            # The browser's own capture size. The panel needs it to label the
+            # frame, and the input path needs it as the frame of reference for
+            # normalized coordinates. Omitted rather than guessed when the
+            # header could not be parsed — the gateway validates and drops
+            # anything out of range.
+            if isinstance(width, int) and isinstance(height, int):
+                payload["device_width"] = width
+                payload["device_height"] = height
+            body = json.dumps(payload).encode("utf-8")
             headers = {"Content-Type": "application/json"}
             secret = _internal_secret()
             if secret:
@@ -331,9 +463,10 @@ def _save_screenshot(data: str, media_type: str) -> str:
     Encodes once, writes the file (for the agent's Read tool), and fires a
     best-effort live-frame POST to the gateway (for the dashboard mirror).
     """
-    img_bytes, ext = _encode_frame(data, media_type)
+    img_bytes, ext, cap_w, cap_h = _encode_frame(data, media_type)
+    _note_capture_size(cap_w, cap_h)
     filepath = _write_screenshot(img_bytes, ext)
-    _post_frame_to_gateway(img_bytes, ext)
+    _post_frame_to_gateway(img_bytes, ext, width=cap_w, height=cap_h)
     return filepath
 
 
@@ -355,8 +488,20 @@ def _save_screenshot(data: str, media_type: str) -> str:
 #     when no page is open / the session is idle-cold;
 #   * a dashboard is actually watching (subscribers > 0).
 _PUMP_INTERVAL = float(os.environ.get("KIROCREW_BROWSE_PUMP_INTERVAL", "") or 1.5)
+# While the user is actively driving the panel, the idle cadence is far too slow
+# to see the result of your own click. Burst to a much shorter interval for a
+# short window after each gesture, then fall back. Effective frame rate is still
+# bounded by the screenshot round-trip (single-in-flight), so this is "as fast as
+# the browser can answer" rather than a fixed fps.
+_PUMP_BURST_INTERVAL = float(
+    os.environ.get("KIROCREW_BROWSE_PUMP_BURST_INTERVAL", "") or 0.15
+)
+_PUMP_BURST_WINDOW = 3.0  # seconds of fast frames after the last input event
 _PUMP_ACTIVE_WINDOW = 20.0  # seconds since the last real browser_* tool response
 _PUMP_TIMEOUT = 10.0  # seconds before a stuck in-flight pump is abandoned
+# A stuck frame must not freeze the mirror for 60+ burst slots, so the abandon
+# threshold tightens while bursting.
+_PUMP_BURST_TIMEOUT = 2.0
 _PUMP_ID_PREFIX = "__mc_pump_"
 _BROWSE_TOOL_PREFIX = "browser_"
 
@@ -365,6 +510,29 @@ _pump_seq = 0
 _pump_inflight_id: str | None = None
 _pump_sent_at = 0.0
 _last_browse_activity = 0.0
+_last_input_at = 0.0
+
+
+def _note_input_activity() -> None:
+    """Mark that the user just drove the page.
+
+    Sets BOTH the input-burst clock and the browse-activity clock. The second one
+    is load-bearing and easy to miss: ``_should_pump`` refuses to run unless a
+    ``browser_*`` call completed within ``_PUMP_ACTIVE_WINDOW``, and injected
+    input responses are consumed by the demux arm without ever passing through
+    ``_note_browse_activity``. Without this, interacting with a page that had been
+    idle for 20s would produce no new frames — the user's clicks would land but
+    the mirror would look frozen.
+    """
+    global _last_input_at, _last_browse_activity
+    now = time.time()
+    _last_input_at = now
+    _last_browse_activity = now
+
+
+def _pump_bursting(now: float) -> bool:
+    """True while frames should be captured at the fast interactive cadence."""
+    return (now - _last_input_at) <= _PUMP_BURST_WINDOW
 
 
 def _note_browse_activity(original: dict[str, Any] | None) -> None:
@@ -395,7 +563,9 @@ def _should_pump(now: float) -> bool:
         return False
     if _PENDING_REQUESTS:
         return False
-    if _pump_inflight_id is not None and (now - _pump_sent_at) < _PUMP_TIMEOUT:
+    if _pump_inflight_id is not None and (now - _pump_sent_at) < (
+        _PUMP_BURST_TIMEOUT if _pump_bursting(now) else _PUMP_TIMEOUT
+    ):
         return False
     if (now - _last_browse_activity) > _PUMP_ACTIVE_WINDOW:
         return False
@@ -418,8 +588,13 @@ def _relay_pump_frame(msg: dict[str, Any]) -> None:
             return
         for item in result.get("content") or []:
             if isinstance(item, dict) and item.get("type") == "image" and item.get("data"):
-                img_bytes, ext = _encode_frame(item["data"], item.get("mimeType", "image/png"))
-                _post_frame_to_gateway(img_bytes, ext, source="pump")
+                img_bytes, ext, cap_w, cap_h = _encode_frame(
+                    item["data"], item.get("mimeType", "image/png")
+                )
+                _note_capture_size(cap_w, cap_h)
+                _post_frame_to_gateway(
+                    img_bytes, ext, source="pump", width=cap_w, height=cap_h
+                )
                 return
     except Exception:
         pass
@@ -429,10 +604,12 @@ def _pump_loop(proc_stdin) -> None:
     """Background thread: inject idle-gated ``browser_take_screenshot`` calls."""
     global _pump_seq, _pump_inflight_id, _pump_sent_at
     while True:
-        time.sleep(_PUMP_INTERVAL)
+        bursting = _pump_bursting(time.time())
+        time.sleep(_PUMP_BURST_INTERVAL if bursting else _PUMP_INTERVAL)
         now = time.time()
         # Abandon a stuck in-flight pump so a hung browser can't wedge us.
-        if _pump_inflight_id is not None and (now - _pump_sent_at) >= _PUMP_TIMEOUT:
+        stuck_after = _PUMP_BURST_TIMEOUT if _pump_bursting(now) else _PUMP_TIMEOUT
+        if _pump_inflight_id is not None and (now - _pump_sent_at) >= stuck_after:
             _pump_inflight_id = None
         if not _should_pump(now):
             continue
@@ -460,6 +637,178 @@ def _pump_loop(proc_stdin) -> None:
                 _write_message_to_subprocess(proc_stdin, req)
         except Exception:
             _pump_inflight_id = None
+
+
+# ── Input relay (dashboard → browser) ─────────────────────────────────────────
+#
+# The mirror's return leg. The dashboard panel POSTs a user gesture to the
+# gateway; this thread long-polls for it and injects the matching Playwright tool
+# call into the SAME authenticated stdio pipe the frames come back on. No debug
+# port, no inbound socket on this process — we only ever make outbound requests,
+# exactly like the frame POST.
+#
+# Coordinates arrive NORMALIZED (0..1 fractions of the frame) and are multiplied
+# here by the capture size learned from the most recent frame. Doing the scaling
+# proxy-side is what keeps a click accurate across a viewport change: the panel's
+# idea of the viewport is always one frame stale, ours is not.
+
+_INPUT_ID_PREFIX = "__mc_input_"
+# Requests are fire-and-forget; we never read their results, so there is no
+# in-flight bookkeeping to keep. The sequence only has to make ids unique.
+_input_seq = 0
+# Long-poll budget. The gateway hangs for ~5s, so time out above that.
+_INPUT_POLL_TIMEOUT = 10.0
+# Backoff after a failed poll so an unreachable gateway doesn't spin this thread.
+_INPUT_ERROR_BACKOFF = 2.0
+
+_input_enabled = "--extension" not in sys.argv
+
+
+def _gateway_input_drain_url() -> str:
+    """Loopback gateway endpoint that hands us queued user input."""
+    port = os.environ.get("KIROCREW_PORT", "5476")
+    return f"http://127.0.0.1:{port}/api/browser/input-drain"
+
+
+def _is_input_id(req_id: Any) -> bool:
+    """True for ids this proxy minted for an injected input call.
+
+    The main relay loop MUST intercept these. Without an arm here the response to
+    an injected call falls through to the client stream as a reply to a request
+    kiro-cli never sent, corrupting the JSON-RPC session.
+    """
+    return isinstance(req_id, str) and req_id.startswith(_INPUT_ID_PREFIX)
+
+
+def _input_event_to_call(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Translate one validated input event into Playwright tool-call params.
+
+    Returns ``None`` when the event cannot be resolved yet — currently only when a
+    pointer event arrives before any frame has been captured, so the capture size
+    is unknown. Dropping it is correct: there is nothing on screen for the user to
+    have aimed at.
+    """
+    verb = event.get("verb")
+    if verb == "resize":
+        # Remember what we asked for: this becomes the authoritative coordinate
+        # frame of reference, independent of how the screenshot was encoded.
+        _note_requested_viewport(event["width"], event["height"])
+        return {
+            "name": "browser_resize",
+            "arguments": {"width": event["width"], "height": event["height"]},
+        }
+    if verb == "key":
+        return {"name": "browser_press_key", "arguments": {"key": event["key"]}}
+    if verb == "wheel":
+        return {
+            "name": "browser_mouse_wheel",
+            "arguments": {"deltaX": event.get("dx", 0), "deltaY": event.get("dy", 0)},
+        }
+
+    size = _current_capture_size()
+    if size is None:
+        return None
+    cap_w, cap_h = size
+
+    def _px(fx: float, fy: float) -> tuple[int, int]:
+        # Clamp to the last addressable pixel: a fraction of exactly 1.0 would
+        # otherwise land one pixel outside the viewport.
+        return (
+            max(0, min(cap_w - 1, int(round(fx * cap_w)))),
+            max(0, min(cap_h - 1, int(round(fy * cap_h)))),
+        )
+
+    if verb == "move":
+        x, y = _px(event["x"], event["y"])
+        return {"name": "browser_mouse_move_xy", "arguments": {"x": x, "y": y}}
+    if verb == "click":
+        x, y = _px(event["x"], event["y"])
+        return {
+            "name": "browser_mouse_click_xy",
+            "arguments": {
+                "x": x,
+                "y": y,
+                "button": event.get("button", "left"),
+                "clickCount": event.get("clickCount", 1),
+            },
+        }
+    if verb == "drag":
+        sx, sy = _px(event["x"], event["y"])
+        ex, ey = _px(event["x2"], event["y2"])
+        return {
+            "name": "browser_mouse_drag_xy",
+            "arguments": {"startX": sx, "startY": sy, "endX": ex, "endY": ey},
+        }
+    return None
+
+
+def _inject_input_event(proc_stdin, event: dict[str, Any]) -> bool:
+    """Write one input event to the Playwright subprocess. True if injected."""
+    global _input_seq
+    params = _input_event_to_call(event)
+    if params is None:
+        return False
+    _input_seq += 1
+    req = {
+        "jsonrpc": "2.0",
+        "id": f"{_INPUT_ID_PREFIX}{_input_seq}",
+        "method": "tools/call",
+        "params": params,
+    }
+    try:
+        with _proc_stdin_lock:
+            _write_message_to_subprocess(proc_stdin, req)
+        _note_input_activity()
+        return True
+    except Exception:
+        return False
+
+
+def _drain_input_once() -> tuple[bool, list[dict[str, Any]]]:
+    """Long-poll the gateway for queued input.
+
+    Returns ``(ok, events)``. ``ok`` distinguishes "the long-poll returned
+    normally with nothing queued" (re-poll immediately — the gateway already did
+    the waiting) from "the request failed" (back off, the gateway may be down).
+    Collapsing the two would add the backoff delay to the first gesture after
+    every idle period.
+
+    Every event we inject came from here, so an unreachable gateway means no input
+    executes at all — the audit the gateway writes when it hands an event over
+    cannot be bypassed by construction.
+    """
+    try:
+        body = json.dumps({"host_pid": os.getpid()}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        secret = _internal_secret()
+        if secret:
+            headers["X-Internal-Secret"] = secret
+        req = urllib.request.Request(
+            _gateway_input_drain_url(), data=body, headers=headers, method="POST"
+        )
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is the loopback gateway (literal http://127.0.0.1 scheme+host, port from our own KIROCREW_PORT env) + a fixed internal path; no user- or agent-controlled value reaches urlopen, and the scheme is not interpolated so file:// is unreachable (same trust profile as _post_frame_to_gateway above)  # noqa: E501
+        resp = urllib.request.urlopen(req, timeout=_INPUT_POLL_TIMEOUT)
+        try:
+            parsed = json.loads(resp.read().decode("utf-8"))
+        finally:
+            resp.close()
+        events = parsed.get("events") if isinstance(parsed, dict) else None
+        if not isinstance(events, list):
+            return True, []
+        return True, [e for e in events if isinstance(e, dict)]
+    except Exception:
+        return False, []
+
+
+def _input_loop(proc_stdin) -> None:
+    """Background thread: long-poll for user input and inject it."""
+    while True:
+        ok, events = _drain_input_once()
+        if not ok:
+            time.sleep(_INPUT_ERROR_BACKOFF)
+            continue
+        for event in events:
+            _inject_input_event(proc_stdin, event)
 
 
 def _maybe_compress_response(msg: dict[str, Any]) -> dict[str, Any]:
@@ -592,6 +941,7 @@ def _forward_stdin_to_subprocess_tracked(client_stdin, proc_stdin) -> None:
         req_id = msg.get("id")
         if req_id is not None:
             _PENDING_REQUESTS[req_id] = msg
+        _note_agent_viewport_change(msg)
         with _proc_stdin_lock:
             _write_message_to_subprocess(proc_stdin, msg)
 
@@ -698,6 +1048,15 @@ def run_proxy(args: list[str]) -> None:
             target=_pump_loop, args=(proc.stdin,), daemon=True
         ).start()
 
+    # Input relay: long-poll the gateway for user gestures on the dashboard's
+    # Browser panel and inject them. Disabled in extension mode, where the user is
+    # driving their own Chrome window directly and injecting synthetic input would
+    # be a surprising side effect.
+    if _input_enabled:
+        threading.Thread(
+            target=_input_loop, args=(proc.stdin,), daemon=True
+        ).start()
+
     while True:
         msg = _read_message(proc.stdout)
         if msg is None:
@@ -709,6 +1068,12 @@ def run_proxy(args: list[str]) -> None:
             # tracked there).
             _clear_pump_inflight(req_id)
             _relay_pump_frame(msg)
+            continue
+        if _is_input_id(req_id):
+            # Proxy-injected user input: consume the response. It answers a
+            # request kiro-cli never sent, so forwarding it would corrupt the
+            # client's JSON-RPC stream. We don't inspect the result — the next
+            # pump frame shows the user what the gesture did.
             continue
         if req_id is None and "error" in msg:
             continue

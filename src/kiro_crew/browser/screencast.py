@@ -52,6 +52,11 @@ _B64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 _SESSION_KEY_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 
+def valid_session_key(value: Any) -> bool:
+    """True if ``value`` is a session key safe to use as a routing/lookup key."""
+    return isinstance(value, str) and _SESSION_KEY_RE.fullmatch(value) is not None
+
+
 def build_frame_payload(body: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize a POSTed frame body into the ``browser_frame`` WS payload.
 
@@ -89,3 +94,132 @@ def build_frame_payload(body: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(sk, str) and _SESSION_KEY_RE.fullmatch(sk):
         payload["session_key"] = sk
     return payload
+
+
+# ── Input (dashboard → browser) ────────────────────────────────────────────────
+#
+# The return leg of the mirror. The panel posts a user gesture; the proxy turns it
+# into a Playwright tool call over the SAME authenticated pipe the frames come
+# back on. The load-bearing control is this CLOSED VERB ENUM: the wire never
+# carries a tool name, so the endpoint cannot be used to reach a tool the caller
+# was not granted. That matters specifically because ``browser_evaluate`` requires
+# interactive confirmation (cookie-exfiltration risk) — a pass-through tool name
+# here would launder it around that gate.
+#
+# Coordinates are NORMALIZED (0..1 fractions of the frame), never pixels. The
+# panel cannot know the browser's live viewport without racing a resize, so the
+# proxy multiplies by the capture size it learned from the most recent frame.
+
+_INPUT_VERBS = {"click", "move", "wheel", "drag", "key", "resize"}
+_MOUSE_BUTTONS = {"left", "right", "middle"}
+
+# Playwright key names we accept for the ``key`` verb: one printable character, or
+# one of these named keys. An allowlist rather than free text so the panel cannot
+# post an arbitrary string into a tool argument.
+_NAMED_KEYS = {
+    "Enter", "Tab", "Escape", "Backspace", "Delete", "Insert",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Home", "End", "PageUp", "PageDown", "Space",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+}
+# Modifier-prefixed combos, e.g. "Control+a" / "Shift+Tab" / "Meta+v".
+_MODIFIERS = {"Control", "Shift", "Alt", "Meta"}
+
+# Wheel deltas are CSS pixels (not fractions) — that is the unit the DOM reports
+# and Playwright consumes. Bounded so one gesture cannot request an absurd scroll.
+_MAX_WHEEL_DELTA = 10_000
+# Viewport bounds for the resize verb. The lower bound keeps a collapsing panel
+# from driving the page to a degenerate width mid-animation.
+_MIN_VIEWPORT = 200
+_MAX_VIEWPORT = 10_000
+
+
+def _norm_fraction(val: Any) -> float | None:
+    """A coordinate as a 0..1 fraction of the frame, or None if out of range."""
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    num = float(val)
+    if num != num or num < 0.0 or num > 1.0:  # NaN-safe
+        return None
+    return num
+
+
+def _valid_key(val: Any) -> str | None:
+    """Validate a Playwright key name against the allowlist."""
+    if not isinstance(val, str) or not val or len(val) > 32:
+        return None
+    base = val
+    if "+" in val:
+        *mods, base = val.split("+")
+        if not mods or any(m not in _MODIFIERS for m in mods):
+            return None
+    if base in _NAMED_KEYS:
+        return val
+    # A single printable character (letters, digits, punctuation), no controls.
+    if len(base) == 1 and base.isprintable():
+        return val
+    return None
+
+
+def build_input_payload(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a POSTed input event, or return ``None`` to reject with 400.
+
+    Every accepted shape is enumerated here; anything else is rejected. The
+    returned dict is what the proxy drains, so it is already fully validated by
+    the time it reaches the injection site.
+    """
+    if not isinstance(body, dict):
+        return None
+    verb = body.get("verb")
+    if verb not in _INPUT_VERBS:
+        return None
+
+    if verb in ("click", "move"):
+        x, y = _norm_fraction(body.get("x")), _norm_fraction(body.get("y"))
+        if x is None or y is None:
+            return None
+        out: dict[str, Any] = {"verb": verb, "x": x, "y": y}
+        if verb == "click":
+            button = body.get("button", "left")
+            if button not in _MOUSE_BUTTONS:
+                return None
+            count = body.get("clickCount", 1)
+            if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 3:
+                return None
+            out["button"] = button
+            out["clickCount"] = count
+        return out
+
+    if verb == "drag":
+        x, y = _norm_fraction(body.get("x")), _norm_fraction(body.get("y"))
+        x2, y2 = _norm_fraction(body.get("x2")), _norm_fraction(body.get("y2"))
+        if None in (x, y, x2, y2):
+            return None
+        return {"verb": "drag", "x": x, "y": y, "x2": x2, "y2": y2}
+
+    if verb == "wheel":
+        deltas: dict[str, Any] = {"verb": "wheel"}
+        for name in ("dx", "dy"):
+            val = body.get(name, 0)
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                return None
+            num = float(val)
+            if num != num or abs(num) > _MAX_WHEEL_DELTA:
+                return None
+            deltas[name] = num
+        return deltas
+
+    if verb == "key":
+        key = _valid_key(body.get("key"))
+        if key is None:
+            return None
+        return {"verb": "key", "key": key}
+
+    # resize
+    width, height = body.get("width"), body.get("height")
+    for val in (width, height):
+        if isinstance(val, bool) or not isinstance(val, int):
+            return None
+        if not _MIN_VIEWPORT <= val <= _MAX_VIEWPORT:
+            return None
+    return {"verb": "resize", "width": width, "height": height}

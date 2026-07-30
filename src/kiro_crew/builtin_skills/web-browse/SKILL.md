@@ -1,6 +1,6 @@
 ---
 name: web-browse
-description: Render a REAL external web page in KiroCrew's built-in Browser panel (the right-side panel), by opening it with the Playwright browser and screenshotting it so the live view streams into the panel. Use when the user wants to VIEW / verify / "show me" an actual website or public URL (not a local dev server — that's the web-preview skill). View-only: operating the page (clicking, typing, multi-step) requires the Globe toggle ("Let the agent use the browser").
+description: Render a REAL external web page in KiroCrew's built-in Browser panel (the right-side panel), by opening it with the Playwright browser and screenshotting it so the live view streams into the panel. Use when the user wants to VIEW / verify / "show me" an actual website or public URL (not a local dev server — that's the web-preview skill). The user can drive the panel directly; YOU operating the page (clicking, typing, multi-step) requires the Globe toggle ("Let the agent use the browser").
 triggers: open this page, show me this site, show me the page, view this url, render this page, look at this website, open in the browser, see what this page looks like, pull up this site, visit this url
 ---
 
@@ -18,13 +18,18 @@ toggle — this one screenshot is self-authorizing.
 
 ## How the panel works (so you set expectations correctly)
 
-The panel is a **read-only live mirror**: a headless Chromium renders the page
-out of view, each screenshot is streamed into the panel, and the panel paints
-the latest frame. There is **no OS browser window** (headless) and **no input
-channel from the panel back to the page** — clicking or typing in the panel
-image does nothing. To actually *operate* the page, the user turns on **Browser
-use** (the Globe), which authorizes *you* (the agent) to drive Playwright via
-MCP tools; the panel still just shows screenshots of what you do.
+The panel is a **live mirror you can drive**: a headless Chromium renders the
+page out of view, each screenshot is streamed into the panel, and the panel
+paints the latest frame. There is **no OS browser window** (headless).
+
+The mirror now has a return leg: the user can click, scroll, drag and type
+directly on the panel image, and those gestures are relayed back to the page.
+That path is the USER's — it needs no toggle, because a gesture they perform
+themselves is attended and self-authorizing. **Browser use** (the Globe) still
+means what it always meant: it authorizes *you* (the agent) to drive Playwright
+via MCP tools, unattended. Frame cadence bursts while the user is interacting and
+falls back to a slow idle rate, so expect remote-desktop feel rather than native
+smoothness — there are no hover states between frames.
 
 ## Precondition — Playwright must be available (the guard)
 

@@ -120,9 +120,9 @@ def _cmd_setup() -> None:
         print("Action needed — install the Playwright MCP package, then re-run this:")
         print("  npm install -g @playwright/mcp        # or: npx @playwright/mcp\n")
     print("Restart the gateway to apply:   kirocrew stop && kirocrew gateway\n")
-    print("The Browser panel is a read-only live mirror (view-only). Toggle")
-    print('the Globe ("Let the agent use the browser") to let the agent operate')
-    print("the page.")
+    print("The Browser panel mirrors the page and relays your clicks, scrolling")
+    print("and typing back to it. Toggle the Globe (\"Let the agent use the")
+    print('browser") to also let the AGENT operate the page on its own.')
 
 
 def _cmd_extension(action: str) -> None:

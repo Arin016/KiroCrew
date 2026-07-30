@@ -132,7 +132,7 @@ The **Globe toggle** ("Let the agent use the browser") authorizes you to activel
 
 **Operate (Globe on / `[BROWSE]`):** use Playwright MCP tools for full interactive browsing.
 
-**Without `[BROWSE]`:** default to `web_fetch` / `web_search` for reading pages. Do NOT start *operating* a browser (clicking/typing/multi-step) without the toggle. **View-only** use is self-authorizing even with Globe off — navigate plus a screenshot, whether to show the user a page or to check your own front-end change on a local dev server. The `web-browse`, `web-preview`, and `web-verify` skills carry the details.
+**Without `[BROWSE]`:** default to `web_fetch` / `web_search` for reading pages. Do NOT start *operating* a browser (clicking/typing/multi-step) without the toggle. **View-only** use is self-authorizing even with Globe off — navigate plus a screenshot, whether to show the user a page or to check your own front-end change on a local dev server. The `web-browse`, `web-preview`, and `web-verify` skills carry the details. Note the restriction is on *you*: the user can always click, scroll and type on the Browser panel themselves, and their gestures reach the page whether or not the Globe is on.
 
 **Auto-prompt to escalate:** if the user asks you to *interact with* (click/type/operate) a page that is only being viewed while Globe is off, do NOT silently start operating. Tell them to turn on the **Globe** toggle (the Browser panel also has a "Let the agent act" button that flips it on), then drive it.
 

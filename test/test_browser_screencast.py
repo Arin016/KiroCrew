@@ -132,7 +132,7 @@ class TestProxyFrameHelpers:
         remaining = sorted(os.listdir(d))
         assert remaining == ["screenshot-3.jpeg", "screenshot-4.jpeg", "screenshot-5.jpeg"]
 
-    def test_encode_frame_returns_bytes_and_ext(self):
+    def test_encode_frame_returns_bytes_ext_and_capture_size(self):
         import kiro_crew.mcp_playwright_proxy as proxy
 
         # 1x1 transparent PNG.
@@ -140,10 +140,14 @@ class TestProxyFrameHelpers:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMCAQAB"
             "GqQ4QAAAAABJRU5ErkJggg=="
         )
-        img_bytes, ext = proxy._encode_frame(png_b64, "image/png")
+        img_bytes, ext, width, height = proxy._encode_frame(png_b64, "image/png")
         assert isinstance(img_bytes, bytes) and img_bytes
         # With PIL present it re-encodes to JPEG; without, it stays png.
         assert ext in ("jpeg", "png")
+        # The capture size is the PRE-downscale size, and must be reported with or
+        # without PIL (the stdlib header probe covers the no-PIL install) because
+        # input coordinates are resolved against it.
+        assert (width, height) == (1, 1)
         # Round-trips as valid base64 input.
         assert base64.b64decode(png_b64)
 
@@ -452,7 +456,9 @@ class TestActivePump:
         monkeypatch.setattr(
             proxy,
             "_post_frame_to_gateway",
-            lambda b, fmt, source="agent": posted.append((b, fmt, source)),
+            lambda b, fmt, source="agent", width=None, height=None: posted.append(
+                (b, fmt, source, width, height)
+            ),
         )
         png_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMCAQAB"
@@ -466,6 +472,9 @@ class TestActivePump:
         # pump frames are tagged source="pump" so the gateway can label them in SEL
         assert len(posted) == 1 and isinstance(posted[0][0], bytes) and posted[0][0]
         assert posted[0][2] == "pump"
+        # The capture size rides along: the panel labels the frame with it and the
+        # input path resolves normalized coordinates against it.
+        assert (posted[0][3], posted[0][4]) == (1, 1)
 
     def test_relay_pump_frame_ignores_non_image(self, monkeypatch):
         import kiro_crew.mcp_playwright_proxy as proxy

@@ -252,7 +252,7 @@ describe('WebPreviewPanel — live agent-browse mirror', () => {
       }))
     })
 
-  it('overlays the read-only live mirror when a browse frame arrives (preview stays mounted)', () => {
+  it('overlays the live browse mirror when a browse frame arrives (preview stays mounted)', () => {
     renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
     expect(screen.queryByText('Browser — live')).toBeNull()
     emitFrame('sess-1')

@@ -181,11 +181,59 @@ def generate_playwright_config() -> Path:
                 "storageState": storage_state,
             },
         },
-        "capabilities": ["network", "storage"],
+        # "vision" unlocks the coordinate-based input tools
+        # (browser_mouse_click_xy / _move_xy / _drag_xy / browser_mouse_wheel).
+        # Without it @playwright/mcp filters them out of the tool list entirely
+        # and the dashboard Browser panel cannot relay a click, because only
+        # element-ref tools remain and the panel has pixels, not refs.
+        "capabilities": ["network", "storage", "vision"],
     }
 
     config_path.write_text(json.dumps(config, indent=2))
     return config_path
+
+
+# Capabilities every generated config must end up with. Kept next to the
+# generator so the migration below cannot drift from it.
+_REQUIRED_CAPABILITIES = ("network", "storage", "vision")
+
+
+def ensure_playwright_capabilities() -> bool:
+    """Add any missing required capability to an EXISTING playwright config.
+
+    Editing the generator alone is a silent no-op for everyone who already has a
+    ``playwright-config.json`` on disk — which is every existing browse user, since
+    the file is written once at setup and then reused. Without this the panel's
+    input relay would appear to work while every coordinate tool was quietly
+    filtered out of the tool list.
+
+    Idempotent, order-preserving, and additive only: unrelated keys and any
+    capability the user added themselves are left alone. Returns True if the file
+    was changed.
+    """
+    config_path = config_dir() / "playwright-config.json"
+    if not config_path.exists():
+        return False
+    try:
+        data = json.loads(config_path.read_text())
+    except (OSError, ValueError):
+        # A corrupt or unreadable config is not ours to repair here; the generator
+        # rewrites it wholesale on the next `browse setup`.
+        return False
+    if not isinstance(data, dict):
+        return False
+    caps = data.get("capabilities")
+    if not isinstance(caps, list):
+        caps = []
+    missing = [c for c in _REQUIRED_CAPABILITIES if c not in caps]
+    if not missing:
+        return False
+    data["capabilities"] = caps + missing
+    try:
+        config_path.write_text(json.dumps(data, indent=2))
+    except OSError:
+        return False
+    return True
 
 
 def refresh_storage_state() -> dict[str, Any]:
@@ -230,6 +278,11 @@ def get_playwright_mcp_args() -> list[str]:
         return args
     config_path = config_dir() / "playwright-config.json"
     if config_path.exists():
+        # Upgrade a config written by an older build before we launch against it,
+        # so existing installs gain the capabilities this version needs (notably
+        # "vision", without which the panel's input relay has no coordinate tools
+        # to call). Additive and idempotent.
+        ensure_playwright_capabilities()
         args.extend(["--config", str(config_path)])
     if is_headed():
         args.append("--headed")
@@ -322,6 +375,14 @@ def migrate_owned_playwright_registration() -> None:
     _migrate_owned_kiro_registration()
     _converge_kirocrew_mcp_json()
     _converge_playwright_agent_files()
+    # Upgrade an existing playwright-config.json written by an older build. This
+    # MUST run from a live boot path, not only from get_playwright_mcp_args(): the
+    # recorded launch entry is ["mcp-playwright-proxy", "--config", <path>], so the
+    # args builder has no production caller and a generator-only change would leave
+    # every existing browse user without the "vision" capability — silently
+    # disabling the panel's coordinate input, since the filtered-out tools fail
+    # inside the proxy where the response is consumed rather than surfaced.
+    ensure_playwright_capabilities()
 
 
 def _migrate_owned_kiro_registration() -> None:
