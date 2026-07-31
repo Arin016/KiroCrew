@@ -1,141 +1,158 @@
-# Simplified-Chinese style guide (`zh-CN`)
+# Simplified Chinese style guide
 
-Normative. `zhStyle.test.ts` enforces the mechanical rules here, so a violation
-fails CI rather than accumulating. Section numbers below are the ones the test
-names cite.
+Normative rules for `src/i18n/locales/zh-CN.json`. Where a rule is mechanically
+checkable it is named alongside the test that enforces it; the rest are for whoever
+reviews a translation PR.
 
-Three governing principles:
+The authority here is **W3C CLReq** (*Requirements for Chinese Text Layout*), which is
+grounded in **GB/T 15834—2011**. It is cited rather than a vendor style guide because it
+is openly licensed, versioned, and distinguishes rules by **region** rather than by
+Simplified/Traditional — which matters, since zh-CN and zh-TW disagree about quotation
+marks while sharing most other conventions.
 
-1. **One concept, one word.** A product noun gets exactly one Chinese rendering
-   across the whole catalog. A sense split is allowed only where the English
-   word itself carries two unrelated senses (`memory` = product memory vs RAM),
-   and every split is listed in §2.
-2. **Keep the English a Chinese developer would type.** Brand names, protocol
-   acronyms, service names and key legends stay in Latin script. Ordinary prose
-   does not. Test: *would a Chinese engineer write this word in Latin letters in
-   a design doc?* If yes, keep it.
-3. **Translate the sentence, not the words.** Where a catalog value is a
-   sentence *fragment*, translate for the sentence the user actually reads, not
-   the fragment in isolation.
+- CLReq — <https://www.w3.org/TR/clreq/>
+- Mozilla L10n general style guide — <https://mozilla-l10n.github.io/styleguides/mozilla_general/>
 
 ---
 
-## §1 Punctuation
+## 1. Punctuation
 
-- **Full-width `，。：；？！（）、` between or beside CJK.** ASCII `,` or `.`
-  between Chinese characters is the clearest signal a string was machine
-  translated and never read.
-- **Half-width is kept inside code**: commands, paths, filenames and extensions
-  (`~/.kiro/crew`, `.yaml`), identifiers and config keys
-  (`pref.backend.framework`), version numbers (`v1.2.3`), numeric ranges,
-  URLs, emails and token prefixes (`xoxb-`). `stripCode()` in the test mirrors
-  this carve-out list.
-- **Wrapper follows the sentence, content keeps its script**:
-  `Piper 语速（length scale）`.
-- **Ellipsis** for pending states is the full-width `…`, glued to the preceding
-  character: `正在安装…`. An ellipsis meaning *omission* inside a code sample
-  stays as authored.
-- **Parentheses** never mix styles within one value — a half-width opener
-  married to a full-width closer renders as `(…）`. A sentence fragment may
-  legitimately open a bracket it never closes; only a mixed-style imbalance is
-  a defect.
-- **Quotes** are curly `“ ”`. Corner brackets `「 」` are not used. A quoted
-  English UI label keeps its English inside Chinese quotes:
-  `请使用“From Spec”标签页`.
-- **CJK ↔ Latin spacing**: one ASCII space between a CJK character and an
-  adjacent Latin letter, digit or `$`-prefixed number — `MCP 服务器`, `第 3 轮`.
-  No space between CJK and full-width punctuation, and none between two CJK
-  characters.
-- **Trailing punctuation matches the English.** A label followed by a value
-  ends in `：` and nothing else. If the English has no `.`, the Chinese gets no
-  `。`.
-- **Em dash** `—` is preserved 1:1 with the English, spaced on both sides.
-  Never `——`, never `-`.
-- **Menu paths** use `→` with spaces: `设置 → 聊天`.
+Chinese-style (full-width) punctuation throughout, because the surrounding text is
+Chinese. CLReq: *"Chinese style punctuation… should be used in principle since the main
+text is Chinese."*
 
-## §2 Terminology
-
-One canonical rendering per concept. The enforced subset:
-
-| English | Canonical | Never |
+| use | not | note |
 |---|---|---|
-| session | 会话 | 进程, 对话 |
-| workspace | 工作区 | 工作空间, 工作台 |
-| artifact | 工件 | 制品, 产物 |
-| agent / subagent | 代理 / 子代理 | 智能体, 子智能体 |
-| skill | 技能 | 技巧 |
-| cron job / scheduled job | 定时任务 | 计划任务 |
-| thread | 话题 | 线程 (reads as an OS thread) |
-| turn | 轮次 | 回合 |
-| message | 消息 | 信息 |
-| dashboard | 仪表板 | 仪表盘, 控制台 |
-| sidebar | 侧边栏 | 侧栏 |
-| preferences | 偏好设置 | 偏好 |
-| usage | 用量 | 使用量 |
-| pinned | 已置顶 | 已固定 |
-| resolved | 已解决 | 已处理 |
-| reject / rejected | 拒绝 / 已拒绝 | 驳回 |
-| effort (reasoning) | 强度 | 投入度 |
-| WeCom | 企业微信 | WeCom |
+| `，` | `,` | |
+| `。` | `.` | |
+| `：` | `:` | |
+| `；` | `;` | |
+| `？` | `?` | |
+| `！` | `!` | |
+| `（…）` | `(…)` | see §1.1 |
+| `“…”` then `‘…’` | `「…」` | double-first is zh-**CN**; `「」` is zh-TW |
+| `……` (two U+2026) | `…` | CLReq: six dots |
+| `——` (two-em dash) | `-`, `–`, `—` | |
+| `、` | `,` | enumeration comma, between list items |
 
-**Stays in English**: KiroCrew, Kiro, Slack, Discord, Telegram, Webex,
-Microsoft Teams, MCP, ACP, API, SDK, CLI, URL, CI, IAM, ARN, PR, cron (the
-syntax — the feature is 定时任务), AWS service names, Playwright/Vite/React/
-TypeScript, key legends (Enter, Shift, ⌘), `main`/`origin`/`HEAD`, and paths,
-filenames and config keys. `issue` stays English for the GitHub object in Issue
-Radar; it becomes 问题 when it means a generic problem.
+### 1.1 Parentheses must not mix widths
 
-**Sense splits that must not be collapsed**: `Jobs` (cron) 定时任务 vs `Task`
-任务 · `Apply` 应用更改 vs `App` 应用 · `Set` 设定 vs `Setup` 安装设置 vs
-`Settings` 设置 · `Show` 展开 vs `Display` 显示 · `Done` 已完成 vs `Finished`
-已结束 · `live` 实时 vs `Running` 运行中 · `Directory` 目录路径 vs `Contents`
-目录 · `Origin:` 安装来源： vs `Sources:` 引用来源：.
+A full-width open with a half-width close renders as `待审阅（3)`. This happens when the
+opening paren is in the catalog and the closing one is a bare JSX literal — the codemod's
+sentence split produced several. **Both halves belong in the same key**, so the correct
+fix is one key containing `（{{count}}）`, not a matched pair of fragments.
 
-**Measure words** are required where English uses a bare plural: `N 个文件`,
-`N 个工具`, `N 个令牌`, `N 次运行`, `N 次工具调用`, `N 轮`, `N 个定时任务`.
+Checked by `qa.test.ts` → `unbalanced-delimiter`.
 
-**Progressive aspect**: `正在X…` for work the system is doing (`正在安装…`);
-`X中` only for short status chips in tables and badges (`运行中`, `失败中`).
+### 1.2 Never store full-width Latin letters or digits
 
-## §3 Tone
+Full-width **punctuation** is correct; full-width **alphanumerics** are not. CLReq:
+*"现今在文本储存时，应避免使用该区段的拉丁字母及数字字符，交由排版引擎处理"* — when storing
+text, avoid the full-width alphabetic and numeric block; leave it to the layout engine.
 
-Neutral-technical, second person 你, imperative for actions.
+Write `MCP 服务器 3 个`, never `ＭＣＰ服务器３个`.
 
-- Button and menu labels are bare imperative verb-object — no 请, no trailing `。`.
-- **Never 您.** The catalog is uniformly 你; mixing registers reads worse than
-  either one consistently.
-- Drop `请` unless the English actually says "please". `请` also *starts*
-  ordinary words (请求 = request, 请勿 = do not) — never split those.
-- Prefer omitting the subject over `你的` when ownership is obvious.
-- Never `进行` + verb (`进行设置检查` → `检查安装状态`).
-- **At most two `的` per clause**; three is genitive stacking and always has a
-  shorter native phrasing.
-- Never `如果…的话`; never a translated `这将` (use `会` or drop it).
-- `该` as a demonstrative becomes `此` — but `该` is also the modal "should"
-  (`我该用`, `应该`), which must be left alone.
-- Avoid gratuitous `被` passive; prefer active or topic-comment.
+Checked by `qa.test.ts` → `fullwidth-alphanumeric`, which is at zero and gates outright.
 
-## §4 Plural forms
+---
 
-Chinese has exactly one CLDR plural category: **`other`**. So a counted key is
-`key_one` + `key_other` in `en.json` and **only `key_other`** in `zh-CN.json`.
-Emitting `key_one` for `zh-CN` creates a form i18next can never select, and
-makes the catalog look like it handles counting when it cannot.
+## 2. Spacing between Han and Latin
 
-A key merely *ending* in `_one` because its English sentence ends with the word
-"one" (`click_new_to_create_one`) is a slug artifact, not a plural form.
+**Do not insert a space.** CLReq §6.3.3 specifies *"tracking or spacing between an
+adjacent Han character and a Western character or a European numeral of **up to 1/4
+em**"* — a typographic gap the layout engine produces, not a `U+0020` an author types.
+The elastic range is 1/8 em to 1/2 em, and it is **not** applied around Chinese commas
+and full stops, nor inside Chinese brackets.
 
-## §5 Known gap — sentence fragments
+A hand-typed space actively harms the result: CSS `text-autospace` inserts the gap *"only
+if there are no existing spaces"*, so a literal space makes the engine stand down and you
+get a Western word space instead — wrong width, wrong justification priority, and wrong at
+a line end.
 
-The extraction codemod converted plain string literals, so a JSX sentence
-containing a variable or an inline element became **several** independently
-translated keys. 244 sentences are currently split across 417 keys, which pins
-the Chinese to English clause order because the slots are fixed by the JSX.
+Write `使用 MCP 服务器`… no. Write `使用MCP服务器` and let the engine space it.
 
-Fixing this requires recomposing each sentence into one key and rendering it
-with `<Trans>` (named components, not indexed `<0>`) or `{{named}}`
-interpolation, so a translator can reorder freely. Until a fragment group is
-recomposed, translate its pieces for the *rendered* sentence and accept that
-the ordering cannot be fully fixed within the fragment.
+> Where this collides with the existing catalog: several values already contain
+> hand-typed spaces around Latin runs. They are not being mass-edited in this PR, since
+> the rendered difference is small and the churn across 3900 keys is not. New and touched
+> strings should follow the rule.
 
-New user-visible copy must not add fragments: keep one key per sentence.
+---
+
+## 3. Terminology
+
+`src/i18n/glossary.json` is the source of truth. It exists because the same English term
+currently has divergent Chinese renderings across keys — measured on this catalog:
+
+| English | renderings in use |
+|---|---|
+| `active` | 启用 / 已启用 / 活跃 |
+| `Back` | 上一步 / 后退 / 返回 |
+| `Created` | 创建 / 创建于 / 已创建 |
+| `Review` | 审查 / 审阅 |
+| `OK` | 成功 / 确定 |
+
+**39 English values have more than one Chinese rendering, 31 of them term-level.** A
+single-language contributor cannot see this — they are editing one file out of ten — which
+is why it is a data file with a test rather than a convention.
+
+Checked by `glossary.test.ts`, which fails on any use of a `forbidden` rendering.
+
+---
+
+## 4. Do not translate
+
+Product names, protocol names, CLI tokens, file paths and code identifiers stay in Latin
+script. Mozilla's guide is the precedent: trademarks keep their original script *"in
+prominent UI and at first use, even for non-Latin locales"*, and the meaning of a product
+name is never translated.
+
+The list lives in `glossary.json` under `dnt: true`. `KiroCrew`, `MCP`, `Slack`,
+`GitHub`, `Playwright` and the `kirocrew` CLI verbs are all on it.
+
+Two consequences worth knowing:
+
+- **Do not put spaces around a DNT term** to "separate" it from Chinese text — §2.
+- A Latin run inside Chinese text needs no `lang` attribute for WCAG: SC 3.1.2 explicitly
+  exempts *"proper names, technical terms, words of indeterminate language"*. It does
+  affect CJK font selection, which is handled in CSS rather than in the catalog.
+
+---
+
+## 5. Register and tone
+
+- Address the user as **你**, not **您**. The product's English voice is direct and
+  unceremonious; **您** reads as service-desk formality and is inconsistent with it.
+- No trailing period on a button, a label, or a single-clause tooltip. Full stops belong
+  in prose sentences.
+- Prefer a verb phrase for an action (`导出配置`) over a noun phrase (`配置的导出`).
+- Translate meaning, not words. Mozilla: *"avoid literal translation at all costs."* A
+  literal rendering that is grammatical but unidiomatic is a defect, not a nitpick.
+
+---
+
+## 6. Plurals
+
+Never hand-roll. Chinese has one CLDR plural category (`other`), so a `{{count}}` key
+needs exactly one form — but the English source needs `_one`/`_other`, and Russian needs
+four. Pass `{{ count }}` and let `Intl.PluralRules` select; the registry of which keys are
+plural is `pluralKeys.json`.
+
+`量词` (measure words) belong inside the single Chinese form: `{{count}} 个会话`, not
+`{{count}} 会话`.
+
+---
+
+## 7. What is mechanically enforced today
+
+| rule | gate |
+|---|---|
+| balanced brackets and quotes, incl. mixed width | `qa.test.ts` |
+| no full-width Latin or digits | `qa.test.ts` |
+| no leading/trailing space, no doubled space | `qa.test.ts` |
+| no lone connector or morpheme as a whole value | `qa.test.ts` |
+| forbidden terminology | `glossary.test.ts` |
+| placeholder parity with English | `catalogParity.test.ts` |
+| correct CLDR plural categories per language | `catalogParity.test.ts` |
+
+Everything in §2, §4 and §5 is review-only. Those are the judgements a human has to make,
+and the reason a translation PR still needs a reader who speaks the language.

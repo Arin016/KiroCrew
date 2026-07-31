@@ -1,0 +1,471 @@
+{
+  "_comment": "Terminology. `terms` was DERIVED from English values that already have more than one Chinese rendering in this catalog, so every entry marks a real inconsistency — but not every inconsistency is an error. `ratified: true` means the variants differ only by punctuation width or whitespace, which is mechanical; `ratified: false` means the same English word is doing different jobs (`Back` is 返回 in a dialog and 上一步 in a wizard) and a reader has to decide whether it is one term or several. `glossary.test.ts` enforces `forbidden` only for ratified entries, so an unratified candidate cannot force a wrong translation.",
+  "dnt": [
+    "AWS",
+    "Discord",
+    "Docker",
+    "Git",
+    "GitHub",
+    "GitLab",
+    "JSON",
+    "Kiro",
+    "KiroCrew",
+    "MCP",
+    "Markdown",
+    "Node.js",
+    "OAuth",
+    "Playwright",
+    "Python",
+    "Slack",
+    "TypeScript",
+    "YAML",
+    "npm"
+  ],
+  "terms": {
+    "Back": {
+      "zh-CN": {
+        "preferred": "返回",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.issueRadar.components.refSheet.back",
+        "apps.issueRadar.welcomeCarousel.back",
+        "components.agentImportFlow.back",
+        "components.onboardingFlow.back"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Cancel running execution": {
+      "zh-CN": {
+        "preferred": "取消正在运行的执行",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.jobLogsView.cancel_running_execution",
+        "pages.schedulePage.cancel_running_execution"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Category": {
+      "zh-CN": {
+        "preferred": "分类",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.skillForm.category",
+        "pages.appsPage.category",
+        "pages.overview.memoryTab.category"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Channels": {
+      "zh-CN": {
+        "preferred": "渠道",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.channelPage.channels",
+        "pages.settings.channelsPanel.channels",
+        "pages.settings.teamsPanel.channels",
+        "settings.tabs.channels.label"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Close (Esc)": {
+      "zh-CN": {
+        "preferred": "关闭（Esc）",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.fileExplorer.searchPanel.close_esc",
+        "apps.issueRadar.components.refSheet.close_esc",
+        "components.markdownPanel.close_esc",
+        "components.searchBar.close_esc"
+      ],
+      "note": "punctuation width only — but the catalog disagrees with itself: 'Exit full screen (Esc)' prefers half-width （Esc）→(Esc). Frequency cannot arbitrate because there is no majority across the corpus. STYLE-zh-CN.md needs a rule for parentheses whose contents are Latin-only; until it has one, neither variant is forbidden."
+    },
+    "Created": {
+      "zh-CN": {
+        "preferred": "已创建",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.issueRadar.views.tagging.labelsPanel.created",
+        "pages.aidlc.taskDetailPanel.created",
+        "pages.artifactDetailPage.created"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Denied Commands": {
+      "zh-CN": {
+        "preferred": "拒绝的命令",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.agentsPage.denied_commands",
+        "pages.settings.securityPanel.denied_commands"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Exit full screen (Esc)": {
+      "zh-CN": {
+        "preferred": "退出全屏 (Esc)",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.artifactPanel.exit_full_screen_esc",
+        "components.markdownPanel.exit_full_screen_esc"
+      ],
+      "note": "punctuation width only — but the catalog disagrees with itself: 'Exit full screen (Esc)' prefers half-width （Esc）→(Esc). Frequency cannot arbitrate because there is no majority across the corpus. STYLE-zh-CN.md needs a rule for parentheses whose contents are Latin-only; until it has one, neither variant is forbidden."
+    },
+    "Loading": {
+      "zh-CN": {
+        "preferred": "加载中",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.appHost.loading",
+        "pages.settings.botChannelPanel.loading"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Memory": {
+      "zh-CN": {
+        "preferred": "记忆",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.overviewPage.memory",
+        "pages.systemPage.memory"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Next": {
+      "zh-CN": {
+        "preferred": "下一步",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.issueRadar.welcomeCarousel.next",
+        "components.executionsView.next",
+        "pages.appDetailPage.next"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Next →": {
+      "zh-CN": {
+        "preferred": "下一页 →",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.autoResearch.researchLabPage.next",
+        "components.jobLogsView.next",
+        "pages.knowledge.index.next",
+        "pages.knowledge.sourceGroup.next"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "No matching jobs": {
+      "zh-CN": {
+        "preferred": "无匹配的任务",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.overview.cronTab.no_matching_jobs",
+        "pages.schedulePage.no_matching_jobs"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "No matching skills": {
+      "zh-CN": {
+        "preferred": "没有匹配的技能",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.agentSkillsEditor.no_matching_skills",
+        "components.skillPickerMenu.no_matching_skills"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "OK": {
+      "zh-CN": {
+        "preferred": "确定",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.executionsView.ok",
+        "components.logEntry.ok",
+        "pages.channelPage.ok",
+        "pages.hooksPage.ok"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Open": {
+      "zh-CN": {
+        "preferred": "打开",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.fileExplorer.fileExplorerPage.open",
+        "apps.issueRadar.components.filtersSection.open",
+        "apps.issueRadar.components.issueDetail.open",
+        "apps.issueRadar.components.prDetail.open"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Open in new tab": {
+      "zh-CN": {
+        "preferred": "在新标签页中打开",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.fileRenderers.open_in_new_tab",
+        "components.webAppArtifactCard.open_in_new_tab",
+        "components.widgetFrame.open_in_new_tab"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Plan": {
+      "zh-CN": {
+        "preferred": "套餐",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "app.plan",
+        "pages.overview.usageTab.plan",
+        "pages.projectsPage.plan"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Pop out to window": {
+      "zh-CN": {
+        "preferred": "弹出到窗口",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.sessionActionsMenu.pop_out_to_window",
+        "pages.artifactDetailPage.pop_out_to_window",
+        "pages.artifactsPage.pop_out_to_window",
+        "pages.chatPage.pop_out_to_window"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Prune": {
+      "zh-CN": {
+        "preferred": "修剪",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.autoResearch.grillTree.prune",
+        "pages.devFleetPage.prune"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Review": {
+      "zh-CN": {
+        "preferred": "审查",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.issueRadar.components.reviewButton.review",
+        "components.commentsSidebar.review"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Schedule": {
+      "zh-CN": {
+        "preferred": "计划",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.jobForm.schedule",
+        "nav.schedule",
+        "pages.overview.cronTab.schedule",
+        "pages.projectsPage.schedule"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Type": {
+      "zh-CN": {
+        "preferred": "类型",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.schedulePage.type",
+        "pages.schedulePage.type_verb_to_confirm"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Update available": {
+      "zh-CN": {
+        "preferred": "有可用更新",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "app.update_available",
+        "pages.settings.aboutPanel.update_available"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Updated": {
+      "zh-CN": {
+        "preferred": "更新时间",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.issueRadar.components.issueDetail.updated",
+        "apps.issueRadar.components.issueList.updated",
+        "apps.issueRadar.components.prDetail.updated",
+        "apps.issueRadar.components.prList.updated"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "Usage": {
+      "zh-CN": {
+        "preferred": "用量",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.agentsPage.usage",
+        "pages.localStorageDebug.usage",
+        "pages.overviewPage.usage"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "active": {
+      "zh-CN": {
+        "preferred": "启用",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.codeReviewSage.codeReviewSagePage.active",
+        "pages.channelPage.active",
+        "pages.overview.vectorMemoryCard.active"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "by": {
+      "zh-CN": {
+        "preferred": "由",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.skillBrowserModal.by",
+        "pages.artifactDetailPage.by",
+        "pages.artifactsPage.by"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "events": {
+      "zh-CN": {
+        "preferred": "个事件",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.workflows.workflowsRuns.events",
+        "pages.chat.workflowSidebarRow.events",
+        "pages.overview.vectorMemoryCard.events"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "items": {
+      "zh-CN": {
+        "preferred": "个条目",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "components.fileRenderers.items",
+        "pages.knowledge.index.items_2",
+        "pages.knowledge.sourcesList.items"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "of": {
+      "zh-CN": {
+        "preferred": "/",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.issueRadar.views.settings.repoSettings.of",
+        "components.onboardingChapterShell.of",
+        "components.searchResultsList.of",
+        "pages.chat.taskProgressBar.of"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "tokens": {
+      "zh-CN": {
+        "preferred": "个令牌",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.chat.knowledgePicker.tokens",
+        "pages.chatPage.tokens",
+        "pages.overviewPage.tokens"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "tools": {
+      "zh-CN": {
+        "preferred": "个工具",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "pages.agentsPage.tools_2",
+        "pages.overview.mcpTab.tools_2",
+        "pages.overview.usageTab.tools"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    },
+    "{{count}} patterns": {
+      "zh-CN": {
+        "preferred": "{{count}} 个模式",
+        "forbidden": []
+      },
+      "ratified": false,
+      "seenUnder": [
+        "apps.codeReviewSage.codeReviewSagePage.pattern_other",
+        "pages.chat.recoveryCard.n_patterns"
+      ],
+      "note": "context-dependent — a reader must decide whether these are one term or several before this can be ratified"
+    }
+  },
+  "_openQuestions": [
+    "Parentheses containing Latin-only content: full-width （Esc） or half-width (Esc)? The catalog currently does both. CLReq prescribes Chinese-style punctuation in principle but carves out formula-heavy scientific text; a UI key hint is arguably neither. Decide, write it into STYLE-zh-CN.md section 1, then ratify the two affected entries.",
+    "34 candidates await a reader. Each is one English value with more than one Chinese rendering; ratifying means deciding whether it is one term (forbid the variants) or several (split the keys and remove the entry)."
+  ],
+  "_dntNote": "Proper nouns only. Abbreviations such as PR, CR, API, CLI and URL are deliberately absent: they behave as common nouns and inflect — Russian declines 'PR' to 'пул-реквеста', which is correct, not a defect. Matching is word-boundary, not substring, for the same reason."
+}
