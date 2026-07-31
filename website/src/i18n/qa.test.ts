@@ -40,17 +40,23 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { CATALOGS as RUNTIME_CATALOGS } from './index'
-import { DEFAULT_LANGUAGE } from './languages'
+import { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES } from './languages'
+
+/**
+ * Generated catalogs are excluded. The pseudolocale is a mechanical transform of
+ * `en.json`, so every defect it has is inherited — checking it would report the same
+ * English violation twice and let a generator change silently move the baseline.
+ */
+const GENERATED = new Set(SUPPORTED_LANGUAGES.filter(l => l.devOnly).map(l => l.code))
 
 const ALLOWLIST_PATH = join(__dirname, 'qa-allowlist.json')
 const UPDATING = process.env.I18N_QA_UPDATE_ALLOWLIST === '1'
 
 /** Catalogs exactly as the runtime composes them, including English's two-file merge. */
 const CATALOGS: Record<string, Record<string, string>> = Object.fromEntries(
-  Object.entries(RUNTIME_CATALOGS).map(([code, bundle]) => [
-    code,
-    flatten((bundle as { translation: unknown }).translation),
-  ]),
+  Object.entries(RUNTIME_CATALOGS)
+    .filter(([code]) => !GENERATED.has(code))
+    .map(([code, bundle]) => [code, flatten((bundle as { translation: unknown }).translation)]),
 )
 
 function flatten(obj: unknown, prefix = ''): Record<string, string> {

@@ -16,7 +16,7 @@
 import {
   AUTO_LANGUAGE,
   DEFAULT_LANGUAGE,
-  SUPPORTED_CODES,
+  DETECTABLE_CODES,
   isSupportedLanguage,
 } from './languages'
 
@@ -36,12 +36,14 @@ function matchTag(tag: string): string | null {
   if (!normalized) return null
 
   // Exact match, case-insensitive (browsers may report `zh-cn`).
-  const exact = SUPPORTED_CODES.find(c => c.toLowerCase() === normalized.toLowerCase())
+  // DETECTABLE_CODES, not SUPPORTED_CODES: a browser never sends the pseudolocale, and
+  // including it would make `en` ambiguous for every real `en-*` tag.
+  const exact = DETECTABLE_CODES.find(c => c.toLowerCase() === normalized.toLowerCase())
   if (exact) return exact
 
   // Primary-subtag match: 'zh-Hans' / 'zh' → 'zh-CN'.
   const primary = normalized.split('-')[0].toLowerCase()
-  const related = SUPPORTED_CODES.find(c => c.split('-')[0].toLowerCase() === primary)
+  const related = DETECTABLE_CODES.find(c => c.split('-')[0].toLowerCase() === primary)
   return related ?? null
 }
 
@@ -65,14 +67,14 @@ function matchConfident(tag: string): string | null {
   const normalized = tag.trim().toLowerCase()
   if (!normalized) return null
 
-  const exact = SUPPORTED_CODES.find(c => c.toLowerCase() === normalized)
+  const exact = DETECTABLE_CODES.find(c => c.toLowerCase() === normalized)
   if (exact) return exact
 
   // Regional variant of a supported language: confident only when the primary
   // subtag maps to a single supported code AND that code carries no region of
   // its own (so `en` matches `en-GB`, but `zh-CN` does not match `zh-TW`).
   const primary = normalized.split('-')[0]
-  const candidates = SUPPORTED_CODES.filter(c => c.split('-')[0].toLowerCase() === primary)
+  const candidates = DETECTABLE_CODES.filter(c => c.split('-')[0].toLowerCase() === primary)
   if (candidates.length === 1 && !candidates[0].includes('-')) return candidates[0]
   return null
 }
