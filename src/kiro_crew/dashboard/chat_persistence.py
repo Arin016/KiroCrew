@@ -19,6 +19,7 @@ from kiro_crew.dashboard.chat_utils import (
     _history_key_for,
     _normalize_model,
     _sync_dashboard_slots,
+    slot_transcript_key,
 )
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot, _normalize_slot_key
 from kiro_crew.effort import EFFORT_LEVELS, EFFORT_VALUES
@@ -389,6 +390,27 @@ def _rehydrate_slot_from_history(
         return state._slots[slot_name]
     history_key = _history_key_for(slot_name)
     meta = state.conversation_log.get_metadata(history_key)
+    # A channel-derived slot name (``slack_<ts>``) shares ONE session with the
+    # channel conversation, so its transcript lives under the channel key. Fall
+    # back to that key when the legacy ``dashboard:``-keyed file has no metadata,
+    # and remember it on the slot below so every later read/write agrees. Probing
+    # the legacy key first keeps a pre-migration slot restoring from the file it
+    # was actually written to.
+    shared_key = ""
+    if not meta:
+        # Local import: channel_slots -> state -> chat_persistence would be a
+        # module-level cycle. Same pattern as DashboardState.link_slack.
+        from kiro_crew.dashboard.channel_slots import channel_key_for_slot_name
+
+        try:
+            _sessions = state.conversation_log.list_sessions()
+        except Exception:
+            _sessions = []
+        candidate = channel_key_for_slot_name(slot_name, _sessions)
+        if candidate:
+            candidate_meta = state.conversation_log.get_metadata(candidate)
+            if candidate_meta:
+                history_key, meta, shared_key = candidate, candidate_meta, candidate
     # No metadata → session was never persisted. Don't create a phantom slot.
     if not meta:
         return None
@@ -482,6 +504,10 @@ def _rehydrate_slot_from_history(
         state._restricted_keys.add(f"dashboard:{slot_name}")
     if meta.get("forked_from") is not None:
         slot.forked_from = meta["forked_from"]
+    # Bind the shared session BEFORE the transcript read below, so every later
+    # read/write/run on this slot resolves to the same key the restore used.
+    if shared_key:
+        slot.shared_session_key = shared_key
     # Restore the persisted tab_id so cross-restart fork chaining survives.
     # get_or_create_slot (called by our caller) assigns a fresh random uuid to
     # slot._tab_id; if we don't overwrite it here, the next _flush_dirty_slots
@@ -1149,7 +1175,7 @@ def _save_slot_to_history(
         and not rewrite
     ):
         return
-    history_key = _history_key_for(slot.key)
+    history_key = slot_transcript_key(slot)
     try:
         # Hold the SAME per-session cross-process lock that ``append`` /
         # ``append_off_loop`` / rotate / rewrite / metadata mutations take, across

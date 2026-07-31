@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kiro_crew.providers.base import LLMEvent
@@ -373,6 +373,46 @@ def _history_key_for(slot_key: str) -> str:
     while slot_key.startswith("dashboard_"):
         slot_key = slot_key[len("dashboard_"):]
     return f"dashboard:{slot_key}"
+
+
+def slot_transcript_key(slot: Any) -> str:
+    """The session key a slot's transcript is READ from and WRITTEN to.
+
+    Ordinarily ``dashboard:<slot.key>``. A slot with ``shared_session_key`` set
+    is one half of a SINGLE session shared with a channel conversation (a Slack
+    thread and its dashboard tab), so its transcript lives under the channel's
+    own key and both surfaces append to that one file.
+
+    Every read, every write, and the ``closed`` flag must agree on this — a site
+    that keeps using ``_history_key_for(slot.key)`` while another uses this
+    helper splits the conversation across two transcripts, which is the exact
+    failure this indirection exists to prevent.
+
+    Note this is NOT ``linked_session_key``: that repoints only the run path and
+    is used by cron/workflow display-mirror slots which still own their own
+    transcript. See ``_ChatSlot.shared_session_key``.
+    """
+    return getattr(slot, "shared_session_key", "") or _history_key_for(slot.key)
+
+
+def slot_session_key(slot: Any) -> str:
+    """The runtime session key a slot's turns execute under.
+
+    Precedence: ``shared_session_key`` (one session shared with a channel) >
+    ``linked_session_key`` (cron/workflow run this slot mirrors) >
+    ``dashboard:<slot.key>``.
+
+    Use this wherever a slot is handed to :class:`SessionManager` — starting a
+    turn, stopping one, resetting or removing the session. A site that stops
+    ``dashboard:<slot.key>`` while the turn is running under the shared key
+    silently does nothing, because the semaphore and provider are registered
+    under the key the turn actually acquired.
+    """
+    return (
+        getattr(slot, "shared_session_key", "")
+        or getattr(slot, "linked_session_key", "")
+        or _history_key_for(slot.key)
+    )
 
 
 _INCOGNITO_PREFIX = (

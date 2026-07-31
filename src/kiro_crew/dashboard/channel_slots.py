@@ -8,37 +8,57 @@ in the sidebar's collapsed **History** pane, where the user had to search for
 one and resume it by hand.
 
 This module reconciles recent channel sessions INTO slots so they show up in
-the active chat list, seeded with the conversation so far and ready to continue.
+the active chat list, and binds each one as **one session with two surfaces**:
+the same conversation, readable and repliable from either the dashboard tab or
+the channel it started in.
 
 Design notes:
 
-* **One history key, no split.** The slot is an ordinary dashboard slot whose
-  key is derived from the channel session key
-  (``slack:1785370133.085469`` -> ``slack_1785370133.085469``), so everything
-  about it — turn persistence, replay, the ``closed`` flag, and both restore
-  paths — uses the single ``dashboard:<slot.key>`` history key.
+* **One session, one transcript — the channel's.** The slot's
+  ``shared_session_key`` is set to the channel session key, so the transcript is
+  READ, WRITTEN and RUN under that single key (see
+  :func:`~kiro_crew.dashboard.chat_utils.slot_transcript_key`). There is no
+  second ``dashboard:<slot.key>`` file to diverge from, and therefore no
+  mirroring or sync step: both surfaces append to the same file.
 
-  It deliberately does NOT set ``linked_session_key`` to the channel key.
-  ``_save_slot_to_history`` is hard-wired to ``_history_key_for(slot.key)``,
-  so binding the RUN path to the channel key while the SAVE path kept writing
-  ``dashboard:<slot.key>`` would split one conversation across two transcripts:
-  a dashboard reply would be invisible to the slot's own replay, and a tab the
-  user closed would have its ``closed`` flag written to a key the reconciler
-  never reads — so it would reopen on the next pass. Continuity with the live
-  channel session is not worth that; picking the conversation up with its full
-  history (which this does) is the point.
+  This replaces an earlier design in which the slot owned its own transcript and
+  was seeded with a COPY of the channel conversation. That copy was frozen at
+  the moment of surfacing — a thread that stayed live on the channel left the tab
+  showing only the turns that existed on the first reconcile pass, and a reply
+  typed into the tab answered from that stale window and never reached the
+  channel. The single-key binding is what removes both failures.
+
+* **Inbound channel replies run the slot's turn.** A surfaced Slack thread is
+  registered via :meth:`DashboardState.link_slack`, so
+  ``slack.handler.maybe_route_linked_thread`` hands an inbound reply to this
+  slot and runs it through the dashboard turn path instead of Slack's own. That
+  keeps ONE running turn per conversation, guarded by the single per-session
+  semaphore, and gives the channel the dashboard's streaming mirror for free.
+
+* **The window live-follows until the user takes over.** While a surfaced slot is
+  neither dirty nor running, every pass re-reads the shared transcript and
+  refreshes the in-memory window and the frozen-prefix counters
+  (:func:`resync_channel_slot`). This keeps the tab current for a conversation
+  still moving on the channel, and — critically — keeps ``_disk_older_count``
+  honest, since a stale count would make the next save rewrite the file from an
+  out-of-date snapshot and drop turns appended in the meantime.
+
 * **Recency-bounded.** Only sessions modified within the dashboard's configured
   ``restore_window_minutes`` become slots, so a long DM history does not turn
   into hundreds of tabs. Pinned and foldered sessions are exempt from the
   window, matching :func:`~kiro_crew.dashboard.chat_persistence.restore_recent_sessions`.
 * **Closed is sticky.** A session the user closed on the dashboard
   (``meta.closed``) is never re-surfaced — otherwise closing the tab would be
-  undone on the next reconcile pass.
+  undone on the next reconcile pass. Because the slot now writes ``closed`` to
+  the channel key, the two-key read below is load-bearing rather than defensive:
+  it also honors the legacy ``dashboard:``-keyed flag written by the old design.
 * **Ephemeral stays ephemeral.** ``incognito``/``temporary`` channel threads are
   skipped: the user asked for a conversation that leaves no trace, and a
   durable sidebar tab contradicts that.
-* **Idempotent.** Every pass is a no-op for sessions that already own a slot,
-  so it is safe to run on a timer.
+* **Idempotent.** Every pass re-asserts the binding for sessions that already
+  own a slot rather than creating a second one, so it is safe to run on a timer
+  and self-heals after a gateway restart (the ``_slack_to_slot`` index is
+  in-memory only).
 """
 
 from __future__ import annotations
@@ -86,11 +106,12 @@ _HYDRATE_LIMIT = 50
 
 
 class _Transcript(NamedTuple):
-    """A pending slot's seed transcript plus its on-disk line accounting.
+    """A slot's seed transcript plus the shared file's line accounting.
 
-    ``disk_older`` + ``disk_window`` always sum to the length of the slot's own
-    history file; the merged ``messages`` may be longer because it also carries
-    channel-side turns that file never held.
+    ``disk_older`` + ``disk_window`` always sum to the length of the CHANNEL
+    transcript — the file a surfaced slot shares and writes. The merged
+    ``messages`` may be longer because it also folds in turns left behind in a
+    legacy ``dashboard:``-keyed file by the previous copy-based design.
     """
 
     messages: list[dict[str, Any]]
@@ -115,12 +136,38 @@ def channel_slot_name(session_key: str) -> str:
 
 
 def slot_history_key(session_key: str) -> str:
-    """Return the history key the surfaced slot persists under.
+    """The LEGACY ``dashboard:``-keyed transcript for a channel session.
 
-    This is the ONLY key the slot reads or writes: turn persistence, replay, the
-    ``closed`` flag, and both restore paths all agree on it.
+    Under the current single-session design a surfaced slot reads and writes the
+    channel key itself, so this file is not written any more. It is still read on
+    two paths: the ``closed`` flag a tab dismissed under the old design wrote
+    here, and :func:`reconcile_channel_slots`' one-time merge of turns a
+    dashboard reply left in this file before the migration.
     """
     return _history_key_for(channel_slot_name(session_key))
+
+
+def channel_key_for_slot_name(slot_name: str, sessions: list[dict[str, Any]]) -> str:
+    """The channel session key whose slot name is *slot_name*, or ``""``.
+
+    An EXACT reverse lookup over *sessions* rather than a string transform:
+    ``_normalize_slot_key`` folds every non-word char to ``_``, so a key with
+    inner separators (``telegram:kirocrew:direct:9:gen3``) cannot be recovered
+    from its slot name by substitution. Comparing forward-normalized candidates
+    is lossless for every namespace, and cheap — the restore paths only reach
+    this when a slot has no legacy transcript of its own.
+
+    Accepts either key spelling ``list_sessions`` serves (``slack:1.1`` or the
+    ``slack_1.1`` filename stem); both fold to the same slot name, and both
+    resolve to the same transcript file via ``history._safe_key``.
+    """
+    if not slot_name:
+        return ""
+    for s in sessions:
+        key = s.get("key", "")
+        if key and is_channel_session_key(key) and channel_slot_name(key) == slot_name:
+            return key
+    return ""
 
 
 def _redact(text: str) -> str:
@@ -297,9 +344,9 @@ def surface_channel_session(
 
     *messages* is the merged transcript to seed the slot with, read by the caller
     so the disk IO stays off the event loop. *disk_older* and *disk_window* are
-    that caller's split of the slot's OWN on-disk lines into the frozen prefix
-    the window does not carry and the region it re-serializes — see
-    :func:`frozen_prefix_len` for why a save needs both.
+    that caller's split of the CHANNEL transcript — the file this slot now shares
+    — into the frozen prefix the window does not carry and the region it
+    re-serializes; see :func:`frozen_prefix_len` for why a save needs both.
     """
     session_key = session_info.get("key", "")
     if not session_key or not is_channel_session_key(session_key):
@@ -348,19 +395,108 @@ def surface_channel_session(
         )
     slot.drain()
     slot._resumed_count = len(slot.messages)
-    # The session file is frozen prefix + live window. Only the slot's OWN
-    # on-disk lines count toward either: the merged window also carries
-    # channel-side turns that were never in this file, and crediting those as
-    # persisted would let a trim fold unwritten turns into the frozen prefix.
+    # The shared session file is frozen prefix + live window, and the file the
+    # slot now writes IS the channel transcript — so both counts are measured
+    # against the CHANNEL side of the merge. Crediting legacy dashboard-keyed
+    # turns here would let a trim fold lines that are not in this file into its
+    # frozen prefix, and the next save would rewrite the file short.
     slot._disk_older_count = disk_older
     slot._disk_window_len = disk_window
+    # One session, two surfaces: read, write and run all resolve to the channel
+    # key from here on. This is what makes the tab a live view of the channel
+    # conversation rather than a copy of it.
+    slot.shared_session_key = session_key
     # Not dirty: a surfaced conversation the user never touches costs no write.
-    # The first real dashboard turn is what persists it under the slot key.
+    # The first real turn on either surface is what persists it.
     slot._dirty = False
     logger.info(
         "Surfaced %s session %s as slot %s", channel_label(session_key), session_key, slot_name
     )
     return slot
+
+
+def resync_channel_slot(
+    slot: "_ChatSlot",
+    messages: list[dict[str, Any]],
+    *,
+    disk_older: int,
+    disk_window: int,
+) -> bool:
+    """Refresh an already-surfaced slot's window from the shared transcript.
+
+    Returns ``True`` when the slot changed. A no-op when the slot is dirty or
+    running: the user (or a turn on either surface) owns the window then, and
+    replacing it would drop unsaved turns.
+
+    This is what keeps a tab current for a conversation still moving on the
+    channel — and it is also a correctness requirement, not just freshness. The
+    frozen-prefix counters are a snapshot of the shared file; if the channel side
+    appends while they go stale, the next save rewrites the file from
+    ``meta + frozen + window`` and silently drops everything appended past the
+    snapshot.
+    """
+    if slot._dirty or slot.running:
+        return False
+    window = hydrate_window(messages)
+    if len(window) == len(slot.messages) and all(
+        _identity(a) == _identity(b) for a, b in zip(window, slot.messages)
+    ):
+        # Already current — do not churn a broadcast every 30s.
+        slot._disk_older_count = disk_older
+        slot._disk_window_len = disk_window
+        return False
+    slot.messages.clear()
+    for msg in window:
+        role = msg.get("role", "assistant")
+        content = _redact(msg.get("content", ""))
+        slot.append(
+            role,
+            content,
+            f"msg msg-{'a' if role != 'user' else 'u'}",
+            ts=msg.get("ts", ""),
+            broadcast=False,
+        )
+    slot.drain()
+    slot._resumed_count = len(slot.messages)
+    slot._disk_older_count = disk_older
+    slot._disk_window_len = disk_window
+    slot._dirty = False
+    return True
+
+
+def _bind_slack_thread(state: "DashboardState", session_key: str, slot_name: str) -> None:
+    """Register a surfaced Slack slot so inbound thread replies run ITS turn.
+
+    ``slack.handler.maybe_route_linked_thread`` looks the slot up by the BARE
+    ``thread_ts`` in ``state._slack_to_slot``; once bound, an inbound reply is
+    appended to this slot and dispatched through the dashboard turn path instead
+    of Slack's own ``handle_message`` loop, so the conversation has exactly one
+    running turn and one transcript.
+
+    ``link_slack`` is reused verbatim rather than reimplemented: it owns evicting
+    a stale thread mapping, stealing the thread from a previous owner slot, and
+    persisting the binding to the session map. Called on every pass because
+    ``_slack_to_slot`` is in-memory and does not survive a gateway restart.
+    """
+    if channel_namespace_of(session_key) != "slack":
+        return
+    thread_ts = session_key.split(":", 1)[1] if ":" in session_key else ""
+    if not thread_ts:
+        return
+    slot = state._slots.get(slot_name)
+    if slot is not None and slot._slack_linked and slot._slack_thread_ts == thread_ts:
+        return  # already bound — link_slack would only re-broadcast
+    channel_id = ""
+    if state.sessions is not None:
+        try:
+            _ts, _chan = state.sessions.get_slack_link(session_key)
+            channel_id = _chan or ""
+        except Exception:
+            channel_id = ""
+    try:
+        state.link_slack(slot_name, thread_ts, channel_id)
+    except Exception:
+        logger.debug("channel reconcile: link_slack failed for %s", slot_name, exc_info=True)
 
 
 async def reconcile_channel_slots(state: "DashboardState", window_minutes: int) -> int:
@@ -388,8 +524,9 @@ async def reconcile_channel_slots(state: "DashboardState", window_minutes: int) 
 
     def _load_meta() -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
-        # Both the channel key and the slot key: the slot key is where a closed
-        # tab records `closed`, and skipping it would resurface it every pass.
+        # Both the channel key and the legacy slot key: a tab closed under the
+        # old design recorded `closed` on the latter, and skipping it would
+        # resurface it every pass.
         for s in candidates:
             for key in (s.get("key", ""), slot_history_key(s.get("key", ""))):
                 if not key or key in out:
@@ -402,51 +539,69 @@ async def reconcile_channel_slots(state: "DashboardState", window_minutes: int) 
 
     metadata = await loop.run_in_executor(None, _load_meta)
     eligible = eligible_channel_sessions(candidates, metadata=metadata, cutoff=cutoff)
-    # Skip transcript reads for sessions that already own a slot — the steady state.
-    pending = [s for s in eligible if channel_slot_name(s.get("key", "")) not in state._slots]
-    if not pending:
+    if not eligible:
         return 0
 
     def _load_messages() -> dict[str, _Transcript]:
         out: dict[str, _Transcript] = {}
-        for s in pending:
+        for s in eligible:
             key = s.get("key", "")
-            try:
-                slot_msgs = log.read_messages(slot_history_key(key))
-            except Exception:
-                slot_msgs = []
             try:
                 chan_msgs = log.read_messages(key)
             except Exception:
                 chan_msgs = []
-            merged = merge_transcripts(slot_msgs, chan_msgs)
-            # Split the slot's own on-disk lines here, in the executor, while
-            # both sides are still separable — after the merge they are not.
-            older = frozen_prefix_len(slot_msgs, hydrate_window(merged))
-            out[key] = _Transcript(merged, older, max(0, len(slot_msgs) - older))
+            try:
+                legacy_msgs = log.read_messages(slot_history_key(key))
+            except Exception:
+                legacy_msgs = []
+            # The channel transcript is the slot's own file now; a legacy
+            # dashboard-keyed file only exists for conversations surfaced by the
+            # previous design, and its turns are folded in once so migrating
+            # loses nothing.
+            merged = merge_transcripts(legacy_msgs, chan_msgs)
+            older = frozen_prefix_len(chan_msgs, hydrate_window(merged))
+            out[key] = _Transcript(merged, older, max(0, len(chan_msgs) - older))
         return out
 
     transcripts = await loop.run_in_executor(None, _load_messages)
 
-    surfaced = 0
-    for s in pending:
+    changed = 0
+    for s in eligible:
         key = s.get("key", "")
         transcript = transcripts.get(key) or _Transcript([], 0, 0)
+        slot_name = channel_slot_name(key)
         try:
-            if surface_channel_session(
-                state,
-                s,
-                metadata.get(key) or {},
-                transcript.messages,
-                disk_older=transcript.disk_older,
-                disk_window=transcript.disk_window,
-            ):
-                surfaced += 1
+            existing = state._slots.get(slot_name)
+            if existing is None:
+                if surface_channel_session(
+                    state,
+                    s,
+                    metadata.get(key) or {},
+                    transcript.messages,
+                    disk_older=transcript.disk_older,
+                    disk_window=transcript.disk_window,
+                ):
+                    changed += 1
+            else:
+                # Self-heal a slot that predates this binding (or a restart that
+                # dropped it), then live-follow the shared transcript.
+                if not existing.shared_session_key:
+                    existing.shared_session_key = key
+                    changed += 1
+                if resync_channel_slot(
+                    existing,
+                    transcript.messages,
+                    disk_older=transcript.disk_older,
+                    disk_window=transcript.disk_window,
+                ):
+                    changed += 1
+            if slot_name in state._slots:
+                _bind_slack_thread(state, key, slot_name)
         except Exception:
-            logger.warning("channel reconcile: failed to surface %s", key, exc_info=True)
-    if surfaced:
+            logger.warning("channel reconcile: failed to reconcile %s", key, exc_info=True)
+    if changed:
         state.push_slots_update()
-    return surfaced
+    return changed
 
 
 async def channel_slot_reconciler(state: "DashboardState", window_minutes: int) -> None:

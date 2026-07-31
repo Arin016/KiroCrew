@@ -8,7 +8,11 @@ from aiohttp import web
 
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
-from kiro_crew.dashboard.chat_utils import _history_key_for, _sync_dashboard_slots
+from kiro_crew.dashboard.chat_utils import (
+    _history_key_for,
+    _sync_dashboard_slots,
+    slot_transcript_key,
+)
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -133,7 +137,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     async with slot._fork_lock:
         all_messages: list[dict] = []
         if state.conversation_log:
-            all_messages = state.conversation_log.read_messages_chained(_history_key_for(slot.key))
+            all_messages = state.conversation_log.read_messages_chained(slot_transcript_key(slot))
         if all_messages and slot._dirty:
             new_msgs = slot.messages[slot._resumed_count:]
             if new_msgs:

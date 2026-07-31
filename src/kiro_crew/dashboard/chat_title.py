@@ -10,7 +10,7 @@ from aiohttp import web
 
 from kiro_crew.config.loader import config_dir
 from kiro_crew.context_management import extract_plan_metadata, rephrase_plan
-from kiro_crew.dashboard.chat_utils import _history_key_for
+from kiro_crew.dashboard.chat_utils import slot_transcript_key
 from kiro_crew.dashboard.state import NEW_SESSION_TITLE, DashboardState, _ChatSlot
 from kiro_crew.llm_helpers import run_bg_oneliner
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -425,7 +425,7 @@ async def _persist_title(state: DashboardState, slot: _ChatSlot) -> None:
     """
 
     if state.conversation_log:
-        history_key = _history_key_for(slot.key)
+        history_key = slot_transcript_key(slot)
         try:
             await asyncio.to_thread(
                 state.conversation_log.set_title, history_key, slot.title

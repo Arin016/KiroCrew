@@ -833,6 +833,7 @@ class _ChatSlot:
         "_pending_rewrite",
         "_file_changes",
         "linked_session_key",
+        "shared_session_key",
         "_browse_mode",
         "_side",
         "_acp_client",
@@ -1026,6 +1027,19 @@ class _ChatSlot:
             []
         )  # [{path, content}] before-snapshots accumulated per turn for file-chip diffs
         self.linked_session_key: str = ""  # when set, _run_chat uses this as session key
+        # When set, this slot and a channel conversation ARE ONE session: the
+        # transcript is READ, WRITTEN and RUN under this key instead of
+        # ``dashboard:<slot.key>``. Set for slots surfaced from a channel
+        # (see :mod:`kiro_crew.dashboard.channel_slots`) so a Slack thread and
+        # its dashboard tab share a single transcript rather than diverging into
+        # two files.
+        #
+        # Deliberately SEPARATE from ``linked_session_key``, which repoints only
+        # the RUN path: cron/workflow slots set that one and still persist under
+        # their own key, because they are display mirrors of a run that owns its
+        # own transcript. Folding the two together would move those writes onto
+        # the cron key and double up with ``inject_cron_result_to_dashboard``.
+        self.shared_session_key: str = ""
         self._browse_mode: bool = False  # per-turn: True when user explicitly enables browser
         self._side: SideState | None = None
         # Live inner AcpClient for the in-flight turn, published by _run_chat at
@@ -1569,6 +1583,7 @@ class _ChatSlot:
             "memory_mode": self.memory_mode,
             "forked_from": self.forked_from,
             "linked_session_key": self.linked_session_key,
+            "shared_session_key": self.shared_session_key,
             "app": self._app,
         }
 

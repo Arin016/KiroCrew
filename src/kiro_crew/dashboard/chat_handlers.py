@@ -46,6 +46,8 @@ from kiro_crew.dashboard.chat_utils import (
     _redact_for_display,
     _remove_queued_by_id,
     _sync_dashboard_slots,
+    slot_session_key,
+    slot_transcript_key,
 )
 from kiro_crew.dashboard.state import (
     _MAX_PENDING_CONTEXT,
@@ -610,7 +612,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     if limit_raw is None and before is None:
         mem_msgs = list(slot.messages)
         if slot._disk_older_count > 0 and state.conversation_log:
-            history_key = _history_key_for(slot.key)
+            history_key = slot_transcript_key(slot)
             try:
                 disk_msgs = state.conversation_log.read_messages_chained(history_key)
             except Exception:
@@ -626,7 +628,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
         # Legacy pagination path (retained for programmatic callers).
         # Always reads from chained disk history; no in-memory offset math.
         limit = min(int(limit_raw or "200"), 500)
-        history_key = _history_key_for(slot.key)
+        history_key = slot_transcript_key(slot)
         try:
             all_msgs = (
                 state.conversation_log.read_messages_chained(history_key)
@@ -763,7 +765,7 @@ def _reject_pending_approvals(slot: _ChatSlot) -> None:
             if _mark_permission_resolved(slot.messages, aid, "rejected"):
                 slot._dirty = True
             sel().log_tool_invocation(
-                session_key=_history_key_for(slot.key),
+                session_key=slot_session_key(slot),
                 agent=getattr(slot, "agent", "") or "kirocrew",
                 source="dashboard",
                 tool_name=f"approval_reject:{aid}",
@@ -901,9 +903,11 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         # Unblock chat runner if it's suspended waiting for tool approval or on
         # a pending ask_question card.
         _unblock_pending_waits(state, slot)
-        await state.sessions.stop_turn(_history_key_for(name), force=True, on_hard=_on_hard_force)
+        await state.sessions.stop_turn(
+            slot_session_key(slot), force=True, on_hard=_on_hard_force
+        )
         sel().log_tool_invocation(
-            session_key=_history_key_for(name),
+            session_key=slot_session_key(slot),
             agent=getattr(slot, "agent", "") or "kirocrew",
             source="dashboard",
             tool_name="dashboard_stop",
@@ -923,7 +927,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         else:
             _info = "stop already in progress"
         sel().log_tool_invocation(
-            session_key=_history_key_for(name),
+            session_key=slot_session_key(slot),
             agent=getattr(slot, "agent", "") or "kirocrew",
             source="dashboard",
             tool_name="dashboard_stop",
@@ -1003,7 +1007,11 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     _unblock_pending_waits(state, slot)
 
     outcome = await state.sessions.stop_turn(
-        _history_key_for(name), force=False, preserve_queue=True, on_soft=_on_soft, on_hard=_on_hard
+        slot_session_key(slot),
+        force=False,
+        preserve_queue=True,
+        on_soft=_on_soft,
+        on_hard=_on_hard,
     )
     # Resolve orphaned card when provider reports no active turn
     if outcome == "idle" and slot._stop_event_id:
@@ -1011,7 +1019,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         slot._stop_state = "idle"
         state.push_slots_update()
     sel().log_tool_invocation(
-        session_key=_history_key_for(name),
+        session_key=slot_session_key(slot),
         agent=getattr(slot, "agent", "") or "kirocrew",
         source="dashboard",
         tool_name="dashboard_stop",
@@ -1044,7 +1052,7 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     # (event id still None), and a compound condition would let it through.
     if slot._stop_state != "idle":
         sel().log_tool_invocation(
-            session_key=_history_key_for(name),
+            session_key=slot_session_key(slot),
             agent=getattr(slot, "agent", "") or "kirocrew",
             source="dashboard",
             tool_name="dashboard_interrupt",
@@ -1119,7 +1127,7 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     _unblock_pending_waits(state, slot)
 
     outcome = await state.sessions.stop_turn(
-        _history_key_for(name),
+        slot_session_key(slot),
         force=False,
         preserve_queue=True,
         on_soft=_on_soft,
@@ -1131,7 +1139,7 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
         slot._stop_state = "idle"
         state.push_slots_update()
     sel().log_tool_invocation(
-        session_key=_history_key_for(name),
+        session_key=slot_session_key(slot),
         agent=getattr(slot, "agent", "") or "kirocrew",
         source="dashboard",
         tool_name="dashboard_interrupt",
@@ -1336,7 +1344,7 @@ async def api_chat_slot_delete(request: web.Request) -> web.Response:
     else:
         state._restricted_keys.discard(f"dashboard:{name}")
     # Kill the per-tab session to free resources
-    await state.sessions.remove(_history_key_for(name))
+    await state.sessions.remove(slot_session_key(slot))
     _sync_dashboard_slots(state)
     state.push_slots_update()
     state.push_refresh("history")
@@ -1441,7 +1449,7 @@ async def api_chat_slots_cleanup(request: web.Request) -> web.Response:
             state._restricted_keys.discard(f"dashboard:{name}")
         # Session cleanup is best-effort — history is already written
         try:
-            await state.sessions.remove(_history_key_for(name))
+            await state.sessions.remove(slot_session_key(removed))
         except Exception:
             logger.warning("Cleanup: session remove failed for %s", name, exc_info=True)
         archived.append(name)
@@ -1507,7 +1515,7 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
 
     # Reset session so next message uses the new agent
     logger.info("Slot %s agent switched to %r, resetting session", name, agent_name or "kirocrew")
-    await _reset_slot_session(state, slot, _history_key_for(name))
+    await _reset_slot_session(state, slot, slot_session_key(slot))
     # Persist the new agent so the session resumes under the correct agent
     # after a gateway restart.  Written after reset succeeds so we never
     # advertise an agent we couldn't actually switch to.
@@ -1519,7 +1527,7 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
             # chat/WS/heartbeat).
             await asyncio.to_thread(
                 state.conversation_log.update_metadata,
-                _history_key_for(name),
+                slot_transcript_key(slot),
                 {"agent": agent_name},
             )
         except Exception:
@@ -1696,7 +1704,7 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
     if slot.model == model_name:
         return web.json_response({"ok": True, "model": model_name})
     slot.model = model_name
-    session_key = _history_key_for(name)
+    session_key = slot_session_key(slot)
     provider = state.sessions.get_provider(session_key)
     if not await _try_live_model_switch(name, slot, provider, model_name):
         logger.info("Slot %s model switched to %r, resetting session", name, model_name or "auto")
@@ -1765,7 +1773,7 @@ async def api_chat_slots_model(request: web.Request) -> web.Response:
         # the new model with stale history (the model/history inconsistency), and a
         # single failure doesn't abort the whole bulk switch.
         try:
-            await _reset_slot_session(state, slot, _history_key_for(name))
+            await _reset_slot_session(state, slot, slot_session_key(slot))
         except Exception:
             logger.error("Bulk model switch: session reset failed for %s", name, exc_info=True)
             failed.append(name)
@@ -1833,7 +1841,7 @@ async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
     slot.reasoning_effort = effort
     logger.info("Slot %s reasoning_effort switched to %r", name, effort or "default")
 
-    session_key = _history_key_for(name)
+    session_key = slot_session_key(slot)
     provider = state.sessions.get_provider(session_key)
     _updated_live = False
     if isinstance(provider, AcpProvider) and provider.supports_effort():
@@ -1900,7 +1908,7 @@ async def api_chat_slot_workspace(request: web.Request) -> web.Response:
     slot.workspace = ws_name
     slot.project = default_project_dir(ws_name)
     logger.info("Slot %s workspace switched to %r, resetting session", name, ws_name)
-    await _reset_slot_session(state, slot, _history_key_for(name))
+    await _reset_slot_session(state, slot, slot_session_key(slot))
     state.push_slots_update()
     return web.json_response({"ok": True, "workspace": ws_name})
 
@@ -1956,7 +1964,7 @@ async def api_chat_slot_project(request: web.Request) -> web.Response:
     # from inside the kiro-cli process group (the set_project MCP tool); an
     # inline reset would killpg() the caller. Consumed in chat_runner.
     if project != old_project:
-        slot._pending_reset_history_key = _history_key_for(name)
+        slot._pending_reset_history_key = slot_session_key(slot)
     state.push_slots_update()
     return web.json_response({"ok": True, "project": project})
 
@@ -2184,7 +2192,7 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
     existing = state._slots.get(name)
     if not existing:
         for slot in state._slots.values():
-            if _history_key_for(slot.key) == canonical:
+            if _history_key_for(slot.key) == canonical or slot_session_key(slot) == history_key:
                 existing = slot
                 break
     if existing:
