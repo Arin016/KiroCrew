@@ -1003,7 +1003,7 @@
       "force_kill_session_discards_in_progress_work_and": "Forza la chiusura della sessione (scarta il lavoro in corso e i messaggi in coda)",
       "force_reset_session_taking_longer_than_expected": "Forza il ripristino della sessione (sta impiegando più tempo del previsto)",
       "force_reset_taking_longer_than_expected": "Forza il ripristino — sta impiegando più tempo del previsto",
-      "it_can_click_type_and_navigate_pages_not_just_re": "Può cliccare, digitare e navigare tra le pagine — non solo leggerle. Lascia disattivato se preferisci che non agisca sui siti in cui hai effettuato l'accesso.",
+      "it_can_click_type_and_navigate_pages_not_just_re": "Può cliccare, digitare e navigare tra le pagine — non solo leggerle. Lascialo disattivato se preferisci che non agisca sui siti in cui hai effettuato l'accesso.",
       "killing": "Chiusura forzata…",
       "killing_session": "Chiusura forzata della sessione",
       "let_the_agent_read_one_of_your_files": "Consenti all'agente di leggere uno dei tuoi file",
@@ -2001,7 +2001,7 @@
       "the_server_at": "Il server su",
       "this_dashboard_is_served_over_https_so_the_brows": "Questa dashboard viene servita tramite HTTPS, quindi il browser blocca l'incorporamento di un",
       "updated": "aggiornata",
-      "view_only_clicks_here_don_t_reach_the_page": "Sola visualizzazione — i clic qui non raggiungono la pagina",
+      "view_only_clicks_here_don_t_reach_the_page": "Solo visualizzazione — i clic qui non raggiungono la pagina",
       "waiting_for_the_browser_to_take_a_screenshot": "In attesa che il browser acquisisca uno screenshot…",
       "web_preview": "Anteprima web"
     },
