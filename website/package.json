@@ -27,6 +27,8 @@
     "jscpd": "jscpd .",
     "gen:settings": "node scripts/gen-settings-registry.mjs",
     "lint:theme-colors": "node scripts/check-theme-colors.mjs",
+    "i18n:pseudo": "node scripts/gen-pseudolocale.mjs",
+    "i18n:pseudo:check": "node scripts/gen-pseudolocale.mjs --check",
     "pretest": "npm run jscpd"
   },
   "files": [
