@@ -14,6 +14,21 @@ import { i18nT } from '../i18n/t'
 const SKIP_ROLES = new Set(['chunk', 'done'])
 const filterMessages = (msgs: ChatMessage[]) => msgs.filter(m => !SKIP_ROLES.has(m.role))
 
+/** Durable client-side identity for a message born WITHOUT a `ts` that will be
+ *  mutated across dispatches (streaming/thinking accumulation). ChatPage keys
+ *  rows by `meta.clientTs ?? ts` and falls back to a WeakMap id minted per
+ *  message OBJECT — but Immer replaces the object on every `content +=` commit,
+ *  so a ts-less accumulating message minted a NEW id (→ new React key → full
+ *  row remount) on every chunk flush. That remount reset useSmoothStream's
+ *  reveal cursor (text snapped in whole chunks) and restarted every CSS/Framer
+ *  animation in the row (widget-placeholder dots flashing in unison). Stamping
+ *  the identity once at append survives Immer's structural sharing for the
+ *  message's whole life, including the streaming→assistant finalization that
+ *  later sets a server `ts`. (This is the "durable id stamped in the reducer
+ *  at append" follow-up ChatPage's stableMsgKey comment pointed at.) */
+let bornKeySeq = 0
+const mintBornKey = (): string => `born-${Date.now()}-${bornKeySeq++}`
+
 /** The three keys that can pollute `Object.prototype` when used to index a
  *  plain-object map (`obj[key] = ...`). Slot ids, subagent ids, run ids, and
  *  session keys all flow in from WebSocket action payloads; a crafted payload
@@ -415,7 +430,7 @@ function applyNonActiveFrame(
       msg.content += content
       msg.rawText = msg.content
     } else {
-      msgs.push({ role: 'streaming', content, cls: 'msg msg-a', rawText: content })
+      msgs.push({ role: 'streaming', content, cls: 'msg msg-a', rawText: content, meta: { clientTs: mintBornKey() } })
     }
     if (seq !== undefined) run.lastChunkSeq = seq
     return
@@ -437,7 +452,7 @@ function applyNonActiveFrame(
     return
   }
   if (role === 'thinking') {
-    if (!msgs.some(m => m.role === 'thinking')) msgs.push({ role: 'thinking', content: '', cls: '' })
+    if (!msgs.some(m => m.role === 'thinking')) msgs.push({ role: 'thinking', content: '', cls: '', meta: { clientTs: mintBornKey() } })
     return
   }
   if (role === 'assistant') {
@@ -1064,7 +1079,7 @@ const chatSlice = createSlice({
     updateStreamingMessage(state, action: PayloadAction<string>) {
       const last = state.messages[state.messages.length - 1]
       if (last?.role === 'streaming') { last.content = action.payload }
-      else { state.messages.push({ role: 'streaming', content: action.payload, cls: 'msg msg-a' }) }
+      else { state.messages.push({ role: 'streaming', content: action.payload, cls: 'msg msg-a', meta: { clientTs: mintBornKey() } }) }
     },
     finalizeAssistant(state, action: PayloadAction<string | { content: string; ts?: string }>) {
       const payload = typeof action.payload === 'string' ? { content: action.payload } : action.payload
@@ -1711,7 +1726,7 @@ const chatSlice = createSlice({
         if (state.messages[i].role === 'thinking') { state.messages[i].content += content; return }
         if (state.messages[i].role === 'user') break
       }
-      state.messages.push({ role: 'thinking', content, cls: '' })
+      state.messages.push({ role: 'thinking', content, cls: '', meta: { clientTs: mintBornKey() } })
     },
     sseChatMessage(state, action: PayloadAction<{ slot: string; role: string; content: string; ts?: string; seq?: number; cls?: string; meta?: Record<string, unknown>; kind?: string; batched?: boolean }>) {
       const { slot, role, content, ts, seq, cls, meta, kind, batched } = action.payload
@@ -1781,7 +1796,7 @@ const chatSlice = createSlice({
           msg.content += content
           msg.rawText = msg.content
         } else {
-          state.messages.push({ role: 'streaming', content, cls: 'msg msg-a', rawText: content })
+          state.messages.push({ role: 'streaming', content, cls: 'msg msg-a', rawText: content, meta: { clientTs: mintBornKey() } })
         }
         if (seq !== undefined) state.lastChunkSeq = seq
         return
@@ -1826,7 +1841,7 @@ const chatSlice = createSlice({
       // Thinking — deduplicate, only keep one
       if (role === 'thinking') {
         if (state.messages.some(m => m.role === 'thinking')) return
-        state.messages.push({ role: 'thinking', content: '', cls: '' })
+        state.messages.push({ role: 'thinking', content: '', cls: '', meta: { clientTs: mintBornKey() } })
         return
       }
       // Replace streaming placeholder with final assistant message
