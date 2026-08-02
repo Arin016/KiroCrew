@@ -1766,6 +1766,18 @@ class DashboardConfig:
             "domain vocabulary. Empty = unspecified.",
         ),
     )
+    user_role_other: str = field(
+        default="",
+        metadata=_meta(
+            "User Role (Custom)",
+            "Free-text role the user typed when they picked 'other' during "
+            "onboarding (e.g. 'solutions architect'). Consulted ONLY while "
+            "user_role == 'other'; quoted verbatim into the agent prompt. "
+            "Retained (not cleared) when another role is picked, so it is "
+            "inert rather than contradictory and survives switching back. "
+            "Empty = 'other' contributes nothing.",
+        ),
+    )
     user_technical_level: str = field(
         default="",
         metadata=_meta(
@@ -4411,6 +4423,7 @@ class KiroCrewConfig:
                     _safe_bool(dashboard_data.get("onboarded"), False),
                 ),
                 user_role=str(dashboard_data.get("user_role", "")),
+                user_role_other=str(dashboard_data.get("user_role_other", "")),
                 user_technical_level=str(dashboard_data.get("user_technical_level", "")),
                 tips_enabled=bool(dashboard_data.get("tips_enabled", True)),
                 tips_cadence_hours=_safe_float(

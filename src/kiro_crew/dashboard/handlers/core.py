@@ -1199,6 +1199,11 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "type": "enum",
         "values": ["", "developer", "designer", "product-manager", "data-ml", "it-ops", "other"],
     },
+    # The one free-text escape hatch: what the user typed after picking "other".
+    # Bounded hard (60 chars) and stripped of prompt-structural characters by
+    # context.py before it is quoted into [USER PROFILE] — it is the only value
+    # in that block the user authors rather than picks.
+    "dashboard.user_role_other": {"type": "str", "max_len": 60},
     "dashboard.user_technical_level": {
         "type": "enum",
         "values": ["", "codes", "somewhat-technical", "non-technical"],

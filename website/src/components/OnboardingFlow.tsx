@@ -13,6 +13,7 @@ import {
   TelemetryToggle,
 } from './PrivacyDisclosure'
 import { api } from '../api/client'
+import { capRoleOther, clampRoleOther } from '../lib/userProfile'
 
 import { i18nT } from '../i18n/t'
 /**
@@ -99,7 +100,9 @@ const TECH_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'non-technical', label: 'Not technical' },
 ]
 
-type ProfileConfig = { dashboard?: { user_role?: string; user_technical_level?: string } }
+type ProfileConfig = {
+  dashboard?: { user_role?: string; user_role_other?: string; user_technical_level?: string }
+}
 
 const RING_SHADOW = '0 20px 50px rgba(0,0,0,.42), 0 0 0 4px var(--accent-subtle)'
 // 20% opacity tint of the active theme accent — used for selected states.
@@ -129,9 +132,17 @@ export default function OnboardingFlow({
   const shellHost = useContext(OnboardingShellContext)
   const localDialogRef = useRef<HTMLDivElement>(null)
   const dialogRef = shellHost?.dialogRef ?? localDialogRef
+  // Which dialog step already received its initial focus (see the trap effect).
+  // Reset on close so reopening focuses again.
+  const initialFocusKeyRef = useRef('')
 
   // ── Step-2 profile state ──────────────────────────────────────────────────
   const [role, setRole] = useState('')
+  // Free text behind "Other". Kept in state even while another chip is
+  // selected, so toggling away and back does not lose what the user typed —
+  // but only PERSISTED while role === 'other' (see persistProfile).
+  const [roleOther, setRoleOther] = useState('')
+  const roleOtherRef = useRef<HTMLInputElement>(null)
   const [techLevel, setTechLevel] = useState('')
   const [savingProfile, setSavingProfile] = useState(false)
   const [profileSaveError, setProfileSaveError] = useState(false)
@@ -141,7 +152,11 @@ export default function OnboardingFlow({
   // Guards the server-seed effect from clobbering in-flow choices, and lets
   // persistProfile skip unchanged fields (no config churn / SEL noise).
   const profileTouched = useRef(false)
-  const initialProfile = useRef<{ role: string; tech: string }>({ role: '', tech: '' })
+  const initialProfile = useRef<{ role: string; other: string; tech: string }>({
+    role: '',
+    other: '',
+    tech: '',
+  })
 
   const qc = useQueryClient()
   // Preselect previously saved answers (matters for `/onboarding` replays).
@@ -155,11 +170,21 @@ export default function OnboardingFlow({
   useEffect(() => {
     if (!open || !cfgData || profileTouched.current) return
     const r = cfgData.dashboard?.user_role ?? ''
+    const o = cfgData.dashboard?.user_role_other ?? ''
     const t = cfgData.dashboard?.user_technical_level ?? ''
-    initialProfile.current = { role: r, tech: t }
+    initialProfile.current = { role: r, other: o, tech: t }
     setRole(r)
+    setRoleOther(o)
     setTechLevel(t)
   }, [open, cfgData])
+
+  // Picking "Other" reveals an input the user must reach; focusing it turns the
+  // reveal into a continuation of the same gesture instead of a second hunt for
+  // the field. Runs on the transition INTO 'other' only, so re-renders from
+  // typing don't steal the caret back to the start.
+  useEffect(() => {
+    if (step === 2 && role === 'other') roleOtherRef.current?.focus()
+  }, [step, role])
 
   // Persist changed profile answers. Returns true when every changed field
   // was written. The baseline (initialProfile) advances PER FIELD and only
@@ -169,9 +194,25 @@ export default function OnboardingFlow({
   // best-effort so Skip/Escape never trap the user in the modal.
   const persistProfile = useCallback(async (): Promise<boolean> => {
     const cur = initialProfile.current
-    const jobs: Array<{ key: 'role' | 'tech'; value: string; p: Promise<unknown> }> = []
+    const jobs: Array<{ key: 'role' | 'other' | 'tech'; value: string; p: Promise<unknown> }> = []
     if (role !== cur.role) {
       jobs.push({ key: 'role', value: role, p: api.patchConfig('dashboard.user_role', role) })
+    }
+    // Persisted whenever it changed, INDEPENDENTLY of which chip is selected.
+    // Deliberately not cleared when the user picks a real role: clearing means
+    // a second PATCH that can succeed while the role PATCH fails, which would
+    // leave the server holding `user_role=other` with its description deleted —
+    // the answer silently thrown away. The value is inert instead: context.py
+    // reads it ONLY while `user_role == 'other'` (see `_role_description`), so
+    // a retained value can never contradict the picked role, and toggling back
+    // to "Other" restores what the user typed.
+    const otherValue = clampRoleOther(roleOther)
+    if (otherValue !== cur.other) {
+      jobs.push({
+        key: 'other',
+        value: otherValue,
+        p: api.patchConfig('dashboard.user_role_other', otherValue),
+      })
     }
     if (techLevel !== cur.tech) {
       jobs.push({
@@ -185,15 +226,14 @@ export default function OnboardingFlow({
     let ok = true
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') {
-        if (jobs[i].key === 'role') initialProfile.current = { ...initialProfile.current, role: jobs[i].value }
-        else initialProfile.current = { ...initialProfile.current, tech: jobs[i].value }
+        initialProfile.current = { ...initialProfile.current, [jobs[i].key]: jobs[i].value }
       } else {
         ok = false
       }
     })
     qc.invalidateQueries({ queryKey: ['kirocrewConfig'] })
     return ok
-  }, [role, techLevel, qc])
+  }, [role, roleOther, techLevel, qc])
 
   // Sync with the server-confirmed onboarding flag on BOTH transitions: open
   // (reset to step 1) when the un-onboarded flag arrives, and close when it
@@ -204,6 +244,7 @@ export default function OnboardingFlow({
     if (initialOpen) {
       profileTouched.current = false
       skipDiscardArmed.current = false
+      initialFocusKeyRef.current = ''
       setProfileSaveError(false)
       setStep(1)
       setOpen(true)
@@ -217,6 +258,7 @@ export default function OnboardingFlow({
     const handler = () => {
       profileTouched.current = false
       skipDiscardArmed.current = false
+      initialFocusKeyRef.current = ''
       setProfileSaveError(false)
       setStep(1)
       setOpen(true)
@@ -321,8 +363,23 @@ export default function OnboardingFlow({
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
         ),
       ).filter(el => !el.hasAttribute('disabled'))
-    // Focus the first control on open so keyboard/SR users land inside the dialog.
-    getFocusable()[0]?.focus()
+    // Focus the first control on ENTERING the dialog step — not on every
+    // re-run. This effect re-runs whenever `finish` / `savingProfile` change
+    // identity, which now includes every keystroke in the "Other" role field
+    // (finish → persistProfile → roleOther). Re-focusing there would yank the
+    // caret to "Skip all" after the first character typed, so initial focus is
+    // keyed to the step and the re-runs only reinstall the key handler.
+    //
+    // `savingProfile` IS part of the key: every step-2 control is disabled
+    // during the save, so `getFocusable()` is empty and the browser drops focus
+    // to <body>. Without re-seating focus when the freeze lifts, the failed-save
+    // path (modal stays open with an error) would leave the Tab trap's
+    // first/last comparisons unmatched and Tab would escape the dialog.
+    const focusKey = `${step}:${shellHost?.sectionSlot ? 1 : 0}:${savingProfile ? 1 : 0}`
+    if (initialFocusKeyRef.current !== focusKey) {
+      initialFocusKeyRef.current = focusKey
+      getFocusable()[0]?.focus()
+    }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -505,6 +562,37 @@ export default function OnboardingFlow({
             </button>
           ))}
         </div>
+
+        {/* "Other" is the only answer the six chips cannot express, so it
+            reveals a free-text field instead of being a dead end. Optional:
+            leaving it blank persists 'other' with no description, exactly as
+            before this input existed. */}
+        {role === 'other' && (
+          <input
+            ref={roleOtherRef}
+            type="text"
+            value={roleOther}
+            disabled={savingProfile}
+            onChange={e => {
+              profileTouched.current = true
+              // Cap here rather than with `maxLength`: the HTML attribute counts
+              // UTF-16 code units, so a paste ending in an astral character
+              // truncates mid-surrogate-pair.
+              setRoleOther(capRoleOther(e.target.value))
+            }}
+            onKeyDown={e => {
+              // Enter in a single-field reveal should advance, not submit the
+              // dialog's first button.
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                if (!savingProfile) void next()
+              }
+            }}
+            placeholder={i18nT('components.onboardingFlow.e_g_solutions_architect_sre_founder')}
+            aria-label={i18nT('components.onboardingFlow.describe_your_role')}
+            className="mt-2 w-full rounded-lg border border-border bg-transparent px-3 py-2 text-[13px] text-text placeholder:text-muted focus:border-accent focus:outline-none disabled:opacity-60"
+          />
+        )}
 
         <div
           id="onboarding-tech-label"
