@@ -409,7 +409,10 @@
       "trust_desc": "In this chat, KiroCrew works without asking you first",
       "yolo_label": "YOLO",
       "yolo_tooltip": "In every chat, KiroCrew works without asking you first",
-      "yolo_desc": "In every chat, KiroCrew works without asking you first"
+      "yolo_desc": "In every chat, KiroCrew works without asking you first",
+      "configure_duration": "Configure duration",
+      "yolo_expiration_until_shutdown": "Stays on until KiroCrew restarts — no timed expiry.",
+      "yolo_expiration_default": "Expires automatically after 6 hours, then asks again."
     },
     "appstore": {
       "categoryRail": {
@@ -2118,7 +2121,19 @@
         "standard": "Standard",
         "turn_off_every_rule": "Turn off every built-in denied-command rule at once. Independent defense-in-depth controls (sensitive paths, IMDS, git-publish) stay enforced.",
         "turn_off_every_rule_governance_locked": "Turn off every built-in denied-command rule at once. Independent defense-in-depth controls (sensitive paths, IMDS, git-publish) stay enforced, and rules pinned by your organization’s policy remain on.",
-        "yolo_auto_approve": "YOLO (auto-approve)"
+        "yolo_auto_approve": "YOLO (auto-approve)",
+        "yolo_duration_title": "YOLO auto-approve duration",
+        "yolo_duration_desc": "How long YOLO stays on once you enable it. Slack always expires after 30 minutes.",
+        "yolo_duration_default": "Expires automatically",
+        "yolo_duration_default_desc": "6 hours when enabled from the dashboard, 24 hours when enabled at startup from your config file.",
+        "yolo_duration_until_shutdown": "Until KiroCrew restarts",
+        "yolo_duration_until_shutdown_desc": "Stays on with no expiry until KiroCrew restarts.",
+        "yolo_duration_locked": "Your organization's security policy has disabled this option.",
+        "yolo_until_restart": "YOLO · until KiroCrew restarts",
+        "failed_to_save_yolo_duration": "Failed to save YOLO duration.",
+        "yolo_duration_next_activation_note": "Applies the next time you turn YOLO on.",
+        "yolo_active_until_restart": "YOLO is on — stays on until KiroCrew restarts.",
+        "yolo_active_expires_at": "YOLO is on — expires at {{time}}."
       },
       "sharedMcpGatewayToggle": {
         "active_sessions_share_pooled_mcp_backends_see_th": "Active — sessions share pooled MCP backends. See the live pool under Developer > System.",

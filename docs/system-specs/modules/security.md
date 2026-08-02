@@ -1124,7 +1124,10 @@ Non-owners receive ephemeral message: "⛔ Only the KiroCrew owner can use these
 
 **Safety override (YOLO) — time-limited with re-authorization** (`safety_override.py`):
 
-Permanent YOLO mode has been eliminated. All activations go through the `SafetyOverride` singleton which enforces a hard ceiling of 24 hours. The tiered TTL defaults are:
+Permanent, unattended YOLO has been eliminated: every activation goes through
+the `SafetyOverride` singleton, and is either bounded by the 24-hour ceiling
+(below) or an explicitly opted-in, admin-deniable, revocable no-expiry grant
+(see "Opt-in no-expiry"). The tiered TTL defaults are:
 
 | Source | Default TTL | Max TTL |
 |--------|------------|---------|
@@ -1133,6 +1136,17 @@ Permanent YOLO mode has been eliminated. All activations go through the `SafetyO
 | Config `approval_mode: "auto"` | 24 hours | 24 hours |
 
 After expiry, re-authorization is required. A 5-minute grace window allows `!yolo renew` (Slack) or the dashboard re-auth button to extend the session without creating a new one. Outside the grace window, a fresh activation is needed.
+
+**Opt-in no-expiry (`agent.yolo_duration`).** Setting `agent.yolo_duration:
+"until_shutdown"` grants a **dashboard/config** activation with no expiry — it
+stays on until the gateway process stops, then clears. It is in-memory only
+(re-derived and re-audited from config on each boot, never persisted as an
+activated grant), instantly revocable, and deniable by the `yolo_duration`
+enterprise governance scope (resolved against the HOST profile, fail-closed —
+see governance.md). Slack always stays finite (30 min). The live
+duration/expiry is surfaced in the dashboard (Settings → Security and the YOLO
+confirm popover) so a no-expiry grant is never mistaken for a bounded window.
+Ad-hoc activations remain 24h-capped as in the table above.
 
 SEL audit events are emitted on every lifecycle transition:
 - `safety_override:activate` — override enabled

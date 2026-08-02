@@ -29,10 +29,27 @@ from kiro_crew.config.paths import config_dir
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.embeddings import get_shared_embedder, model_file_present
 from kiro_crew.platform import current_context
-from kiro_crew.safety_override import safety_override
+from kiro_crew.safety_override import governed_duration_mode, safety_override
 from kiro_crew.stats import Stats
 
 logger = logging.getLogger(__name__)
+
+
+def _effective_yolo_duration() -> str:
+    """Governance-clamped configured YOLO duration mode for ``/api/status``.
+
+    Read live (fingerprint-cached) so the dashboard reflects a config change
+    without a restart. Fails safe to ``"default"`` when config/governance is
+    unavailable — the UI then shows the bounded-window messaging, never a
+    stronger claim than it can prove.
+    """
+    try:
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        return governed_duration_mode(KiroCrewConfig.load().agent.yolo_duration)
+    except Exception:
+        return "default"
+
 
 # Absolute paths for macOS system commands — shutil.which may fail when PATH
 # is minimal (e.g. launched as a background service), so fall back to known
@@ -167,6 +184,14 @@ async def api_status(request: web.Request) -> web.Response:
             "yolo_active": so_status.active,
             "yolo_expires_at": so_status.expires_at_iso or "",
             "yolo_remaining_secs": so_status.remaining_secs,
+            "yolo_until_shutdown": so_status.until_shutdown,
+            # Effective (governance-clamped) configured duration mode, so the UI
+            # can show the EXPECTED expiry before YOLO is turned on.
+            "yolo_duration": _effective_yolo_duration(),
+            # Whether an admin governance policy currently ALLOWS the
+            # "until_shutdown" option (so the UI can hide/disable it when denied).
+            "yolo_until_shutdown_permitted": governed_duration_mode("until_shutdown")
+            == "until_shutdown",
             "owner_id_hash": owner_hash,
             "os_type": static_info.get("os", ""),
             "arch": static_info.get("arch", ""),

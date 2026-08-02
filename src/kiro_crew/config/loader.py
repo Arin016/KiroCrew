@@ -799,6 +799,18 @@ class AgentConfig:
         default=False,
         metadata=_meta("YOLO Mode", "Skip tool approval confirmations."),
     )
+    yolo_duration: str = field(
+        default="default",
+        metadata=_meta(
+            "YOLO Duration",
+            "How long YOLO auto-approve lasts once enabled from the dashboard or "
+            "at startup from config. 'default' uses tiered expiries (dashboard 6h, "
+            "config 24h). 'until_shutdown' keeps it on with no expiry until the "
+            "gateway process stops (nothing survives a restart). Slack `!yolo on` "
+            "always stays 30 min regardless of this setting.",
+            enum=["default", "until_shutdown"],
+        ),
+    )
     notify_override_expiry: bool = field(
         default=True,
         metadata=_meta(
@@ -4144,6 +4156,11 @@ class KiroCrewConfig:
                 ),
                 jail=_normalize_jail(agent_data.get("jail", "auto")),
                 yolo=agent_data.get("yolo", False),
+                yolo_duration=(
+                    "until_shutdown"
+                    if agent_data.get("yolo_duration") == "until_shutdown"
+                    else "default"
+                ),
                 notify_override_expiry=agent_data.get("notify_override_expiry", True),
                 conductor_skill=agent_data.get("conductor_skill", False),
                 tool_search=bool(agent_data.get("tool_search", True)),

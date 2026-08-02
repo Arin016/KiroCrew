@@ -11,12 +11,21 @@ Sources and default TTLs:
 
 Hard ceiling: 24 h regardless of requested TTL.
 
+When ``duration_mode`` is set to ``"until_shutdown"`` (from ``agent.yolo_duration``
+in config), activations from the ``dashboard`` and ``config`` sources are granted
+with NO expiry — they stay active until the gateway process stops, then clear (the
+state is in-memory, so nothing survives a restart). Slack activations are never
+affected by ``duration_mode``: ``!yolo on`` always keeps its 30-min TTL, because
+the short Slack TTL is itself a safety property against a remote surface pinning
+unbounded auto-approve.
+
 All state changes are logged to the Security Event Log (SEL).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -66,12 +75,13 @@ class OverrideStatus:
 
     active: bool
     source: str
-    remaining_secs: int
+    remaining_secs: int  # -1 when the grant has no expiry (until_shutdown)
     activation_count: int
     activated_at_iso: Optional[str]  # None when inactive
-    expires_at_iso: Optional[str]  # None when inactive
+    expires_at_iso: Optional[str]  # None when inactive OR until_shutdown (no wall-clock expiry)
     last_renewed_at_iso: Optional[str]  # None if never renewed
     last_renewed_by: str
+    until_shutdown: bool = False  # True when the active grant has no expiry
 
 
 # ─── Core class ──────────────────────────────────────────────────────────────
@@ -97,6 +107,11 @@ class SafetyOverride:
         "config": _CONFIG_TTL,
     }
 
+    # Sources whose default-TTL activations honor duration_mode="until_shutdown".
+    # Slack is deliberately excluded: its short TTL guards against a remote
+    # surface pinning unbounded auto-approve, so `!yolo on` always stays finite.
+    _UNTIL_SHUTDOWN_SOURCES: frozenset[str] = frozenset({"dashboard", "config"})
+
     # Class-level default lock for instances created via object.__new__() (e.g. tests).
     # Each real instance gets its own lock in __init__; this is just a safe fallback.
     _lock: threading.Lock
@@ -107,6 +122,12 @@ class SafetyOverride:
         self._source: str = ""
         self._activated_at: float = 0.0
         self._expires_at: float = 0.0
+        self._until_shutdown: bool = False  # True when the live grant has no expiry
+        # Duration policy for dashboard/config activations: "default" (tiered
+        # per-source TTLs) or "until_shutdown" (no expiry until the process stops).
+        # Set from agent.yolo_duration by whoever wires the singleton; kept here
+        # (not read from config) to keep this module config-agnostic and pure.
+        self._duration_mode: str = "default"
         self._activation_count: int = 0
         self._last_renewed_at: float = 0.0
         self._last_renewed_by: str = ""
@@ -130,6 +151,12 @@ class SafetyOverride:
             scoped: dict[str, tuple[float, float]] = {}
             object.__setattr__(self, "_scoped", scoped)
             return scoped
+        if name == "_until_shutdown":
+            object.__setattr__(self, "_until_shutdown", False)
+            return False
+        if name == "_duration_mode":
+            object.__setattr__(self, "_duration_mode", "default")
+            return "default"
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     # ── Callback properties ──────────────────────────────────────────────────
@@ -150,6 +177,23 @@ class SafetyOverride:
     def on_activated(self, cb: Optional[Callable[[str, int], None]]) -> None:
         self._on_activated = cb
 
+    # ── Duration policy ──────────────────────────────────────────────────────
+
+    @property
+    def duration_mode(self) -> str:
+        """Current duration policy: ``"default"`` or ``"until_shutdown"``."""
+        return self._duration_mode
+
+    @duration_mode.setter
+    def duration_mode(self, value: str) -> None:
+        """Set the duration policy. Unknown values fall back to ``"default"``.
+
+        Does NOT retroactively change an already-active grant — it governs the
+        next activation. This mirrors config: flipping the setting takes effect
+        the next time YOLO is turned on.
+        """
+        self._duration_mode = value if value in ("default", "until_shutdown") else "default"
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     def activate(self, source: str, ttl: Optional[int] = None) -> ActivationResult:
@@ -158,14 +202,27 @@ class SafetyOverride:
         Args:
             source: Trigger source (``slack``, ``dashboard``, ``config``, …).
             ttl: Override TTL in seconds.  Defaults to the source's default TTL.
-                 Capped at ``_MAX_TTL``.
+                 Capped at ``_MAX_TTL``.  When ``duration_mode`` is
+                 ``"until_shutdown"`` AND ``source`` is dashboard/config AND no
+                 explicit ``ttl`` was passed, the grant is given NO expiry (it
+                 lasts until the process stops); the reported ``ttl`` is ``-1``.
 
         Returns:
             ActivationResult with effective TTL and wall-clock activation time.
         """
+        # until_shutdown only applies to a source's DEFAULT TTL (no explicit ttl),
+        # for the eligible sources, when the policy is set. An explicit ttl (e.g.
+        # Slack's) always takes the normal capped path.
+        until_shutdown = (
+            ttl is None
+            and self._duration_mode == "until_shutdown"
+            and source in self._UNTIL_SHUTDOWN_SOURCES
+        )
         if ttl is None:
             ttl = self._SOURCE_TTLS.get(source, self._SLACK_TTL)
         ttl = min(ttl, self._MAX_TTL)
+        report_ttl = -1 if until_shutdown else ttl
+        ttl_label = "until_shutdown" if until_shutdown else f"{ttl}s"
 
         now_mono = time.monotonic()
         now_wall = datetime.now(tz=timezone.utc)
@@ -175,7 +232,13 @@ class SafetyOverride:
         with self._lock:
             was_active = self._active
             prev_source = self._source
-            prev_remaining = max(0, int(self._expires_at - now_mono)) if self._active else 0
+            if not self._active:
+                prev_remaining = 0
+            elif self._until_shutdown:
+                prev_remaining = -1  # no-expiry grant — avoid int(inf) overflow
+            else:
+                prev_remaining = max(0, int(self._expires_at - now_mono))
+        prev_remaining_label = "until_shutdown" if prev_remaining == -1 else f"{prev_remaining}s"
 
         # Audit BEFORE committing — fail-closed with no race window
         try:
@@ -183,7 +246,7 @@ class SafetyOverride:
                 caller="safety_override",
                 operation="safety_override:activate",
                 outcome="enabled",
-                resources=f"source:{source}, ttl:{ttl}s",
+                resources=f"source:{source}, ttl:{ttl_label}",
                 critical=True,
             )
         except Exception:
@@ -196,7 +259,7 @@ class SafetyOverride:
                 caller="safety_override",
                 operation="safety_override:reactivate",
                 outcome="enabled",
-                resources=f"prev_source:{prev_source}, prev_remaining:{prev_remaining}s, new_source:{source}, new_ttl:{ttl}s",
+                resources=f"prev_source:{prev_source}, prev_remaining:{prev_remaining_label}, new_source:{source}, new_ttl:{ttl_label}",
             )
 
         # Only commit after audit succeeds
@@ -204,7 +267,8 @@ class SafetyOverride:
             self._active = True
             self._source = source
             self._activated_at = now_mono
-            self._expires_at = now_mono + ttl
+            self._expires_at = math.inf if until_shutdown else now_mono + ttl
+            self._until_shutdown = until_shutdown
             self._activation_count += 1
             self._last_renewed_at = 0.0
             self._last_renewed_by = ""
@@ -212,13 +276,13 @@ class SafetyOverride:
         cb = self._on_activated
         if cb is not None:
             try:
-                cb(source, ttl)
+                cb(source, report_ttl)
             except Exception:
                 logger.warning("on_activated callback raised", exc_info=True)
 
         return ActivationResult(
             active=True,
-            ttl=ttl,
+            ttl=report_ttl,
             source=source,
             activated_at_iso=activated_at_iso,
         )
@@ -234,16 +298,21 @@ class SafetyOverride:
         """
         now_mono = time.monotonic()
         ttl = 0
+        kept_until_shutdown = False
 
         denied = False
         with self._lock:
             currently_active = self._active and self._expires_at > now_mono
-            in_grace = (
-                not currently_active
-                and self._expires_at > 0
+            if currently_active and self._until_shutdown:
+                # No-expiry grant: renewing must NOT downgrade it to a finite
+                # TTL. Treat as a no-op success that keeps it active.
+                kept_until_shutdown = True
+                self._last_renewed_at = now_mono
+                self._last_renewed_by = source
+            elif currently_active or (
+                self._expires_at > 0
                 and (now_mono - self._expires_at) <= self._RENEW_GRACE_SECS
-            )
-            if currently_active or in_grace:
+            ):
                 ttl = self._SOURCE_TTLS.get(source, self._SLACK_TTL)
                 ttl = min(ttl, self._MAX_TTL)
                 self._active = True
@@ -262,6 +331,15 @@ class SafetyOverride:
             )
             return RenewResult(renewed=False, ttl=0, source=source, reason="not_active")
 
+        if kept_until_shutdown:
+            self._log_sel(
+                caller="safety_override",
+                operation="safety_override:renew",
+                outcome="renewed",
+                resources=f"source:{source}, new_ttl:until_shutdown",
+            )
+            return RenewResult(renewed=True, ttl=-1, source=source)
+
         self._log_sel(
             caller="safety_override",
             operation="safety_override:renew",
@@ -277,6 +355,7 @@ class SafetyOverride:
                 return
             self._active = False
             self._expires_at = 0.0
+            self._until_shutdown = False
 
         self._log_sel(
             caller="safety_override",
@@ -441,12 +520,18 @@ class SafetyOverride:
         return False
 
     def remaining_secs(self) -> int:
-        """Return seconds remaining, 0 if inactive or expired."""
+        """Return seconds remaining, 0 if inactive/expired, -1 if no expiry.
+
+        ``-1`` signals an ``until_shutdown`` grant that stays active until the
+        process stops (there is no finite remaining time to report).
+        """
         self.is_active()
         now_mono = time.monotonic()
         with self._lock:
             if not self._active:
                 return 0
+            if self._until_shutdown:
+                return -1
             remaining = self._expires_at - now_mono
             return max(0, int(remaining))
 
@@ -467,18 +552,20 @@ class SafetyOverride:
             count = self._activation_count
             activated_at = self._activated_at
             expires_at = self._expires_at
+            until_shutdown = self._until_shutdown
             last_renewed_at = self._last_renewed_at
             last_renewed_by = self._last_renewed_by
 
         def _mono_to_iso(mono_ts: float) -> Optional[str]:
-            if mono_ts <= 0.0:
+            if mono_ts <= 0.0 or not math.isfinite(mono_ts):
                 return None
             wall_ts = now_wall + (mono_ts - now_mono)
             return datetime.fromtimestamp(wall_ts, tz=timezone.utc).isoformat()
 
+        # -1 for a no-expiry grant (until_shutdown); a finite countdown otherwise.
         remaining = 0
         if active:
-            remaining = max(0, int(expires_at - now_mono))
+            remaining = -1 if until_shutdown else max(0, int(expires_at - now_mono))
 
         return OverrideStatus(
             active=active,
@@ -486,9 +573,11 @@ class SafetyOverride:
             remaining_secs=remaining,
             activation_count=count,
             activated_at_iso=_mono_to_iso(activated_at) if active else None,
-            expires_at_iso=_mono_to_iso(expires_at) if active else None,
+            # No wall-clock expiry exists for an until_shutdown grant.
+            expires_at_iso=(None if until_shutdown else _mono_to_iso(expires_at)) if active else None,
             last_renewed_at_iso=_mono_to_iso(last_renewed_at),
             last_renewed_by=last_renewed_by,
+            until_shutdown=until_shutdown and active,
         )
 
     # ── Internal helpers ─────────────────────────────────────────────────────
@@ -544,3 +633,53 @@ def reset_singleton() -> None:
     global _singleton
     with _singleton_lock:
         _singleton = None
+
+
+# ─── Admin governance shim ───────────────────────────────────────────────────
+
+
+def governed_duration_mode(configured: str, *, session_key: str = "") -> str:
+    """Clamp a configured YOLO duration to what enterprise governance permits.
+
+    This is the admin control seam. The ``yolo_duration`` governed scope lets an
+    enterprise POLICY (or host PROFILE) deny the ``"until_shutdown"`` member —
+    e.g. ``{"yolo_duration": {"mode": "deny", "deny": ["until_shutdown"]}}`` —
+    in which case a configured ``"until_shutdown"`` is downgraded to
+    ``"default"`` so no-expiry YOLO can never be chosen. Enforcement lives HERE,
+    at the source that sets ``duration_mode``, not merely in the UI: hiding the
+    option in the dashboard is cosmetic; this makes the restriction real even if
+    the config file or an API caller asks for ``until_shutdown``.
+
+    With no governing policy (the standalone default) the value passes through
+    unchanged. Governance-evaluation errors fail CLOSED (downgrade to
+    ``"default"``): this is a restriction, so an indeterminate ceiling must not
+    hand out the stronger no-expiry grant.
+
+    ``session_key`` selects the active governance profile. It defaults to the
+    HOST profile (``HOST_SESSION_KEY``) because YOLO duration is a gateway-wide
+    decision — an empty/session key must NOT let a per-session profile decide
+    whether the stronger no-expiry grant is allowed (that would let a narrower
+    surface widen a host ceiling). Callers may pass an explicit key to scope it.
+    """
+    if configured != "until_shutdown":
+        return "default"
+    try:
+        from kiro_crew.platform.governance_profiles import (
+            HOST_SESSION_KEY,
+            governance_permits,
+        )
+
+        decision = governance_permits(
+            "yolo_duration",
+            "until_shutdown",
+            session_key=session_key or HOST_SESSION_KEY,
+            log_warning=False,
+            fail_closed=True,
+        )
+        permitted = bool(getattr(decision, "permitted", True))
+    except Exception:
+        logger.warning(
+            "YOLO duration governance check failed; downgrading to 'default'", exc_info=True
+        )
+        return "default"
+    return "until_shutdown" if permitted else "default"

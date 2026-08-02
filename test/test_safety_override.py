@@ -13,6 +13,7 @@ from kiro_crew.safety_override import (
     OverrideStatus,
     RenewResult,
     SafetyOverride,
+    governed_duration_mode,
     reset_singleton,
     safety_override,
 )
@@ -539,3 +540,182 @@ class TestScopedGrants:
         r = override.renew_scoped("never", source="dashboard")
         assert r.renewed is False
         assert r.reason == "not_active"
+
+
+# ─── Duration mode: until_shutdown ──────────────────────────────────────────
+
+
+class TestUntilShutdown:
+    """`duration_mode="until_shutdown"` grants dashboard/config no expiry, but
+    never affects Slack, and never survives a downgrade via renew()."""
+
+    def test_duration_mode_default_and_validation(self, override: SafetyOverride) -> None:
+        assert override.duration_mode == "default"
+        override.duration_mode = "until_shutdown"
+        assert override.duration_mode == "until_shutdown"
+        override.duration_mode = "bogus"  # unknown → falls back
+        assert override.duration_mode == "default"
+
+    def test_dashboard_no_expiry(self, override: SafetyOverride) -> None:
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            result = override.activate("dashboard")
+        assert result.ttl == -1
+        assert result.active is True
+        assert override.is_active() is True
+        assert override.remaining_secs() == -1
+        st = override.status()
+        assert st.until_shutdown is True
+        assert st.remaining_secs == -1
+        assert st.expires_at_iso is None
+        assert st.active is True
+
+    def test_config_no_expiry(self, override: SafetyOverride) -> None:
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            result = override.activate("config")
+        assert result.ttl == -1
+        assert override.status().until_shutdown is True
+
+    def test_slack_default_unaffected(self, override: SafetyOverride) -> None:
+        """Slack is NOT in the eligible source set: its default TTL stays finite."""
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            result = override.activate("slack")
+        assert result.ttl == SafetyOverride._SLACK_TTL
+        assert override.remaining_secs() > 0
+        assert override.status().until_shutdown is False
+
+    def test_slack_explicit_ttl_unaffected(self, override: SafetyOverride) -> None:
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            result = override.activate("slack", ttl=1800)
+        assert result.ttl == 1800
+        assert override.status().until_shutdown is False
+
+    def test_explicit_ttl_bypasses_until_shutdown(self, override: SafetyOverride) -> None:
+        """An explicit ttl always takes the normal capped path, even for dashboard."""
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            result = override.activate("dashboard", ttl=600)
+        assert result.ttl == 600
+        assert override.remaining_secs() > 0
+        assert override.status().until_shutdown is False
+
+    def test_renew_does_not_downgrade(self, override: SafetyOverride) -> None:
+        """Renewing a no-expiry grant keeps it no-expiry (must not become finite)."""
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            override.activate("dashboard")
+            renew = override.renew("slack")
+        assert renew.renewed is True
+        assert renew.ttl == -1
+        assert override.is_active() is True
+        assert override.remaining_secs() == -1
+        assert override.status().until_shutdown is True
+
+    def test_deactivate_resets_until_shutdown(self, override: SafetyOverride) -> None:
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            override.activate("dashboard")
+            override.deactivate("dashboard")
+        assert override.is_active() is False
+        assert override.remaining_secs() == 0
+        assert override.status().until_shutdown is False
+
+    def test_reactivate_finite_after_until_shutdown(self, override: SafetyOverride) -> None:
+        """Switching back to default mode and re-activating restores a finite TTL."""
+        with patch("kiro_crew.safety_override.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            override.duration_mode = "until_shutdown"
+            override.activate("dashboard")
+            override.duration_mode = "default"
+            result = override.activate("dashboard")
+        assert result.ttl == SafetyOverride._DASHBOARD_TTL
+        assert override.remaining_secs() > 0
+        assert override.status().until_shutdown is False
+
+
+# ─── Admin governance shim: governed_duration_mode ──────────────────────────
+
+
+class TestGovernedDurationMode:
+    """`governed_duration_mode` clamps the configured value to what an enterprise
+    governance policy permits — the admin control over the until_shutdown option."""
+
+    _PERMIT = "kiro_crew.platform.governance_profiles.governance_permits"
+
+    def test_default_passes_without_governance_call(self) -> None:
+        # A configured "default" never needs a governance check.
+        with patch(self._PERMIT) as gp:
+            assert governed_duration_mode("default") == "default"
+            gp.assert_not_called()
+
+    def test_until_shutdown_permitted(self) -> None:
+        with patch(self._PERMIT) as gp:
+            gp.return_value = MagicMock(permitted=True)
+            assert governed_duration_mode("until_shutdown") == "until_shutdown"
+            gp.assert_called_once()
+
+    def test_resolves_against_host_profile_fail_closed(self) -> None:
+        # A gateway-wide decision must ask the HOST profile (not an empty/session
+        # key that a per-session profile could answer) and fail closed.
+        from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY
+
+        with patch(self._PERMIT) as gp:
+            gp.return_value = MagicMock(permitted=True)
+            governed_duration_mode("until_shutdown")
+            _, kwargs = gp.call_args
+            assert kwargs["session_key"] == HOST_SESSION_KEY
+            assert kwargs["fail_closed"] is True
+
+    def test_until_shutdown_denied_downgrades(self) -> None:
+        with patch(self._PERMIT) as gp:
+            gp.return_value = MagicMock(permitted=False)
+            assert governed_duration_mode("until_shutdown") == "default"
+
+    def test_governance_error_fails_closed(self) -> None:
+        with patch(self._PERMIT, side_effect=RuntimeError("boom")):
+            # An indeterminate ceiling must NOT hand out the stronger grant.
+            assert governed_duration_mode("until_shutdown") == "default"
+
+    def test_unknown_value_normalizes_to_default(self) -> None:
+        with patch(self._PERMIT) as gp:
+            assert governed_duration_mode("garbage") == "default"
+            gp.assert_not_called()
+
+
+class TestYoloDurationScopeRegistered:
+    """The governed scope must exist in the catalog and resolve like a ruleset."""
+
+    def test_scope_in_catalog(self) -> None:
+        from kiro_crew.platform.governance import SCOPE_CATALOG
+
+        assert "yolo_duration" in SCOPE_CATALOG
+        assert SCOPE_CATALOG["yolo_duration"].kind == "ruleset"
+
+    def test_policy_deny_resolves_denied(self) -> None:
+        from kiro_crew.platform.governance import ScopedRuleset, resolve
+
+        # A ceiling-like object: .get(scope) returns a deny-mode ruleset that
+        # blocks "until_shutdown" but permits "default".
+        deny_us = ScopedRuleset(mode="deny", allow=frozenset(), deny=frozenset({"until_shutdown"}))
+
+        class _Ceiling:
+            def get(self, scope: str) -> object:
+                return deny_us if scope == "yolo_duration" else None
+
+        assert resolve(_Ceiling(), None, "yolo_duration", "until_shutdown").permitted is False
+        assert resolve(_Ceiling(), None, "yolo_duration", "default").permitted is True
+
+    def test_ungoverned_permits_until_shutdown(self) -> None:
+        from kiro_crew.platform.governance import resolve
+
+        assert resolve(None, None, "yolo_duration", "until_shutdown").permitted is True

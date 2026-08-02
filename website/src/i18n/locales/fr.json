@@ -1827,7 +1827,10 @@
       "cancel": "Annuler",
       "don_t_show_again": "Ne plus afficher",
       "enable": "Activer",
-      "yolo_mode_is_an_app_wide_setting": "Le mode YOLO est un paramètre global de l’application"
+      "yolo_mode_is_an_app_wide_setting": "Le mode YOLO est un paramètre global de l’application",
+      "configure_duration": "Configurer la durée",
+      "yolo_expiration_until_shutdown": "Reste actif jusqu'au redémarrage de KiroCrew — sans expiration programmée.",
+      "yolo_expiration_default": "Expire automatiquement après 6 heures, puis redemande."
     },
     "appstore": {
       "appListRow": {
@@ -6615,7 +6618,19 @@
         "standard": "Standard",
         "turn_off_every_rule": "Désactiver d'un seul coup toutes les règles intégrées de commandes refusées. Les contrôles indépendants de défense en profondeur (chemins sensibles, IMDS, publication git) restent appliqués.",
         "turn_off_every_rule_governance_locked": "Désactiver d'un seul coup toutes les règles intégrées de commandes refusées. Les contrôles indépendants de défense en profondeur (chemins sensibles, IMDS, publication git) restent appliqués, et les règles épinglées par la politique de ton organisation restent actives.",
-        "yolo_auto_approve": "YOLO (approbation automatique)"
+        "yolo_auto_approve": "YOLO (approbation automatique)",
+        "yolo_duration_title": "Durée de l'auto-approbation YOLO",
+        "yolo_duration_desc": "Combien de temps YOLO reste actif après activation. Slack expire toujours après 30 minutes.",
+        "yolo_duration_default": "Expire automatiquement",
+        "yolo_duration_default_desc": "6 heures lorsqu'activé depuis le tableau de bord, 24 heures lorsqu'activé au démarrage depuis votre fichier de configuration.",
+        "yolo_duration_until_shutdown": "Jusqu'au redémarrage de KiroCrew",
+        "yolo_duration_until_shutdown_desc": "Reste actif sans expiration jusqu'au redémarrage de KiroCrew.",
+        "yolo_duration_locked": "La politique de sécurité de votre organisation a désactivé cette option.",
+        "yolo_until_restart": "YOLO · jusqu'au redémarrage de KiroCrew",
+        "failed_to_save_yolo_duration": "Échec de l'enregistrement de la durée YOLO.",
+        "yolo_duration_next_activation_note": "S'applique la prochaine fois que vous activez YOLO.",
+        "yolo_active_until_restart": "YOLO est actif — reste actif jusqu'au redémarrage de KiroCrew.",
+        "yolo_active_expires_at": "YOLO est actif — expire à {{time}}."
       },
       "sharedMcpGatewayToggle": {
         "cancel": "Annuler",

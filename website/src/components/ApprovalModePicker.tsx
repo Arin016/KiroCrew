@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { ShieldCheck, BookOpen, Handshake, Rocket, Check } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { ShieldCheck, BookOpen, Handshake, Rocket, Check, Clock } from 'lucide-react'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from './ui/dropdown-menu'
-import { useAppDispatch } from '../store'
+import { useAppDispatch, useAppSelector } from '../store'
 import { changeApprovalMode } from '../store/dashboardSlice'
 import { safeSetItem } from '../utils/safeStorage'
 
@@ -74,6 +75,8 @@ function segmentText(key: ApprovalModeKey): { label: string; tooltip: string; de
  *  cannot silently disable the confirm. */
 export default function ApprovalModePicker({ mode, slotKey, compact }: { mode: string; slotKey: string; compact?: boolean }) {
   const dispatch = useAppDispatch()
+  const navigate = useNavigate()
+  const yoloDuration = useAppSelector(s => s.dashboard.status?.yolo_duration)
   const [open, setOpen] = useState(false)
   const [yoloConfirm, setYoloConfirm] = useState(0)
   const [yoloDontAsk, setYoloDontAsk] = useState(false)
@@ -143,6 +146,12 @@ export default function ApprovalModePicker({ mode, slotKey, compact }: { mode: s
             >
               <p className="font-medium text-text">{i18nT('components.approvalModePicker.yolo_mode_is_an_app_wide_setting')}</p>
               <p className="text-muted mt-0.5">{i18nT('components.approvalModePicker.all_tools_will_get_auto_approved_across_all_sess')}</p>
+              <p className="text-muted mt-1 flex items-center gap-1">
+                <Clock size={11} className="shrink-0" />
+                {yoloDuration === 'until_shutdown'
+                  ? i18nT('components.approvalModePicker.yolo_expiration_until_shutdown')
+                  : i18nT('components.approvalModePicker.yolo_expiration_default')}
+              </p>
               <div className="flex items-center gap-2 mt-1.5">
                 <button
                   autoFocus
@@ -159,6 +168,12 @@ export default function ApprovalModePicker({ mode, slotKey, compact }: { mode: s
                   {i18nT('components.approvalModePicker.don_t_show_again')}
                 </label>
               </div>
+              <button
+                className="mt-1.5 text-[11px] text-muted hover:text-text underline bg-transparent border-none cursor-pointer p-0"
+                onClick={() => { onOpenChange(false); navigate('/settings?tab=security') }}
+              >
+                {i18nT('components.approvalModePicker.configure_duration')}
+              </button>
             </motion.div>
           </>
         )}

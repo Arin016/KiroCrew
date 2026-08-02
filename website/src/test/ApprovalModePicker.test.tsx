@@ -7,6 +7,7 @@ vi.mock('../api/client', () => ({
 
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { Provider } from 'react-redux'
+import { MemoryRouter } from 'react-router-dom'
 import ApprovalModePicker from '../components/ApprovalModePicker'
 import { createTestStore } from './helpers'
 import { api } from '../api/client'
@@ -15,7 +16,9 @@ function renderPicker(mode = 'normal', compact = false) {
   const store = createTestStore()
   render(
     <Provider store={store}>
-      <ApprovalModePicker mode={mode} slotKey="dashboard:1" compact={compact} />
+      <MemoryRouter>
+        <ApprovalModePicker mode={mode} slotKey="dashboard:1" compact={compact} />
+      </MemoryRouter>
     </Provider>,
   )
   return store

@@ -42,10 +42,19 @@ custom-rules:
         event via sel.py.
       - Never hardcode secrets. Store them in ~/.kiro/crew/.env with chmod 600,
         enforced at load time (log a warning if the chmod fails).
-      - Auto-approve / YOLO mode MUST auto-expire — never leave global
-        auto-approve enabled indefinitely. Activations are capped via the
-        SafetyOverride singleton (safety_override.py). Never set the mode
-        globals directly.
+      - Auto-approve / YOLO mode MUST route through the SafetyOverride
+        singleton (safety_override.py) — never set the mode globals directly.
+        Ad-hoc activations (Slack `!yolo on`, and the dashboard button in the
+        default duration mode) MUST carry a finite TTL capped by the singleton's
+        24h ceiling and auto-expire. An operator MAY opt into a no-expiry grant
+        (`agent.yolo_duration = "until_shutdown"`, dashboard/config sources only)
+        ONLY when ALL of these hold: the grant lives in-memory and is cleared
+        when the gateway stops (it is NOT persisted as an activated grant — only
+        the config intent persists, re-audited on each boot), it is instantly
+        revocable (deactivate), it is deniable by the `yolo_duration` enterprise
+        governance scope resolved against the HOST profile with fail-closed, and
+        its live duration/expiry is clearly surfaced in the UI so the operator
+        cannot mistake it for a bounded window. Slack always stays finite.
       - Mermaid securityLevel must be 'strict' (iframe sandbox), never 'loose'
         (which allows JS execution from diagram payloads).
 

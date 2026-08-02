@@ -81,6 +81,16 @@ matcher. `register_scope` / `register_matcher` are append-only extension seams;
 the test suite proves a synthetic scope resolves end-to-end with **zero**
 evaluator edits.
 
+> **`yolo_duration` scope (YOLO duration control).** A `ScopedRuleset`
+> (`identifier` matcher) whose members are the YOLO duration values
+> (`default`, `until_shutdown`). An enterprise POLICY can deny a member — e.g.
+> `{"yolo_duration": {"mode": "deny", "deny": ["until_shutdown"]}}` — to forbid
+> the no-expiry grant fleet-wide. Consulted by
+> `safety_override.governed_duration_mode` against the **HOST** profile
+> (fail-closed) at the activation seam, and surfaced to the dashboard via
+> `/api/status.yolo_until_shutdown_permitted`. Added as a `SCOPE_CATALOG` data
+> row only — no evaluator change.
+
 > **2026-07-18 governance-seam re-triage.** The re-triage of the 16 upstream CPP
 > commit groups added **zero `SCOPE_CATALOG` rows** and **did not touch the
 > evaluator** — its seam work was confined to `platform/interfaces.py` /

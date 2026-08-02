@@ -955,6 +955,13 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     "channels": ScopeSpec(SCOPEDMAP),
     "approval_mode": ScopeSpec(ORDINAL, ordinal_scale="approval"),
     "sandbox.min_level": ScopeSpec(ORDINAL, ordinal_scale="sandbox"),
+    # Admin control over the YOLO *duration* options a user may select. Members
+    # are the duration values ("default", "until_shutdown"). Deny-by-default is
+    # open (standalone permits both); an enterprise POLICY can deny a member,
+    # e.g. {"yolo_duration": {"mode": "deny", "deny": ["until_shutdown"]}}, to
+    # remove no-expiry YOLO so it can never be chosen. Consulted by
+    # kiro_crew.safety_override.governed_duration_mode at the activation seam.
+    "yolo_duration": ScopeSpec(RULESET, matcher="identifier"),
     # Capabilities (Validation rule 8 registered defaults):
     "capabilities.spawn": ScopeSpec(
         CAPABILITY, capability_default=True, scope_matchers={"agents": "identifier"}

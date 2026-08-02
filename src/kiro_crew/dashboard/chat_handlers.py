@@ -59,7 +59,7 @@ from kiro_crew.dashboard.state import (
 )
 from kiro_crew.providers.acp import AcpProvider
 from kiro_crew.providers.base import LLMProvider
-from kiro_crew.safety_override import safety_override
+from kiro_crew.safety_override import governed_duration_mode, safety_override
 from kiro_crew.security import (
     is_sensitive_path,
     redact_credentials,
@@ -2696,6 +2696,14 @@ async def api_chat_mode(request: web.Request) -> web.Response:
     slot_key = body.get("slot") or None
 
     if mode == "yolo":
+        # Pick up a change to agent.yolo_duration without a restart, clamped by
+        # enterprise governance (an admin policy may forbid "until_shutdown").
+        try:
+            safety_override().duration_mode = governed_duration_mode(
+                KiroCrewConfig.load().agent.yolo_duration
+            )
+        except Exception:
+            logger.debug("could not refresh YOLO duration_mode from config", exc_info=True)
         result = await asyncio.to_thread(safety_override().activate, "dashboard")
         if not result.active:
             return web.json_response(
@@ -2968,6 +2976,14 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
         action = "approved"
     # YOLO: auto-approve all tools globally (all slots)
     elif action == "yolo":
+        # Pick up a change to agent.yolo_duration without a restart, clamped by
+        # enterprise governance (an admin policy may forbid "until_shutdown").
+        try:
+            safety_override().duration_mode = governed_duration_mode(
+                KiroCrewConfig.load().agent.yolo_duration
+            )
+        except Exception:
+            logger.debug("could not refresh YOLO duration_mode from config", exc_info=True)
         result = await asyncio.to_thread(safety_override().activate, "dashboard")
         if not result.active:
             return web.json_response(

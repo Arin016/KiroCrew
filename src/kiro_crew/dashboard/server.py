@@ -171,7 +171,7 @@ from kiro_crew.platform import (
     current_context,
     safe_context_call,
 )
-from kiro_crew.safety_override import safety_override
+from kiro_crew.safety_override import governed_duration_mode, safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 from kiro_crew.skills import SkillsLoader, set_pending_staged_hook
@@ -1138,7 +1138,13 @@ def _write_secret_file(secret_path: Path, secret: str) -> None:
 def _apply_startup_yolo(state: DashboardState, cfg: Any) -> None:
     """Enable safety override at startup if ``agent.yolo=true`` in config.
 
-    Activates with 24h TTL (no longer permanent). Re-auth required after expiry.
+    Duration follows ``duration_mode`` (already set from ``agent.yolo_duration``
+    just before this call, clamped by governance): in the ``default`` mode the
+    config source gets a 24h-capped TTL; in ``until_shutdown`` the grant has no
+    expiry and lasts until the gateway process stops. Either way the grant is
+    in-memory only — it is re-derived from config (and re-audited) on every
+    boot, never persisted as an activated grant. It stays instantly revocable
+    and deniable by the ``yolo_duration`` governance scope.
     """
     if not cfg.agent.yolo:
         return
@@ -1151,8 +1157,8 @@ def _apply_startup_yolo(state: DashboardState, cfg: Any) -> None:
         logger.error("Safety override activation refused (SEL audit failure?)")
         return
     logger.info(
-        "Safety override enabled at startup (agent.yolo=true, expires in %ds)",
-        result.ttl,
+        "Safety override enabled at startup (agent.yolo=true, %s)",
+        "no expiry until shutdown" if result.ttl < 0 else f"expires in {result.ttl}s",
     )
 
 
@@ -2866,6 +2872,11 @@ async def start_dashboard(
     # NOTE: Even with restore_sessions=false, foldered and pinned sessions are restored
     # so the Explorer tree stays populated.  Users can unpin or remove from folder to dismiss.
     cfg = KiroCrewConfig.load()
+    # Wire the YOLO duration policy onto the singleton BEFORE any activation, and
+    # unconditionally (even when yolo is off at startup) so a later dashboard
+    # activation honors the configured policy — clamped by enterprise governance
+    # (an admin policy may forbid the "until_shutdown" option).
+    safety_override().duration_mode = governed_duration_mode(cfg.agent.yolo_duration)
     _apply_startup_yolo(state, cfg)
 
     # Wire safety override expiry notifications
