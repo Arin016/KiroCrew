@@ -4508,6 +4508,32 @@ class TestExtractToolEvent:
         assert event is not None
         assert event.tool_purpose == "run tests"
 
+    def test_tool_purpose_extracted_camel_case_key(self):
+        """kiro-cli echoes the reserved purpose arg back camelCased on some tool
+        calls. Reading only the snake_case spelling dropped the purpose, which
+        made the dashboard's concise tool pill fall back to the raw command."""
+        client = AcpClient()
+        from kiro_crew.acp.types import JsonRpcMessage
+
+        msg = JsonRpcMessage(
+            method="session/update",
+            params={
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "Running: node kc-shot.mjs",
+                    "kind": "execute",
+                    "toolCallId": "tc-5",
+                    "input": {
+                        "__toolUsePurpose": "check harness render errors",
+                        "command": "node kc-shot.mjs",
+                    },
+                }
+            },
+        )
+        event = client._extract_tool_event(msg)
+        assert event is not None
+        assert event.tool_purpose == "check harness render errors"
+
 
 class TestBuildPermissionEvent:
     """Tests for _build_permission_event."""
@@ -8653,9 +8679,7 @@ class TestCompactionResetsContextStats:
             method="_kiro.dev/metadata",
             params={"contextUsagePercentage": 5.0},
         )
-        client._read_message = AsyncMock(
-            side_effect=[self._compaction_msg("completed"), post_meta]
-        )
+        client._read_message = AsyncMock(side_effect=[self._compaction_msg("completed"), post_meta])
 
         result = await client.wait_for_compaction(timeout=5.0)
 
