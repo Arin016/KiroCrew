@@ -110,6 +110,27 @@ def test_tool_prompt_emits_tool_call_without_permission(monkeypatch):
     assert not any(m.get("method") == "session/request_permission" for m in msgs)
 
 
+def test_tool_call_carries_the_purpose_arg_the_host_reads(monkeypatch):
+    """The fake's ``rawInput`` must carry the reserved purpose argument, and the
+    host's extractor must find it — that pair is what the dashboard's concise
+    tool pill renders instead of the literal command line. The camelCase
+    spelling is deliberate: kiro-cli emits it that way on a large share of calls,
+    and reading only the snake_case key silently dropped the label."""
+    from kiro_crew.acp._dispatch import extract_tool_purpose
+
+    buf = _capture(monkeypatch)
+    fake._handle(_prompt(fake.TOOL_TRIGGER))
+    msgs = _messages(buf)
+    call = next(
+        m["params"]["update"]
+        for m in msgs
+        if m.get("method") == "session/update"
+        and m["params"]["update"]["sessionUpdate"] == "tool_call"
+    )
+    assert call["rawInput"]["__toolUsePurpose"] == fake._TOOL_PURPOSE
+    assert extract_tool_purpose(call["rawInput"]) == fake._TOOL_PURPOSE
+
+
 def test_permission_prompt_raises_request_permission(monkeypatch):
     buf = _capture(monkeypatch)
     fake._handle(

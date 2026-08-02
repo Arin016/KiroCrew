@@ -4269,3 +4269,54 @@ def test_drop_counter_placeholder_appears_in_flushed_summary(caplog):
     records = _drop_records(caplog)
     assert len(records) == 1, records
     assert "Dropped 1 unroutable frame(s) for session ? (method=?)" in records[0]
+
+
+class TestToolPurposeExtraction:
+    """The reserved purpose arg is what the dashboard's concise tool pill shows
+    instead of the literal invocation. kiro-cli echoes it back under EITHER
+    spelling, so the shared runtime path must accept both — matching only the
+    snake_case key silently degraded half the pills to raw command text."""
+
+    def _update(self, raw_input: dict) -> dict:
+        return {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc-purpose",
+            "kind": "execute",
+            "title": "Running: node kc-shot.mjs",
+            "rawInput": raw_input,
+        }
+
+    def test_snake_case_key(self):
+        from kiro_crew.acp._dispatch import _build_tool_call_event
+
+        event = _build_tool_call_event(
+            self._update({"command": "node kc-shot.mjs", "__tool_use_purpose": "check harness"}),
+            None,
+        )
+        assert event.tool_purpose == "check harness"
+
+    def test_camel_case_key(self):
+        from kiro_crew.acp._dispatch import _build_tool_call_event
+
+        event = _build_tool_call_event(
+            self._update({"command": "node kc-shot.mjs", "__toolUsePurpose": "check harness"}),
+            None,
+        )
+        assert event.tool_purpose == "check harness"
+
+    def test_no_purpose_key_yields_empty(self):
+        from kiro_crew.acp._dispatch import _build_tool_call_event
+
+        event = _build_tool_call_event(self._update({"command": "node kc-shot.mjs"}), None)
+        assert event.tool_purpose == ""
+
+    def test_blank_and_non_string_values_ignored(self):
+        from kiro_crew.acp._dispatch import extract_tool_purpose
+
+        assert extract_tool_purpose({"__tool_use_purpose": "   "}) == ""
+        assert extract_tool_purpose({"__toolUsePurpose": 123}) == ""
+        assert extract_tool_purpose("not a dict") == ""
+        # A blank snake_case value must not shadow a real camelCase one.
+        assert (
+            extract_tool_purpose({"__tool_use_purpose": "", "__toolUsePurpose": "real"}) == "real"
+        )

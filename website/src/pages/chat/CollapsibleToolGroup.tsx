@@ -24,6 +24,12 @@ interface CollapsibleToolGroupProps {
   activityOpen?: boolean
 }
 
+/** Reserved tool argument holding the agent-authored purpose line. kiro-cli
+ *  echoes it back under EITHER spelling, so both are read — matching only the
+ *  snake_case one leaves the preview blank for the camelCase half of calls.
+ *  Mirrors `TOOL_PURPOSE_KEYS` in `acp/types.py`. Protocol keys, not UI copy. */
+const PURPOSE_META_KEYS = ['__tool_use_purpose', '__toolUsePurpose'] as const
+
 /** Extract a human-readable command preview from permission meta. */
 function extractPreview(meta?: Record<string, unknown>): string {
   if (!meta) return ''
@@ -37,7 +43,10 @@ function extractPreview(meta?: Record<string, unknown>): string {
     // unreadable line with escaped \n / \t sequences.
     return JSON.stringify(ti, null, 2)
   }
-  if (typeof meta.__tool_use_purpose === 'string') return meta.__tool_use_purpose
+  for (const key of PURPOSE_META_KEYS) {
+    const purpose = meta[key]
+    if (typeof purpose === 'string' && purpose.trim()) return purpose
+  }
   return ''
 }
 

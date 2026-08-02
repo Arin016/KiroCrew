@@ -138,6 +138,15 @@ KNOWN_SESSION_UPDATES = frozenset(
     }
 )
 
+# Reserved tool argument carrying the agent's own one-line reason for a call.
+# It is what the dashboard's concise tool label ("simplified tool names") shows
+# instead of the literal invocation, so a missed key silently degrades every
+# pill back to raw command text. BOTH spellings occur on the wire: our tool
+# schemas declare the snake_case key, but kiro-cli echoes some tool calls back
+# in ``rawInput`` with it camelCased — read via
+# ``_dispatch.extract_tool_purpose()``, never by indexing one literal.
+TOOL_PURPOSE_KEYS: tuple[str, ...] = ("__tool_use_purpose", "__toolUsePurpose")
+
 # ── ACP Permission Outcomes ──
 
 OUTCOME_SELECTED = "selected"

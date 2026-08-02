@@ -37,6 +37,7 @@ from kiro_crew import model_registry, platform_compat
 from kiro_crew.acp._dispatch import (
     _kiro_mcp_server_name,
     _kiro_tool_name,
+    extract_tool_purpose,
     parse_usage_update,
 )
 from kiro_crew.acp.liveness import VERDICT_UNKNOWN, VERDICT_WORKING, LivenessOracle
@@ -4011,7 +4012,7 @@ class AcpClient:
             title = update.get("title", "unknown")
             kind = update.get("kind", "unknown")
             raw_input = update.get("rawInput") or update.get("input") or update.get("params")
-            purpose = raw_input.get("__tool_use_purpose", "") if isinstance(raw_input, dict) else ""
+            purpose = extract_tool_purpose(raw_input)
             logger.debug(
                 "ACP tool_call raw: %s",
                 {k: v for k, v in update.items() if k != "sessionUpdate"},

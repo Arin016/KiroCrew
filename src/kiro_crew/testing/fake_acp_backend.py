@@ -16,7 +16,9 @@ Prompt-driven behaviour on ``session/prompt`` (the reply is always sent last):
 * ``[[TOOL]]`` in the prompt -> also emit a ``tool_call`` + ``tool_call_update``
   (no permission). Exercises the tool-card UI and is deterministic headless:
   kiro-cli likewise emits tool calls that never raise ``session/request_permission``
-  for pre-approved tools.
+  for pre-approved tools. The emitted ``rawInput`` carries the reserved purpose
+  argument under its camelCase spelling (see ``_TOOL_PURPOSE``), so the pill's
+  concise-label path is covered by the harness.
 * ``[[PERMISSION]]`` in the prompt -> the ``[[TOOL]]`` sequence PLUS a
   server->client ``session/request_permission`` (to surface the approval
   modal). This is **fire-and-forget**: the fake does not gate its own
@@ -120,6 +122,11 @@ ERROR_MESSAGE = "fake ACP backend: injected failure"
 
 _SESSION_ID = "fake-1"
 _TOOL_CALL_ID = "fake-tool-1"
+# The agent-authored purpose line, carried as a reserved tool argument. kiro-cli
+# echoes it back in ``rawInput`` under EITHER spelling; the fake emits the
+# camelCase one so the harness exercises the shape that used to be dropped (the
+# dashboard's concise tool pill fell back to the literal command line).
+_TOOL_PURPOSE = "Say hello from the fake backend"
 _PERMISSION_REQ_ID = 9001
 
 
@@ -269,7 +276,10 @@ def _emit_tool_call(
             "title": "fake demo tool",
             "kind": "execute",
             "status": "pending",
-            "rawInput": {"command": "echo hello-from-fake"},
+            "rawInput": {
+                "command": "echo hello-from-fake",
+                "__toolUsePurpose": _TOOL_PURPOSE,
+            },
         },
     )
     status = "completed"

@@ -786,6 +786,13 @@ has nothing to go on and mirrors the language the user typed in — an inferred
 signal that flips mid-session the moment the user pastes an English stack trace,
 and one that persists, since purposes are stored in session history.
 
+Reading it back off the wire accepts **both** spellings — kiro-cli echoes the
+reserved arg in `rawInput` as either `__tool_use_purpose` or `__toolUsePurpose`
+depending on the call. `acp/_dispatch.py::extract_tool_purpose` (keys in
+`acp/types.py::TOOL_PURPOSE_KEYS`) is the single reader for both transports;
+matching one literal drops the purpose for the other half of the calls, and the
+concise pill silently falls back to the raw command line.
+
 Three properties are load-bearing:
 
 - **`""` injects nothing.** Auto is resolved client-side by `detect.ts`; the

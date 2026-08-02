@@ -47,6 +47,7 @@ from kiro_crew.acp.types import (
     OPTION_ALLOW_ONCE,
     TODO_TASKS_MAX,
     TODO_TEXT_MAX,
+    TOOL_PURPOSE_KEYS,
     UPDATE_AGENT_MESSAGE_CHUNK,
     UPDATE_AGENT_THOUGHT_CHUNK,
     UPDATE_TOOL_CALL,
@@ -215,6 +216,24 @@ def select_tool_title(title: object, raw_input: object) -> str | None:
     if isinstance(title, str) and title:
         return title
     return None
+
+
+def extract_tool_purpose(raw_input: object) -> str:
+    """Pull the agent-authored purpose line out of a tool call's raw params.
+
+    Accepts every spelling in ``TOOL_PURPOSE_KEYS`` because kiro-cli echoes the
+    reserved argument back inconsistently (snake_case as declared in the tool
+    schema, camelCase on some calls). Reading only one literal drops the purpose
+    for the other half of the calls, which shows up as the dashboard's concise
+    tool pill falling back to the literal command line.
+    """
+    if not isinstance(raw_input, dict):
+        return ""
+    for key in TOOL_PURPOSE_KEYS:
+        value = raw_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _redact(text: str) -> str:
@@ -446,7 +465,7 @@ def _build_tool_call_event(
     title = update.get("title", "unknown")
     kind = update.get("kind", "unknown")
     raw_input = update.get("rawInput") or update.get("input") or update.get("params")
-    purpose = raw_input.get("__tool_use_purpose", "") if isinstance(raw_input, dict) else ""
+    purpose = extract_tool_purpose(raw_input)
     tool_call_id = update.get("toolCallId", "")
     # Cache the STRUCTURED raw params (dict) keyed by toolCallId so a later
     # permission_request — which carries only a truncated title — can recover
