@@ -7,6 +7,7 @@ import { useProvider } from '../../providers'
 import { modelListRefetchInterval } from '../../providers/modelListHealth'
 import { EFFORT_LEVELS, effortLabel, modelSupportsEffort } from '../../lib/effort'
 import { isMac } from '../../utils/platform'
+import { capRoleOther, clampRoleOther } from '../../lib/userProfile'
 
 import { i18nT } from '../../i18n/t'
 const RESTORE_OPTIONS = ['15', '30', '60', '120', '360', '720', '1440', '0']
@@ -100,7 +101,7 @@ export function ChatPanel() {
       completion_keep?: CompletionKeepMode
       completion_keep_chars?: number
     }
-    dashboard?: { user_role?: string; user_technical_level?: string }
+    dashboard?: { user_role?: string; user_role_other?: string; user_technical_level?: string }
   }>({
     queryKey: ['kirocrewConfig'],
     queryFn: () => api.kirocrewConfig(),
@@ -112,6 +113,7 @@ export function ChatPanel() {
   // config PATCH allowlist (handlers/core.py) and mapped to the prompt's
   // [USER PROFILE] block in context.py.
   const userRole = mcCfg?.dashboard?.user_role ?? ''
+  const userRoleOther = mcCfg?.dashboard?.user_role_other ?? ''
   const userTechLevel = mcCfg?.dashboard?.user_technical_level ?? ''
   const profileMut = useMutation({
     mutationFn: ({ path, value }: { path: string; value: string }) =>
@@ -119,6 +121,26 @@ export function ChatPanel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
     onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_profile')),
   })
+
+  // "Other" reveals a free-text role. Typed locally and committed on blur /
+  // Enter so a PATCH does not fire per keystroke; seeded from the server once
+  // the config query resolves, and re-seeded whenever the server value changes
+  // (another tab, or the onboarding replay writing it).
+  const [localRoleOther, setLocalRoleOther] = useState(userRoleOther)
+  const roleOtherSeedRef = useRef(userRoleOther)
+  useEffect(() => {
+    if (roleOtherSeedRef.current !== userRoleOther) {
+      roleOtherSeedRef.current = userRoleOther
+      setLocalRoleOther(userRoleOther)
+    }
+  }, [userRoleOther])
+  const commitRoleOther = () => {
+    const next = clampRoleOther(localRoleOther)
+    if (next === userRoleOther) return
+    roleOtherSeedRef.current = next
+    setLocalRoleOther(next)
+    profileMut.mutate({ path: 'dashboard.user_role_other', value: next })
+  }
 
   const [localBudget, setLocalBudget] = useState('')
   const budgetInitRef = useRef(false)
@@ -280,6 +302,17 @@ export function ChatPanel() {
             optionLabels={ROLE_LABELS}
             onChange={v => profileMut.mutate({ path: 'dashboard.user_role', value: v })}
           />
+          {userRole === 'other' && (
+            <SettingsInput
+              label={i18nT('pages.settings.chatPanel.describe_your_role')}
+              aria-label={i18nT('pages.settings.chatPanel.describe_your_role')}
+              description={i18nT('pages.settings.chatPanel.kiro_quotes_this_back_to_itself_when_calibrating')}
+              placeholder={i18nT('pages.settings.chatPanel.e_g_solutions_architect_sre_founder')}
+              value={localRoleOther}
+              onChange={v => setLocalRoleOther(capRoleOther(v))}
+              onBlur={commitRoleOther}
+            />
+          )}
           <SettingsSelect
             label={i18nT('pages.settings.chatPanel.technical_comfort')}
             description={i18nT('pages.settings.chatPanel.sets_how_deep_explanations_go_plain_language_vs')}

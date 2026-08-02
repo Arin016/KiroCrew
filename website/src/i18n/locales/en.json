@@ -1478,11 +1478,11 @@
       "no_matches": "No matches"
     },
     "modelEffortDropdown": {
+      "default_for_agent": "Default for {{agent}}",
       "filter_models": "Filter models",
       "model_list": "Model list",
       "models": "Models",
       "reasoning": "Reasoning",
-      "default_for_agent": "Default for {{agent}}",
       "set_default_for_agent": "Set as default for {{agent}}",
       "set_default_for_new_sessions": "Global fallback for new sessions…",
       "type_to_filter": "Type to filter…"
@@ -1545,6 +1545,8 @@
       "continue": "Continue",
       "couldn_t_save_your_answers_press_next_to_retry_o": "Couldn't save your answers — press Next to retry, or Skip again to\n            continue without saving.",
       "customize_kirocrew": "Customize KiroCrew",
+      "describe_your_role": "Describe your role",
+      "e_g_solutions_architect_sre_founder": "e.g. solutions architect, SRE, founder",
       "how_technical_are_you": "How technical are you?",
       "pick_your_look": "Pick your look",
       "skip": "Skip",
@@ -1917,13 +1919,13 @@
       "enable_it_under": "Enable it under",
       "not_now": "Not now",
       "open_settings": "Open settings",
+      "pick_an_installed_provider_under_settings_voice": "Pick an installed provider under Settings → Voice, or install the current one.",
+      "provider_is_not_installed_on_this_machine": "Speech-to-text is on, but the \"{{provider}}\" provider isn't installed on this machine, so recordings can't be transcribed.",
       "settings_voice": "Settings → Voice",
       "speech_to_text_is_not_enabled_yet_so_the_microph": "Speech-to-text is not enabled yet, so the microphone cannot turn your voice into text.",
       "then_click_the_mic_to_dictate_into_the_message_b": ", then click the mic to dictate into the message box.",
       "turn_on_voice_input": "Turn on voice input",
-      "voice_provider_not_installed": "Voice provider not installed",
-      "provider_is_not_installed_on_this_machine": "Speech-to-text is on, but the \"{{provider}}\" provider isn't installed on this machine, so recordings can't be transcribed.",
-      "pick_an_installed_provider_under_settings_voice": "Pick an installed provider under Settings → Voice, or install the current one."
+      "voice_provider_not_installed": "Voice provider not installed"
     },
     "voiceStatusBar": {
       "dismiss_microphone_error": "Dismiss microphone error",
@@ -3957,9 +3959,11 @@
         "default_model": "Fallback Model",
         "default_reasoning_effort": "Default Reasoning Effort",
         "default_to_autopilot_mode": "Default to Autopilot Mode",
+        "describe_your_role": "Describe your role",
         "dismiss": "Dismiss",
         "display_time_on_each_message": "Display time on each message",
         "display_usage_percentage_next_to_the_context_pro": "Display usage percentage next to the context progress bar",
+        "e_g_solutions_architect_sre_founder": "e.g. solutions architect, SRE, founder",
         "expand_history_sidebar_by_default": "Expand history sidebar by default",
         "failed_to_load_config": "Failed to load config.",
         "failed_to_load_dashboard_config": "Failed to load dashboard config.",
@@ -3974,6 +3978,7 @@
         "how_long_to_wait_for_the_agent_to_honor_a_stop_p": "How long to wait for the agent to honor a Stop press before forcefully killing the session. Longer budgets preserve session state more often but make stops feel laggy when agents are stuck in long tool calls.",
         "immediate_mode_shows_raw_chunks_as_they_arrive_s": "Immediate mode shows raw chunks as they arrive. Smooth mode buffers and fades text in at a steady pace.",
         "kiro_matches_vocabulary_and_examples_to_your_pro": "Kiro matches vocabulary and examples to your professional background",
+        "kiro_quotes_this_back_to_itself_when_calibrating": "Kiro quotes this back to itself when calibrating vocabulary and examples.",
         "merge_queued_messages": "Merge Queued Messages",
         "messages": "Messages",
         "model": "Model",

@@ -3775,6 +3775,7 @@
         "onboarded": false,
         "import_onboarded": false,
         "user_role": "",
+        "user_role_other": "",
         "user_technical_level": "",
         "tips_enabled": true,
         "tips_cadence_hours": 6.0,
@@ -4130,6 +4131,20 @@
       "tags": [],
       "label": "User Role",
       "help": "The user's professional background, collected during onboarding (developer, designer, product-manager, data-ml, it-ops, other). Injected into the agent prompt so responses match the user's domain vocabulary. Empty = unspecified.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "dashboard.user_role_other",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "User Role (Custom)",
+      "help": "Free-text role the user typed when they picked 'other' during onboarding (e.g. 'solutions architect'). Consulted ONLY while user_role == 'other'; quoted verbatim into the agent prompt. Retained (not cleared) when another role is picked, so it is inert rather than contradictory and survives switching back. Empty = 'other' contributes nothing.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""

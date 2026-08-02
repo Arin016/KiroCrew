@@ -129,6 +129,14 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "chat.describe-your-role",
+    "label": "Describe your role",
+    "description": "Kiro quotes this back to itself when calibrating vocabulary and examples.",
+    "tab": "chat",
+    "type": "input",
+    "occurrence": 1
+  },
+  {
     "id": "chat.fallback-model",
     "label": "Fallback Model",
     "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Capabilities → Crews, or pick one inside a session to override it there.",

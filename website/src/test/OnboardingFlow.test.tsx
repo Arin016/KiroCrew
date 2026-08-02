@@ -235,6 +235,153 @@ describe('OnboardingFlow — About You step', () => {
     expect(patchConfig).toHaveBeenCalledTimes(1)
     expect(patchConfig).toHaveBeenCalledWith('dashboard.user_role', 'developer')
   })
+
+  // ── "Other" free-text escape hatch ──────────────────────────────────────
+
+  it('reveals a focused text field only when Other is picked', () => {
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    expect(screen.queryByLabelText('Describe your role')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    const input = screen.getByLabelText('Describe your role')
+    expect(input).toBeInTheDocument()
+    expect(input).toHaveFocus()
+    // No `maxLength`: the HTML attribute counts UTF-16 code units, so a paste
+    // ending in an astral character would truncate mid-surrogate-pair. The cap
+    // is applied in onChange by code point instead.
+    expect(input).not.toHaveAttribute('maxLength')
+  })
+
+  it('caps the typed role by code point, never splitting a surrogate pair', () => {
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    const input = screen.getByLabelText('Describe your role') as HTMLInputElement
+    // 59 BMP chars + an astral char: a code-unit slice at 60 would keep only
+    // the high surrogate and persist a broken character.
+    fireEvent.change(input, { target: { value: 'x'.repeat(59) + '😀' } })
+    expect([...input.value]).toHaveLength(60)
+    expect(input.value.endsWith('😀')).toBe(true)
+    // Past the cap, the astral char is dropped whole rather than halved.
+    fireEvent.change(input, { target: { value: 'x'.repeat(60) + '😀' } })
+    expect(input.value).toBe('x'.repeat(60))
+  })
+
+  it('persists the typed role alongside the other slug', async () => {
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    fireEvent.change(screen.getByLabelText('Describe your role'), {
+      target: { value: '  solutions architect  ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => {
+      expect(patchConfig).toHaveBeenCalledWith('dashboard.user_role', 'other')
+      // Trimmed — a stray space would render inside the prompt's quotes.
+      expect(patchConfig).toHaveBeenCalledWith(
+        'dashboard.user_role_other',
+        'solutions architect',
+      )
+    })
+  })
+
+  it('Enter in the field advances instead of leaving the answer unsaved', async () => {
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    const input = screen.getByLabelText('Describe your role')
+    fireEvent.change(input, { target: { value: 'SRE' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() =>
+      expect(patchConfig).toHaveBeenCalledWith('dashboard.user_role_other', 'SRE'),
+    )
+    expect(await screen.findByText('Work that runs on time')).toBeInTheDocument()
+  })
+
+  it('switching from Other to a real chip leaves the stored free text alone', async () => {
+    kirocrewConfig.mockResolvedValue({
+      dashboard: {
+        user_role: 'other',
+        user_role_other: 'solutions architect',
+        user_technical_level: '',
+      },
+    })
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    // Seeded from the server, so the replay shows what was saved.
+    await waitFor(() =>
+      expect(screen.getByLabelText('Describe your role')).toHaveValue('solutions architect'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Developer' }))
+    expect(screen.queryByLabelText('Describe your role')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() =>
+      expect(patchConfig).toHaveBeenCalledWith('dashboard.user_role', 'developer'),
+    )
+    // Deliberately NOT cleared: a second PATCH could succeed while the role
+    // PATCH failed, leaving `user_role=other` with its description deleted.
+    // The value is inert — context.py only reads it while the role is 'other'.
+    expect(patchConfig).toHaveBeenCalledTimes(1)
+    expect(patchConfig).not.toHaveBeenCalledWith('dashboard.user_role_other', '')
+  })
+
+  it('Other with an empty field writes only the slug', async () => {
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() =>
+      expect(patchConfig).toHaveBeenCalledWith('dashboard.user_role', 'other'),
+    )
+    // '' equals the baseline, so no needless PATCH for the free text.
+    expect(patchConfig).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the caret in the field while typing (focus-trap regression)', () => {
+    // The dialog's focus trap re-runs whenever `finish` changes identity, which
+    // now happens on every keystroke in this field. Before initial focus was
+    // keyed to the step, the second character went to "Skip all".
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    const input = screen.getByLabelText('Describe your role')
+    fireEvent.change(input, { target: { value: 'S' } })
+    expect(input).toHaveFocus()
+    fireEvent.change(input, { target: { value: 'SR' } })
+    expect(input).toHaveFocus()
+  })
+
+  it('re-seats focus inside the dialog when the save freeze lifts', async () => {
+    // Every step-2 control is disabled during the save, so the browser drops
+    // focus to <body>. On the failed-save path the modal stays open, and
+    // without re-seating focus the Tab trap's first/last comparisons stop
+    // matching and Tab escapes the aria-modal dialog.
+    patchConfig.mockRejectedValueOnce(new Error('gateway down'))
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }))
+    fireEvent.change(screen.getByLabelText('Describe your role'), {
+      target: { value: 'founder' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByRole('alert')
+    expect(document.activeElement).not.toBe(document.body)
+    expect(screen.getByRole('button', { name: /Skip/ })).toHaveFocus()
+  })
+
+  it('keeps typed text when Other is toggled off and back on', () => {
+    renderWithProviders(<OnboardingFlow initialOpen onComplete={vi.fn()} />)
+    advanceToStep2()
+    const other = screen.getByRole('button', { name: 'Other' })
+    fireEvent.click(other)
+    fireEvent.change(screen.getByLabelText('Describe your role'), {
+      target: { value: 'founder' },
+    })
+    fireEvent.click(other) // toggle off — field hides
+    expect(screen.queryByLabelText('Describe your role')).not.toBeInTheDocument()
+    fireEvent.click(other) // back on — the answer is still there
+    expect(screen.getByLabelText('Describe your role')).toHaveValue('founder')
+  })
 })
 
 describe('OnboardingFlow — Privacy step (final)', () => {

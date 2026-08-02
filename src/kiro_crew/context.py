@@ -661,8 +661,9 @@ def _build_docs_section() -> str:
 # Slug → prompt-ready description maps for the [USER PROFILE] block. Slugs are
 # the values enforced by the dashboard.user_role / dashboard.user_technical_level
 # enums in handlers/core.py _EDITABLE_CONFIG; keep the three places in sync.
-# "other"/"" role and "" level contribute nothing — the block only names what
-# the user actually told us.
+# "" role and "" level contribute nothing — the block only names what the user
+# actually told us. "other" has no entry here on purpose: it routes to the
+# free-text dashboard.user_role_other instead (see _role_description).
 _USER_ROLE_DESCRIPTIONS: dict[str, str] = {
     "developer": "a software developer",
     "designer": "a UX / product designer",
@@ -677,19 +678,64 @@ _TECHNICAL_LEVEL_DESCRIPTIONS: dict[str, str] = {
     "non-technical": "not technical — prefers plain language over code and jargon",
 }
 
+#: Longest free-text role rendered into the prompt. Mirrors the ``max_len`` on
+#: ``dashboard.user_role_other`` in handlers/core.py, re-applied here because the
+#: writer's validation is not the only way a value reaches this field — a
+#: hand-edited config.json bypasses the PATCH allowlist entirely.
+_ROLE_OTHER_MAX_LEN = 60
+
+
+def _sanitize_free_text_role(raw: str) -> str:
+    """Return ``raw`` reduced to a single safe prompt-sized phrase, or ``""``.
+
+    ``dashboard.user_role_other`` is the ONLY user-authored string in the
+    [USER PROFILE] block — every other value is a slug the UI picks — so it is
+    the only one that could carry newlines and bracket markers shaped like the
+    block delimiters the model is taught to trust. Whitespace (including
+    newlines and tabs) is collapsed to single spaces, C0/C1 control characters
+    and square brackets are dropped, and the result is length-capped. A value
+    that sanitizes to nothing is treated as unset rather than rendered empty.
+    """
+    if not raw:
+        return ""
+    cleaned = "".join(" " if ch.isspace() else "" if _is_unsafe_role_char(ch) else ch for ch in raw)
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:_ROLE_OTHER_MAX_LEN].strip()
+
+
+def _is_unsafe_role_char(ch: str) -> bool:
+    """True for characters that must never reach the prompt from free text."""
+    return ch in "[]" or unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cs")
+
+
+def _role_description(cfg: "KiroCrewConfig") -> str:
+    """Resolve the role half of the profile block to a prompt-ready phrase.
+
+    A picked slug maps through ``_USER_ROLE_DESCRIPTIONS``. "other" has no
+    canned description, so it falls back to the free text the user typed —
+    quoted, and framed as something they said rather than as a fact the product
+    asserts, since nothing validated that it names a real profession.
+    """
+    role = cfg.dashboard.user_role
+    if role == "other":
+        custom = _sanitize_free_text_role(cfg.dashboard.user_role_other)
+        return f'described by the user as "{custom}"' if custom else ""
+    return _USER_ROLE_DESCRIPTIONS.get(role, "")
+
 
 def _build_user_profile_section(cfg: "KiroCrewConfig") -> str:
     """Build the [USER PROFILE] block from onboarding answers.
 
     Collected by onboarding step 2 (and editable in Settings > General >
-    About You), stored as dashboard.user_role / dashboard.user_technical_level.
+    About You), stored as dashboard.user_role / dashboard.user_role_other /
+    dashboard.user_technical_level.
     Returns "" when the user skipped both questions so un-profiled installs
     see byte-identical context.
 
     The wording deliberately calibrates HOW the agent communicates, not WHAT
     it may do — a designer who asks for code must still get code.
     """
-    role_desc = _USER_ROLE_DESCRIPTIONS.get(cfg.dashboard.user_role, "")
+    role_desc = _role_description(cfg)
     tech_desc = _TECHNICAL_LEVEL_DESCRIPTIONS.get(cfg.dashboard.user_technical_level, "")
     if not role_desc and not tech_desc:
         return ""

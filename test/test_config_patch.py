@@ -436,6 +436,22 @@ class TestUserProfilePatch:
             resp = await _patch(c, "dashboard.user_technical_level", "expert")
             assert resp.status == 400
 
+    @pytest.mark.asyncio
+    async def test_free_text_role_persists(self, tmp_config) -> None:
+        """The 'other' escape hatch is the one profile field that IS free text."""
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "dashboard.user_role_other", "solutions architect")
+            assert resp.status == 200
+        data = json.loads(tmp_config.read_text(encoding="utf-8"))
+        assert data["dashboard"]["user_role_other"] == "solutions architect"
+
+    @pytest.mark.asyncio
+    async def test_free_text_role_length_capped(self, tmp_config) -> None:
+        """Bounded so an unbounded paste cannot land in the system prompt."""
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "dashboard.user_role_other", "x" * 61)
+            assert resp.status == 400
+
 
 # ── Default model + default reasoning effort (Settings > Chat) ────────────
 
