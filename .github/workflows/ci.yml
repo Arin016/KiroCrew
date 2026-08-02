@@ -766,6 +766,33 @@ jobs:
           path: website/build/coverage/
           if-no-files-found: error
 
+  electron-test:
+    name: Electron Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/electron/package-lock.json
+
+      # ELECTRON_SKIP_BINARY_DOWNLOAD: the suite is `node --test` over the main
+      # process's pure-logic modules -- it never launches Electron -- so the
+      # ~100MB prebuilt binary is dead weight here. Skipping it takes the
+      # install from minutes to ~30s. Anything that needs a REAL Electron
+      # runtime belongs in ota-test.yml, which packages actual app bundles.
+      - name: Install dependencies
+        working-directory: website/electron
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: npm ci --no-audit --no-fund
+
+      - name: Unit tests
+        working-directory: website/electron
+        run: npm test
+
   e2e:
     name: E2E (stub ACP backend, offline)
     runs-on: ubuntu-latest
