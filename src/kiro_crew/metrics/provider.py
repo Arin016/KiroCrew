@@ -189,6 +189,7 @@ _TURN_BUCKETS_MS: list[float] = [
 # instrument to this map when you add the metric.
 _HISTOGRAM_BUCKETS_MS: dict[str, list[float]] = {
     "kirocrew.gateway.request.duration": _FAST_BUCKETS_MS,
+    "kirocrew.db.query.duration": _FAST_BUCKETS_MS,
     "kirocrew.mcp.backend.acquire.duration": _FAST_BUCKETS_MS,
     "kirocrew.skill.lazy_load.duration": _FAST_BUCKETS_MS,
     # Telegram Bot API round-trips: typically 50-500ms, but a 429 retry_after
