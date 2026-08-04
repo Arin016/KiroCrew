@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "name": "launchdarkly",
+    "repo": "https://github.com/launchdarkly-labs/launchdarkly-kiro-crew-app",
+    "gitUrl": "https://github.com/launchdarkly-labs/launchdarkly-kiro-crew-app",
+    "branch": "main"
+  }
+]
