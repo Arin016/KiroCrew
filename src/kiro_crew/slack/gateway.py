@@ -5011,6 +5011,14 @@ class GatewayOrchestrator:
         mgr = self._mcp_gateway_manager
         if self.dashboard_state is not None:
             self.dashboard_state._mcp_gateway_manager = mgr
+        # Rebuild the provider factory so new sessions resolve the overlay
+        # path from the CURRENT config, not the value captured at boot.
+        # refresh_defaults() rebuilds the factory and drains the warm pool
+        # without killing live sessions — the correct semantics since a
+        # running session has already sent session/new and cannot be
+        # retrofitted.
+        if self.sessions is not None:
+            await self.sessions.refresh_defaults()
         if mgr is None:
             return {"enabled": enabled, "running": False, "ping_ok": False}
         running = bool(mgr.is_running)

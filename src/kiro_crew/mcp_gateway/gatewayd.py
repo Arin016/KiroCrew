@@ -186,7 +186,8 @@ _DEFAULT_SOCKET_NAME = "mcp-gateway.sock"
 #: A ``target_resolver`` takes a :class:`PoolKey` and returns the
 #: ``(command, args, env, work_dir)`` tuple used to spawn the backend, or
 #: ``None`` if the server is unknown. The default resolver looks up
-#: ``MC_MCP_TARGET_<SERVER>`` env vars (matches the Rust PoC and existing
+#: ``KIROCREW_MCP_TARGET_<SERVER>`` env vars (accepts legacy ``MC_MCP_TARGET_<SERVER>``
+#: for backward compatibility; matches the Rust PoC and existing
 #: rewriter wiring); tests inject their own resolver to avoid env-coupling.
 TargetResolver = Callable[
     [PoolKey],
@@ -1033,10 +1034,10 @@ def _declared_env_to_forward(pool_key: PoolKey) -> dict[str, str]:
 
 
 def env_target_resolver(pool_key: PoolKey) -> Optional[tuple[str, list[str], dict[str, str], str]]:
-    """Look up ``MC_MCP_TARGET_<SERVER>`` in the process env and return the
+    """Look up ``KIROCREW_MCP_TARGET_<SERVER>`` in the process env and return the
     spawn tuple, or ``None`` if no mapping is set.
 
-    Wire format: ``MC_MCP_TARGET_SLACK_MCP="slack-mcp --stdio"``.
+    Wire format: ``KIROCREW_MCP_TARGET_SLACK_MCP="slack-mcp --stdio"``.
     The server name is upper-cased with ``-`` replaced by ``_``. Env is
     inherited from the gateway process with ``KIROCREW_CHANNEL_ID``
     overlaid when the pool key carries one — this keeps cron / send_message
@@ -1046,14 +1047,22 @@ def env_target_resolver(pool_key: PoolKey) -> Optional[tuple[str, list[str], dic
     :func:`kiro_crew.mcp_gateway.manager._scrub_sensitive_env` so even if
     the gateway process somehow inherited credential vars, backends won't.
     """
-    base = "MC_MCP_TARGET_" + pool_key.server_name.upper().replace("-", "_")
+    base = "KIROCREW_MCP_TARGET_" + pool_key.server_name.upper().replace("-", "_")
+    # Accept the legacy MC_MCP_TARGET_ prefix for overlays/daemons written by
+    # older versions that haven't been regenerated (#928).
+    legacy_base = "MC_MCP_TARGET_" + pool_key.server_name.upper().replace("-", "_")
     # Prefer the args-disambiguated entry (written by
     # rewriter._collect_target_env) so two agents that share a server name but
     # declare different --target-args each spawn their OWN backend command,
     # instead of resolving to whichever agent sorted first alphabetically. Fall
     # back to the bare server-name entry for older overlays predating the
     # disambiguated keys.
-    spec = os.environ.get(base + "__" + pool_key.command_args_hash) or os.environ.get(base)
+    spec = (
+        os.environ.get(base + "__" + pool_key.command_args_hash)
+        or os.environ.get(base)
+        or os.environ.get(legacy_base + "__" + pool_key.command_args_hash)
+        or os.environ.get(legacy_base)
+    )
     if not spec:
         return None
     parts = shlex.split(spec)
@@ -2258,7 +2267,7 @@ async def _acquire_backend(
     if target is None:
         raise _TargetUnknown(
             f"no target mapping for server {pool_key.server_name!r}; "
-            "set MC_MCP_TARGET_<SERVER> env var or pass a target_resolver"
+            "set KIROCREW_MCP_TARGET_<SERVER> env var or pass a target_resolver"
         )
     command, args, env, work_dir = target
 
