@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { screen, fireEvent, act } from '@testing-library/react'
+import { screen, fireEvent, act, waitFor } from '@testing-library/react'
 
 import { renderWithProviders } from './helpers'
 import WebPreviewPanel, { normalizeUrl, setSessionPreviewUrl, setSessionPreviewPending, isolatePreviewHost, withCacheBuster, PREVIEW_ENABLE_BROWSE_EVENT, BROWSE_MODE_EVENT } from '../components/WebPreviewPanel'
@@ -372,5 +372,112 @@ describe('WebPreviewPanel — live agent-browse mirror', () => {
     })
     expect(screen.getByText('Agent can act')).toBeInTheDocument()
     expect(screen.queryByText('Let the agent act')).toBeNull()
+  })
+})
+
+describe('WebPreviewPanel — native browser transport', () => {
+  // A minimal window.browserAPI bridge, enough for useNativeBrowser to report
+  // available:true and (via getState open:true) hand the panel to the native
+  // surface. The native view paints outside the DOM, so these assert transport
+  // SELECTION + control wiring, never pixels.
+  function installNativeBridge(open = true, url = 'https://example.com/') {
+    const api = {
+      open: vi.fn(async (_p: string, u: string) => ({ open: true, visible: true, url: u, bounds: null })),
+      navigate: vi.fn(async (_p: string, u: string) => ({ open: true, visible: true, url: u, bounds: null })),
+      setBounds: vi.fn(async () => ({ open, visible: true, url, bounds: null })),
+      setOverlayActive: vi.fn(async () => ({ open, visible: true, url, bounds: null })),
+      close: vi.fn(async () => ({ open: false, visible: false, url: '', bounds: null })),
+      setInactive: vi.fn(async () => ({ open, visible: true, url, bounds: null })),
+      getState: vi.fn(async () => ({ open, visible: true, url, bounds: null })),
+      setAgentAct: vi.fn(async () => ({ ok: true })),
+      setControlOwner: vi.fn(async (_p: string, owner: string) => ({ owner, changed: true })),
+      onDidNavigate: vi.fn(() => () => {}),
+      onTitleUpdated: vi.fn(() => () => {}),
+    }
+    ;(window as unknown as { browserAPI?: unknown }).browserAPI = api
+    return api
+  }
+
+  const emitFrame = (session_key = 'sess-1') =>
+    act(() => {
+      window.dispatchEvent(new CustomEvent('kirocrew-browser-frame', {
+        detail: { data: 'Zm9vYmFy', format: 'jpeg', session_key },
+      }))
+    })
+
+  beforeEach(() => {
+    localStorage.clear()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(undefined))
+    class RO { observe() {} unobserve() {} disconnect() {} }
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = RO
+  })
+  afterEach(() => {
+    delete (window as unknown as { browserAPI?: unknown }).browserAPI
+    vi.unstubAllGlobals()
+  })
+
+  it('native view OWNS the panel when available — a chat-opened page lands in it, not the mirror', async () => {
+    installNativeBridge(true)
+    renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
+    // NOTE: 'Let the agent act' appears on BOTH surfaces (the native header
+    // reuses the mirror's keys), so it cannot distinguish them. Wait instead for
+    // the mirror's <img> to be gone, which only happens once the native view is
+    // open and owning the panel. Before getState resolves, a streamed frame
+    // legitimately shows the mirror -- that is the deliberate fallback for a
+    // desktop shell whose native view has nothing in it yet.
+    emitFrame('sess-1')
+    await waitFor(() => expect(screen.queryByAltText('Live browser session')).toBeNull())
+    // A further streamed frame must NOT override the now-open native view.
+    emitFrame('sess-1')
+    expect(screen.queryByAltText('Live browser session')).toBeNull()
+    expect(screen.getByText('Let the agent act')).toBeInTheDocument()
+  })
+
+  it('shows the mirror when the bridge EXISTS but no native view is open yet', async () => {
+    // Regression: gating the mirror on `!native.available` blanked the panel on a
+    // desktop shell whose preload bridge exists while nothing has been opened
+    // natively -- frames were arriving with nothing rendering them. The real
+    // condition is `!nativeOpen`.
+    installNativeBridge(false)
+    renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
+    emitFrame('sess-1')
+    await waitFor(() =>
+      expect(screen.getByAltText('Live browser session')).toBeInTheDocument()
+    )
+  })
+
+  it('falls back to the read-only mirror when NO native view is available (remote gateway / plain browser)', () => {
+    // No browserAPI bridge → native.available is false → streamed frames are the
+    // only transport, so the mirror shows.
+    renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
+    emitFrame('sess-1')
+    expect(screen.getByAltText('Live browser session')).toBeInTheDocument()
+  })
+
+  it('wires the Globe toggle: ON acquires LIGHT control, OFF releases to NONE', async () => {
+    const api = installNativeBridge(true)
+    renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
+    await screen.findByText('Let the agent act')
+    // Globe ON → mirror agent-act authorization AND request LIGHT.
+    act(() => { window.dispatchEvent(new CustomEvent(BROWSE_MODE_EVENT, { detail: { on: true } })) })
+    await waitFor(() => expect(api.setControlOwner.mock.calls.at(-1)?.[1]).toBe('light'))
+    expect(api.setAgentAct.mock.calls.at(-1)?.[1]).toBe(true)
+    // Globe OFF → actively release.
+    act(() => { window.dispatchEvent(new CustomEvent(BROWSE_MODE_EVENT, { detail: { on: false } })) })
+    await waitFor(() => expect(api.setControlOwner.mock.calls.at(-1)?.[1]).toBe('none'))
+    expect(api.setAgentAct.mock.calls.at(-1)?.[1]).toBe(false)
+  })
+
+  it('hides (never destroys) the native view when the panel goes inactive, and closes it on unmount', async () => {
+    const api = installNativeBridge(true)
+    const { rerender, unmount } = renderWithProviders(<WebPreviewPanel sessionKey="sess-1" active />)
+    await waitFor(() => expect(api.getState).toHaveBeenCalled())
+    // Inactive → setInactive(true) HIDES; close() must not fire.
+    rerender(<WebPreviewPanel sessionKey="sess-1" active={false} />)
+    await waitFor(() => expect(api.setInactive.mock.calls.at(-1)?.[1]).toBe(true))
+    expect(api.close).not.toHaveBeenCalled()
+    // Unmount → close() DESTROYS.
+    unmount()
+    await waitFor(() => expect(api.close).toHaveBeenCalledWith('sess-1'))
   })
 })
