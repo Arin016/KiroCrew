@@ -4695,6 +4695,11 @@
       "eyebrow": "গোপনীয়তা",
       "subtitle": "Kiro Crew যে পাঁচটি বেনামী ফিল্ড পাঠায়, এবং কীভাবে তা বন্ধ করবেন।",
       "title": "গোপনীয়তা"
+    },
+    "ui": {
+      "clear_filter": "ফিল্টার মুছুন",
+      "no_matches_for": "কোনো মিল নেই",
+      "no_noun_match": "কোনো {{noun}} মিলছে না"
     }
   },
   "hooks": {
@@ -6845,7 +6850,11 @@
         "run_now": "এখনই চালাও",
         "running": "চলছে",
         "select_at_least_one_day": "অন্তত একটি দিন বেছে নাও",
-        "view_last_result": "শেষ ফলাফল দেখো"
+        "view_last_result": "শেষ ফলাফল দেখো",
+        "no_cron_jobs_yet": "এখনও কোনো ক্রন জব নেই",
+        "empty_subtitle": "স্বয়ংক্রিয়ভাবে চালানোর জন্য পুনরাবৃত্ত কাজ নির্ধারণ করুন — অথবা চ্যাটে জিজ্ঞাসা করুন।",
+        "go_to_schedule": "শিডিউলে যান",
+        "jobs_noun": "জব"
       },
       "displayTab": {
         "auto": "স্বয়ংক্রিয়",
@@ -7052,7 +7061,9 @@
         "controls_how_conversation_history_is_consolidate": "কথাবার্তার ইতিহাস কীভাবে মেমরিতে জমা হয় তা নিয়ন্ত্রণ করে।",
         "learned_user_preferences_coding_style_tools_work": "শেখা ব্যবহারকারী পছন্দ (কোডিং স্টাইল, টুল, ওয়ার্কফ্লো)। মেমরি সংহতকরণ স্বয়ংক্রিয়ভাবে আপডেট করে।",
         "persistent_lessons_injected_into_every_session_a": "প্রতিটি সেশনে ঢোকানো স্থায়ী শিক্ষা। টাস্ক রানারের ব্যর্থতা থেকে স্বয়ংক্রিয়ভাবে বের করা হয়। হাতে যোগ করতে 'kirocrew learn add' ব্যবহার করো। ভেক্টর মেমরি সক্রিয় থাকলে শিক্ষাগুলি Semantic ট্যাবে lesson.* এন্ট্রি হিসেবে পরিচালিত হয়।",
-        "save": "সেভ করো"
+        "save": "সেভ করো",
+        "no_lessons_yet": "এখনও কোনো শিক্ষা নেই",
+        "lessons_empty_subtitle": "এজেন্টকে শেখানোর সময় সংশোধন এবং পছন্দগুলি এখানে সংরক্ষিত হয়।"
       },
       "portabilityTab": {
         "archive_contents": "আর্কাইভের বিষয়বস্তু:",
@@ -7144,7 +7155,9 @@
         "the_skill_this_update_targets_no_longer_exists_s": "এই আপডেটটি যে স্কিলের জন্য, সেটি আর নেই, তাই আপডেট করার কিছু নেই। এই প্রার্থীটি বাতিল করো।",
         "this_skill_changed_after_this_update_was_written": "এই আপডেট লেখার পরে স্কিলটি বদলে গেছে, তাই এখন এটি প্রয়োগ করলে সেই নতুন পরিবর্তনগুলি মুছে যাবে। অনুমোদন আটকানো আছে — প্রার্থীটি বাতিল করো, বর্তমান সংস্করণের বিপরীতে নতুন একটি আপডেট প্রস্তাব করা হবে।",
         "update": "আপডেট করো",
-        "workspace": "ওয়ার্কস্পেস"
+        "workspace": "ওয়ার্কস্পেস",
+        "no_skills_yet": "এখনও কোনো দক্ষতা নেই",
+        "empty_subtitle": "দক্ষতা এজেন্টকে পুনরায় ব্যবহারযোগ্য পদ্ধতি শেখায়। একটি যোগ করতে রেজিস্ট্রি ব্রাউজ করুন।"
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -7550,7 +7563,8 @@
       "type_verb_to_confirm": "টাইপ করুন",
       "view": "দেখো",
       "view_last_result": "শেষ ফলাফল দেখো",
-      "you_can_also_create_schedules_by_chatting_try": "চ্যাট করেও আপনি সময়সূচি তৈরি করতে পারেন — চেষ্টা করুন"
+      "you_can_also_create_schedules_by_chatting_try": "চ্যাট করেও আপনি সময়সূচি তৈরি করতে পারেন — চেষ্টা করুন",
+      "jobs_noun": "জব"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "ফাজি ফিল্টার (সাবস্ট্রিং মিল)",

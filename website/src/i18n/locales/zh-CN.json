@@ -4636,6 +4636,11 @@
       "eyebrow": "隐私",
       "subtitle": "Kiro Crew 发送的五个匿名字段，以及如何关闭。",
       "title": "隐私"
+    },
+    "ui": {
+      "clear_filter": "清除筛选",
+      "no_matches_for": "没有匹配",
+      "no_noun_match": "没有匹配的{{noun}}"
     }
   },
   "hooks": {
@@ -6764,7 +6769,11 @@
         "run_now": "立即运行",
         "running": "运行中",
         "select_at_least_one_day": "至少选择一天",
-        "view_last_result": "查看上次结果"
+        "view_last_result": "查看上次结果",
+        "no_cron_jobs_yet": "暂无定时任务",
+        "empty_subtitle": "设置定期自动运行的任务——或在聊天中请求。",
+        "go_to_schedule": "前往计划",
+        "jobs_noun": "任务"
       },
       "displayTab": {
         "auto": "自动",
@@ -6969,7 +6978,9 @@
         "controls_how_conversation_history_is_consolidate": "控制如何将对话历史整合进记忆。",
         "learned_user_preferences_coding_style_tools_work": "已学习的用户偏好设置（编码风格、工具、工作流）。由记忆整合自动更新。",
         "persistent_lessons_injected_into_every_session_a": "注入到每个会话的持久经验。自动从任务运行器失败中提取。可通过 'kirocrew learn add' 手动添加。当向量记忆启用时，经验会在“语义”标签页中作为 lesson.* 条目管理。",
-        "save": "保存"
+        "save": "保存",
+        "no_lessons_yet": "暂无学习记录",
+        "lessons_empty_subtitle": "当你教导代理时，纠正和偏好会保存在这里。"
       },
       "portabilityTab": {
         "archive_contents": "压缩包内容：",
@@ -7060,7 +7071,9 @@
         "the_skill_this_update_targets_no_longer_exists_s": "此更新针对的技能已不存在，因此没有可更新的内容。请忽略此候选。",
         "this_skill_changed_after_this_update_was_written": "此技能在此更新写入之后已变更，现在应用它会撤销那些较新的更改。无法批准 — 请忽略此候选，系统会针对当前版本重新提出更新。",
         "update": "更新",
-        "workspace": "工作区"
+        "workspace": "工作区",
+        "no_skills_yet": "暂无技能",
+        "empty_subtitle": "技能教会代理可重复使用的流程。浏览注册表添加一个。"
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -7464,7 +7477,8 @@
       "type_verb_to_confirm": "请输入",
       "view": "查看",
       "view_last_result": "查看最近一次结果",
-      "you_can_also_create_schedules_by_chatting_try": "你也可以通过聊天创建计划 — 试试"
+      "you_can_also_create_schedules_by_chatting_try": "你也可以通过聊天创建计划 — 试试",
+      "jobs_noun": "任务"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "模糊筛选（子串匹配）",

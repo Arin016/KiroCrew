@@ -4695,6 +4695,11 @@
       "eyebrow": "Datenschutz",
       "subtitle": "Die fünf anonymen Felder, die Kiro Crew sendet, und wie du sie abschaltest.",
       "title": "Datenschutz"
+    },
+    "ui": {
+      "clear_filter": "Filter löschen",
+      "no_matches_for": "Keine Treffer für",
+      "no_noun_match": "Keine passenden {{noun}}"
     }
   },
   "hooks": {
@@ -6845,7 +6850,11 @@
         "run_now": "Jetzt ausführen",
         "running": "Läuft",
         "select_at_least_one_day": "Mindestens einen Tag auswählen",
-        "view_last_result": "Letztes Ergebnis anzeigen"
+        "view_last_result": "Letztes Ergebnis anzeigen",
+        "no_cron_jobs_yet": "Noch keine Cron-Jobs",
+        "empty_subtitle": "Planen Sie wiederkehrende Aufgaben für die automatische Ausführung — oder fragen Sie im Chat.",
+        "go_to_schedule": "Zum Zeitplan",
+        "jobs_noun": "Jobs"
       },
       "displayTab": {
         "auto": "Automatisch",
@@ -7052,7 +7061,9 @@
         "controls_how_conversation_history_is_consolidate": "Steuert, wie der Gesprächsverlauf in die Erinnerung konsolidiert wird.",
         "learned_user_preferences_coding_style_tools_work": "Erlernte Benutzerpräferenzen (Programmierstil, Werkzeuge, Arbeitsabläufe). Werden automatisch durch die Erinnerungskonsolidierung aktualisiert.",
         "persistent_lessons_injected_into_every_session_a": "Dauerhafte Lektionen, die in jede Sitzung eingefügt werden. Werden automatisch aus Fehlern des Task-Runners extrahiert. Manuell hinzufügen über „kirocrew learn add“. Wenn die Vektor-Erinnerung aktiv ist, werden Lektionen im Semantik-Tab als lesson.*-Einträge verwaltet.",
-        "save": "Speichern"
+        "save": "Speichern",
+        "no_lessons_yet": "Noch keine Lektionen",
+        "lessons_empty_subtitle": "Korrekturen und Einstellungen werden hier gespeichert, wenn Sie den Agenten unterrichten."
       },
       "portabilityTab": {
         "archive_contents": "Archivinhalt:",
@@ -7144,7 +7155,9 @@
         "the_skill_this_update_targets_no_longer_exists_s": "Der Skill, auf den diese Aktualisierung abzielt, existiert nicht mehr, daher gibt es nichts zu aktualisieren. Verwirf diesen Kandidaten.",
         "this_skill_changed_after_this_update_was_written": "Dieser Skill hat sich geändert, nachdem diese Aktualisierung geschrieben wurde, daher würde ihre Anwendung diese neueren Änderungen zurücknehmen. Das Genehmigen ist blockiert — verwirf diesen Kandidaten, dann wird eine neue Aktualisierung gegen die aktuelle Version vorgeschlagen.",
         "update": "Aktualisieren",
-        "workspace": "Workspace"
+        "workspace": "Workspace",
+        "no_skills_yet": "Noch keine Fähigkeiten",
+        "empty_subtitle": "Fähigkeiten lehren den Agenten wiederverwendbare Verfahren. Durchsuchen Sie das Register, um eine hinzuzufügen."
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -7550,7 +7563,8 @@
       "type_verb_to_confirm": "Geben Sie",
       "view": "Ansehen",
       "view_last_result": "Letztes Ergebnis ansehen",
-      "you_can_also_create_schedules_by_chatting_try": "Sie können Zeitpläne auch per Chat erstellen — versuchen Sie"
+      "you_can_also_create_schedules_by_chatting_try": "Sie können Zeitpläne auch per Chat erstellen — versuchen Sie",
+      "jobs_noun": "Jobs"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Unscharfer Filter (Teilstring-Übereinstimmung)",

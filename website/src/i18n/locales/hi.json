@@ -4695,6 +4695,11 @@
       "eyebrow": "गोपनीयता",
       "subtitle": "Kiro Crew जो पाँच अनाम फ़ील्ड भेजता है, और उन्हें कैसे बंद करना है।",
       "title": "गोपनीयता"
+    },
+    "ui": {
+      "clear_filter": "फ़िल्टर साफ़ करें",
+      "no_matches_for": "कोई मिलान नहीं",
+      "no_noun_match": "कोई {{noun}} मेल नहीं"
     }
   },
   "hooks": {
@@ -6845,7 +6850,11 @@
         "run_now": "अभी चलाएँ",
         "running": "चालू",
         "select_at_least_one_day": "कम से कम एक दिन चुनें",
-        "view_last_result": "पिछला परिणाम देखें"
+        "view_last_result": "पिछला परिणाम देखें",
+        "no_cron_jobs_yet": "अभी तक कोई क्रॉन जॉब नहीं",
+        "empty_subtitle": "स्वचालित रूप से चलने के लिए आवर्ती कार्य शेड्यूल करें — या चैट में पूछें।",
+        "go_to_schedule": "शेड्यूल पर जाएं",
+        "jobs_noun": "जॉब"
       },
       "displayTab": {
         "auto": "स्वतः",
@@ -7052,7 +7061,9 @@
         "controls_how_conversation_history_is_consolidate": "तय करता है कि बातचीत का इतिहास मेमोरी में कैसे समेटा जाता है।",
         "learned_user_preferences_coding_style_tools_work": "सीखी गई उपयोगकर्ता पसंद (कोडिंग स्टाइल, टूल, वर्कफ़्लो)। मेमोरी कंसॉलिडेशन से अपने-आप अपडेट होती हैं।",
         "persistent_lessons_injected_into_every_session_a": "हर सेशन में डाले जाने वाले स्थायी सबक। टास्क रनर की विफलताओं से अपने-आप निकाले जाते हैं। खुद जोड़ने के लिए 'kirocrew learn add' चलाएँ। वेक्टर मेमोरी चालू होने पर सबक सिमेंटिक टैब में lesson.* एंट्रीज़ के रूप में संभाले जाते हैं।",
-        "save": "सहेजें"
+        "save": "सहेजें",
+        "no_lessons_yet": "अभी तक कोई सबक नहीं",
+        "lessons_empty_subtitle": "जब तुम एजेंट को सिखाते हो तो सुधार और प्राथमिकताएं यहां सहेजी जाती हैं।"
       },
       "portabilityTab": {
         "archive_contents": "आर्काइव की सामग्री:",
@@ -7144,7 +7155,9 @@
         "the_skill_this_update_targets_no_longer_exists_s": "यह अपडेट जिस स्किल के लिए है वह अब मौजूद नहीं है, इसलिए अपडेट करने को कुछ नहीं बचा। इस कैंडिडेट को खारिज करें।",
         "this_skill_changed_after_this_update_was_written": "यह अपडेट लिखे जाने के बाद स्किल बदल चुकी है, इसलिए इसे अब लागू करने से वे नए बदलाव मिट जाएँगे। मंज़ूरी रोक दी गई है — इस कैंडिडेट को खारिज करें और मौजूदा वर्शन के लिए नया अपडेट प्रस्तावित किया जाएगा।",
         "update": "अपडेट करें",
-        "workspace": "वर्कस्पेस"
+        "workspace": "वर्कस्पेस",
+        "no_skills_yet": "अभी तक कोई कौशल नहीं",
+        "empty_subtitle": "कौशल एजेंट को पुन: प्रयोज्य प्रक्रियाएं सिखाते हैं। एक जोड़ने के लिए रजिस्ट्री ब्राउज़ करें।"
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -7550,7 +7563,8 @@
       "type_verb_to_confirm": "टाइप करें",
       "view": "देखें",
       "view_last_result": "पिछला परिणाम देखें",
-      "you_can_also_create_schedules_by_chatting_try": "आप चैट करके भी शेड्यूल बना सकते हैं — आज़माएँ"
+      "you_can_also_create_schedules_by_chatting_try": "आप चैट करके भी शेड्यूल बना सकते हैं — आज़माएँ",
+      "jobs_noun": "जॉब"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "फ़ज़ी फ़िल्टर (सबस्ट्रिंग मैच)",

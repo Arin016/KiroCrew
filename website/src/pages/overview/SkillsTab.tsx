@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Download, RefreshCw } from 'lucide-react'
+import { Download, RefreshCw, Sparkles } from 'lucide-react'
 import { api } from '../../api/client'
-import { Card, Btn, SearchInput } from '../../components/ui'
+import { Card, Btn, SearchInput, EmptyState } from '../../components/ui'
 import InfoTip from '../../components/InfoTip'
 import Modal from '../../components/Modal'
 import SkillForm, { assembleSkillContent, parseSkillContent, type SkillFormData } from '../../components/SkillForm'
@@ -198,7 +198,7 @@ export default function SkillsTab() {
         </div>
       </div>
 
-      {skills.length === 0 ? <div className="text-muted italic py-3.5 text-sm">{i18nT('pages.overview.skillsTab.no_skills_installed')}</div> : (
+      {skills.length === 0 ? <EmptyState icon={<Sparkles className="lucide-inline" />} title={i18nT('pages.overview.skillsTab.no_skills_yet')} subtitle={i18nT('pages.overview.skillsTab.empty_subtitle')} action={<Btn onClick={() => setSkillBrowserOpen(true)}><Download size={14} /> {i18nT('pages.overview.skillsTab.add_skill')}</Btn>} /> : (
         /* Master-detail: skill list (pane 1) on the left, then the directory
          *  browser (panes 2+3: file tree + file content) on the right. */
         <div className="flex gap-3 h-[calc(100vh-260px)] min-h-[420px]">

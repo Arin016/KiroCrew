@@ -3455,6 +3455,11 @@
     "tunnelStatus": {
       "tunnel": "Tunnel"
     },
+    "ui": {
+      "clear_filter": "Clear filter",
+      "no_matches_for": "No matches for",
+      "no_noun_match": "No {{noun}} match"
+    },
     "updateModal": {
       "dismiss": "Dismiss",
       "dismiss_update_dialog": "Dismiss update dialog",
@@ -4938,8 +4943,12 @@
         "model": "Model",
         "name": "Name",
         "no_cron_jobs": "No cron jobs",
+        "no_cron_jobs_yet": "No cron jobs yet",
         "no_crons": "--no-crons",
         "no_matching_jobs": "No matching jobs",
+        "empty_subtitle": "Schedule recurring tasks to run automatically — or ask in chat.",
+        "go_to_schedule": "Go to Schedule",
+        "jobs_noun": "jobs",
         "ok": "OK",
         "optional": "Optional",
         "paused": "Paused",
@@ -5102,6 +5111,8 @@
         "memory_settings": "Memory Settings",
         "no_history_yet": "No history yet",
         "no_lessons": "No lessons",
+        "no_lessons_yet": "No lessons yet",
+        "lessons_empty_subtitle": "Corrections and preferences are saved here when you teach the agent.",
         "no_sessions_to_consolidate_start_a_chat_first": "No sessions to consolidate — start a chat first",
         "preference": "preference",
         "preferences": "Preferences",
@@ -5171,6 +5182,8 @@
         "filter_skills": "Filter skills…",
         "loaded_by": "Loaded by",
         "no_skills_installed": "No skills installed",
+        "no_skills_yet": "No skills yet",
+        "empty_subtitle": "Skills teach the agent reusable procedures. Browse the registry to add one.",
         "on_demand": "on-demand",
         "package": "Package",
         "refresh_skills": "Refresh skills",
@@ -5420,6 +5433,7 @@
       "no_cron_jobs": "No cron jobs",
       "no_matching_jobs": "No matching jobs",
       "no_scheduled_jobs_yet": "No scheduled jobs yet",
+      "jobs_noun": "jobs",
       "ok": "OK",
       "open_chat": "Open Chat",
       "or": "or",

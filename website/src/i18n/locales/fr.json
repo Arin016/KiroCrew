@@ -4754,6 +4754,11 @@
       "eyebrow": "Confidentialité",
       "subtitle": "Les cinq champs anonymes que Kiro Crew envoie, et comment les désactiver.",
       "title": "Confidentialité"
+    },
+    "ui": {
+      "clear_filter": "Effacer le filtre",
+      "no_matches_for": "Aucun résultat pour",
+      "no_noun_match": "Aucun(e) {{noun}} correspondant(e)"
     }
   },
   "hooks": {
@@ -6926,7 +6931,11 @@
         "run_now": "Exécuter",
         "running": "En cours",
         "select_at_least_one_day": "Sélectionne au moins un jour",
-        "view_last_result": "Voir le dernier résultat"
+        "view_last_result": "Voir le dernier résultat",
+        "no_cron_jobs_yet": "Aucune tâche planifiée pour le moment",
+        "empty_subtitle": "Planifiez des tâches récurrentes à exécuter automatiquement — ou demandez dans le chat.",
+        "go_to_schedule": "Aller à Planification",
+        "jobs_noun": "tâches"
       },
       "displayTab": {
         "auto": "Auto",
@@ -7135,7 +7144,9 @@
         "controls_how_conversation_history_is_consolidate": "Contrôle la façon dont l’historique des conversations est consolidé en mémoire.",
         "learned_user_preferences_coding_style_tools_work": "Préférences utilisateur apprises (style de code, outils, workflows). Mises à jour automatiquement par la consolidation de la mémoire.",
         "persistent_lessons_injected_into_every_session_a": "Leçons persistantes injectées dans chaque session. Extraites automatiquement des échecs de l’exécuteur de tâches. Ajoute-les manuellement via 'kirocrew learn add'. Quand la mémoire vectorielle est active, les leçons sont gérées dans l’onglet Sémantique en tant qu’entrées lesson.*.",
-        "save": "Enregistrer"
+        "save": "Enregistrer",
+        "no_lessons_yet": "Aucune leçon pour le moment",
+        "lessons_empty_subtitle": "Les corrections et préférences sont enregistrées ici lorsque vous enseignez à l'agent."
       },
       "portabilityTab": {
         "archive_contents": "Contenu de l'archive :",
@@ -7228,7 +7239,9 @@
         "the_skill_this_update_targets_no_longer_exists_s": "La compétence visée par cette mise à jour n’existe plus, il n’y a donc rien à mettre à jour. Ignore ce candidat.",
         "this_skill_changed_after_this_update_was_written": "Cette compétence a changé après la rédaction de cette mise à jour ; l’appliquer maintenant annulerait ces changements plus récents. L’approbation est bloquée — ignore ce candidat et une nouvelle mise à jour sera proposée par rapport à la version actuelle.",
         "update": "Mettre à jour",
-        "workspace": "espace de travail"
+        "workspace": "espace de travail",
+        "no_skills_yet": "Aucune compétence pour le moment",
+        "empty_subtitle": "Les compétences enseignent à l'agent des procédures réutilisables. Parcourez le registre pour en ajouter."
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -7636,7 +7649,8 @@
       "type_verb_to_confirm": "Saisissez",
       "view": "Afficher",
       "view_last_result": "Afficher le dernier résultat",
-      "you_can_also_create_schedules_by_chatting_try": "Vous pouvez aussi créer des planifications en discutant — essayez"
+      "you_can_also_create_schedules_by_chatting_try": "Vous pouvez aussi créer des planifications en discutant — essayez",
+      "jobs_noun": "tâches"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtre approximatif (correspondance de sous-chaîne)",

@@ -4754,6 +4754,11 @@
       "eyebrow": "Privacidade",
       "subtitle": "Os cinco campos anônimos que o Kiro Crew envia e como desativá-los.",
       "title": "Privacidade"
+    },
+    "ui": {
+      "clear_filter": "Limpar filtro",
+      "no_matches_for": "Sem correspondências para",
+      "no_noun_match": "Nenhum(a) {{noun}} correspondente"
     }
   },
   "hooks": {
@@ -6926,7 +6931,11 @@
         "run_now": "Executar agora",
         "running": "Executando",
         "select_at_least_one_day": "Selecione pelo menos um dia",
-        "view_last_result": "Ver último resultado"
+        "view_last_result": "Ver último resultado",
+        "no_cron_jobs_yet": "Nenhuma tarefa agendada ainda",
+        "empty_subtitle": "Agende tarefas recorrentes para executar automaticamente — ou pergunte no chat.",
+        "go_to_schedule": "Ir para Agenda",
+        "jobs_noun": "tarefas"
       },
       "displayTab": {
         "auto": "Automático",
@@ -7135,7 +7144,9 @@
         "controls_how_conversation_history_is_consolidate": "Controla como o histórico de conversas é consolidado na memória.",
         "learned_user_preferences_coding_style_tools_work": "Preferências do usuário aprendidas (estilo de código, ferramentas, fluxos de trabalho). Atualizadas automaticamente pela consolidação de memória.",
         "persistent_lessons_injected_into_every_session_a": "Lições persistentes injetadas em todas as sessões. Extraídas automaticamente das falhas do executor de tarefas. Adicione manualmente com 'kirocrew learn add'. Quando a memória vetorial está ativa, as lições são gerenciadas na aba Semântica como entradas lesson.*.",
-        "save": "Salvar"
+        "save": "Salvar",
+        "no_lessons_yet": "Nenhuma lição ainda",
+        "lessons_empty_subtitle": "Correções e preferências são salvas aqui quando você ensina o agente."
       },
       "portabilityTab": {
         "archive_contents": "Conteúdo do arquivo:",
@@ -7228,7 +7239,9 @@
         "the_skill_this_update_targets_no_longer_exists_s": "A habilidade que esta atualização altera não existe mais, então não há nada para atualizar. Descarte esta candidata.",
         "this_skill_changed_after_this_update_was_written": "Esta habilidade mudou depois que a atualização foi escrita, então aplicá-la agora desfaria essas alterações mais recentes. A aprovação está bloqueada — descarte esta candidata e uma nova atualização será proposta com base na versão atual.",
         "update": "Atualizar",
-        "workspace": "workspace"
+        "workspace": "workspace",
+        "no_skills_yet": "Nenhuma habilidade ainda",
+        "empty_subtitle": "Habilidades ensinam ao agente procedimentos reutilizáveis. Navegue no registro para adicionar uma."
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -7636,7 +7649,8 @@
       "type_verb_to_confirm": "Digite",
       "view": "Ver",
       "view_last_result": "Ver último resultado",
-      "you_can_also_create_schedules_by_chatting_try": "Você também pode criar agendamentos pelo chat — tente"
+      "you_can_also_create_schedules_by_chatting_try": "Você também pode criar agendamentos pelo chat — tente",
+      "jobs_noun": "tarefas"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtro aproximado (correspondência parcial)",
