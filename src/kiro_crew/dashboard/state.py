@@ -560,7 +560,7 @@ def build_refusal_recovery_prompt(refusals: list[tuple[str, str]]) -> str:
     if not refusals:
         return ""
     lines = [
-        "One or more tool calls in your previous turn were blocked by a KiroCrew "
+        "One or more tool calls in your previous turn were blocked by a Kiro Crew "
         "safety policy, which ended the turn early. This was NOT a user action — "
         "do not treat it as a cancellation or interruption by the user.",
         "",
@@ -640,7 +640,7 @@ def build_tool_stall_recovery_prompt(
     tool_label = tool_title or "a tool call"
     lines = [
         f"Your previous turn stalled: {tool_label} produced no response for "
-        f"~{idle_mins} minute(s) and the turn was ended by a KiroCrew watchdog. "
+        f"~{idle_mins} minute(s) and the turn was ended by a Kiro Crew watchdog. "
         "This was NOT a user action — do not treat it as a cancellation or "
         "interruption by the user.",
         "",

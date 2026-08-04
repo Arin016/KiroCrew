@@ -1191,8 +1191,8 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
         pattern=".*cat.*/(?:\\.kiro/crew|\\.kirocrew)/\\.env.*",
         category="sensitive-file-read",
         description=(
-            "Blocks using cat to read KiroCrew's own credential file (~/.kiro/crew/.env, "
-            "or the pre-move ~/.kirocrew/.env), which holds KiroCrew's own secrets and "
+            "Blocks using cat to read Kiro Crew's own credential file (~/.kiro/crew/.env, "
+            "or the pre-move ~/.kirocrew/.env), which holds Kiro Crew's own secrets and "
             "environment credentials."
         ),
     ),
