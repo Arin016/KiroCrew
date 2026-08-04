@@ -2163,7 +2163,11 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
         merge = False
 
     hold_users = bool(
-        state.subagents is not None and state.subagents.running_agents_for(f"dashboard:{slot.key}")
+        (
+            state.subagents is not None
+            and state.subagents.running_agents_for(f"dashboard:{slot.key}")
+        )
+        or slot._in_stage_execution
     )
     if hold_users:
         next_msg, consumed = _dequeue_next_system_message(slot)
@@ -4788,7 +4792,11 @@ async def _run_chat(
 
             if _prompt_depth == 0 and slot._stale_recovery_retries < 3:
                 slot._stale_recovery_retries += 1
-                slot.queue_insert(0, f"{STALE_RECOVERY_PREFIX}\n{build_stale_recovery_prompt()}")
+                slot.queue_insert(
+                    0,
+                    f"{STALE_RECOVERY_PREFIX}\n{build_stale_recovery_prompt()}",
+                    kind=SYNTHETIC_RECOVERY_KIND,
+                )
                 _emit_stale("⟳ Recovering a stalled turn…")
             elif slot._stale_recovery_retries >= 3:
                 _emit_stale("Session stuck — please start a new chat.")
@@ -4829,7 +4837,11 @@ async def _run_chat(
                     command=_stall_command,
                     stuck_input=_stuck,
                 )
-                slot.queue_insert(0, f"{TOOL_STALL_RECOVERY_PREFIX}\n{_body}")
+                slot.queue_insert(
+                    0,
+                    f"{TOOL_STALL_RECOVERY_PREFIX}\n{_body}",
+                    kind=SYNTHETIC_RECOVERY_KIND,
+                )
                 _emit_stall("⟳ Tool appeared stalled — recovering…")
             elif slot._tool_stall_retries >= 3:
                 _emit_stall("Session stuck — please start a new chat.")
@@ -4854,7 +4866,7 @@ async def _run_chat(
 
             if _prompt_depth == 0 and slot._acp_pipe_death_retries < 3:
                 slot._acp_pipe_death_retries += 1
-                slot.queue_insert(0, message)
+                slot.queue_insert(0, message, kind=SYNTHETIC_RECOVERY_KIND)
                 _emit_error(f"⟳ Connection lost{_rc_suffix} — retrying...")
             elif slot._acp_pipe_death_retries >= 3:
                 _emit_error(f"Session stuck{_rc_suffix} — please start a new chat.")
@@ -5044,7 +5056,7 @@ async def _run_chat(
                 # streaming turn ends (so it never surfaces). Only the second
                 # consecutive empty surfaces a persisted notice card below.
                 slot._empty_response_retries += 1
-                slot.queue_insert(0, message)
+                slot.queue_insert(0, message, kind=SYNTHETIC_RECOVERY_KIND)
                 _retrying_empty = True
             elif (
                 _prompt_depth == 0
@@ -5280,7 +5292,7 @@ async def _run_chat(
             # until the post-turn history refresh reconciles it.
             _retry_msg = "⟳ Connection lost — retrying…"
             slot.append("error", _retry_msg, "msg msg-err")
-            slot.queue_insert(0, message)
+            slot.queue_insert(0, message, kind=SYNTHETIC_RECOVERY_KIND)
         elif slot._acp_pipe_death_retries > 3:
             slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
         else:
@@ -5306,7 +5318,7 @@ async def _run_chat(
             # broadcast_ws or the UI shows a duplicate card.
             _retry_msg = "⟳ Session busy — retrying…"
             slot.append("error", _retry_msg, "msg msg-err")
-            slot.queue_insert(0, message)
+            slot.queue_insert(0, message, kind=SYNTHETIC_RECOVERY_KIND)
         elif slot._prompt_busy_retries > 3:
             slot.append("error", "Session stuck — please start a new chat.", "msg msg-err")
         else:
@@ -5373,7 +5385,7 @@ async def _run_chat(
                     slot._acp_pipe_death_retries if _is_pipe_death else slot._prompt_busy_retries,
                 )
                 slot.append("error", _status, "msg msg-err")
-                slot.queue_insert(0, message)
+                slot.queue_insert(0, message, kind=SYNTHETIC_RECOVERY_KIND)
             else:
                 # depth>0 with budget remaining: session already reset + failure
                 # counted above; do NOT re-queue (mirrors AcpProcessDied /
@@ -5426,7 +5438,7 @@ async def _run_chat(
                 # session (no reset), preserving conversation state.
                 slot.append("error", "⟳ Backend hiccup — retrying…", "msg msg-err")
                 await asyncio.sleep(_delay)
-                slot.queue_insert(0, message)
+                slot.queue_insert(0, message, kind=SYNTHETIC_RECOVERY_KIND)
             else:
                 # depth>0 (nested turn): don't re-queue — surface a clean
                 # transient status; the live session stays resumable.
@@ -5633,6 +5645,10 @@ async def _run_chat(
         # individually cancellable — a user who meant "discard" clicks ✕;
         # nothing is ever silently lost.
         _requeue_unconsumed_steers(state, slot)
+        # Record this turn's auth outcome so the orchestrator _stage_loop, which
+        # runs stages as separate _run_chat calls, can mirror this same
+        # "hold the queue for post-login resume" guard on its end-of-plan handoff.
+        slot._last_turn_auth_required = _auth_required
         next_turn_started = False
         if slot._queue and not _auth_required:
             # No readiness gate before the next queued turn. Readiness is latched
