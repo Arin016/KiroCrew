@@ -221,7 +221,10 @@ class TestPrReadiness:
     def test_readiness_leaves_untriggered_merge_and_review_state_to_live_gates(self) -> None:
         workflow = _workflow("pr-readiness.yml")
 
-        assert "--json number,state,isDraft,isCrossRepository,headRefOid,url)" in workflow
+        assert (
+            "--json number,state,isDraft,isCrossRepository,"
+            "headRefOid,headRefName,headRepositoryOwner,headRepository,url)"
+        ) in workflow
         assert "mergeStateStatus" not in workflow
         assert "reviewDecision" not in workflow
         assert "MERGEABLE:" not in workflow
