@@ -2609,7 +2609,12 @@
         "fetching": "Fetching…",
         "install": "Install",
         "install_failed": "Install failed",
-        "native_window_zoom_tip": "Native window zoom, the same setting as {{mod}}+ / {{mod}}− (50%–300%). Remembered across launches."
+        "native_window_zoom_tip": "Native window zoom, the same setting as {{mod}}+ / {{mod}}− (50%–300%). Remembered across launches.",
+        "terminal": "Terminal",
+        "terminal_font_family": "Font",
+        "terminal_font_family_desc": "Font for the built-in terminal. Enter a monospace font installed on your computer — use a Nerd Font to render Powerline and prompt-theme glyphs.",
+        "terminal_font_size": "Font size",
+        "terminal_font_size_desc": "Text size in the built-in terminal, measured in pixels."
       },
       "instancesPanel": {
         "add_remote_crew": "Add remote crew",

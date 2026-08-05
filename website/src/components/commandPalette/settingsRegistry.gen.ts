@@ -411,11 +411,27 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "display.font",
+    "label": "Font",
+    "description": "Font for the built-in terminal. Enter a monospace font installed on your computer — use a Nerd Font to render Powerline and prompt-theme glyphs.",
+    "tab": "display",
+    "type": "input",
+    "occurrence": 1
+  },
+  {
     "id": "display.font-family",
     "label": "Font Family",
     "description": "UI font family for the dashboard",
     "tab": "display",
     "type": "buttonGroup",
+    "occurrence": 1
+  },
+  {
+    "id": "display.font-size",
+    "label": "Font size",
+    "description": "Text size in the built-in terminal, measured in pixels.",
+    "tab": "display",
+    "type": "stepper",
     "occurrence": 1
   },
   {
