@@ -210,8 +210,13 @@ describe('chat sidebar — filter menu Tags section', () => {
   it('persists the selection so it survives a remount', async () => {
     localStorage.setItem('mc-session-tag-filter', JSON.stringify(['t1']))
     const utils = renderSidebar()
-    await waitFor(() => expect(utils.queryByText('alpha session')).not.toBeNull())
-    expect(utils.queryByText('beta session')).toBeNull()
+    // Await the FILTERED state, not merely a first paint. `alpha` appearing only
+    // proves the list rendered; the persisted filter is applied in a later effect,
+    // so asserting `beta` synchronously after that races the effect and passes
+    // only when the render happens to settle first. The sibling chip test below
+    // already waits on this same condition -- matched here rather than invented.
+    await waitFor(() => expect(utils.queryByText('beta session')).toBeNull())
+    expect(utils.queryByText('alpha session')).not.toBeNull()
   })
 
   it('ignores a persisted id whose tag no longer exists instead of hiding everything', async () => {
