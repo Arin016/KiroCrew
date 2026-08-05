@@ -31,6 +31,7 @@ Routes (as seen by the backend after prefix stripping by gateway):
 from __future__ import annotations
 
 import asyncio
+import enum
 import functools
 import hashlib
 import hmac as _hmac_mod
@@ -42,11 +43,17 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+try:  # Optional dependency: the Windows-only registry module.
+    import winreg
+except ImportError:  # pragma: no cover - exercised on POSIX, where it is absent
+    winreg = None  # type: ignore[assignment]
 
 from aiohttp import web
 
@@ -723,6 +730,242 @@ _SANDBOX_ERR_MAX = 900
 _GIT_ERR_MAX = 300
 
 
+# ─── Windows registry-based binary discovery ───
+# Maps tool names to (HKLM registry key, value name, subdirectory) tuples.
+# These registry entries are written by official installers and live in the
+# MACHINE hive (HKLM), which requires admin to write — not agent-writable.
+_WIN_REGISTRY_HINTS: dict[str, list[tuple[str, str, str]]] = {
+    "git": [
+        (r"SOFTWARE\GitForWindows", "InstallPath", "cmd"),
+        (r"SOFTWARE\GitForWindows", "InstallPath", "bin"),
+    ],
+    "gh": [
+        (r"SOFTWARE\GitHub CLI", "InstallPath", ""),
+    ],
+}
+
+
+# Windows collapses two very different answers into PermissionError: "the DACL
+# refuses you" (ERROR_ACCESS_DENIED) and "someone holds this open without write
+# sharing" (ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION). Only the first is a
+# statement about permissions; the second says nothing and goes away when the
+# other handle closes.
+_WIN_SHARING_ERRORS = frozenset({32, 33})
+
+
+def _is_access_denied(exc: OSError) -> bool:
+    """True when *exc* means "you may not", not "someone else is using it"."""
+    return getattr(exc, "winerror", None) not in _WIN_SHARING_ERRORS
+
+
+class _Replaceability(enum.Enum):
+    """Whether this process could swap a discovered binary out.
+
+    The third case is the load-bearing one. Refusing on an inconclusive probe is
+    correct, but the REASON has to survive: a stable "no" may be cached, while a
+    transient one must be retried, or a momentary file lock at cold start freezes
+    into a permanently empty fleet.
+    """
+
+    UNREPLACEABLE = "unreplaceable"  # permission denied — trust it, cacheable
+    REPLACEABLE = "replaceable"      # we can write it — refuse, cacheable
+    UNKNOWN = "unknown"              # inconclusive — refuse, but retry later
+
+
+# How long an inconclusive refusal is honoured before probing again. Long enough
+# that a polled fleet does not re-create/delete a probe file in the install
+# directory on every request (EDR on managed hosts reads that as suspicious),
+# short enough that a transient lock heals without a restart.
+_TRUSTED_BIN_RETRY_SECS = 60.0
+_TRUSTED_BIN_RETRY_AT: dict[str, float] = {}
+
+
+def _probe_replaceability(path: Path) -> _Replaceability:
+    """True when THIS process could swap out *path*, directly or via a parent.
+
+    ``os.access(W_OK)`` cannot answer this on Windows: it reports the read-only
+    ATTRIBUTE and ignores the DACL entirely. So ask the filesystem instead of
+    inferring — open the target for writing, and try to create a file in its
+    directory. The directory matters on its own: delete-and-replace needs no
+    write bit on the binary.
+
+    Scope is the file and its immediate directory, which is the standard
+    ``_trusted_bin`` already holds ``/usr/bin`` to (it checks the resolved file,
+    not the chain above it). A writable grandparent is a real but PRE-EXISTING
+    gap shared with the POSIX branch, tracked separately rather than fixed only
+    here.
+
+    Fails CLOSED, and only ONE outcome earns trust: the filesystem explicitly
+    refusing us PERMISSION. A probe that fails for any other reason — a full
+    volume, exhausted descriptors, an I/O error, or a Windows sharing violation
+    because the binary is currently running — proves nothing about permissions,
+    so treating it as "not writable" would hand trust to an install we never
+    actually checked. Every inconclusive answer counts as replaceable.
+    """
+    try:
+        # Writable target? O_WRONLY alone never truncates, so this asks a
+        # permission question without modifying anything.
+        try:
+            fd = os.open(path, os.O_WRONLY)
+        except PermissionError as exc:
+            if not _is_access_denied(exc):
+                # Held open by someone else. Says nothing about the DACL, and
+                # becomes writable again the moment that handle closes.
+                return _Replaceability.UNKNOWN
+            # Denied — not ours to rewrite. Check the directory next.
+        except OSError:
+            return _Replaceability.UNKNOWN
+        else:
+            os.close(fd)
+            return _Replaceability.REPLACEABLE
+
+        # Creatable in its directory? Then we can delete and substitute.
+        probe_at = path.parent / f".kirocrew-write-probe-{uuid.uuid4().hex}"
+        try:
+            fd = os.open(probe_at, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except PermissionError as exc:
+            if not _is_access_denied(exc):
+                return _Replaceability.UNKNOWN  # Sharing/lock violation.
+            # The only trusted outcome: we may not create here, so we cannot
+            # delete-and-substitute either.
+            return _Replaceability.UNREPLACEABLE
+        except FileExistsError:
+            return _Replaceability.UNKNOWN  # Astronomically unlikely.
+        except OSError:
+            return _Replaceability.UNKNOWN
+        os.close(fd)
+        try:
+            os.unlink(probe_at)
+        except OSError:
+            logger.warning("dev-fleet: left a write probe behind at %s", probe_at)
+        return _Replaceability.REPLACEABLE
+    except Exception:  # pragma: no cover - defensive: never trust on confusion
+        return _Replaceability.UNKNOWN
+
+
+def _win_registry_bin(name: str) -> tuple[str | None, bool]:
+    """Resolve *name* via HKLM registry keys written by official installers.
+
+    The hive gets us a CANDIDATE, not trust: writing under HKEY_LOCAL_MACHINE
+    requires admin, so an inherited PATH entry cannot forge the hint. Trust is
+    then earned per candidate — it must exist, be executable, be an ABSOLUTE
+    path, sit outside $HOME, and be unreplaceable by this process (see
+    ``_agent_can_replace``). Returns the first candidate that clears all of
+    that, else None.
+
+    Scope: the probe answers "can WE swap this out", which is the invariant
+    ``_trusted_bin`` states. It is not a full DACL audit — a second local admin
+    could still poison the install — so this closes the agent-writable vector,
+    not every principal on the host.
+
+    Returns ``(path, cacheable)``. ``cacheable`` is False when a candidate was
+    refused only because the probe was inconclusive, so the caller retries later
+    instead of freezing a transient condition into a permanent refusal.
+    """
+    if winreg is None:
+        return None, True
+    hints = _WIN_REGISTRY_HINTS.get(name)
+    if not hints:
+        return None, True
+    inconclusive = False
+    suffixes = (".exe", ".cmd", "")
+    # Windows paths are case-insensitive, so the $HOME guard below has to
+    # compare case-folded — otherwise `D:\Users\me` slips past a home
+    # recorded as `d:\users\me`.
+    home_prefix = os.path.normcase(str(Path.home().resolve()) + os.sep)
+    for reg_key, reg_value, subdir in hints:
+        for hive_flag in (winreg.KEY_READ | winreg.KEY_WOW64_64KEY,  # type: ignore[attr-defined]
+                          winreg.KEY_READ | winreg.KEY_WOW64_32KEY):  # type: ignore[attr-defined]
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_key, 0, hive_flag) as key:  # type: ignore[attr-defined]
+                    install_path, _ = winreg.QueryValueEx(key, reg_value)  # type: ignore[attr-defined]
+            except OSError:
+                continue
+            # A hostile or merely broken value must not become a relative
+            # path: `Path("")` is `.`, which would resolve the candidate
+            # against the CWD — agent-writable, the exact vector _trusted_bin
+            # exists to close. REG_DWORD and friends are rejected outright.
+            if not isinstance(install_path, str) or not install_path.strip():
+                continue
+            base = Path(install_path.strip())
+            if not base.is_absolute():
+                continue
+            if subdir:
+                base = base / subdir
+            for suffix in suffixes:
+                cand = base / (name + suffix)
+                try:
+                    if not (cand.is_file() and os.access(cand, os.X_OK)):
+                        continue
+                    real = cand.resolve()
+                    # Reject if under the user's home (same guard as the main
+                    # loop): a per-user install is user-writable, so it carries
+                    # none of the HKLM attestation this path relies on.
+                    if os.path.normcase(str(real)).startswith(home_prefix):
+                        continue
+                    # HKLM says an admin REGISTERED this path; it says nothing
+                    # about who can write it. A custom install (D:\software\Git)
+                    # can carry permissive ACLs, so verify we cannot replace the
+                    # binary before handing it the credential-bearing tier.
+                    verdict = _probe_replaceability(real)
+                    if verdict is not _Replaceability.UNREPLACEABLE:
+                        inconclusive |= verdict is _Replaceability.UNKNOWN
+                        logger.warning(
+                            "dev-fleet: ignoring registry-discovered %s at %s (%s)",
+                            name,
+                            real,
+                            verdict.value,
+                        )
+                        continue
+                    return str(real), True
+                except OSError:
+                    continue
+    return None, not inconclusive
+
+
+_REGISTRY_REFRESH_LOCK = threading.Lock()
+
+
+def _refresh_registry_bin_now(name: str) -> None:
+    """Re-probe the registry and record the outcome. Blocking; never call on the loop."""
+    try:
+        resolved, cacheable = _win_registry_bin(name)
+    except Exception:  # pragma: no cover - a probe must not kill the thread
+        logger.exception("dev-fleet: registry re-probe for %s failed", name)
+        _TRUSTED_BIN_RETRY_AT[name] = time.monotonic() + _TRUSTED_BIN_RETRY_SECS
+        return
+    if resolved is not None or cacheable:
+        _TRUSTED_BIN_CACHE[name] = resolved
+        _TRUSTED_BIN_RETRY_AT.pop(name, None)
+    else:
+        _TRUSTED_BIN_RETRY_AT[name] = time.monotonic() + _TRUSTED_BIN_RETRY_SECS
+
+
+def _schedule_registry_refresh(name: str) -> None:
+    """Re-probe OFF the event loop, letting the result land for a later call.
+
+    ``_trusted_bin`` is resolved on the request path — ``_run_cmd`` picks the
+    executable before it offloads the spawn — so probing inline would put
+    registry reads and a file-create probe on the loop on every cool-off window,
+    indefinitely. The probe is also slowest exactly when it is failing (an
+    EDR-interposed create, a stalled volume), so the cost correlates with the
+    trigger. Hand it to a thread instead: the fleet is polled, so a recovered
+    toolchain shows up on the next refresh rather than blocking this one.
+
+    A single refresh at a time; a second request during one is a no-op.
+    """
+    if not _REGISTRY_REFRESH_LOCK.acquire(blocking=False):
+        return
+
+    def work() -> None:
+        try:
+            _refresh_registry_bin_now(name)
+        finally:
+            _REGISTRY_REFRESH_LOCK.release()
+
+    threading.Thread(target=work, name=f"devfleet-bin-{name}", daemon=True).start()
+
+
 def _trusted_bin(name: str) -> str | None:
     """Resolve *name* to a canonical executable in a system or Homebrew bin dir.
 
@@ -778,6 +1021,33 @@ def _trusted_bin(name: str) -> str | None:
                 continue
         if resolved:
             break
+    # Windows fallback: discover install paths from the MACHINE registry
+    # (HKLM), which is operator-owned and not writable by the agent process.
+    # This covers tools installed outside Program Files (e.g.
+    # D:\software\Git\cmd\git.exe) without trusting the inherited PATH (which
+    # includes agent-writable worktree venvs — the exact vector _trusted_bin
+    # is designed to close).
+    if resolved is None and platform_compat.IS_WINDOWS:
+        retry_at = _TRUSTED_BIN_RETRY_AT.get(name)
+        if retry_at is not None:
+            # Already refused inconclusively once. Inside the cool-off, honour it
+            # untouched; past it, refresh on a THREAD and still decline for now —
+            # the loop must not carry a recurring probe. Either way this call does
+            # no filesystem work.
+            if time.monotonic() >= retry_at:
+                _schedule_registry_refresh(name)
+            return None
+        # First probe only: one-shot, inline, same cost profile the trusted-dir
+        # loop above already has.
+        resolved, cacheable = _win_registry_bin(name)
+        if resolved is None and not cacheable:
+            # Refused only because the probe could not reach a verdict (a locked
+            # binary, an EDR-blocked create). Caching that would turn a momentary
+            # condition into an empty fleet for the life of the process, which is
+            # the very symptom this fallback exists to prevent — so retry later.
+            _TRUSTED_BIN_RETRY_AT[name] = time.monotonic() + _TRUSTED_BIN_RETRY_SECS
+            return None
+        _TRUSTED_BIN_RETRY_AT.pop(name, None)
     _TRUSTED_BIN_CACHE[name] = resolved
     return resolved
 

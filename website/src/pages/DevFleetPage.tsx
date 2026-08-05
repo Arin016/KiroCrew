@@ -341,9 +341,22 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
   const [rect, setRect] = useState<DOMRect | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+
+  // Closing unmounts the focused button, so focus would fall to <body> and the
+  // next Tab would restart from the top of the page. Hand it back to the trigger
+  // — the element the user was on before opening.
+  const close = useCallback(() => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }, [])
 
   useEffect(() => {
     if (!open) return
+    // Move focus into the popover on open (the non-destructive Cancel, so a
+    // stray Enter dismisses rather than confirms). Deferred a frame because
+    // the portaled node is not in the document yet on this render.
+    requestAnimationFrame(() => cancelRef.current?.focus())
     // Portaled to <body>, so the popover is not a DOM descendant of the
     // trigger — the outside-click guard must exclude BOTH, or every click
     // inside the popover (including Cancel/Start) would close it first.
@@ -351,7 +364,7 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
       const t = e.target as Node
       if (!triggerRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus() } }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
     // position:fixed desyncs from any scrolling ancestor — close on scroll
     // (capture phase catches nested scrollers) and on resize.
     const onScrollOrResize = () => setOpen(false)
@@ -365,7 +378,7 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
       window.removeEventListener('scroll', onScrollOrResize, true)
       window.removeEventListener('resize', onScrollOrResize)
     }
-  }, [open])
+  }, [open, close])
 
   const toggle = () => {
     if (!open && triggerRef.current) setRect(triggerRef.current.getBoundingClientRect())
@@ -405,8 +418,8 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
           <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>{title}</div>
           <div style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 9 }}>{desc}</div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' } as CSSProperties}>
-            <Btn onClick={() => setOpen(false)}>{i18nT('pages.devFleetPage.cancel')}</Btn>
-            <Btn primary onClick={() => { setOpen(false); onConfirm() }}>{confirmLabel || i18nT('pages.devFleetPage.start')}</Btn>
+            <Btn ref={cancelRef} onClick={close}>{i18nT('pages.devFleetPage.cancel')}</Btn>
+            <Btn primary onClick={() => { close(); onConfirm() }}>{confirmLabel || i18nT('pages.devFleetPage.start')}</Btn>
           </div>
         </div>,
         document.body,

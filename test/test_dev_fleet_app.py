@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import hmac as _hmac  # noqa: F401
 import hmac as _hmac_mod
@@ -4182,6 +4183,7 @@ async def test_fetch_pr_head_oid_refuses_non_merged(monkeypatch):
 def test_trusted_bin_rejects_agent_writable_path(monkeypatch, tmp_path):
     """Bare command names resolve only inside the trusted bin dirs; a planted
     shim in an agent-writable PATH entry is never selected."""
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GIT", raising=False)
     mod._TRUSTED_BIN_CACHE.clear()
     fake = tmp_path / "git"
     fake.write_text("#!/bin/sh\necho pwned\n")
@@ -4209,6 +4211,7 @@ def test_trusted_bin_pins_the_resolved_target_not_the_symlink(monkeypatch, tmp_p
     """Homebrew's `bin/gh` is a user-writable symlink into `Cellar/`. Caching the
     LINK would let it be repointed between validation and execution, so the
     vetted real path is what gets cached and spawned."""
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GH", raising=False)
     mod._TRUSTED_BIN_CACHE.clear()
     cellar = tmp_path / "Cellar" / "gh" / "1.0" / "bin"
     cellar.mkdir(parents=True)
@@ -4221,6 +4224,542 @@ def test_trusted_bin_pins_the_resolved_target_not_the_symlink(monkeypatch, tmp_p
     monkeypatch.setattr(mod, "_TRUSTED_BIN_DIRS", (str(bin_dir),))
 
     assert mod._trusted_bin("gh") == str(target.resolve())
+    mod._TRUSTED_BIN_CACHE.clear()
+
+
+# --- Windows registry-based bin discovery ---
+class _FakeRegKey:
+    def __init__(self, key):
+        self.key = key
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_winreg(monkeypatch, values, *, only_flag=None):
+    """Install a stub `winreg` so the Windows-only lookup is testable on POSIX.
+
+    *values* maps a registry key path to the value the stub hands back from
+    QueryValueEx. *only_flag* makes OpenKey succeed for that access flag alone,
+    which is how the 32-bit-view fallback gets exercised. Returns the list of
+    flags OpenKey was called with, so a test can assert the search order.
+    """
+    import types
+
+    stub = types.ModuleType("winreg")
+    stub.HKEY_LOCAL_MACHINE = 0x80000002
+    stub.KEY_READ = 0x20019
+    stub.KEY_WOW64_64KEY = 0x0100
+    stub.KEY_WOW64_32KEY = 0x0200
+    opened: list[int] = []
+
+    def open_key(hive, key, _reserved, flag):
+        opened.append(flag)
+        if only_flag is not None and flag != only_flag:
+            raise OSError(2, "not found")
+        if key not in values:
+            raise OSError(2, "not found")
+        return _FakeRegKey(key)
+
+    stub.OpenKey = open_key
+    stub.QueryValueEx = lambda key, _name: (values[key.key], 1)
+    monkeypatch.setattr(mod, "winreg", stub)
+    return opened
+
+
+# Directories these tests chmod'd read-only, recorded so the fixture below can
+# restore exactly those and nothing else.
+_SEALED_DIRS: list[Path] = []
+
+
+def _install_git(root, subdir="cmd", *, sealed=True):
+    """Create a fake install. ``sealed`` makes it unwritable by this process, the
+    way a real admin-owned install is, so `_probe_replaceability` lets it through."""
+    d = root / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    exe = d / "git.exe"
+    exe.write_text("binary")
+    exe.chmod(0o555)
+    if sealed:
+        d.chmod(0o555)  # no create/delete in the dir -> cannot substitute
+        _SEALED_DIRS.append(d)
+    return exe
+
+
+@pytest.fixture(autouse=True)
+def _unseal_sealed_dirs():
+    """Restore write bits on the directories THIS module sealed, so pytest can
+    clean tmp_path up.
+
+    Deliberately not a walk of tmp_path: `rglob` + `is_dir()` follow symlinks, and
+    other tests in this file link into real repository directories — so a walk
+    would chmod the link TARGET, changing permissions outside tmp_path entirely.
+    Restoring only the paths we sealed cannot reach anything we did not create.
+    """
+    _SEALED_DIRS.clear()
+    yield
+    while _SEALED_DIRS:
+        sealed = _SEALED_DIRS.pop()
+        try:
+            sealed.chmod(0o755)
+        except OSError:
+            pass
+
+
+def _home_elsewhere(monkeypatch, tmp_path):
+    """Point $HOME away from the fixture install so the home guard is not what
+    the assertion ends up measuring. USERPROFILE too — that is what Path.home()
+    reads on the Windows leg of CI."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(elsewhere))
+    monkeypatch.setenv("USERPROFILE", str(elsewhere))
+
+
+def test_win_registry_bin_finds_install_outside_program_files(monkeypatch, tmp_path):
+    """The bug this closes: git installed on a D: drive rather than under
+    Program Files is invisible to the hardcoded dir list, which silently
+    emptied the entire fleet instead of reporting a missing toolchain."""
+    root = tmp_path / "software" / "Git"
+    exe = _install_git(root)
+    _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(root)})
+    _home_elsewhere(monkeypatch, tmp_path)
+
+    assert mod._win_registry_bin("git") == (str(exe.resolve()), True)
+
+
+def test_win_registry_bin_falls_back_to_the_32_bit_view(monkeypatch, tmp_path):
+    """A 32-bit installer writes its key into the WOW6432Node view only, so both
+    views have to be consulted or those hosts stay broken."""
+    root = tmp_path / "Git"
+    exe = _install_git(root)
+    thirty_two = 0x20019 | 0x0200
+    opened = _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(root)}, only_flag=thirty_two)
+    _home_elsewhere(monkeypatch, tmp_path)
+
+    assert mod._win_registry_bin("git") == (str(exe.resolve()), True)
+    assert opened[0] == 0x20019 | 0x0100, "the native 64-bit view must be tried first"
+    assert thirty_two in opened
+
+
+def test_win_registry_bin_rejects_relative_and_non_string_values(monkeypatch, tmp_path):
+    """An empty, blank, relative or REG_DWORD value must not degrade into a
+    CWD-relative lookup: the CWD is an agent-writable worktree, which is the
+    exact vector _trusted_bin exists to close."""
+    # Plant a shim at every location a bogus value would resolve to with the
+    # CWD as the base, so the assertion fails if any guard is removed rather
+    # than passing because the fixture happened not to line up.
+    _install_git(tmp_path, sealed=False)
+    _install_git(tmp_path / "Git", sealed=False)  # <cwd>/Git/cmd/git.exe — "Git", "./Git"
+    monkeypatch.chdir(tmp_path)
+    _home_elsewhere(monkeypatch, tmp_path)
+
+    for bogus in ("", "   ", "Git", "./Git", 4, None):
+        _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": bogus})
+        assert mod._win_registry_bin("git") == (None, True), bogus
+
+
+def test_win_registry_bin_rejects_install_under_home(monkeypatch, tmp_path):
+    """A per-user install is user-writable, so it carries none of the HKLM
+    attestation this path relies on."""
+    home = tmp_path / "home" / "me"
+    root = home / "AppData" / "Git"
+    _install_git(root)
+    _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(root)})
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    assert mod._win_registry_bin("git")[0] is None
+
+
+def test_win_registry_bin_has_no_hint_for_arbitrary_names(monkeypatch, tmp_path):
+    """Only tools with a known official-installer key are discoverable this way;
+    an unknown name must not reach the registry at all."""
+    _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(tmp_path)})
+    assert mod._win_registry_bin("definitely-not-a-real-tool-xyz") == (None, True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission bits")
+def test_probe_replaceability_spots_a_writable_binary(tmp_path):
+    """The vector this closes: an install whose executable we can rewrite."""
+    exe = _install_git(tmp_path, sealed=False)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.REPLACEABLE
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission bits")
+def test_probe_replaceability_spots_a_writable_binary_in_a_sealed_dir(tmp_path):
+    """Isolates the FILE half of the probe: the directory denies create, so only
+    a check on the executable itself can catch this."""
+    exe = _install_git(tmp_path, sealed=True)
+    exe.chmod(0o755)  # writable file, sealed dir
+    assert mod._probe_replaceability(exe) is mod._Replaceability.REPLACEABLE
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission bits")
+def test_probe_replaceability_spots_a_writable_directory(tmp_path):
+    """A read-only binary in a writable directory is still ours to substitute:
+    delete-and-replace needs no write bit on the file."""
+    exe = _install_git(tmp_path, sealed=False)
+    exe.chmod(0o555)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.REPLACEABLE, "writable dir"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission bits")
+def test_probe_replaceability_accepts_a_sealed_install(tmp_path):
+    """An admin-owned install — no write on the file, no create in its dir."""
+    exe = _install_git(tmp_path, sealed=True)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.UNREPLACEABLE
+
+
+def _perm_error(winerror=None):
+    """A PermissionError shaped like the Windows one. Windows reports BOTH
+    access-denied and sharing violations through this type."""
+    exc = PermissionError(errno.EACCES, "Permission denied")
+    if winerror is not None:
+        exc.winerror = winerror
+    return exc
+
+
+@pytest.mark.parametrize("winerror", [32, 33])
+def test_probe_replaceability_does_not_read_a_sharing_violation_as_denied(
+    tmp_path, monkeypatch, winerror
+):
+    """WinError 32/33 mean "someone holds this open", not "you may not write it" —
+    and the lock lifts when that handle closes. Reading it as proof of
+    non-writability would cache a writable git.exe as trusted for the whole
+    process, which is the vector the probe exists to close."""
+    exe = _install_git(tmp_path, sealed=True)
+    real_open = mod.os.open
+
+    def fake_open(path, flags, *a, **kw):
+        if str(path) == str(exe):
+            raise _perm_error(winerror)
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "open", fake_open)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.UNKNOWN
+
+
+@pytest.mark.parametrize("winerror", [32, 33])
+def test_probe_replaceability_does_not_trust_a_locked_directory(
+    tmp_path, monkeypatch, winerror
+):
+    """Same rule for the directory half."""
+    exe = _install_git(tmp_path, sealed=True)
+    real_open = mod.os.open
+
+    def fake_open(path, flags, *a, **kw):
+        if ".kirocrew-write-probe-" in str(path):
+            raise _perm_error(winerror)
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "open", fake_open)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.UNKNOWN
+
+
+def test_probe_replaceability_still_trusts_a_real_access_denied(tmp_path, monkeypatch):
+    """ERROR_ACCESS_DENIED (5) — and POSIX EACCES, which carries no winerror at
+    all — remain the trusted negative. Without this the probe would refuse every
+    legitimate install and the fallback would be dead code."""
+    exe = _install_git(tmp_path, sealed=True)
+    real_open = mod.os.open
+
+    for winerror in (5, None):
+        def fake_open(path, flags, *a, **kw):
+            if str(path) == str(exe) or ".kirocrew-write-probe-" in str(path):
+                raise _perm_error(winerror)
+            return real_open(path, flags, *a, **kw)
+
+        monkeypatch.setattr(mod.os, "open", fake_open)
+        assert mod._probe_replaceability(exe) is mod._Replaceability.UNREPLACEABLE, winerror
+
+
+def test_probe_replaceability_fails_closed_when_the_dir_probe_is_inconclusive(
+    tmp_path, monkeypatch
+):
+    """A full volume (or exhausted descriptors) makes the create-probe fail for a
+    reason that says NOTHING about permissions. Reading that as "not writable"
+    would trust an install we never checked, and the answer is then cached for the
+    process lifetime — so it must count as replaceable."""
+    exe = _install_git(tmp_path, sealed=True)
+    real_open = mod.os.open
+
+    def fake_open(path, flags, *a, **kw):
+        if ".kirocrew-write-probe-" in str(path):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "open", fake_open)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.UNKNOWN
+
+
+def test_probe_replaceability_fails_closed_when_the_file_probe_is_inconclusive(
+    tmp_path, monkeypatch
+):
+    """Same rule for the file half: an I/O error is not a permission answer."""
+    exe = _install_git(tmp_path, sealed=True)
+    real_open = mod.os.open
+
+    def fake_open(path, flags, *a, **kw):
+        if str(path) == str(exe):
+            raise OSError(errno.EIO, "I/O error")
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "open", fake_open)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.UNKNOWN
+
+
+def test_probe_replaceability_fails_closed_on_a_confusing_probe(tmp_path, monkeypatch):
+    """An unreadable answer must withhold trust, never grant it."""
+    exe = _install_git(tmp_path, sealed=True)
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("probe confused")
+
+    monkeypatch.setattr(mod.os, "open", boom)
+    assert mod._probe_replaceability(exe) is mod._Replaceability.UNKNOWN
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission bits")
+def test_win_registry_bin_rejects_an_agent_writable_install(monkeypatch, tmp_path):
+    """HKLM proves an admin REGISTERED the path, not that it is unwritable. A
+    custom install with permissive ACLs must be refused, or the registry becomes
+    a laundering route for the planted shim _trusted_bin exists to block."""
+    root = tmp_path / "software" / "Git"
+    _install_git(root, sealed=False)
+    _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(root)})
+    _home_elsewhere(monkeypatch, tmp_path)
+
+    assert mod._win_registry_bin("git")[0] is None
+
+
+def test_win_registry_bin_reports_an_inconclusive_refusal_as_uncacheable(
+    monkeypatch, tmp_path
+):
+    """A candidate refused because the PROBE could not decide must come back
+    flagged uncacheable, so `_trusted_bin` retries instead of freezing it. Without
+    this the caller cannot tell "verified writable" from "could not tell", and a
+    transient lock becomes a permanent empty fleet."""
+    root = tmp_path / "software" / "Git"
+    exe = _install_git(root, sealed=True)
+    _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(root)})
+    _home_elsewhere(monkeypatch, tmp_path)
+    real_open = mod.os.open
+
+    def locked(path, flags, *a, **kw):
+        if str(path) == str(exe):
+            raise _perm_error(32)  # held open, e.g. an editor polling git
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "open", locked)
+    assert mod._win_registry_bin("git") == (None, False)
+
+
+def test_win_registry_bin_reports_a_verified_writable_install_as_cacheable(
+    monkeypatch, tmp_path
+):
+    """By contrast, "we can definitely rewrite this" is a stable fact and may be
+    cached — otherwise every fleet poll re-probes a host that will never qualify."""
+    root = tmp_path / "software" / "Git"
+    _install_git(root, sealed=False)
+    _fake_winreg(monkeypatch, {r"SOFTWARE\GitForWindows": str(root)})
+    _home_elsewhere(monkeypatch, tmp_path)
+
+    assert mod._win_registry_bin("git") == (None, True)
+
+
+def test_win_registry_bin_is_inert_without_the_winreg_module(monkeypatch):
+    """On POSIX the module is absent, so the helper must no-op rather than raise
+    into _trusted_bin's resolution path."""
+    monkeypatch.setattr(mod, "winreg", None)
+    assert mod._win_registry_bin("git")[0] is None
+
+
+def _registry_stub(monkeypatch, results):
+    """Drive _trusted_bin's registry fallback from a scripted list of
+    ``(path, cacheable)`` results, recording how often it was consulted."""
+    calls: list[str] = []
+    seq = list(results)
+
+    def fake(name):
+        calls.append(name)
+        return seq.pop(0) if seq else (None, True)
+
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GIT", raising=False)
+    monkeypatch.setattr(mod, "_win_registry_bin", fake)
+    monkeypatch.setattr(mod, "_TRUSTED_BIN_DIRS", ())
+    monkeypatch.setattr(mod.platform_compat, "IS_WINDOWS", True)
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+    return calls
+
+
+def test_trusted_bin_does_not_freeze_an_inconclusive_refusal(monkeypatch):
+    """The regression this guards: a running git.exe (an editor polling git is
+    enough) denies write-open with a sharing violation, so the probe correctly
+    refuses — but caching that None would make a MOMENTARY lock a permanent empty
+    fleet for the life of the gateway. The refusal must be revisited."""
+    calls = _registry_stub(monkeypatch, [(None, False), ("C:/w/git.exe", True)])
+    # Stub the scheduler so the refresh runs exactly once, where this test says.
+    scheduled: list[str] = []
+    monkeypatch.setattr(mod, "_schedule_registry_refresh", scheduled.append)
+
+    assert mod._trusted_bin("git") is None
+    assert "git" not in mod._TRUSTED_BIN_CACHE, "inconclusive refusal must not cache"
+    assert "git" in mod._TRUSTED_BIN_RETRY_AT, "must be queued for another look"
+
+    # Pretend the cool-off has elapsed, then let the refresh run.
+    mod._TRUSTED_BIN_RETRY_AT["git"] = time.monotonic() - 1
+    assert mod._trusted_bin("git") is None, "this call declines; it must not block"
+    assert scheduled == ["git"]
+    mod._refresh_registry_bin_now("git")
+
+    assert mod._trusted_bin("git") == "C:/w/git.exe", "must recover once it clears"
+    assert calls == ["git", "git"], "exactly one re-probe, off the calling path"
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+
+
+def test_trusted_bin_never_reprobes_on_the_calling_thread(monkeypatch):
+    """`_trusted_bin` is resolved on the request path (`_run_cmd` picks the
+    executable before offloading the spawn), so a recurring probe would put
+    registry reads and a file-create on the event loop — and the probe is slowest
+    precisely when it is failing. Past the cool-off it must SCHEDULE, not probe."""
+    calls = _registry_stub(monkeypatch, [(None, False)])
+    scheduled: list[str] = []
+    monkeypatch.setattr(mod, "_schedule_registry_refresh", scheduled.append)
+
+    assert mod._trusted_bin("git") is None  # first probe: inline, one-shot
+    assert calls == ["git"] and scheduled == []
+
+    mod._TRUSTED_BIN_RETRY_AT["git"] = time.monotonic() - 1
+    assert mod._trusted_bin("git") is None
+    assert scheduled == ["git"], "the retry must be handed off, not run here"
+    assert calls == ["git"], "no second probe on the calling thread"
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+
+
+def test_trusted_bin_rate_limits_an_inconclusive_refusal(monkeypatch):
+    """Inside the cool-off it must neither probe nor schedule: the fleet is polled,
+    and each probe creates and deletes a file in the install directory, which EDR
+    on a managed Windows host reads as suspicious."""
+    calls = _registry_stub(monkeypatch, [(None, False)])
+    scheduled: list[str] = []
+    monkeypatch.setattr(mod, "_schedule_registry_refresh", scheduled.append)
+
+    assert mod._trusted_bin("git") is None
+    for _ in range(5):
+        assert mod._trusted_bin("git") is None
+    assert calls == ["git"], f"probed {len(calls)}x inside the cool-off window"
+    assert scheduled == [], "no refresh should be queued inside the cool-off"
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+
+
+def test_trusted_bin_still_caches_a_conclusive_refusal(monkeypatch):
+    """A verified-writable install is a stable fact, so it may be cached — the
+    cool-off is only for verdicts the probe could not reach."""
+    calls = _registry_stub(monkeypatch, [(None, True)])
+
+    assert mod._trusted_bin("git") is None
+    assert mod._TRUSTED_BIN_CACHE.get("git", "missing") is None
+    assert mod._trusted_bin("git") is None
+    assert calls == ["git"], "a conclusive refusal should be served from cache"
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+
+
+def test_refresh_re_arms_instead_of_caching_an_inconclusive_result(monkeypatch):
+    """The refresh must not undo the very fix it serves: if the re-probe is ALSO
+    inconclusive, it re-arms the cool-off rather than caching the refusal, or the
+    lock-at-startup case would still freeze into a permanently empty fleet."""
+    _registry_stub(monkeypatch, [(None, False)])
+
+    mod._refresh_registry_bin_now("git")
+
+    assert "git" not in mod._TRUSTED_BIN_CACHE, "inconclusive must stay uncached"
+    assert mod._TRUSTED_BIN_RETRY_AT.get("git", 0) > time.monotonic(), "must re-arm"
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+
+
+def test_schedule_registry_refresh_runs_off_thread_and_coalesces(monkeypatch):
+    """The scheduler hands the probe to a thread and allows only one in flight."""
+    started: list[dict] = []
+
+    class FakeThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            self.target = target
+            started.append({"name": name, "daemon": daemon})
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(mod.threading, "Thread", FakeThread)
+    _registry_stub(monkeypatch, [("C:/w/git.exe", True)])
+
+    mod._schedule_registry_refresh("git")
+    assert len(started) == 1 and started[0]["daemon"] is True
+    assert mod._TRUSTED_BIN_CACHE["git"] == "C:/w/git.exe"
+
+    # Lock held (a refresh already in flight) -> no second thread.
+    assert mod._REGISTRY_REFRESH_LOCK.acquire(blocking=False)
+    try:
+        mod._schedule_registry_refresh("git")
+        assert len(started) == 1, "refreshes must coalesce"
+    finally:
+        mod._REGISTRY_REFRESH_LOCK.release()
+    mod._TRUSTED_BIN_CACHE.clear()
+    mod._TRUSTED_BIN_RETRY_AT.clear()
+
+
+def test_trusted_bin_consults_the_registry_only_on_windows(monkeypatch):
+    """The registry lookup is a Windows-only last resort: it must not run on
+    POSIX, where the trusted dir list is the whole contract."""
+    calls: list[str] = []
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GIT", raising=False)
+    monkeypatch.setattr(
+        mod, "_win_registry_bin", lambda n: (calls.append(n) or "C:/w/git.exe", True)
+    )
+    monkeypatch.setattr(mod, "_TRUSTED_BIN_DIRS", ())
+
+    mod._TRUSTED_BIN_CACHE.clear()
+    monkeypatch.setattr(mod.platform_compat, "IS_WINDOWS", False)
+    assert mod._trusted_bin("git") is None
+    assert calls == []
+
+    mod._TRUSTED_BIN_CACHE.clear()
+    monkeypatch.setattr(mod.platform_compat, "IS_WINDOWS", True)
+    assert mod._trusted_bin("git") == "C:/w/git.exe"
+    assert calls == ["git"]
+    mod._TRUSTED_BIN_CACHE.clear()
+
+
+def test_trusted_bin_prefers_a_trusted_dir_over_the_registry(monkeypatch, tmp_path):
+    """The registry is a fallback, not a shortcut: a tool sitting in a trusted
+    bin dir wins and the registry is never consulted for it."""
+    calls: list[str] = []
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GIT", raising=False)
+    monkeypatch.setattr(
+        mod, "_win_registry_bin", lambda n: (calls.append(n) or "C:/w/git.exe", True)
+    )
+    exe = tmp_path / "git"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o555)
+    monkeypatch.setattr(mod, "_TRUSTED_BIN_DIRS", (str(tmp_path),))
+    # Simulate a Windows host wholesale: the POSIX ownership guard does not
+    # apply there, and it would reject this fixture when the suite runs as root.
+    monkeypatch.setattr(mod.platform_compat, "IS_WINDOWS", True)
+    monkeypatch.setattr(mod.platform_compat, "IS_POSIX", False)
+    _home_elsewhere(monkeypatch, tmp_path)
+
+    mod._TRUSTED_BIN_CACHE.clear()
+    assert mod._trusted_bin("git") == str(exe.resolve())
+    assert calls == []
     mod._TRUSTED_BIN_CACHE.clear()
 
 
