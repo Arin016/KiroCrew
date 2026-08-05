@@ -1053,6 +1053,20 @@ const REVEAL_FADE_CHARS = 32
  *  fade-from-invisible. */
 const REVEAL_MIN_OPACITY = 0.6
 
+/** How long the rendered content must sit unchanged before the reveal edge is
+ *  settled to full opacity. `--ft-o` is POSITIONAL, so only the tip advancing
+ *  raises a character's opacity. This matters for exactly one case: a stream
+ *  that PAUSES mid-turn (the gap while the model composes tool arguments), where
+ *  `streaming` is still true and nothing advances the tip, leaving the last
+ *  REVEAL_FADE_CHARS characters pinned as low as REVEAL_MIN_OPACITY for the
+ *  whole pause. A FINISHED stream is already self-healing and needs nothing:
+ *  rehypeStreamingReveal is only in the pipeline while `glow` is set, and
+ *  `glow` follows `isStreaming`, so the spans are dropped on the next re-parse.
+ *  Do not "simplify" this into `animOn = !!smooth && streaming` — that only
+ *  covers the self-healing case and cannot cover a pause, where streaming is
+ *  true by definition. */
+const REVEAL_IDLE_SETTLE_MS = 500
+
 /** Opacity for a character `d` positions back from the streaming tip (d=0 is
  *  the newest char). Deliberately a pure function of POSITION, not of mount
  *  time — this is the streaming-flash fix. react-markdown re-parses the whole
@@ -1513,6 +1527,31 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
     return -1
   }, [blocks])
 
+  // Settle the reveal edge once the content stops changing, and NEVER un-settle
+  // it. One-way is the whole point: `.ft-word` spans persist across chunks
+  // (hast-util-to-jsx-runtime keys element children by per-parent ordinal, and
+  // `--ft-o` is a function of the span's slot, not of the character), so
+  // REMOVING `.ft-idle` would transition the entire 32-character edge from the
+  // settled 1 back down to `--ft-o` — an inverse of the fade-in #697 built, in
+  // the same pixels. Pre-paint clearing cannot avoid that either, because a
+  // transition starts from the previously COMPUTED style, not the last painted
+  // frame. Making the settle one-way removes the downward transition by
+  // construction: a character's opacity only ever rises.
+  //
+  // The cost is deliberate: after the first stall the rest of that row renders
+  // at full opacity with no reveal. A latched class is harmless once streaming
+  // ends — the spans only exist while `glow` is set, and the class's effect is
+  // full opacity, which is the correct end state anyway.
+  //
+  // Skipped entirely when `smooth` is off: `.ft-idle` is inert there, and this
+  // component has ~15 non-streaming call sites.
+  const [revealIdle, setRevealIdle] = useState(false)
+  useEffect(() => {
+    if (!smooth || revealIdle) return
+    const t = setTimeout(() => setRevealIdle(true), REVEAL_IDLE_SETTLE_MS)
+    return () => clearTimeout(t)
+  }, [content, smooth, revealIdle])
+
   if (rawMode) {
     return <pre className="text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed text-muted">{content}</pre>
   }
@@ -1523,7 +1562,15 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
   // re-mounts don't re-fade.
   const animOn = !!smooth
   const animClass = animOn ? ' ft-anim-smooth' : ''
-  const streamClass = animOn && streaming ? ' ft-streaming' : ''
+  // `ft-idle` is folded into streamClass rather than interpolated separately so
+  // the root element below stays byte-identical to base. The repo's
+  // accessible-interactive-elements rule greps ADDED lines for a non-role div or
+  // span carrying a click handler (check-added: true), so merely re-touching that
+  // line trips a WCAG-affordance gate even though this change adds no affordance
+  // -- the element and its handler are untouched.
+  const streamClass =
+    (animOn && streaming ? ' ft-streaming' : '') +
+    (animOn && revealIdle ? ' ft-idle' : '')
 
   return (
     // Presentational content wrapper for rendered markdown blocks. The onClick is

@@ -1197,6 +1197,18 @@ button:hover .app-icon{--ico-a:var(--accent);--ico-b:var(--text)}
 @keyframes ft-fade{from{opacity:0}to{opacity:1}}
 .ft-word{white-space:pre-wrap;opacity:1}
 .ft-anim-smooth .ft-word{opacity:var(--ft-o,1);transition:opacity .25s linear}
+/* Reveal-edge settle. `--ft-o` above is positional, so a stream that pauses
+   mid-turn or has finished leaves its last REVEAL_FADE_CHARS characters pinned
+   below full opacity with nothing to advance the tip. MarkdownRenderer adds
+   `.ft-idle` after REVEAL_IDLE_SETTLE_MS of unchanged content; this overrides
+   the edge to 1 and the transition on the rule above animates that settle. The
+   reduced-motion block below still wins on `transition` (not redeclared here),
+   so that path snaps instead of animating. */
+.ft-anim-smooth.ft-idle .ft-word{opacity:1}
+/* NOTE: `.ft-anim-smooth.ft-idle .ft-word` above is (0,3,0) and out-specifies
+   this block's (0,2,0) on `opacity`. Harmless today -- both declare 1, and the
+   settle rule does not redeclare `transition`, so `transition:none` still wins
+   here. If you ever change the opacity below, change the settle rule too. */
 @media (prefers-reduced-motion:reduce){
   .ft-anim-smooth .ft-word{opacity:1;transition:none}
 }
