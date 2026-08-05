@@ -115,8 +115,25 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
     # would delete the pin we just wrote and this pod would crash-loop on boot.
     with rt.pod_name_mutex(cfg, name):
         rt.pin_checkout(cfg, name, checkout)
+        # Boot-time settings, merged into a single env-file write. ``boot`` reads
+        # them once at start, so recording one against a live pod would look
+        # applied and change nothing until a restart -- hence the note below.
+        # Read defensively, as ``provision`` above is: hand-built Namespaces in
+        # tests (and older callers) may not carry every key.
+        env_updates: dict[str, str] = {}
+        boot_flags: list[str] = []
         if args.seed:
-            rt.write_env_file(cfg, name, {"SEED": args.seed})
+            env_updates["SEED"] = args.seed
+        approval = getattr(args, "approval", None)
+        if approval:
+            env_updates["APPROVAL"] = approval
+            boot_flags.append(f"--approval {approval}")
+        crons = bool(getattr(args, "crons", False))
+        if crons:
+            env_updates["CRONS"] = "1"
+            boot_flags.append("--crons")
+        if env_updates:
+            rt.write_env_file(cfg, name, env_updates)
 
         if not rt.is_active(cfg, name):
             cp = rt.start_pod(cfg, name)
@@ -125,7 +142,23 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
                     "pod.up", "failure", f"name={name} port={port}", error="backend start failed"
                 )
                 _die(f"starting pod {name} failed: {(cp.stderr or '').strip()}")
-        _audit("pod.up", "allowed", f"name={name} port={port}")
+        elif boot_flags:
+            joined = " ".join(boot_flags)
+            print(
+                f"pod: note: {joined} recorded for {name!r}, but that pod is already "
+                f"running, so it applies on the next boot "
+                f"(kirocrew pod down {name} && kirocrew pod up {name} {joined}).",
+                file=sys.stderr,
+            )
+        # Record boot-time settings: a pod in `yolo` auto-approves every tool and
+        # one with the scheduler on runs work unattended, so the audit trail must
+        # say so rather than recording only that a pod came up.
+        resources = f"name={name} port={port}"
+        if approval:
+            resources += f" approval={approval}"
+        if crons:
+            resources += " crons=on"
+        _audit("pod.up", "allowed", resources)
 
         code = _wait_healthy(cfg, name, port)
         if code not in (200, 401, 403):
