@@ -1580,6 +1580,22 @@ button:hover .app-icon{--ico-a:var(--accent);--ico-b:var(--text)}
   background-color: var(--search-highlight-current);
 }
 
+/* Line reveal — a `path/to/file.py:447` chip in the transcript opens the file in
+   the side panel and flashes line 447. Monaco decoration classes (not the CSS
+   Custom Highlight API), so unlike ::highlight() these DO honor box properties,
+   which is what allows the gutter bar. --accent-subtle is theme-defined for all
+   palettes and is the same wash flashCommentRow uses, so the two "here is what
+   you clicked" signals read as one idea. Cleared after ~2.8s by the panel; the
+   transition means the clear reads as a fade rather than a pop. */
+.mc-line-reveal {
+  background-color: var(--accent-subtle, rgba(99, 102, 241, 0.25));
+  transition: background-color 0.3s ease;
+}
+.mc-line-reveal-gutter {
+  border-left: 2px solid var(--accent);
+  margin-left: 3px;
+}
+
 /* Anchored-comment highlights on the markdown / text artifact body are drawn
    as a real overlay layer (InlineCommentOverlay), NOT the CSS Custom Highlight
    API — real elements always paint and support box-shadow + a persistent active
