@@ -218,6 +218,14 @@ _TRANSIENT_PROBE_ERRNOS = frozenset(
 # Delay before the single in-probe retry on a transient failure.
 _PROBE_TRANSIENT_RETRY_DELAY_SECS = 0.05
 
+# Ceiling on how long a blocking ``warm_backend`` waits for the probe to land.
+# The probe itself is a fork + unshare (sub-millisecond) and the warm thread
+# makes at most two attempts separated by one _PROBE_TRANSIENT_RETRY_DELAY_SECS
+# sleep, so this is orders of magnitude of slack rather than a tuned value — it
+# exists so a wedged probe cannot stall boot indefinitely. Exceeding it is not
+# an error: the cache stays cold and the self-healing transient path applies.
+_WARM_JOIN_TIMEOUT_SECS = 2.0
+
 # Steps of the launcher's namespace handshake, named in probe failure reasons so
 # a caller can tell the host mechanisms apart instead of seeing a bare errno: a
 # NEWNS denial is Ubuntu's AppArmor userns restriction, while NEWUSER with
@@ -562,12 +570,22 @@ def _background_warm() -> None:
 
 
 def _kick_background_warm() -> None:
-    """Start the background warm thread if not already running."""
+    """Start the background warm thread if not already running.
+
+    Thread-start failure (RuntimeError under thread exhaustion) is swallowed:
+    the cache stays cold and the pre-existing self-healing transient path
+    applies on the next spawn.  This keeps gateway boot stable even when the
+    host is resource-constrained.
+    """
     global _warm_thread
     if _warm_thread is not None and _warm_thread.is_alive():
         return  # dedupe: warm already in progress
     _warm_thread = threading.Thread(target=_background_warm, name="sandbox-probe-warm", daemon=True)
-    _warm_thread.start()
+    try:
+        _warm_thread.start()
+    except RuntimeError:
+        _warm_thread = None
+        logger.debug("sandbox warm thread start failed; cache stays cold")
 
 
 def prewarm_backend() -> None:
@@ -579,6 +597,34 @@ def prewarm_backend() -> None:
     if sys.platform != "linux":
         return  # probes are Linux-only
     _kick_background_warm()
+
+
+def warm_backend(timeout: float = _WARM_JOIN_TIMEOUT_SECS) -> None:
+    """Blocking boot hook: fill the probe cache BEFORE returning.
+
+    ``prewarm_backend`` only *starts* the probe, so a caller that reaches
+    ``detect_backend`` in the same tick still races the warm thread and gets the
+    synthetic-transient answer — a cold-cache false negative that reads exactly
+    like "this host has no sandbox backend". This variant waits for the probe to
+    land, so the next ``detect_backend`` sees a warm cache and the transient path
+    is not reachable from a warmed boot.
+
+    The wait is bounded: ``_background_warm`` makes at most two attempts with a
+    single short delay between them, and a join timeout caps the total. A timeout
+    is not an error — the cache simply stays cold and the pre-existing
+    self-healing transient path applies, exactly as with ``prewarm_backend``.
+
+    **Never-block-on-loop invariant**: this blocks on a thread join, so it MUST
+    NOT be called from a running event loop. On-loop callers use
+    ``await asyncio.to_thread(warm_backend)``; synchronous callers (CLI paths)
+    may call it directly.
+    """
+    if sys.platform != "linux":
+        return  # probes are Linux-only
+    _kick_background_warm()
+    thread = _warm_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout)
 
 
 def _probe_unshare() -> bool:

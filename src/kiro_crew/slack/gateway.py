@@ -160,7 +160,7 @@ from kiro_crew.platform.governance_profiles import (
 )
 from kiro_crew.providers.base import LLMEvent
 from kiro_crew.safety_override import safety_override
-from kiro_crew.sandbox import prewarm_backend
+from kiro_crew.sandbox import warm_backend
 from kiro_crew.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 from kiro_crew.service.common import restart_command_hint
@@ -5604,8 +5604,15 @@ class GatewayOrchestrator:
 
         cleanup_orphaned_sessions()
 
-        # Prewarm sandbox probe cache so on-loop spawns never hit cold-cache path
-        prewarm_backend()
+        # Fill the sandbox probe cache BEFORE any on-loop spawn path can reach
+        # detect_backend(). Waiting (off-loop) rather than firing-and-forgetting
+        # is what makes that guarantee hold: a fire-and-forget prewarm leaves the
+        # very next caller racing the warm thread and reading a cold-cache
+        # transient as "no sandbox backend on this host".
+        try:
+            await asyncio.to_thread(warm_backend)
+        except RuntimeError:
+            logger.warning("sandbox warm_backend skipped (thread exhaustion); cache stays cold")
 
         # ── Initialise all services ──
         from kiro_crew.slack.events import SeenCache, init_socket_mode

@@ -74,7 +74,7 @@ from kiro_crew.mcp_gateway.rewriter import (
 from kiro_crew.mcp_gateway.shutdown_budget import DRAIN_SECS, POOL_SHUTDOWN_SECS
 from kiro_crew.mcp_gateway.spill import cleanup_old_spill_files
 from kiro_crew.metrics.provider import get_recorder
-from kiro_crew.sandbox import prewarm_backend
+from kiro_crew.sandbox import warm_backend
 from kiro_crew.sel import SecurityEventLog
 from kiro_crew.session_pid_sig import read_session_pid_txt
 
@@ -2868,8 +2868,14 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
 
     hb_task = asyncio.create_task(_heartbeat(), name="mcp-gateway-heartbeat")
 
-    # Prewarm sandbox probe cache so backends spawned on-loop never hit cold path
-    prewarm_backend()
+    # Fill the sandbox probe cache BEFORE any backend is spawned on-loop. See the
+    # matching site in slack/gateway.py: the wait is what makes the guarantee
+    # hold, since a fire-and-forget prewarm leaves the first spawn racing the
+    # warm thread and reading a cold-cache transient as "no sandbox backend".
+    try:
+        await asyncio.to_thread(warm_backend)
+    except RuntimeError:
+        logger.warning("sandbox warm_backend skipped (thread exhaustion); cache stays cold")
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
