@@ -3046,6 +3046,20 @@ class TestSsmTunnelProcessGroup:
 class TestSsmTransportSelection:
     """The manager must drive the transport each instance is configured for."""
 
+    @pytest.fixture(autouse=True)
+    def _free_ports(self, monkeypatch):
+        # These tests assert which TRANSPORT the manager selects (ssh vs ssm) via
+        # _FakeTunnel; they are not about real local-port availability. connect()
+        # probes the real _is_port_free (CSE SEC-016 mirror-conflict check), and
+        # on a busy CI shard the fixed ports below (53510-53513) can already be
+        # bound -- connect() then returns an error status WITHOUT registering the
+        # tunnel, so `mgr._tunnels[id]` raises KeyError and the test flakes. Stub
+        # the probe to always-free, exactly as the other SshTunnelManager test
+        # classes do, so transport selection is tested deterministically.
+        import kiro_crew.instances.ssh_tunnel_manager as stm
+
+        monkeypatch.setattr(stm, "_is_port_free", lambda port, host="127.0.0.1": True)
+
     def _mgr(self, tmp_path, *, mint=None):
         from kiro_crew.instances.registry import InstancesRegistry
         from kiro_crew.instances.ssh_tunnel_manager import SshTunnelManager
