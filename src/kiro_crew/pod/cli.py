@@ -117,6 +117,11 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
         rt.pin_checkout(cfg, name, checkout)
         if args.seed:
             rt.write_env_file(cfg, name, {"SEED": args.seed})
+        # Read defensively, as ``provision`` above is: hand-built Namespaces in
+        # tests (and older callers) may not carry the key.
+        approval = getattr(args, "approval", None)
+        if approval:
+            rt.write_env_file(cfg, name, {"APPROVAL": approval})
 
         if not rt.is_active(cfg, name):
             cp = rt.start_pod(cfg, name)
@@ -125,7 +130,21 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
                     "pod.up", "failure", f"name={name} port={port}", error="backend start failed"
                 )
                 _die(f"starting pod {name} failed: {(cp.stderr or '').strip()}")
-        _audit("pod.up", "allowed", f"name={name} port={port}")
+        elif approval:
+            # The mode is read once, at boot. Recording it against a live pod
+            # would otherwise look applied but change nothing until a restart.
+            print(
+                f"pod: note: --approval {approval} recorded for {name!r}, but that pod is "
+                f"already running, so it applies on the next boot "
+                f"(kirocrew pod down {name} && kirocrew pod up {name} --approval {approval}).",
+                file=sys.stderr,
+            )
+        # Record the mode: booting a pod in `yolo` auto-approves every tool, so
+        # the audit trail must say so, not just that a pod came up.
+        resources = f"name={name} port={port}"
+        if approval:
+            resources += f" approval={approval}"
+        _audit("pod.up", "allowed", resources)
 
         code = _wait_healthy(cfg, name, port)
         if code not in (200, 401, 403):

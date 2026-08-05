@@ -17,6 +17,7 @@ kirocrew pod install              # lay down the systemd --user template unit (o
 kirocrew pod provision <wt>       # build the worktree's venv + SPA dist (the on-ramp)
 kirocrew pod up   <wt> [--json]   # bring up an isolated pod → {base_url, token, port}
 kirocrew pod up   <wt> --provision# provision (if needed) then bring it up
+kirocrew pod up   <wt> --approval reads  # boot its gateway in an approval mode
 kirocrew pod ls                   # what's running (≈ kubectl get pods)
 kirocrew pod status <wt>          # up/down + health
 kirocrew pod token  <wt> [--ttl]  # (re)mint a dashboard token for a running pod

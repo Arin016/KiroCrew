@@ -44,9 +44,20 @@ def validate_name(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Per-pod env file (pinned CHECKOUT= / PORT= / SEED=). Values are single-quoted
-# on write and unquoted on read; unknown keys are preserved on merge.
+# Per-pod env file (pinned CHECKOUT= / PORT= / SEED= / APPROVAL=). Values are
+# single-quoted on write and unquoted on read; unknown keys are preserved on
+# merge.
 # --------------------------------------------------------------------------- #
+
+# Approval modes a pod's gateway may boot with, mirroring the choices on
+# ``kirocrew gateway --approval``. This tuple is the ENFORCEMENT point: the env
+# file is hand-editable, so ``boot`` re-validates against it instead of trusting
+# whatever ``pod up`` wrote. The top-level ``cli.py`` repeats the literal for its
+# argparse ``choices`` because that parser deliberately imports no pod module at
+# startup; argparse is the UX layer, this tuple is the invariant.
+APPROVAL_MODES: tuple[str, ...] = ("reads", "yolo", "interactive")
+
+
 def read_env_file(cfg: PodConfig, name: str) -> dict[str, str]:
     out: dict[str, str] = {}
     f = cfg.env_file(name)
@@ -1003,6 +1014,18 @@ def boot(cfg: PodConfig, name: str) -> int:
         return 70
 
     seed = env_data.get("SEED", "")
+    approval = env_data.get("APPROVAL", "")
+    if approval and approval not in APPROVAL_MODES:
+        # `pod up` constrains the flag, but this file is hand-editable, so an
+        # unknown value can still reach here. Drop it rather than forward an
+        # arbitrary argument to the gateway: omitting --approval leaves the
+        # gateway in its default interactive mode, the most restrictive outcome,
+        # and the pod still boots.
+        print(
+            f"kirocrew-pod: ignoring unknown APPROVAL={approval!r} "
+            f"(expected one of: {', '.join(APPROVAL_MODES)})"
+        )
+        approval = ""
 
     # Write the pod's isolated, tunnel-disabled config with owner-only perms.
     # Creates the HOME (0o700) too. Never copies DB/sessions/crons.
@@ -1011,5 +1034,8 @@ def boot(cfg: PodConfig, name: str) -> int:
     print(f"kirocrew-pod: name={name} port={port} home={home_dir} checkout={checkout}")
 
     pod_env = build_pod_env(cfg, home_dir, port, checkout)
-    os.execve(str(bin_path), [str(bin_path), "gateway", "--no-crons"], pod_env)
+    argv = ["gateway", "--no-crons"]
+    if approval:
+        argv += ["--approval", approval]
+    os.execve(str(bin_path), [str(bin_path), *argv], pod_env)
     return 0  # unreachable on success
