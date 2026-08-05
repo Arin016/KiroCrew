@@ -2412,9 +2412,9 @@ function ChatSidebar({
             <div className="absolute top-1/2 -translate-y-1/2 right-1.5 flex items-center gap-0.5">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label={i18nT('pages.chatSidebar.more_options')} onMouseDown={e => e.stopPropagation()}><MoreVertical size={14} /></button>
+                  <button type="button" className="text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label={i18nT('pages.chatSidebar.more_options')} onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}><MoreVertical size={14} /></button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[160px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
+                <DropdownMenuContent align="end" className="min-w-[160px]" onClick={e => e.stopPropagation()} onCloseAutoFocus={onMenuCloseAutoFocus}>
                   <SessionActionsMenu variant="dropdown" {...rowMenuProps} />
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -2423,9 +2423,9 @@ function ChatSidebar({
             <IconButtonGroup reveal className="absolute top-1/2 -translate-y-1/2 right-1.5 has-[[data-state=open]]:opacity-100">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <IconButton title={i18nT('pages.chatSidebar.more')} aria-label={i18nT('pages.chatSidebar.more_options')} onMouseDown={e => e.stopPropagation()}><MoreVertical size={12} /></IconButton>
+                  <IconButton title={i18nT('pages.chatSidebar.more')} aria-label={i18nT('pages.chatSidebar.more_options')} onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}><MoreVertical size={12} /></IconButton>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[160px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
+                <DropdownMenuContent align="end" className="min-w-[160px]" onClick={e => e.stopPropagation()} onCloseAutoFocus={onMenuCloseAutoFocus}>
                   <SessionActionsMenu variant="dropdown" {...rowMenuProps} />
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -2435,7 +2435,7 @@ function ChatSidebar({
           ))}
         </div>
           </ContextMenuTrigger>
-          <ContextMenuContent className="min-w-[160px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
+          <ContextMenuContent className="min-w-[160px]" onClick={e => e.stopPropagation()} onCloseAutoFocus={onMenuCloseAutoFocus}>
             <SessionActionsMenu variant="context" {...rowMenuProps} />
           </ContextMenuContent>
         </ContextMenu>
