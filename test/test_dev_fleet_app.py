@@ -7,6 +7,7 @@ import hmac as _hmac  # noqa: F401
 import hmac as _hmac_mod
 import json
 import os
+import sys
 import textwrap
 import time
 from contextlib import ExitStack
@@ -2795,8 +2796,14 @@ async def test_trusted_helpers_loaded_from_global_config(monkeypatch):
     monkeypatch.setattr(mod, "_GIT_TRUSTED_HELPERS", None)
     monkeypatch.setattr(mod, "_trusted_bin", lambda n: f"/usr/bin/{n}")
 
+    scopes: list = []
+
     async def fake_run_cmd(cmd, **kw):
-        assert cmd[:4] == ["git", "config", "--global", "--get-regexp"]
+        assert cmd[:2] == ["git", "config"]
+        assert cmd[3] == "--get-regexp"
+        scopes.append(cmd[2])
+        if cmd[2] != "--global":
+            return 1, "", ""  # nothing machine-wide
         return 0, (
             "credential.https://github.com.helper !gh auth git-credential\n"
             "credential.helper store\n"
@@ -2811,6 +2818,79 @@ async def test_trusted_helpers_loaded_from_global_config(monkeypatch):
     assert h[f"GIT_CONFIG_VALUE_{base}"] == "!/usr/bin/gh auth git-credential"
     assert f"GIT_CONFIG_KEY_{base + 1}" not in h
     assert h["GIT_CONFIG_COUNT"] == str(base + 1)
+    # Both operator-owned scopes are probed, and repo-LOCAL never is: a checkout
+    # Dev Fleet builds can write .git/config, and a helper from there would run
+    # in the credential-bearing standard tier.
+    assert scopes == ["--system", "--global"]
+
+
+@pytest.mark.asyncio
+async def test_trusted_helpers_loaded_from_system_config(monkeypatch):
+    """A SYSTEM-scope helper is re-pinned — the stock-macOS case.
+
+    Xcode's Command Line Tools ship `credential.helper = osxkeychain` in the
+    system gitconfig and a stock install has nothing in global, so scanning only
+    --global left the neutralizer's reset unrepaired and `git fetch` died with
+    "could not read Username" (no tty to prompt on).
+    """
+    monkeypatch.setattr(mod, "_GIT_TRUSTED_HELPERS", None)
+
+    async def fake_run_cmd(cmd, **kw):
+        if cmd[2] == "--system":
+            return 0, "credential.helper osxkeychain\n", ""
+        return 1, "", ""  # nothing in global, as on a stock macOS host
+
+    monkeypatch.setattr(mod, "_run_cmd", fake_run_cmd)
+    await mod._load_trusted_credential_helpers()
+    h = mod._GIT_TRUSTED_HELPERS or {}
+    base = int(mod._GIT_ENV_NEUTRALIZERS["GIT_CONFIG_COUNT"])
+    assert h[f"GIT_CONFIG_KEY_{base}"] == "credential.helper"
+    assert h[f"GIT_CONFIG_VALUE_{base}"] == "osxkeychain"
+    assert h["GIT_CONFIG_COUNT"] == str(base + 1)
+
+
+@pytest.mark.asyncio
+async def test_trusted_helpers_global_is_pinned_after_system(monkeypatch):
+    """Ordering mirrors git's own precedence: system first, then global.
+
+    credential.helper is multi-valued and the LAST entry wins, so an operator's
+    own global setting must still override a machine-wide default.
+    """
+    monkeypatch.setattr(mod, "_GIT_TRUSTED_HELPERS", None)
+
+    async def fake_run_cmd(cmd, **kw):
+        if cmd[2] == "--system":
+            return 0, "credential.helper osxkeychain\n", ""
+        return 0, "credential.helper manager\n", ""
+
+    monkeypatch.setattr(mod, "_run_cmd", fake_run_cmd)
+    await mod._load_trusted_credential_helpers()
+    h = mod._GIT_TRUSTED_HELPERS or {}
+    base = int(mod._GIT_ENV_NEUTRALIZERS["GIT_CONFIG_COUNT"])
+    assert h[f"GIT_CONFIG_VALUE_{base}"] == "osxkeychain"      # system
+    assert h[f"GIT_CONFIG_VALUE_{base + 1}"] == "manager"      # global wins
+    assert h["GIT_CONFIG_COUNT"] == str(base + 2)
+
+
+@pytest.mark.asyncio
+async def test_trusted_helpers_never_read_repo_local_scope(monkeypatch):
+    """--local is never probed.
+
+    Repo-local config is the attack surface the neutralizer's reset exists for:
+    a checkout Dev Fleet builds can write .git/config, and a helper from there
+    would run in the credential-bearing standard tier.
+    """
+    monkeypatch.setattr(mod, "_GIT_TRUSTED_HELPERS", None)
+    scopes: list = []
+
+    async def fake_run_cmd(cmd, **kw):
+        scopes.append(cmd[2])
+        return 1, "", ""
+
+    monkeypatch.setattr(mod, "_run_cmd", fake_run_cmd)
+    await mod._load_trusted_credential_helpers()
+    assert "--local" not in scopes
+    assert set(scopes) == {"--system", "--global"}
 
 
 @pytest.mark.asyncio
@@ -2849,6 +2929,77 @@ def test_build_env_credentials_only_when_requested(monkeypatch):
     assert plain["GIT_CONFIG_COUNT"] == str(base)
 
 
+async def _sync_step_argvs(monkeypatch) -> list:
+    """Run _sync with every spawn stubbed; return each step's argv, in order."""
+    captured: list = []
+
+    def fake_sandbox(argv, mode, *, env=None, **kw):
+        captured.append(list(argv))
+        return list(argv), dict(env or {}), None
+
+    with patch.object(mod, "_git", new_callable=AsyncMock,
+                      return_value=mod.BASE_BRANCH), \
+         patch.object(mod, "_venv_python", return_value=Path("/fake/.venv/bin/python")), \
+         patch.object(mod, "_trusted_bin", side_effect=lambda n: f"/usr/bin/{n}"), \
+         patch.object(mod, "sandboxed_spawn_argv", fake_sandbox), \
+         patch.object(mod, "_start_run", new_callable=AsyncMock,
+                      return_value="rid-steps"):
+        mod._SYNC_RID = None
+        res = await mod._sync()
+    assert res["ok"] is True
+    return captured
+
+
+def _is_stage_step(argv: list) -> bool:
+    return any("stage_built_dist" in str(part) for part in argv)
+
+
+@pytest.mark.asyncio
+async def test_sync_stages_dist_on_a_stock_checkout(monkeypatch):
+    """The staging step is part of the sync on a stock checkout.
+
+    `npm run build` writes website/dist while the dashboard serves
+    src/kiro_crew/static/dist; without this step Pull+Build reports success and
+    the gateway keeps serving the previous bundle.
+    """
+    monkeypatch.setattr(mod.frontend, "edition_configured", lambda: False)
+    argvs = await _sync_step_argvs(monkeypatch)
+    stage_at = [i for i, a in enumerate(argvs) if _is_stage_step(a)]
+    build_at = [i for i, a in enumerate(argvs)
+                if Path(a[0]).name == "npm" and "build" in a]
+    assert stage_at, f"no staging step in {argvs}"
+    assert build_at and stage_at[0] > build_at[0], \
+        "staging must run AFTER the build that produces the bundle"
+    # THIS backend's interpreter, not the target checkout's: resolving the
+    # helper from the pulled revision would make the step's existence contingent
+    # on that revision already carrying it, so an older target would turn the
+    # whole Pull+Build into an ImportError.
+    assert argvs[stage_at[0]][0] == sys.executable
+
+
+@pytest.mark.asyncio
+async def test_sync_never_stages_dist_on_an_edition_checkout(monkeypatch):
+    """An edition checkout must NOT have its dashboard rebuilt or staged over.
+
+    The sync build runs under _build_env(), whose allowlist drops
+    KIROCREW_EDITION_DIR / KIROCREW_ALLOW_EDITION, so on an edition composition
+    root `npm run build` compiles the STOCK SPA. Staging that would silently
+    replace the edition dashboard with upstream's; leaving the shipped bundle in
+    place is what frontend's own edition guards already do.
+    """
+    monkeypatch.setattr(mod.frontend, "edition_configured", lambda: True)
+    argvs = await _sync_step_argvs(monkeypatch)
+    assert not any(_is_stage_step(a) for a in argvs)
+    # The BUILD is skipped too. vite builds with emptyOutDir, so on a source-tree
+    # install -- where static/dist is a symlink to website/dist -- the stock build
+    # alone would replace the served edition dashboard, staging step or not.
+    assert not any(Path(a[0]).name == "npm" for a in argvs)
+    # The backend half of the sync is untouched: an edition still gets the pull
+    # and the editable reinstall.
+    assert any(Path(a[0]).name == "git" and "fetch" in a for a in argvs)
+    assert any("pip" in a for a in argvs)
+
+
 @pytest.mark.asyncio
 async def test_sync_build_steps_never_see_credential_helpers(monkeypatch):
     """Only the network fetch step carries operator credential helpers;
@@ -2881,9 +3032,12 @@ async def test_sync_build_steps_never_see_credential_helpers(monkeypatch):
     build_envs = [
         e for a, e in captured
         if _base(a) == ["git", "merge"] or "pip" in a or Path(a[0]).name == "npm"
+        # The dist-staging step is a build step too and must not be exempt from
+        # the credential-absence invariant just because it runs via `python -c`.
+        or any("stage_built_dist" in str(x) for x in a)
     ]
     assert fetch_envs and all(key in e for e in fetch_envs)
-    assert len(build_envs) == 4  # merge + pip + npm ci + npm build
+    assert len(build_envs) == 5  # merge + pip + npm ci + npm build + stage dist
     assert all(key not in e for e in build_envs)
 
 
@@ -3064,6 +3218,8 @@ async def test_load_helpers_skips_untrusted(monkeypatch):
     """Untrusted helper lines are dropped; trusted ones survive with a
     correct GIT_CONFIG_COUNT."""
     async def fake_run(cmd, **kw):
+        if cmd[2] != "--global":
+            return 1, "", ""
         return 0, (
             "credential.helper !evil-shim\n"
             "credential.https://github.com.helper !gh auth git-credential\n"

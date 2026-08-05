@@ -290,3 +290,151 @@ def test_stock_build_still_inherits_the_env(monkeypatch, tmp_path):
     build = [(argv, env) for argv, env in seen if argv[:3] == ["/usr/bin/npm", "run", "build"]]
     assert build
     assert build[0][1] is None
+
+
+def test_stage_built_dist_copies_website_dist_into_static_dist(tmp_path):
+    """The staging-only seam Dev Fleet's Pull+Build calls.
+
+    Pull+Build drives each build step as its own audited subprocess, so it cannot
+    use build_frontend_sync's all-in-one path; before this seam existed it ran
+    `npm run build` and never staged, leaving the gateway serving the previous
+    bundle while reporting success.
+    """
+    built = tmp_path / "website" / "dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<html>fresh</html>")
+    frontend.stage_built_dist(tmp_path, log=lambda _m: None)
+    staged = tmp_path / "src" / "kiro_crew" / "static" / "dist" / "index.html"
+    assert staged.read_text() == "<html>fresh</html>"
+
+
+def test_stage_built_dist_replaces_a_stale_symlink(tmp_path):
+    """A source-tree gateway leaves static/dist as a SYMLINK to website/dist.
+
+    Staging must replace it with a real snapshot rather than fail or write
+    through it, so a packaged layout gets a self-contained bundle.
+    """
+    built = tmp_path / "website" / "dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<html>fresh</html>")
+    static_parent = tmp_path / "src" / "kiro_crew" / "static"
+    static_parent.mkdir(parents=True)
+    (static_parent / "dist").symlink_to(built)
+    frontend.stage_built_dist(tmp_path, log=lambda _m: None)
+    staged = static_parent / "dist"
+    assert not staged.is_symlink(), "a stale symlink must be replaced by a copy"
+    assert (staged / "index.html").read_text() == "<html>fresh</html>"
+
+
+def test_stage_built_dist_fails_loudly_without_a_build(tmp_path):
+    """No website/dist -> raise, and leave the served bundle alone.
+
+    Two separate requirements. Deleting a working static/dist because the build
+    step failed would take the dashboard down harder than the failed build
+    already did -- so the previous bundle survives. But this runs as a sync step
+    right after `npm run build` reported success, so a MISSING build output means
+    something is genuinely wrong and must not be reported as a successful sync.
+    """
+    static_dist = tmp_path / "src" / "kiro_crew" / "static" / "dist"
+    static_dist.mkdir(parents=True)
+    (static_dist / "index.html").write_text("<html>previous</html>")
+    messages: list = []
+    with pytest.raises(RuntimeError, match="staging failed"):
+        frontend.stage_built_dist(tmp_path, log=messages.append)
+    assert (static_dist / "index.html").read_text() == "<html>previous</html>"
+    assert any("not found" in m for m in messages)
+
+
+def test_stage_built_dist_raises_when_staging_did_not_happen(tmp_path, monkeypatch):
+    """A staging failure must FAIL the caller, not report success.
+
+    Dev Fleet's Pull+Build runs this as a sync step whose exit status decides
+    whether the sync reports success. A surviving older bundle is deliberately
+    NOT treated as evidence of success: _stage_dist now preserves it on failure,
+    so only its returned flag can distinguish "staged" from "kept the old one".
+    """
+    built = tmp_path / "website" / "dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<html>fresh</html>")
+    served = tmp_path / "src" / "kiro_crew" / "static" / "dist"
+    served.mkdir(parents=True)
+    (served / "index.html").write_text("<html>previous</html>")
+    monkeypatch.setattr(frontend, "_stage_dist", lambda *_a, **_k: False)
+    with pytest.raises(RuntimeError, match="staging failed"):
+        frontend.stage_built_dist(tmp_path, log=lambda _m: None)
+
+
+def test_stage_dist_keeps_the_served_bundle_when_the_copy_fails(tmp_path, monkeypatch):
+    """A failed rebuild must not take the working dashboard down with it.
+
+    The original order removed the destination and THEN copied, so any copy error
+    left static/dist missing entirely. Staging into a temp sibling and swapping
+    means a failure costs the update, not the UI.
+    """
+    built = tmp_path / "website" / "dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<html>fresh</html>")
+    served = tmp_path / "src" / "kiro_crew" / "static" / "dist"
+    served.mkdir(parents=True)
+    (served / "index.html").write_text("<html>previous</html>")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(frontend.shutil, "copytree", boom)
+    assert frontend._stage_dist(built, tmp_path, log=lambda _m: None) is False
+    # The previously served bundle is untouched.
+    assert (served / "index.html").read_text() == "<html>previous</html>"
+    # No staging leftovers.
+    assert not list(served.parent.glob(".dist.staging.*"))
+
+
+def test_stage_dist_replaces_the_served_bundle_on_success(tmp_path):
+    """The happy path still swaps the new bundle in and reports True."""
+    built = tmp_path / "website" / "dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<html>fresh</html>")
+    served = tmp_path / "src" / "kiro_crew" / "static" / "dist"
+    served.mkdir(parents=True)
+    (served / "index.html").write_text("<html>previous</html>")
+    (served / "stale-asset.js").write_text("old")
+
+    assert frontend._stage_dist(built, tmp_path, log=lambda _m: None) is True
+    assert (served / "index.html").read_text() == "<html>fresh</html>"
+    # A replace, not a merge -- stale files from the old bundle are gone.
+    assert not (served / "stale-asset.js").exists()
+    assert not list(served.parent.glob(".dist.staging.*"))
+
+
+def test_edition_configured_tracks_the_env_var(monkeypatch):
+    """The predicate callers use to decide whether staging is safe at all."""
+    monkeypatch.delenv("KIROCREW_EDITION_DIR", raising=False)
+    assert frontend.edition_configured() is False
+    monkeypatch.setenv("KIROCREW_EDITION_DIR", "/opt/edition")
+    assert frontend.edition_configured() is True
+
+
+def test_edition_dir_survives_the_app_backend_env_allowlist(monkeypatch):
+    """An app backend must be ABLE to tell an edition install from a stock one.
+
+    The backend runs as a separate process started with
+    ``apps.registry.minimal_env()``, which passes only a fixed safe-key set --
+    so an edition guard inside a backend reads "stock" on every install unless
+    the var is propagated explicitly. Dev Fleet's dist-staging guard depends on
+    this: without it the guard can never fire and a stock SPA would be staged
+    over an edition dashboard.
+    """
+    from kiro_crew.apps.registry import minimal_env
+
+    monkeypatch.setenv("KIROCREW_EDITION_DIR", "/opt/edition")
+    # The generic allowlist does NOT carry it -- that is the trap this guards.
+    assert "KIROCREW_EDITION_DIR" not in minimal_env()
+
+    # apps/backend.py must therefore add it to the explicit platform extras.
+    src = Path(frontend.__file__).parent / "apps" / "backend.py"
+    body = src.read_text()
+    assert '_platform_extra["KIROCREW_EDITION_DIR"]' in body, \
+        "app backends can no longer detect an edition install"
+    # The opt-in must NOT be propagated: a backend may detect an edition but
+    # never manufacture consent to compile edition sources into a package.
+    assert '_platform_extra["KIROCREW_ALLOW_EDITION"]' not in body

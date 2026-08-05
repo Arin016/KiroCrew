@@ -236,33 +236,102 @@ def _stage_dist(
     built_dist: Path,
     proj_path: Path,
     log: Callable[[str], None] = print,
-) -> None:
+) -> bool:
     """Copy the freshly built ``website/dist`` into ``static/dist``.
 
-    Removes any stale destination (real dir or symlink) first, then copies the
-    build output so the dashboard serves the latest frontend assets without a
-    manual step. A copy (rather than a symlink) is used here so the served
-    bundle is a self-contained snapshot independent of later ``website/``
-    rebuilds — important for packaged/installed layouts.
+    A copy (rather than a symlink) is used here so the served bundle is a
+    self-contained snapshot independent of later ``website/`` rebuilds —
+    important for packaged/installed layouts.
+
+    The copy lands in a temporary sibling and only REPLACES ``static/dist`` once
+    it is complete. Removing the destination first (as this did originally) meant
+    any copy error left the dashboard with no bundle at all — a failed rebuild
+    would take the working UI down with it. The unavailable window is now a
+    rename rather than a whole ``copytree``.
+
+    Returns ``True`` when ``static/dist`` now holds the new bundle. Callers that
+    treat staging as best-effort can keep ignoring the result — the failure is
+    still logged — but a caller whose own success depends on staging (Dev Fleet's
+    Pull+Build) must check it, because a preserved older bundle is no longer
+    evidence that anything was staged.
     """
     static_dist = proj_path / "src" / "kiro_crew" / "static" / "dist"
     if not built_dist.is_dir():
         log(f"  ⚠️  Built dist not found at {built_dist} — dashboard may be stale")
-        return
+        return False
+    staging = static_dist.parent / f".dist.staging.{os.getpid()}"
+    try:
+        static_dist.parent.mkdir(parents=True, exist_ok=True)
+        if staging.is_symlink() or staging.is_file():
+            staging.unlink()
+        elif staging.is_dir():
+            shutil.rmtree(staging)
+        shutil.copytree(built_dist, staging)
+    except OSError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        log(f"  ⚠️  Could not copy static/dist: {exc}")
+        return False
     try:
         if static_dist.is_symlink() or static_dist.is_file():
             static_dist.unlink()
         elif static_dist.is_dir():
             shutil.rmtree(static_dist)
+        staging.replace(static_dist)
     except OSError as exc:
-        log(f"  ⚠️  Could not remove stale static/dist: {exc}")
-        return
-    try:
-        static_dist.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(built_dist, static_dist)
-        log(f"  📦 Staged static/dist ← {built_dist}")
-    except OSError as exc:
-        log(f"  ⚠️  Could not copy static/dist: {exc}")
+        shutil.rmtree(staging, ignore_errors=True)
+        log(f"  ⚠️  Could not replace static/dist: {exc}")
+        return False
+    log(f"  📦 Staged static/dist ← {built_dist}")
+    return True
+
+
+def edition_configured() -> bool:
+    """True when an edition composition root is configured for this process.
+
+    A rebuild that cannot pass the edition seam through to vite can only produce
+    a STOCK SPA (see :func:`_edition_build_env`), so a caller that STAGES build
+    output must skip rather than replace an edition dashboard with upstream's.
+    Distinct from :func:`edition_sources_missing`, which answers whether the
+    sources are present; this answers whether an edition is in play at all.
+    """
+    return bool(os.environ.get(_EDITION_DIR_ENV))
+
+
+def stage_built_dist(
+    proj_path: "str | Path",
+    log: Callable[[str], None] = print,
+) -> None:
+    """Stage an ALREADY-built ``website/dist`` into the served ``static/dist``.
+
+    The public seam for callers that run the npm build themselves and only need
+    the staging half — Dev Fleet's Pull+Build, which drives each build step as
+    its own audited subprocess and so cannot call
+    :func:`build_frontend_sync`'s all-in-one path.
+
+    Without this step a Pull+Build leaves the new bundle in ``website/dist``
+    while the gateway keeps serving the old ``static/dist``. On a source-tree
+    gateway start that goes unnoticed because :func:`ensure_dev_dist_symlink`
+    has already linked the two; with a packaged install there is no link, so the
+    rebuild silently never takes effect.
+
+    Raises ``RuntimeError`` when staging did not happen.
+    :func:`_stage_dist` logs and returns ``False`` on failure because its other
+    callers treat staging as best-effort; here it is a SYNC STEP whose exit
+    status decides whether Pull+Build reports success. Note that a surviving
+    older bundle is NOT evidence of success -- `_stage_dist` now preserves it on
+    failure -- so this checks the returned flag rather than merely asserting that
+    something is present at the destination.
+
+    The caller is responsible for not invoking this after a build that could not
+    recompose an edition — see :func:`edition_configured`.
+    """
+    proj = Path(proj_path)
+    built = proj / "website" / "dist"
+    if not _stage_dist(built, proj, log):
+        raise RuntimeError(
+            f"dist staging failed; the dashboard still serves the previous "
+            f"bundle (built dist: {built})"
+        )
 
 
 def build_frontend_sync(

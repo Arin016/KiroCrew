@@ -50,7 +50,7 @@ from typing import Any, Callable
 
 from aiohttp import web
 
-from kiro_crew import hooks, platform_compat
+from kiro_crew import frontend, hooks, platform_compat
 from kiro_crew.apps.builtins.dev_fleet import gateway_service
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.sandbox import (
@@ -475,14 +475,33 @@ async def _load_fallback_repos() -> None:
 
 async def _load_trusted_credential_helpers() -> None:
     global _GIT_TRUSTED_HELPERS
-    rc, out, _err = await _run_cmd(
-        ["git", "config", "--global", "--get-regexp", r"^credential(\..+)?\.helper$"],
-        timeout=5,
-    )
     extra: dict[str, str] = {}
-    if rc == 0 and out:
-        base = int(_GIT_ENV_NEUTRALIZERS["GIT_CONFIG_COUNT"])
-        idx = base
+    base = int(_GIT_ENV_NEUTRALIZERS["GIT_CONFIG_COUNT"])
+    idx = base
+    # SYSTEM scope first, then GLOBAL, mirroring git's own precedence: for a
+    # multi-valued key like credential.helper the later entry wins, so the
+    # operator's own global setting still overrides a machine-wide default.
+    #
+    # System scope is read at all because that is where macOS puts the operator's
+    # helper: Xcode's Command Line Tools ship
+    # `credential.helper = osxkeychain` in
+    # /Library/Developer/CommandLineTools/usr/share/git-core/gitconfig, and a
+    # stock install has NOTHING in global. Scanning only --global therefore left
+    # the neutralizer's reset unrepaired on every stock macOS host, and `git
+    # fetch` died with "could not read Username" — no tty to prompt on.
+    #
+    # Repo-LOCAL scope stays excluded. That is the attack surface the reset
+    # exists for: a checkout Dev Fleet builds can write .git/config, and a helper
+    # from there would run in the credential-bearing standard tier.
+    for scope in ("--system", "--global"):
+        rc, out, _err = await _run_cmd(
+            ["git", "config", scope, "--get-regexp", r"^credential(\..+)?\.helper$"],
+            timeout=5,
+        )
+        # A missing system gitconfig is rc != 0 with no output — normal, not an
+        # error worth surfacing.
+        if rc != 0 or not out:
+            continue
         for line in out.splitlines():
             key, _, val = line.partition(" ")
             if not key.endswith(".helper"):
@@ -494,7 +513,7 @@ async def _load_trusted_credential_helpers() -> None:
                 # withheld; only the config KEY name is recorded.
                 logger.warning(
                     "dev-fleet: skipping helper with unverifiable provenance"
-                    " for config key %s", key,
+                    " for config key %s (%s scope)", key, scope.lstrip("-"),
                 )
                 continue
             extra[f"GIT_CONFIG_KEY_{idx}"] = key
@@ -502,8 +521,10 @@ async def _load_trusted_credential_helpers() -> None:
             idx += 1
             if idx - base >= 9:
                 break
-        if idx > base:
-            extra["GIT_CONFIG_COUNT"] = str(idx)
+        if idx - base >= 9:
+            break
+    if idx > base:
+        extra["GIT_CONFIG_COUNT"] = str(idx)
     _GIT_TRUSTED_HELPERS = extra
 
 
@@ -2288,9 +2309,54 @@ async def _sync_start_locked() -> dict:
          _build_env(with_credentials=True), "Pull"),
         ([git_bin, "merge", "--ff-only", f"{remote}/{BASE_BRANCH}"], "strict", _build_env(), "Pull"),
         ([str(target_py), "-m", "pip", "install", "-e", "."], "strict", _build_env(), "pip install"),
-        ([npm_bin, "ci", "--prefix", "website"], "strict", _build_env(), "npm ci"),
-        ([npm_bin, "run", "build", "--prefix", "website"], "strict", _build_env(), "npm build"),
     ]
+    # The whole FRONTEND half of the sync is skipped on an edition checkout.
+    #
+    # The build runs under _build_env(), whose allowlist (_SAFE_ENV_KEYS) drops
+    # KIROCREW_EDITION_DIR and KIROCREW_ALLOW_EDITION, so on an edition
+    # composition root `npm run build` can only compile the STOCK SPA -- and vite
+    # builds with emptyOutDir, so it OVERWRITES website/dist. On a source-tree
+    # install frontend.ensure_dev_dist_symlink() has pointed static/dist at
+    # website/dist, which means the build alone replaces the served edition
+    # dashboard with upstream's, with or without a staging step. Skipping the
+    # build is therefore the only way to make this safe, and it costs an edition
+    # nothing: the only artifact this path could produce for it is a stock SPA it
+    # must never serve. It is the same call frontend's own
+    # edition_sources_missing() guard already makes -- leave the shipped bundle
+    # alone rather than degrade it.
+    #
+    # This backend is a SEPARATE process started with apps.registry.minimal_env(),
+    # which strips KIROCREW_EDITION_DIR, so the guard would read "stock" on every
+    # install and never fire. apps/backend.py therefore propagates that one var
+    # explicitly, the same way it already propagates KIROCREW_PROJECT_DIR.
+    if frontend.edition_configured():
+        logger.info(
+            "dev-fleet: skipping the frontend build and dist staging -- this is "
+            "an edition checkout and the sync build cannot recompose the "
+            "edition; the shipped bundle is left in place"
+        )
+    else:
+        raw_steps += [
+            ([npm_bin, "ci", "--prefix", "website"], "strict", _build_env(), "npm ci"),
+            ([npm_bin, "run", "build", "--prefix", "website"], "strict", _build_env(), "npm build"),
+            # `npm run build` writes website/dist; the dashboard SERVES
+            # src/kiro_crew/static/dist. Without a staging step the rebuild never
+            # reaches the served path and Pull+Build reports success while the
+            # gateway keeps serving the previous bundle. On a source-tree gateway
+            # start the gap is masked by the dev symlink; a packaged install has
+            # no such link, so nothing takes effect.
+            #
+            # Run with THIS backend's interpreter, not the target checkout's.
+            # Staging is a pure file copy between two paths inside MAIN_REPO, so
+            # the logic is revision-independent -- while resolving it from the
+            # target would make the step's very EXISTENCE contingent on the
+            # pulled revision already carrying stage_built_dist, turning an older
+            # target into an ImportError that fails the whole Pull+Build.
+            ([sys.executable, "-c",
+              "import sys;from kiro_crew.frontend import stage_built_dist;"
+              "stage_built_dist(sys.argv[1])", MAIN_REPO],
+             "strict", _build_env(), "stage dist"),
+        ]
     cleanups: list[str] = []
     wrapped_steps: list[dict] = []
     loop = asyncio.get_running_loop()
