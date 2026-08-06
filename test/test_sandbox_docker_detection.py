@@ -164,10 +164,13 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(sandbox, "_inside_kirocrew_sandbox", lambda: False)
         monkeypatch.setattr(sandbox, "_inside_macos_sandbox", lambda: False)
         monkeypatch.setattr(sandbox, "is_docker_container", lambda: True)
+        # The probe records (transient, reason, remedy) as ONE value. The remedy
+        # token is empty because it is only surfaced on the transient path, and
+        # every case here is a permanent failure.
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         # Stub SEL so no real I/O happens.
         fake_sel = MagicMock()
@@ -246,7 +249,7 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         fake_sel = MagicMock()
         fake_sel.return_value = fake_sel
@@ -281,7 +284,7 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         fake_sel = MagicMock()
         fake_sel.return_value = fake_sel
