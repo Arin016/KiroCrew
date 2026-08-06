@@ -75,6 +75,7 @@ import UpdateModal from './components/UpdateModal'
 
 import ComputerUseLiveView from './components/ComputerUseLiveView'
 import BottomTerminalPanel from './components/BottomTerminalPanel'
+import PendingApprovalsBar from './components/PendingApprovalsBar'
 import { toggleBottomTerminal, useBottomTerminalOpen } from './hooks/useBottomTerminal'
 import { setTerminalEnabledFlag } from './utils/terminalRegistry'
 import AppsPage from './pages/AppsPage'
@@ -2440,6 +2441,10 @@ export default function App() {
             <Route path="*" element={<ChatRedirect />} />
           </Routes>
         </main>
+        {/* Unowned tool approvals (taskrunner/cron/heartbeat/autonudge — no
+            owning chat) dock here, above the terminal, on every route. Owned
+            approvals keep their inline chat card, so nothing is duplicated. */}
+        <PendingApprovalsBar />
         {/* App-wide docked terminal panel — spans every route, below <main>.
             Toggled from the sidebar Terminal icon; hosts app-wide
             shells. Distinct from the chat-scoped activity-bar terminal tabs. */}
