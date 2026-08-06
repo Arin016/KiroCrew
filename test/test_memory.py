@@ -167,6 +167,134 @@ class TestRecentHistoryCache:
         ctx = store.get_context()
         assert "cron scheduler" in ctx
 
+    # ── zero-cap contract: a cap of 0 OMITS the section ──
+
+
+class TestGetContextZeroCaps:
+    """A cap of 0 means OMIT the section, not "truncate it to nothing".
+
+    `_cap(text, 0)` returns `text[:0] + "\\n…[truncated]"`, so each zeroed
+    section needs an explicit guard or it renders a header, leaks its on-disk
+    source path, and tells the model content was withheld.
+    """
+
+    def test_history_cap_zero_omits_the_section_entirely(self, tmp_path):
+        """cap=0 must omit, not emit a header + bare truncation marker.
+
+        `_cap(text, 0)` returns `text[:0] + "\\n…[truncated]"`, so without the
+        guard this rendered the header, leaked the on-disk history path, and told
+        the model content existed that was withheld.
+        """
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        store.append_history("Deployed cron scheduler")
+
+        ctx = store.get_context(history_cap=0)
+
+        assert "## Recent History" not in ctx
+        assert "[truncated]" not in ctx
+        assert "cron scheduler" not in ctx
+        assert str(store._history_dir) not in ctx, "must not leak the source path"
+
+    def test_history_cap_positive_still_includes_the_section(self, tmp_path):
+        """The guard must not over-block the normal path."""
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        store.append_history("Deployed cron scheduler")
+
+        ctx = store.get_context(history_cap=25_000)
+
+        assert "## Recent History" in ctx
+        assert "cron scheduler" in ctx
+
+    def test_history_cap_positive_but_smaller_than_history_truncates(self, tmp_path):
+        """A positive-but-small cap still truncates (the pre-existing behavior)."""
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        store.append_history("x" * 500)
+
+        ctx = store.get_context(history_cap=50)
+
+        assert "## Recent History" in ctx
+        assert "[truncated]" in ctx
+
+    def test_semantic_cap_zero_skips_the_query_entirely(self, tmp_path):
+        """A zero cap must not do the query-and-discard work."""
+        from unittest.mock import MagicMock
+
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        vs = MagicMock()
+        vs.get_semantic_context = MagicMock(return_value="[Semantic Memory]\nk: v\n")
+        vs.get_episodic_context = MagicMock(return_value="")
+        store.vector_store = vs
+
+        ctx = store.get_context(semantic_cap=0)
+
+        vs.get_semantic_context.assert_not_called()
+        assert "Semantic Memory" not in ctx
+
+    def test_semantic_cap_positive_queries_and_includes(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        vs = MagicMock()
+        vs.get_semantic_context = MagicMock(return_value="[Semantic Memory]\nk: v\n")
+        vs.get_episodic_context = MagicMock(return_value="")
+        store.vector_store = vs
+
+        ctx = store.get_context(semantic_cap=12_000)
+
+        vs.get_semantic_context.assert_called_once()
+        assert "Semantic Memory" in ctx
+
+    def test_episodic_cap_zero_skips_even_with_a_query(self, tmp_path):
+        """Episodic needs BOTH a query and a positive cap."""
+        from unittest.mock import MagicMock
+
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        vs = MagicMock()
+        vs.get_semantic_context = MagicMock(return_value="")
+        vs.get_episodic_context = MagicMock(return_value="[Episodic]\nfrag\n")
+        store.vector_store = vs
+
+        ctx = store.get_context(query="anything", episodic_cap=0)
+
+        vs.get_episodic_context.assert_not_called()
+        assert "Episodic" not in ctx
+
+    def test_episodic_requires_a_query_even_with_a_positive_cap(self, tmp_path):
+        """The pre-existing half of the condition still holds."""
+        from unittest.mock import MagicMock
+
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        vs = MagicMock()
+        vs.get_semantic_context = MagicMock(return_value="")
+        vs.get_episodic_context = MagicMock(return_value="[Episodic]\nfrag\n")
+        store.vector_store = vs
+
+        store.get_context(query="", episodic_cap=12_000)
+
+        vs.get_episodic_context.assert_not_called()
+
+    def test_episodic_included_with_query_and_positive_cap(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        store = MemoryStore(workspace=tmp_path)
+        store.init()
+        vs = MagicMock()
+        vs.get_semantic_context = MagicMock(return_value="")
+        vs.get_episodic_context = MagicMock(return_value="[Episodic]\nfrag\n")
+        store.vector_store = vs
+
+        ctx = store.get_context(query="anything", episodic_cap=12_000)
+
+        vs.get_episodic_context.assert_called_once()
+        assert "Episodic" in ctx
+
     def test_append_history_creates_date_file(self, tmp_path):
         store = MemoryStore(workspace=tmp_path)
         store.append_history("test entry")

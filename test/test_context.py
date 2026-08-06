@@ -396,6 +396,156 @@ class TestContextBuilder:
         assert len(history_block) <= _HISTORY_BUDGET_CHARS + 1000  # some overhead for labels
 
 
+class TestSubagentLeanContext:
+    """`subagent_context=True` drops bulk history, keeps the load-bearing parts.
+
+    The budget shape that motivates this: recent-history is ~86% of the memory
+    block, while lessons are the highest value-per-char content in the prompt.
+    So history/semantic/episodic/thread-history go, and prefs + projects +
+    skills + the FULL lesson set stay.
+    """
+
+    def _builder(self, tmp_path):
+        from datetime import datetime, timezone
+
+        from kiro_crew.learn import Lesson
+
+        store = MemoryStore(workspace=tmp_path / "ws")
+        store.init()
+        store.write("# Memory\n\nUser likes lobsters.")
+        store.append_history("EARLIER-HISTORY-MARKER deployed the cron scheduler")
+
+        lessons = LessonStore(base_dir=tmp_path)
+        now = datetime.now(timezone.utc).isoformat()
+        # More lessons than the old k=10 top-K would have kept, so a regression
+        # to truncation is detectable.
+        for i in range(14):
+            lessons.save(
+                Lesson(ts=now, rule=f"LESSON-MARKER-{i:02d} always do the thing", category="tool")
+            )
+
+        return ContextBuilder(
+            memory=store,
+            skills=SkillsLoader(skills_path=tmp_path / "skills", install_builtins=False),
+            lessons=lessons,
+        )
+
+    def test_lean_drops_recent_history(self, tmp_path):
+        builder = self._builder(tmp_path)
+        ctx = builder.build_session_context(subagent_context=True)
+        assert "EARLIER-HISTORY-MARKER" not in ctx
+        assert "## Recent History" not in ctx
+        # And no truncation stub standing in for it.
+        assert "[truncated]" not in ctx
+
+    def test_full_context_keeps_recent_history(self, tmp_path):
+        """Control: the non-lean path is unchanged."""
+        builder = self._builder(tmp_path)
+        ctx = builder.build_session_context()
+        assert "EARLIER-HISTORY-MARKER" in ctx
+
+    def test_lean_keeps_preferences(self, tmp_path):
+        builder = self._builder(tmp_path)
+        ctx = builder.build_session_context(subagent_context=True)
+        assert "lobsters" in ctx
+
+    def test_lean_keeps_every_lesson(self, tmp_path):
+        """Lessons are NOT trimmed for sub-agents.
+
+        Regression guard for the removed top-K-by-cosine path, which silently
+        degraded to "the 10 most recent" whenever embeddings were unavailable
+        and discarded user-taught safety rules.
+        """
+        builder = self._builder(tmp_path)
+        ctx = builder.build_session_context(subagent_context=True)
+        for i in range(14):
+            assert f"LESSON-MARKER-{i:02d}" in ctx, f"lesson {i} was dropped"
+
+    def test_lean_and_full_agree_on_lessons(self, tmp_path):
+        """The lean path must not select a different lesson set than the full one."""
+        builder = self._builder(tmp_path)
+        lean = builder.build_session_context(subagent_context=True)
+        full = builder.build_session_context()
+        for i in range(14):
+            marker = f"LESSON-MARKER-{i:02d}"
+            assert (marker in lean) == (marker in full)
+
+    def test_lean_drops_thread_history(self, tmp_path):
+        """Thread history is skipped — the task text IS the sub-agent's context."""
+        from unittest.mock import MagicMock
+
+        builder = self._builder(tmp_path)
+        log = MagicMock()
+        log.recent.return_value = [{"role": "user", "content": "THREAD-MARKER"}]
+        log.recent_with_provenance.return_value = []
+        builder.conversation_log = log
+
+        ctx = builder.build_session_context(session_key="s1", subagent_context=True)
+        assert "THREAD-MARKER" not in ctx
+        assert "THREAD CONVERSATION HISTORY" not in ctx
+
+    def test_lean_drops_provenance_entries(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        builder = self._builder(tmp_path)
+        log = MagicMock()
+        log.recent.return_value = []
+        log.recent_with_provenance.return_value = [
+            {"role": "user", "content": "PROVENANCE-MARKER", "source": "slack"}
+        ]
+        builder.conversation_log = log
+
+        ctx = builder.build_session_context(session_key="s1", subagent_context=True)
+        assert "PROVENANCE-MARKER" not in ctx
+        log.recent_with_provenance.assert_not_called()
+
+    def test_lean_skips_episodic_in_build_message(self, tmp_path):
+        """The F2 fix: this is the ONLY live episodic injection.
+
+        `build_session_context` passes no query, so its `episodic_cap=0` never
+        fires — zeroing that cap alone left sub-agents still receiving episodic
+        fragments from the parent's unrelated past conversations.
+        """
+        from unittest.mock import MagicMock
+
+        builder = self._builder(tmp_path)
+        vs = MagicMock()
+        vs.get_lessons_context = MagicMock(return_value="")
+        vs.get_semantic_context = MagicMock(return_value="")
+        vs.get_episodic_context = MagicMock(return_value="[Episodic]\nEPISODIC-MARKER\n")
+        builder.memory.vector_store = vs
+
+        msg, _ = builder.build_message(
+            "do the task", is_new_session=True, subagent_context=True
+        )
+
+        vs.get_episodic_context.assert_not_called()
+        assert "EPISODIC-MARKER" not in msg
+
+    def test_normal_new_session_still_gets_episodic(self, tmp_path):
+        """Control: the guard must not suppress episodic for ordinary sessions."""
+        from unittest.mock import MagicMock
+
+        builder = self._builder(tmp_path)
+        vs = MagicMock()
+        vs.get_lessons_context = MagicMock(return_value="")
+        vs.get_semantic_context = MagicMock(return_value="")
+        vs.get_episodic_context = MagicMock(return_value="[Episodic]\nEPISODIC-MARKER\n")
+        builder.memory.vector_store = vs
+
+        msg, _ = builder.build_message("do the task", is_new_session=True)
+
+        vs.get_episodic_context.assert_called_once()
+        assert "EPISODIC-MARKER" in msg
+
+    def test_lean_is_materially_smaller(self, tmp_path):
+        """The whole point: the lean context is a large reduction."""
+        builder = self._builder(tmp_path)
+        lean = builder.build_session_context(subagent_context=True)
+        full = builder.build_session_context()
+        assert len(lean) < len(full)
+
+
 class TestGetMemoryForVectorStore:
     """Tests for symmetric vector_store attachment across memory stores."""
 

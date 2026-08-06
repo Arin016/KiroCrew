@@ -361,6 +361,12 @@ class MemoryStore:
             semantic_cap: Max chars for semantic memory.
             episodic_cap: Max chars for episodic memory.
             query: User message for episodic memory retrieval (optional).
+
+        A cap of ``0`` means OMIT that section entirely — not "include it
+        truncated to nothing". Without the explicit guards below, ``_cap(text,
+        0)`` would emit the section header plus a bare ``…[truncated]`` marker,
+        which costs the header, leaks the on-disk source path, and tells the
+        model content exists that was deliberately withheld.
         """
         parts: list[str] = []
 
@@ -385,7 +391,7 @@ class MemoryStore:
                 f"{_cap(projects, projects_cap)}"
             )
 
-        history = self.read_recent_history(days=14)
+        history = self.read_recent_history(days=14) if history_cap > 0 else ""
         if history.strip():
             parts.append(
                 f"## Recent History\n"
@@ -395,14 +401,18 @@ class MemoryStore:
 
         # Semantic memory (structured key-value pairs from vector_memory.py)
         if self._vector_store:
-            semantic_ctx = self._vector_store.get_semantic_context(
-                query_text=query, cap=semantic_cap
-            )
-            if semantic_ctx:
-                parts.append(semantic_ctx)
+            # A zero cap already yields "" from get_semantic_context (its
+            # accumulator breaks on the first line), but it does the query and
+            # per-row embedding work first. Skip it outright.
+            if semantic_cap > 0:
+                semantic_ctx = self._vector_store.get_semantic_context(
+                    query_text=query, cap=semantic_cap
+                )
+                if semantic_ctx:
+                    parts.append(semantic_ctx)
 
             # Episodic memory (relevant past conversation fragments)
-            if query:
+            if query and episodic_cap > 0:
                 episodic_ctx = self._vector_store.get_episodic_context(
                     query_text=query, cap=episodic_cap
                 )

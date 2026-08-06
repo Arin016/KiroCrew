@@ -1571,6 +1571,7 @@ class ContextBuilder:
         runtime_source: str | None = None,
         exclude_last_n: int = 0,
         model_window: int | None = None,
+        subagent_context: bool = False,
     ) -> str:
         """Build context for a new session (memory + skills + history).
 
@@ -1752,7 +1753,8 @@ class ContextBuilder:
         # Inject for CC too: a fresh dashboard/Slack session maps to a new CC
         # subprocess with no in-process history, so the thread transcript must
         # be supplied for parity with kiro (which gets it natively).
-        if session_key and self.conversation_log and not resumed:
+        # Subagent lean context: skip thread history (task text IS the context).
+        if session_key and self.conversation_log and not resumed and not subagent_context:
             _history_header = (
                 "[THREAD CONVERSATION HISTORY — this is the PRIMARY context.\n"
                 "When the user says 'just now', 'earlier', 'the task', 'try again', "
@@ -1819,7 +1821,7 @@ class ContextBuilder:
 
         # Stop event context — inject notes for recent stop events so the
         # LLM knows prior turns were cancelled by the user.
-        if session_key and self.conversation_log:
+        if session_key and self.conversation_log and not subagent_context:
             _stop_notes = _build_stop_event_notes(self.conversation_log, session_key)
             if _stop_notes:
                 parts.append(_stop_notes)
@@ -1831,13 +1833,23 @@ class ContextBuilder:
         mem_key = memory_store or workspace
         memory = self.get_memory_for(mem_key)
         if not blocks_reads:
-            memory_ctx = memory.get_context(
-                prefs_cap=caps.prefs,
-                projects_cap=caps.projects,
-                history_cap=caps.memory_history,
-                semantic_cap=caps.semantic,
-                episodic_cap=caps.episodic,
-            )
+            if subagent_context:
+                # Lean context: only prefs + projects, drop history/semantic/episodic
+                memory_ctx = memory.get_context(
+                    prefs_cap=caps.prefs,
+                    projects_cap=caps.projects,
+                    history_cap=0,
+                    semantic_cap=0,
+                    episodic_cap=0,
+                )
+            else:
+                memory_ctx = memory.get_context(
+                    prefs_cap=caps.prefs,
+                    projects_cap=caps.projects,
+                    history_cap=caps.memory_history,
+                    semantic_cap=caps.semantic,
+                    episodic_cap=caps.episodic,
+                )
             if memory_ctx:
                 parts.append(memory_ctx)
 
@@ -1875,6 +1887,16 @@ class ContextBuilder:
 
         # Lessons: merge global + workspace-scoped — inject for ALL agents
         # (skipped for temporary sessions)
+        #
+        # Deliberately NOT trimmed for sub-agents. Lessons are the highest
+        # value-per-char content in the prompt — distilled user corrections
+        # injected under "ALWAYS follow these" — and history is where the real
+        # budget is (see the subagent_context block above). An earlier revision
+        # selected a top-K by cosine similarity to the task text; that is gone,
+        # because it silently degraded to "the K most recent" whenever the
+        # embedding model was unavailable and dropped safety rules a sub-agent
+        # needs (annotation placement, destructive-rebase guards) for ~14% of
+        # the saving.
         lessons_ctx = ""
         if not blocks_reads:
             # One query, not two: get_lessons_context() already returns "" when the
@@ -1925,7 +1947,7 @@ class ContextBuilder:
                 parts.append(lessons_ctx)
 
         # Provenance-tagged entries from recent sessions (skipped for temporary)
-        if session_key and self.conversation_log and not blocks_reads:
+        if session_key and self.conversation_log and not blocks_reads and not subagent_context:
             provenance = self.conversation_log.recent_with_provenance(
                 session_key, exclude_last_n=exclude_last_n
             )
@@ -1988,6 +2010,7 @@ class ContextBuilder:
         user_text_range: tuple[int, int] | None = None,
         user_span_out: list[int] | None = None,
         needs_reinjection: bool = False,
+        subagent_context: bool = False,
     ) -> tuple[str, HookResult]:
         """Build the full message with context and hook processing.
 
@@ -2071,6 +2094,7 @@ class ContextBuilder:
                 runtime_source=runtime_source,
                 exclude_last_n=exclude_last_n,
                 model_window=model_window,
+                subagent_context=subagent_context,
             )
             if session_ctx:
                 # Scrub forgeable boundary markers from the UNTRUSTED content in
@@ -2267,6 +2291,13 @@ class ContextBuilder:
             logger.info("🔍 Minimal context — episodic memory skipped")
         elif blocks_reads:
             logger.info("🔍 Temporary session — episodic memory skipped")
+        elif subagent_context:
+            # THIS is the only live episodic injection — build_session_context
+            # passes no query, so its episodic_cap argument never fires. Zeroing
+            # that cap therefore does nothing; the guard has to be here or a
+            # sub-agent still receives episodic fragments from the parent's
+            # unrelated past conversations.
+            logger.info("🔍 Sub-agent lean context — episodic memory skipped")
         elif is_new_session:
             memory = self.get_memory_for(memory_store or workspace)
             if memory.vector_store:

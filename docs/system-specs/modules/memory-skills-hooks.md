@@ -48,6 +48,28 @@ FTS5 search via `~/.kiro/crew/memory_index.db` (SQLite via `pysqlite3-binary` on
 
 Context injection includes source citations per section. Agent can update memory files via kiro-cli's file tools.
 
+### Section caps — a cap of `0` OMITS the section
+
+`MemoryStore.get_context()` takes a per-section char cap. Any cap **> 0** truncates with a trailing `…[truncated]` marker; a cap of exactly **`0` omits the section entirely** — no header, no source-path citation, no marker. The distinction matters: the truncating helper is `text[:limit] + "…[truncated]"`, so a `0` cap without the explicit guard would render a header plus a bare marker, costing the header, leaking the section's on-disk path, and telling the model content existed that was withheld.
+
+The guards are `history_cap > 0`, `semantic_cap > 0`, and `query and episodic_cap > 0` (episodic needs both a query and a positive cap). Only `get_context`'s two call sites in `context.py` pass `0`; every other cap flows from `_resolve_caps_cached`, whose base is floored by `_MIN_CONTEXT_BUDGET_BASE`, so no scaled cap can reach `0` even on the smallest model window.
+
+### Sub-agent lean context (`subagent_context=True`)
+
+A sub-agent gets a deliberately narrower prompt than a chat session, because its task text — not conversation continuity — is its context. `SubagentManager` passes `subagent_context=True` through `build_message()` to `build_session_context()`.
+
+| Section | Sub-agent | Why |
+|---|---|---|
+| preferences, projects | **kept** | small, and they govern how work is done |
+| skills index | **kept** | the sub-agent still needs to discover skills |
+| lessons | **kept in full** | highest value-per-char in the prompt; see below |
+| recent history | dropped | the largest single section by far |
+| semantic memory | dropped | retrievable on demand via tools |
+| episodic memory | dropped | fragments of the parent's unrelated past conversations |
+| thread history, stop-event notes, provenance | dropped | no thread to continue |
+
+**Lessons are deliberately NOT trimmed.** An earlier revision selected a top-K by cosine similarity to the task text. It was removed: the ranking silently degraded to "the K most recent" whenever the embedding model was unavailable (`_try_embed()` returns `None`, no log line), which discarded user-taught safety rules; and lessons are only a small share of the total saving, so the trade bought little and risked much. Recent history is where the budget actually is.
+
 ### Decaying Memory (`read_recent_history`)
 
 History context uses natural decay: recent days in full detail, older days
@@ -67,7 +89,10 @@ declares `history_cap=25_000` as its own signature default, but the live caller
 is `ContextBuilder.build_session_context()`, which always passes
 `caps.memory_history` (26,400 chars at the reference window, scaled per model
 window, see Context Builder below), so 25,000 only applies to a direct
-programmatic call. Timestamps use local timezone.
+programmatic call. Timestamps use local timezone. **Exception —
+`build_session_context(subagent_context=True)` passes `history_cap=0`, which
+OMITS the block entirely** (see "Sub-agent lean context" below); recent history
+is the largest single section, and a sub-agent's task text is its context.
 
 `read_recent_history` runs on every message turn (context build) and otherwise
 stats + reads up to 181 daily files synchronously. The assembled string is
@@ -211,7 +236,7 @@ SQLite table `semantic_memory` — structured key-value store with:
 - **Injection detection**: the `_INJECTION_PATTERNS` regex set (14 patterns, `vector_memory_constants.py`) is scanned on every value write
 - **Audit trail**: `memory_events` table logs every create/update/delete with old+new values, bounded at `_MAX_EVENTS = 10_000`
 
-Context injection: formatted as `key: value` pairs in `[Semantic Memory]` block. The cap is passed in by the caller: `build_session_context()` supplies `caps.semantic`, which is `_SEMANTIC_MEMORY_CAP` (7.7% of the base = 12,705 chars) at the reference window and scales down with the model window. Excludes `lesson.*` keys (they have their own `[Learned corrections]` block). Uses hybrid retrieval when embeddings are available: `_SEMANTIC_VECTOR_WEIGHT` 0.6 × vector_score + `_SEMANTIC_KEYWORD_WEIGHT` 0.4 × keyword_score. Falls back to keyword-only scoring (word overlap on keys and values, key matches weighted 3×, with `snowballstemmer` expansion) without embeddings.
+Context injection: formatted as `key: value` pairs in `[Semantic Memory]` block. The cap is passed in by the caller: `build_session_context()` supplies `caps.semantic`, which is `_SEMANTIC_MEMORY_CAP` (7.7% of the base = 12,705 chars) at the reference window and scales down with the model window — except under `subagent_context=True`, which passes `0` and omits the block. Excludes `lesson.*` keys (they have their own `[Learned corrections]` block). Uses hybrid retrieval when embeddings are available: `_SEMANTIC_VECTOR_WEIGHT` 0.6 × vector_score + `_SEMANTIC_KEYWORD_WEIGHT` 0.4 × keyword_score. Falls back to keyword-only scoring (word overlap on keys and values, key matches weighted 3×, with `snowballstemmer` expansion) without embeddings.
 
 ### Episodic Memory
 
@@ -224,7 +249,7 @@ SQLite table `episodic_memories` — conversation fragments with optional embedd
 - **Fallback ladder**: FAISS (needs faiss + numpy) → `_sqlite_vector_search`, stdlib cosine over the stored blobs → FTS5/LIKE keyword search (OR logic on text + tags) when there is no query embedding at all. The middle rung matters: faiss is an optional accelerator, not a declared dependency, so a stock install still gets vector recall from the stored vectors.
 - **Cap**: `_DEFAULT_EPISODIC_MAX` = 10,000 active entries. `_enforce_episodic_cap()` tombstones `ORDER BY importance ASC, created_at ASC` (lowest-importance oldest first) on write once the count reaches the cap.
 
-Context injection: `_DEFAULT_EPISODIC_LIMIT` = 8 results in an `[Episodic Memory]` block, each fragment sliced to 1,500 chars, total bounded by `min(_EPISODIC_INJECT_CAP, caps.episodic)` where `_EPISODIC_INJECT_CAP` = 3,000. Injected on the first message of new sessions via `build_message()`, not at plain session start, since `build_session_context` passes no query to `memory.get_context()`, so that call's `episodic_cap` argument never fires.
+Context injection: `_DEFAULT_EPISODIC_LIMIT` = 8 results in an `[Episodic Memory]` block, each fragment sliced to 1,500 chars, total bounded by `min(_EPISODIC_INJECT_CAP, caps.episodic)` where `_EPISODIC_INJECT_CAP` = 3,000. Injected on the first message of new sessions via `build_message()`, not at plain session start, since `build_session_context` passes no query to `memory.get_context()`, so that call's `episodic_cap` argument never fires. Because that is the only live injection point, the sub-agent exclusion is a guard in `build_message` (`elif subagent_context:`) — zeroing `episodic_cap` in `build_session_context` would be inert.
 
 ### Fading: three independent decay mechanisms
 

@@ -4226,6 +4226,7 @@ class SubagentManager:
             session_key,
             provider_type="claude_code" if is_cc else "acp",
             model_window=_sub_window,
+            subagent_context=True,
         )
 
         result_text = ""
