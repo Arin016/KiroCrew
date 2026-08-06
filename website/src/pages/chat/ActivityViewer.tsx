@@ -744,7 +744,7 @@ function FileRow({ f, onFileOpen, onFileRemove, artifactSlug, promotable, onProm
     queryFn: () => api.fileDiff(f.path),
     placeholderData: (prev) => prev,
   })
-  const stats = data?.diff ? countDiffStats(data.diff) : null
+  const stats = data?.diff && !data.diff_truncated ? countDiffStats(data.diff) : null
   // Artifact control, three mutually exclusive states:
   //   • already in the library → an always-visible accent glyph that OPENS it
   //     (never a second save — the row is the entry point for both)
@@ -787,6 +787,11 @@ function FileRow({ f, onFileOpen, onFileRemove, artifactSlug, promotable, onProm
         <span className="text-[12.5px] text-text truncate">{name}</span>
         {dir && <span className="text-[10.5px] text-muted/80 truncate">{dir}</span>}
       </span>
+      {data?.diff_truncated && (
+        <span className="text-[10px] font-mono text-warn shrink-0 ml-0.5" title={i18nT('pages.chat.activityViewer.line_totals_unavailable_diff_truncated')}>
+          partial
+        </span>
+      )}
       {stats && (stats.added > 0 || stats.removed > 0) && (
         <span className="flex items-center gap-1.5 text-[11px] font-mono shrink-0 tabular-nums">
           {stats.added > 0 && <span className="text-ok">+{stats.added}</span>}
@@ -1173,7 +1178,7 @@ function ArtifactListRow({ row, busy, onOpen, onSave }: {
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFolderOpen, onArtifactOpen, onFileRemove, navLinks, navResolving, view, sources, selectedSourceUrl, onSelectSource, onReconcileSource, issues, selectedIssueUrl, onSelectIssue, onReconcileIssue, onAddToChat, onFileSave, onSubmitComments, openDocPaths, previewPath, onPreviewPathChange }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFolderOpen, onArtifactOpen, onFileRemove, navLinks, navResolving, view, sources, projectDir, selectedSourceUrl, onSelectSource, onReconcileSource, issues, selectedIssueUrl, onSelectIssue, onReconcileIssue, onAddToChat, onFileSave, onSubmitComments, openDocPaths, previewPath, onPreviewPathChange }: {
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFolderOpen?: (p: string) => void; onArtifactOpen?: (slug: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
   projectDir?: string
@@ -1369,15 +1374,21 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
         </div>
       )}
 
-      {/* Changes (pull request sources) view */}
+      {/* Changes view: Local worktree tab + pull request sources. The panel
+          renders whenever there is something to inspect — a detected PR, or a
+          project directory whose working tree can be diffed. With neither, there
+          is no working tree AND no PR, so the PR empty state is the honest
+          fallback rather than an empty Local tab. */}
       {effectiveTab === 'changes' && (
         <div className="flex-1 min-h-0 overflow-hidden">
-          {hasSources ? (
+          {hasSources || projectDir ? (
             <PullRequestPanel
-              sources={sources!}
+              sources={sources || []}
+              projectDir={projectDir}
               selectedUrl={selectedSourceUrl || ''}
               onSelect={onSelectSource || (() => {})}
               onReconcile={onReconcileSource}
+              onFileOpen={onFileOpen}
               onAddToChat={onAddToChat || (() => {})}
             />
           ) : (

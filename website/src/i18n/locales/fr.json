@@ -3525,6 +3525,11 @@
       "to_send_to_this_chat": "à envoyer dans ce chat",
       "toggle_additional_instruction": "Afficher/masquer l’instruction supplémentaire"
     },
+    "askAgent": {
+      "ask_the_agent": "Demander à l'agent",
+      "open_a_chat_with_this_error_s_context_attached": "Ouvrir une conversation avec tout le contexte de cette erreur",
+      "prompt_lead": "Cette erreur vient d'apparaître dans le tableau de bord Kiro Crew. Diagnostique la cause racine et corrige-la."
+    },
     "autoNudgePopover": {
       "close": "Fermer",
       "cycle": "· cycle",
@@ -3893,6 +3898,9 @@
       "something_went_wrong": "Une erreur s'est produite",
       "try_again": "Réessayer"
     },
+    "errorNotice": {
+      "dismiss": "Ignorer"
+    },
     "excalidrawBlock": {
       "render_failed": "Impossible d’afficher le diagramme — affichage de la source"
     },
@@ -3953,6 +3961,20 @@
       "showing_raw_content_count": "Affichage du contenu brut ({{count}} caractères)",
       "showing_raw_content_truncated_count": "Affichage du contenu brut ({{count}} caractères, les {{shown}} premiers affichés)"
     },
+    "folderColorNames": {
+      "amber": "Ambre",
+      "blue": "Bleu",
+      "cyan": "Cyan",
+      "gray": "Gris",
+      "green": "Vert",
+      "indigo": "Indigo",
+      "lime": "Citron vert",
+      "orange": "Orange",
+      "pink": "Rose",
+      "red": "Rouge",
+      "teal": "Bleu sarcelle",
+      "violet": "Violet"
+    },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}} (non installé)",
       "browse": "Parcourir",
@@ -3981,19 +4003,11 @@
       "set_color_to_name": "Définir la couleur sur {{name}}",
       "top_level": "Niveau supérieur"
     },
-    "folderColorNames": {
-      "amber": "Ambre",
-      "blue": "Bleu",
-      "cyan": "Cyan",
-      "gray": "Gris",
-      "green": "Vert",
-      "indigo": "Indigo",
-      "lime": "Citron vert",
-      "orange": "Orange",
-      "pink": "Rose",
-      "red": "Rouge",
-      "teal": "Bleu sarcelle",
-      "violet": "Violet"
+    "folderSuggestionCard": {
+      "folder_suggestion": "Suggestion de dossier",
+      "move_to_folder_question": "Déplacer cette session vers {{folder}} ?",
+      "no_thanks": "Pas maintenant",
+      "yes_move_it": "Déplacer"
     },
     "followUpBar": {
       "click_to_add_to_input_double_click_to_select_and": "Clique pour ajouter à la saisie (double-clic pour sélectionner et envoyer)",
@@ -4266,6 +4280,26 @@
       "two_way": "Bidirectionnel",
       "unavailable": "Cette destination est indisponible."
     },
+    "localChangesView": {
+      "checking_for_changes": "Vérification des modifications git…",
+      "could_not_scan": "Impossible d'analyser {{dir}} pour les modifications.",
+      "couldnt_load_diff": "Impossible de charger le diff.",
+      "diff_not_shown_for_safety": "Diff non affiché par sécurité : {{reason}}.",
+      "diff_truncated": "Diff tronqué — le contenu du fichier dépasse la limite de 2 Mo ; seul le début est affiché.",
+      "diff_unavailable_file_unreadable": "Diff indisponible car le fichier n'a pas pu être lu entièrement.",
+      "loading_diff": "Chargement du diff…",
+      "no_diff_available": "Aucun diff disponible pour ce fichier.",
+      "no_git_repository": "Aucun dépôt git dans ce répertoire de projet. Dirigez le répertoire de projet du chat vers un dépôt git (ou un dossier à l'intérieur) pour voir les modifications.",
+      "open_in_editor": "Ouvrir {{file}} dans l'éditeur",
+      "partial_scan": "Analyse partielle — le budget de fichiers ou de temps a été atteint ; certaines modifications peuvent ne pas être listées.",
+      "pick_project_directory": "Choisissez un répertoire de projet pour ce chat afin de voir les modifications git non validées.",
+      "repo_refused_safe_read": "la lecture sécurisée a été refusée pour ce dépôt",
+      "repo_skipped_for_safety": "Ce dépôt a été ignoré par sécurité : {{reason}}.",
+      "retry": "Réessayer",
+      "scan_hit_limit": "L'analyse a atteint sa limite de fichiers ou de sortie — il existe plus de modifications que celles listées ici.",
+      "working_tree_clean": "Arbre de travail propre — aucune modification locale.",
+      "working_tree_clean_on_branch": "Arbre de travail propre — aucune modification locale sur {{branch}}."
+    },
     "logEntry": {
       "cancelled": "Annulé",
       "error": "Erreur",
@@ -4293,6 +4327,10 @@
       "close_find": "Fermer la recherche",
       "copy_content": "Copier le contenu",
       "copy_path": "Copier le chemin",
+      "diff_unavailable_baseline_failed": "Diff indisponible — la référence git du fichier n'a pas pu être chargée",
+      "diff_unavailable_no_git_repo": "Diff indisponible — ce fichier n'est pas dans un dépôt git",
+      "diff_unavailable_original_too_large": "Diff indisponible — l'original est trop volumineux pour être chargé intégralement",
+      "diff_unavailable_with_error": "Diff indisponible — {{error}}",
       "discard_unsaved_changes": "Abandonner les modifications non enregistrées ?",
       "download": "Télécharger",
       "download_failed": "Échec du téléchargement",
@@ -4576,6 +4614,12 @@
       "paste_lines_one": "[ Collage n°{{seq}} · {{count}} ligne ]",
       "paste_lines_other": "[ Collage n°{{seq}} · {{count}} lignes ]"
     },
+    "privacyChapter": {
+      "continue": "Continuer",
+      "eyebrow": "Confidentialité",
+      "subtitle": "Les cinq champs anonymes que Kiro Crew envoie, et comment les désactiver.",
+      "title": "Confidentialité"
+    },
     "projectPicker": {
       "back": "Retour",
       "browse": "Parcourir",
@@ -4623,29 +4667,49 @@
       "add_to_chat": "Ajouter à la conversation",
       "all_checks_passed": "Toutes les vérifications ont réussi",
       "auto_merge_enabled": "Fusion automatique activée",
+      "branch_is_behind": "Branche en retard",
       "branch_is_behind_detail": "Cette branche n’est plus à jour avec {{base}} et doit être actualisée avant la fusion.",
+      "branch_protection_requirements_approving_reviews": "Les exigences de protection de branche (relectures approuvées ou vérifications requises) ne sont pas encore satisfaites.",
       "cancel": "Annuler",
       "changes": "Modifications",
+      "check_failed": "Échec",
+      "check_in_progress": "En cours",
+      "check_passed": "Réussi",
+      "check_skipped": "Ignoré",
       "checks": "Vérifications",
+      "checks_failed": "Vérifications en échec",
+      "checks_passed": "Vérifications réussies",
       "checks_running": "Vérifications en cours",
       "checks_unavailable": "Vérifications indisponibles",
+      "closed": "Fermée",
       "collapse_comment": "Réduire le commentaire",
       "commits": "Commits",
       "confirm_auto_merge": "Confirmer la fusion automatique",
       "could_not_load_this_pull_request": "Impossible de charger cette pull request",
       "could_not_resolve": "Résolution impossible",
       "description": "Description",
+      "draft": "Brouillon",
       "enable_auto_merge": "Activer la fusion automatique",
       "expand_comment": "Développer le commentaire",
+      "files_changed_many": "{{count}} fichiers modifiés",
+      "files_changed_one": "{{count}} fichier modifié",
+      "files_changed_other": "{{count}} fichiers modifiés",
+      "github_cli_login_required": "Connexion à la CLI GitHub requise",
       "github_merges_this_pull_request_automatically_on": "GitHub fusionne automatiquement cette pull request dès que les vérifications et les revues requises réussissent",
       "github_will_merge_this_pull_request_once_its_req": "GitHub fusionnera cette pull request dès que ses conditions seront remplies",
+      "gitlab_cli_login_required": "Connexion à la CLI GitLab requise",
       "gitlab_merges_this_merge_request_when_the_pipeli": "GitLab fusionne cette merge request quand le pipeline réussit — la fusion est immédiate si aucun pipeline n’est en attente",
       "gitlab_will_merge_this_merge_request_when_the_pi": "GitLab fusionnera cette merge request quand le pipeline réussira",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew utilise la CLI locale de votre fournisseur pour charger les pull requests. Exécutez cette commande dans votre terminal, puis réessayez.",
       "loading_diff": "Chargement du diff…",
       "loading_source_provider": "Chargement du fournisseur source…",
+      "local": "Local",
+      "local_working_tree_changes": "Modifications locales de l'arbre de travail",
+      "merge_blocked": "Fusion bloquée",
+      "merge_conflicts": "Conflits de fusion",
       "merge_conflicts_detail": "Cette branche est en conflit avec {{base}} et ne peut pas être fusionnée avant leur résolution.",
       "merge_now": "Fusionner maintenant",
+      "merged": "Fusionnée",
       "no_changed_files_were_returned": "Aucun fichier modifié n'a été renvoyé.",
       "no_ci_checks_were_returned": "Aucune vérification CI n'a été renvoyée.",
       "no_commits_were_returned": "Aucun commit n'a été renvoyé.",
@@ -4654,9 +4718,12 @@
       "no_written_comment": "Aucun commentaire écrit.",
       "open": "Ouverte",
       "open_pull_request": "Ouvrir la pull request",
+      "provider_results_may_be_partial_merge_request": "Les résultats du fournisseur peuvent être partiels pour {{sections}}. Ouvrez la merge request pour l’ensemble complet.",
+      "provider_results_may_be_partial_pull_request": "Les résultats du fournisseur peuvent être partiels pour {{sections}}. Ouvrez la pull request pour l’ensemble complet.",
       "pull_request_sections": "Sections de la pull request",
       "pull_requests": "Pull requests",
       "ready_for_review": "Prête pour relecture",
+      "rebase_required": "Rebase requis",
       "rebase_required_detail": "Ce projet exige que la branche soit rebasée sur {{base}} avant la fusion ; un commit de fusion ne la débloquera pas.",
       "refresh_pull_request": "Actualiser la pull request",
       "refreshing_pull_request": "Actualisation de la pull request",
@@ -4664,39 +4731,18 @@
       "resolved": "Résolu",
       "retry": "Réessayer",
       "reviews": "Revues",
-      "the_provider_did_not_return_a_patch_for_this_fil": "Le fournisseur n'a pas renvoyé de patch pour ce fichier.",
-      "unknown_reviewer": "Relecteur inconnu",
-      "untitled_commit": "Commit sans titre",
-      "updated": "Mise à jour",
-      "branch_is_behind": "Branche en retard",
-      "branch_protection_requirements_approving_reviews": "Les exigences de protection de branche (relectures approuvées ou vérifications requises) ne sont pas encore satisfaites.",
-      "closed": "Fermée",
-      "draft": "Brouillon",
-      "files_changed_many": "{{count}} fichiers modifiés",
-      "files_changed_one": "{{count}} fichier modifié",
-      "files_changed_other": "{{count}} fichiers modifiés",
-      "github_cli_login_required": "Connexion à la CLI GitHub requise",
-      "gitlab_cli_login_required": "Connexion à la CLI GitLab requise",
-      "merge_blocked": "Fusion bloquée",
-      "merge_conflicts": "Conflits de fusion",
-      "merged": "Fusionnée",
-      "provider_results_may_be_partial_merge_request": "Les résultats du fournisseur peuvent être partiels pour {{sections}}. Ouvrez la merge request pour l’ensemble complet.",
-      "provider_results_may_be_partial_pull_request": "Les résultats du fournisseur peuvent être partiels pour {{sections}}. Ouvrez la pull request pour l’ensemble complet.",
-      "rebase_required": "Rebase requis",
-      "take_this_merge_request_out_of_draft": "Sortir cette merge request du mode brouillon",
-      "take_this_pull_request_out_of_draft": "Sortir cette pull request du mode brouillon",
-      "this_authorizes_the_merge_as_soon_as_requirement": "Ceci autorise la fusion dès que les exigences sont satisfaites, avec un squash si ce dépôt l’autorise (sinon un commit de fusion, puis un rebase).",
-      "this_authorizes_the_merge_when_the_pipeline_succ": "Ceci autorise la fusion lorsque le pipeline réussit.",
-      "check_failed": "Échec",
-      "check_in_progress": "En cours",
-      "check_passed": "Réussi",
-      "check_skipped": "Ignoré",
-      "checks_failed": "Vérifications en échec",
-      "checks_passed": "Vérifications réussies",
       "state_closed": "Fermée",
       "state_draft": "Brouillon",
       "state_merged": "Fusionnée",
-      "state_open": "Ouverte"
+      "state_open": "Ouverte",
+      "take_this_merge_request_out_of_draft": "Sortir cette merge request du mode brouillon",
+      "take_this_pull_request_out_of_draft": "Sortir cette pull request du mode brouillon",
+      "the_provider_did_not_return_a_patch_for_this_fil": "Le fournisseur n'a pas renvoyé de patch pour ce fichier.",
+      "this_authorizes_the_merge_as_soon_as_requirement": "Ceci autorise la fusion dès que les exigences sont satisfaites, avec un squash si ce dépôt l’autorise (sinon un commit de fusion, puis un rebase).",
+      "this_authorizes_the_merge_when_the_pipeline_succ": "Ceci autorise la fusion lorsque le pipeline réussit.",
+      "unknown_reviewer": "Relecteur inconnu",
+      "untitled_commit": "Commit sans titre",
+      "updated": "Mise à jour"
     },
     "questionCard": {
       "collapse_all": "Tout réduire",
@@ -4783,6 +4829,25 @@
       "open_read_only_viewer": "Ouvrir la visionneuse en lecture seule (lire et commenter ; l’original sur {{name}} s’ouvre depuis là)",
       "v": "v"
     },
+    "reportProblemModal": {
+      "report_a_problem": "Signaler un problème",
+      "what_happened": "Que s’est-il passé ?",
+      "note_placeholder": "ex. : chaque message échoue avec « process exited (rc=None) » depuis la mise à jour.",
+      "include_recent_logs": "Inclure les journaux récents",
+      "include_logs_hint": "Journaux de la passerelle et de kiro-cli. Désactivez pour n’envoyer que les rapports de plantage.",
+      "redaction_notice": "Les jetons Bearer, les cookies de session et les clés AWS sont automatiquement masqués avant la création du zip.",
+      "collect_failed": "Échec de la collecte des diagnostics",
+      "cancel": "Annuler",
+      "create_report": "Créer le rapport",
+      "collecting": "Collecte…",
+      "done": "Terminé",
+      "diagnostics_ready": "Diagnostics prêts — {{redactions}} secret(s) masqué(s) dans {{files}} fichier(s).",
+      "saved_to": "Enregistré dans",
+      "show_in_finder": "Afficher dans le Finder",
+      "download_zip": "Télécharger le zip",
+      "open_github_issue": "Ouvrir un ticket GitHub",
+      "prefill_hint": "L’ouverture du ticket pré-remplit les détails — glissez-y ensuite le zip."
+    },
     "resizeHandle": {
       "drag_to_resize": "Faire glisser pour redimensionner"
     },
@@ -4828,6 +4893,10 @@
       "selected": "sélectionné",
       "showing": "Affichage de",
       "you": "Toi"
+    },
+    "searchableSelect": {
+      "no_matches": "Aucun résultat",
+      "search": "Rechercher…"
     },
     "secretField": {
       "cancel": "Annuler",
@@ -5133,6 +5202,15 @@
       "tunnel_stopped": "Tunnel arrêté",
       "up": "actif depuis {{time}}"
     },
+    "ui": {
+      "clear_filter": "Effacer le filtre",
+      "no_matches_for": "Aucun résultat pour",
+      "no_noun_match": "Aucun(e) {{noun}} correspondant(e)"
+    },
+    "unifiedDiffView": {
+      "diff_display_capped": "Affichage du diff limité à {{count}} lignes. Les lignes restantes ne sont pas affichées.",
+      "loading_diff": "Chargement du diff…"
+    },
     "updateModal": {
       "dismiss": "Ignorer",
       "dismiss_update_dialog": "Ignorer la boîte de dialogue de mise à jour",
@@ -5309,54 +5387,6 @@
       "select": "Sélectionner",
       "workspace_name": "Nom de l'espace de travail",
       "workspace_name_2": "workspace-name"
-    },
-    "privacyChapter": {
-      "continue": "Continuer",
-      "eyebrow": "Confidentialité",
-      "subtitle": "Les cinq champs anonymes que Kiro Crew envoie, et comment les désactiver.",
-      "title": "Confidentialité"
-    },
-    "ui": {
-      "clear_filter": "Effacer le filtre",
-      "no_matches_for": "Aucun résultat pour",
-      "no_noun_match": "Aucun(e) {{noun}} correspondant(e)"
-    },
-    "askAgent": {
-      "ask_the_agent": "Demander à l'agent",
-      "open_a_chat_with_this_error_s_context_attached": "Ouvrir une conversation avec tout le contexte de cette erreur",
-      "prompt_lead": "Cette erreur vient d'apparaître dans le tableau de bord Kiro Crew. Diagnostique la cause racine et corrige-la."
-    },
-    "errorNotice": {
-      "dismiss": "Ignorer"
-    },
-    "reportProblemModal": {
-      "report_a_problem": "Signaler un problème",
-      "what_happened": "Que s’est-il passé ?",
-      "note_placeholder": "ex. : chaque message échoue avec « process exited (rc=None) » depuis la mise à jour.",
-      "include_recent_logs": "Inclure les journaux récents",
-      "include_logs_hint": "Journaux de la passerelle et de kiro-cli. Désactivez pour n’envoyer que les rapports de plantage.",
-      "redaction_notice": "Les jetons Bearer, les cookies de session et les clés AWS sont automatiquement masqués avant la création du zip.",
-      "collect_failed": "Échec de la collecte des diagnostics",
-      "cancel": "Annuler",
-      "create_report": "Créer le rapport",
-      "collecting": "Collecte…",
-      "done": "Terminé",
-      "diagnostics_ready": "Diagnostics prêts — {{redactions}} secret(s) masqué(s) dans {{files}} fichier(s).",
-      "saved_to": "Enregistré dans",
-      "show_in_finder": "Afficher dans le Finder",
-      "download_zip": "Télécharger le zip",
-      "open_github_issue": "Ouvrir un ticket GitHub",
-      "prefill_hint": "L’ouverture du ticket pré-remplit les détails — glissez-y ensuite le zip."
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "Suggestion de dossier",
-      "move_to_folder_question": "Déplacer cette session vers {{folder}} ?",
-      "no_thanks": "Pas maintenant",
-      "yes_move_it": "Déplacer"
-    },
-    "searchableSelect": {
-      "no_matches": "Aucun résultat",
-      "search": "Rechercher…"
     }
   },
   "hooks": {
@@ -6276,6 +6306,7 @@
         "input": "Entrée",
         "issues": "Issues",
         "last_tool": "Dernier outil :",
+        "line_totals_unavailable_diff_truncated": "Totaux des lignes indisponibles car le diff a été tronqué",
         "load_output_from_disk": "Charger la sortie depuis le disque",
         "loading": "Chargement…",
         "logs": "Journaux",

@@ -560,10 +560,10 @@
         "blocked_figma_no_permission_auth_tail": "アクセスが得られない場合は、フレームをPNGとしてエクスポートする方法も同様に機能します — ピクセルどちらにしても批評します。",
         "blocked_figma_no_permission_hint": "アクセスをリクエストするか、フレームをPNGとしてエクスポートしてここにドラッグしてください。",
         "blocked_figma_no_permission_say": "あなたのFigmaアカウントはそのファイルを表示できません。",
-        "blocked_no_access_auth_lead": "Git アクセスはアプリごとではなくマシンごとに設定されます — 一度行えば、すべてのプライベートリポジトリが機能します。ターミナルでこれを実行してください。",
+        "blocked_no_access_auth_lead": "Git アクセスはアプリごとではなくマシンごとに設定されます — 一度行えば、すべてのプライベートリポジトリーが機能します。ターミナルでこれを実行してください。",
         "blocked_no_access_auth_tail": "その後、戻って「もう一度試す」を押してください。トークンを要求したり保存したりすることはありません — このアプリに貼り付けられたものはすべて、保存されたトランスクリプトに終わります。",
         "blocked_no_access_hint": "チェックアウトしている場合は、フォルダーパスを代わりに指定してください。",
-        "blocked_no_access_say": "そのリポジトリを開くことができませんでした。プライベート（認証情報がない）か、存在しないかのいずれかです — GitHub は両方に対して同じエラーを返します。",
+        "blocked_no_access_say": "そのリポジトリーを開くことができませんでした。プライベート（認証情報がない）か、存在しないかのいずれかです — GitHub は両方に対して同じエラーを返します。",
         "blocked_not_found_hint": "所有者と名前を確認するか、ローカルフォルダーパスを指定してください。",
         "blocked_not_found_say": "そのリポジトリはそのURLに存在しません。",
         "blocked_other_hint": "スクリーンショットはそれを回避する最速の方法です。",
@@ -587,7 +587,7 @@
         "stage_writing_up": "批評を作成中",
         "wait_figma": "Figmaファイルを開いてフレームをリストアップ中…",
         "wait_local": "コードのルートをスキャン中…",
-        "wait_repo": "リポジトリをクローンしてルートをリストアップ中…",
+        "wait_repo": "リポジトリーをクローンしてルートをリストアップ中…",
         "wait_url": "ページを読み込んでリンクをたどる中…"
       },
       "designCritiquePage": {
@@ -851,7 +851,7 @@
           "labels": "ラベル",
           "loading_labels": "ラベルを読み込み中…",
           "no_labels_match_query": "「{{query}}」に一致するラベルがありません。",
-          "no_labels_on_this_repo": "このリポジトリにはラベルがありません。",
+          "no_labels_on_this_repo": "このリポジトリーにはラベルがありません。",
           "search_labels": "ラベルを検索",
           "search_labels_2": "ラベルを検索…"
         },
@@ -860,10 +860,10 @@
           "filter_labels": "ラベルをフィルター…",
           "filter_labels_2": "ラベルをフィルター",
           "loading_labels": "ラベルを読み込み中…",
-          "remove_this_label_no_longer_exists_on_the_repo": "削除 — このラベルはもうこのリポジトリに存在しません",
-          "saved_but_no_longer_on_this_repo": "保存されましたが、このリポジトリにはもうありません：",
+          "remove_this_label_no_longer_exists_on_the_repo": "削除 — このラベルはもうこのリポジトリーに存在しません",
+          "saved_but_no_longer_on_this_repo": "保存されましたが、このリポジトリーにはもうありません：",
           "suggested": "提案",
-          "this_repo_has_no_labels": "このリポジトリにはラベルがありません。"
+          "this_repo_has_no_labels": "このリポジトリーにはラベルがありません。"
         },
         "leftRail": {
           "click_to_expand_the_sidebar": "{{name}} — クリックでサイドバーを展開",
@@ -1102,7 +1102,7 @@
           "review": "レビュー"
         },
         "settingsSection": {
-          "connect_repo": "リポジトリを接続",
+          "connect_repo": "リポジトリーを接続",
           "general": "一般",
           "repository_settings": "リポジトリ設定"
         }
@@ -1110,7 +1110,7 @@
       "connectPanel": {
         "check_again": "もう一度確認",
         "cli": "CLI",
-        "connect_a_repo_nothing_runs_without_your_say": "リポジトリを接続します。あなたの許可なしに何も実行されません。",
+        "connect_a_repo_nothing_runs_without_your_say": "リポジトリーを接続します。あなたの許可なしに何も実行されません。",
         "connected": "接続済み",
         "couldn_t_read_far_enough_back_through_your_activ": "アクティビティを十分に遡ることができません。代わりに下のURLを貼り付けてください。",
         "details": "詳細",
@@ -1118,8 +1118,8 @@
         "https_gitlab_com_group_project": "https://gitlab.com/<group>/<project>",
         "issue_radar_reads": "Issue Radarが読み取ります",
         "last_contribution": "最後のコントリビューション: {{when}}",
-        "let_s_connect_a_repo": "リポジトリを接続しましょう",
-        "loading_your_repos": "リポジトリを読み込み中…",
+        "let_s_connect_a_repo": "リポジトリーを接続しましょう",
+        "loading_your_repos": "リポジトリーを読み込み中…",
         "most_recent_activity": "最新のアクティビティ",
         "no_contributions_in_the_last_month_paste_a_url_b": "過去1ヶ月間のコントリビューションがありません。代わりに下のURLを貼り付けてください。",
         "or": "または",
@@ -1135,7 +1135,7 @@
       "connectRepoModal": {
         "close": "クローズ",
         "close_connect_dialog": "接続ダイアログをクローズ",
-        "connect_a_repo": "リポジトリを接続",
+        "connect_a_repo": "リポジトリーを接続",
         "connecting": "{{done}}/{{total}} を接続中…"
       },
       "issueRadarPage": {
@@ -1156,7 +1156,7 @@
         "highlight_4": "マージはゲートをバイパスしません: ホストが必要なレビューとチェックを適用し、自動マージはそれらが合格すると変更をランディングできます",
         "highlight_5": "承認またはマージは表示されたコミットにピン留めされるため、レビュー中にプッシュされるのは拒否されます",
         "highlight_6": "すべての書き込みはリポジトリへのトリアージまたはプッシュアクセスが必要です。読み取り専用接続は提案のみです",
-        "highlight_7": "最近コントリビューションしたリポジトリをサーフェスするため、1つを接続するのはクリックです",
+        "highlight_7": "最近コントリビューションしたリポジトリーをサーフェスするため、1つを接続するのはクリックです",
         "highlight_8": "Issue、ラベル、メンバーをローカルにキャッシュし、オンデマンドで更新",
         "highlight_9": "GitHub で動作します。ゲートウェイホストに認証済みの`gh` CLIが必要です",
         "page_label": "Issue Radar"
@@ -1218,7 +1218,7 @@
             "cli_has_no_active_session_run": "CLIにアクティブなセッションがありません。実行してください:",
             "cli_issue_radar_keeps_no_credentials": "CLI — Issue Radar。\n                  認証情報は保持しません。",
             "configure_triage": "トリアージを構成",
-            "connect_another_repo": "別のリポジトリを接続",
+            "connect_another_repo": "別のリポジトリーを接続",
             "detail_refresh": "詳細更新",
             "detail_refresh_hint": "オープンしたIssueまたはプルリクエストが再度読み込まれる頻度。クローズしたアイテムは常にバックオフします。",
             "identity_and_the_repositories_issue_radar_watche": "アイデンティティと Issue Radarが監視するリポジトリ。",
@@ -1251,7 +1251,7 @@
             "counting_open_issues": "オープンIssueをカウント中…",
             "data_and": "データと",
             "disconnect": "切断",
-            "disconnect_repository": "リポジトリを切断",
+            "disconnect_repository": "リポジトリーを切断",
             "disconnecting": "切断中…",
             "from_issue_radar_and_deletes_its_local_cache_you": "Issue Radarから削除し、ローカルキャッシュを削除します。あなたの",
             "good_first_issue_labels": "初心者向けのよいIssueラベル",
@@ -1261,7 +1261,7 @@
             "loading_this_repo_s_saved_settings": "このリポジトリの保存された設定を読み込み中…",
             "local_triage_settings_for_this_repo_they_teach_i": "このリポジトリのローカルトリアージ設定 — これらはIssue Radarに次の方法を教えます:",
             "members": "メンバー",
-            "members_read_from_provider": "このリポジトリにアクセスできるすべてのユーザーを {{provider}} から読み取ったものです — 各自の役割付き。参考用に表示しており、ここでは読み取り専用です。",
+            "members_read_from_provider": "このリポジトリーにアクセスできるすべてのユーザーを {{provider}} から読み取ったものです — 各自の役割付き。参考用に表示しており、ここでは読み取り専用です。",
             "membership_is_read_from": "メンバーシップの読み込み元:",
             "new_issue": "新しい Issue",
             "no_labels": "ラベルなし",
@@ -1294,7 +1294,7 @@
             "sign_in_no_extra_credentials_no_webhook": "サインイン（追加の認証情報、\n          {{provider}} Webhook は不要）。",
             "this_is_an_approximate_list_inferred_from_issue": "。これは Issue の作成者から推測されたおおよそのリストです。\n              完全な一覧とメンバー管理は以下にあります:",
             "triage_labels": "トリアージラベル",
-            "watch_this_repo_in_the_background_and_post_a_kir": "このリポジトリをバックグラウンドで監視し、新しい Issue が開かれるたびに Kiro Crew 通知を投稿します。",
+            "watch_this_repo_in_the_background_and_post_a_kir": "このリポジトリーをバックグラウンドで監視し、新しい Issue が開かれるたびに Kiro Crew 通知を投稿します。",
             "which_labels_mark_newcomer_friendly_work_so_issu": "初心者向けの作業をマークするラベルはどれですか。Issue Radar が初回貢献者にルーティングする Issue をサーフェスできるようにします。",
             "which_labels_mean_an_issue_still_needs_triage_dr": "Issue がまだトリアージが必要なことを示すラベルはどれですか。概要の「未トリアージ」カウントと注意が必要なキューを駆動します。",
             "without_push_access_to": "へのプッシュアクセス権がない場合:",
@@ -1313,9 +1313,9 @@
             "creating_needs_write_access": "作成には書き込みアクセスが必要です",
             "defined_by_open_issue_count": "定義 · オープン Issue 数で",
             "labels": "ラベル",
-            "looking_for_labels_this_repo_is_missing": "このリポジトリにないラベルを検索中…",
+            "looking_for_labels_this_repo_is_missing": "このリポジトリーにないラベルを検索中…",
             "none_the_repo_s_taxonomy_already_covers_what_its": "なし。リポジトリのタクソノミーは、オープン Issue が必要とするものをすでにカバーしています。",
-            "propose_labels_this_repo_is_missing_from_its_ope": "リポジトリがオープン Issue から取得する必要があるラベルを提案",
+            "propose_labels_this_repo_is_missing_from_its_ope": "リポジトリーがオープン Issue から取得する必要があるラベルを提案",
             "re_fetch_this_repo_s_labels_from_github": "GitHub からこのリポジトリのラベルを再取得",
             "read_only_repo_needs_triage_push_access": "読み取り専用リポジトリ。トリアージ/プッシュアクセスが必要です",
             "suggest_again": "もう一度提案",
@@ -1337,7 +1337,7 @@
         "taggingView": {
           "analyzing": "分析中…",
           "applying": "適用中…",
-          "applying_is_disabled_until_they_load_because_a_s": "リポジトリが不要になったラベルに名前を付けているため、\n            読み込みまでは適用が無効になります。バッチ全体の入力が却下されます。",
+          "applying_is_disabled_until_they_load_because_a_s": "リポジトリーが不要になったラベルに名前を付けているため、\n            読み込みまでは適用が無効になります。バッチ全体の入力が却下されます。",
           "applying_needs_write_access": "適用には書き込みアクセスが必要です",
           "available_to_assign": "割り当て可能",
           "carries_at_least_one_label_nothing_to_tag": "少なくとも 1 つのラベルを持っています。タグ付けするものがありません。",
@@ -1419,8 +1419,8 @@
         "choose": "選択…",
         "choosing": "選択中…",
         "cloneAction": "ボールトを接続",
-        "cloneHelp": "GitHub リポジトリをクローンし、独自の作業コピーを保持します。",
-        "cloneTab": "リポジトリをクローン",
+        "cloneHelp": "GitHub リポジトリーをクローンし、独自の作業コピーを保持します。",
+        "cloneTab": "リポジトリーをクローン",
         "cloning": "クローン中…",
         "knowledgeFailed": "ボールトが接続されましたが、知識の同期に失敗しました: {{message}}",
         "localFolder": "ローカルフォルダー",
@@ -1449,10 +1449,10 @@
         "label": "Kiro Crew ナレッジと同期"
       },
       "manifest": {
-        "description": "git リポジトリに置かれたマークダウンノートブックを保持してください。ノートはバージョン管理され、ポータブルで、他のエディタで読み取り可能です。GitHub リポジトリを指すと、作業コピーがクローンされるか、既存のフォルダーを接続します。既存の Obsidian ボールトなどを含む。フォルダーは 2 番目のコピーを作成せずにその場で採用されます。ノートは、クリックしてすぐに編集できるフォーマット済みテキストとしてレンダリングされます。[[wikilinks]] はそれらを接続し、すべてのノートは何がそれにリンクバックしているかを示します。同期は 1 つのステップでコミット、プル、プッシュを行い、マージ競合は何かを上書きするのではなく、競合するノートを一覧に表示し、マージを中止して報告されます。",
+        "description": "git リポジトリーに置かれたマークダウンノートブックを保持してください。ノートはバージョン管理され、ポータブルで、他のエディタで読み取り可能です。GitHub リポジトリーを指すと、作業コピーがクローンされるか、既存のフォルダーを接続します。既存の Obsidian ボールトなどを含む。フォルダーは 2 番目のコピーを作成せずにその場で採用されます。ノートは、クリックしてすぐに編集できるフォーマット済みテキストとしてレンダリングされます。[[wikilinks]] はそれらを接続し、すべてのノートは何がそれにリンクバックしているかを示します。同期は 1 つのステップでコミット、プル、プッシュを行い、マージ競合は何かを上書きするのではなく、競合するノートを一覧に表示し、マージを中止して報告されます。",
         "display_name": "ノート",
         "highlight_1": "ノートはプレーンマークダウン git リポジトリ内にあります。ロックイン不要、Obsidian または任意のエディタで読み取り可能",
-        "highlight_2": "GitHub リポジトリをボールトとしてクローンするか、既存のフォルダーを接続してコピーせずに使用",
+        "highlight_2": "GitHub リポジトリーをボールトとしてクローンするか、既存のフォルダーを接続してコピーせずに使用",
         "highlight_3": "レンダリングされた任意のブロックをクリックしてその場で編集。Enter で新しいブロックを開始、Tab でリストをネスト",
         "highlight_4": "[[wikilinks]] ノート間で、ノートを指しているものを示すバックリンクリストを表示",
         "highlight_5": "タイトルとコンテンツ全体を検索でき、フォルダービューとフラットビューの6種類のソート順序に対応しています",
@@ -1490,7 +1490,7 @@
       "settings": {
         "active": "アクティブ",
         "authGh": "GitHub CLIログインを使用しています。",
-        "authNone": "GitHub アクセスなし—プライベートリポジトリを同期するにはトークンを追加してください。",
+        "authNone": "GitHub アクセスなし—プライベートリポジトリーを同期するにはトークンを追加してください。",
         "authStored": "このアプリに保存されたトークンを使用しています。",
         "autoCommit": "履歴に自動保存",
         "autoCommitHelp": "ボールトのローカルgit履歴に、{{n}}分ごとに編集をコミットします。手動で保存する必要はありません。リモートにはプッシュされません。",
@@ -2564,7 +2564,7 @@
         "it_last_saw": "を含む既存コピーを\n          使用します。",
         "leave_this_on_if_you_are_the_only_one_running_op": "Ops Mission Control を実行している唯一の人である場合、これをオンのままにしてください。\n          1つの台帳を共有するチームでは、正確に1つのインスタンスがプライマリである必要があります。\n          そうしないとメンテナンスパスが1人に1回実行されます。",
         "ledger_conflict": "台帳の競合",
-        "ledger_intro": "チームの知識台帳、通常のgitリポジトリを通じて交換：{{file}}は夜間メンテナンスパスによってプルおよびプッシュされます。",
+        "ledger_intro": "チームの知識台帳、通常のgitリポジトリーを通じて交換：{{file}}は夜間メンテナンスパスによってプルおよびプッシュされます。",
         "list_if_the_rotation_is_meant_to_decide_who_resp": "ローテーションで対応者を決める場合は、\n                このリストに追加してください。",
         "list_or_correct_the_login_above": "リストするか、上記のログインを修正してください。",
         "loading": "読み込み中…",
@@ -2971,7 +2971,7 @@
           "start_the_conversation": "会話を始める →",
           "starting": "開始中…",
           "tell_me_what_you_have_in_mind_i_ll_ask_a_few_cla": "どんなことを実現したいのか教えてください。チャットでいくつか質問をして、確認できるプランを書き、\n          準備ができたら実装します。",
-          "this_folder_isn_t_a_git_repository_so_i_ll_work": "このフォルダーはGitリポジトリではないので、ここで直接作業します。Gitリポジトリを選択すると、新しいワークツリーのオプションが使えます（メインのチェックアウトそのままで作業できます）。",
+          "this_folder_isn_t_a_git_repository_so_i_ll_work": "このフォルダーはGitリポジトリではないので、ここで直接作業します。Gitリポジトリーを選択すると、新しいワークツリーのオプションが使えます（メインのチェックアウトそのままで作業できます）。",
           "type_bug_blurb": "問題を調査し、根本原因を特定して、修正計画を立てます。",
           "type_bug_title": "バグを修正",
           "type_feature_blurb": "完全なプラン：要件、技術設計、タスクリスト。",
@@ -4012,7 +4012,7 @@
       "skip": "スキップ",
       "start_in_new_worktree": "新しいワークツリーで開始",
       "suggested_follow_up_other": "サジェストされたフォローアップ",
-      "this_session_has_no_project_directory_so_there_i": "このセッションはプロジェクトディレクトリがないため、ブランチ元リポジトリがありません",
+      "this_session_has_no_project_directory_so_there_i": "このセッションはプロジェクトディレクトリがないため、ブランチ元リポジトリーがありません",
       "worktree_disabled_no_project_directory": "「このセッションに追加」はコンポーザーを事前入力します。送信を押すまで何も送信されません。ワークツリーは使用不可です。このセッションにはプロジェクトディレクトリがありません (コンポーザーのプロジェクトチップで選択してください)。"
     },
     "inboundLinkChip": {
@@ -4169,12 +4169,16 @@
       "ask_the_kiro_crew_owner_to_install_kiro_cli_and": "Kiro Crew の所有者に、このゲートウェイホストで Kiro CLI をインストールしてサインインするよう依頼してください。ゲートウェイの準備ができたら、\n          ダッシュボードが開きます。",
       "check_again": "再度確認",
       "complete": "完了",
+      "copied": "コピーしました",
+      "copy_command": "コマンドをコピー",
       "copy_sign_in_command": "サインインコマンドをコピー",
       "could_not_check_kiro_cli": "Kiro CLIを確認できませんでした。",
       "gateway": "ゲートウェイ",
       "gateway_host": "ゲートウェイホスト",
       "gateway_setup_required": "ゲートウェイセットアップが必要",
       "get_kiro_cli": "Kiro CLI を入手",
+      "how_to_fix": "対処方法",
+      "if_this_keeps_happening": "問題が解決しない場合",
       "if_you_are_diagnosing_this_from_a_terminal_kiro": "ターミナルからこれを診断している場合、Kiro CLIアプリ自体が実行されるまでkiro-cli診断レポートは何も返さないことに注意してください。まずkiro-cli launchで起動してください。その拒否はこれの原因ではありません。",
       "install_kiro_cli_from_kiros_official_setup_page": "Kiro 公式のセットアップページから Kiro CLI をインストールします。お使いのプラットフォーム向けの手順が掲載されており、常に最新の内容です。",
       "install_kiro_cli_sign_in_once_and_kiro_crew_will": "Kiro CLIをインストール、1回サインインしてください。その後 Kiro Crewが処理します。",
@@ -4187,12 +4191,18 @@
       "kiro_crew_s_agent_specs_are_not_installed": "Kiro Crew のエージェント仕様がインストールされていません",
       "kiro_crew_uses_kiro_cli_as_its_agent_engine_comp": "Kiro Crew はエージェントエンジンとして Kiro CLI を使用しています。この 2 つの手順を実行してください",
       "kiro_crew_writes_its_own_agent_specs_where_kiro": "Kiro Crew は Kiro CLI が読み込む場所に独自のエージェント仕様を書き込みます。これなしでは Kiro CLI はエージェントを解決できないため、すべてのメッセージが失敗します。もう一度確認すると仕様が再度書き込まれ、問題が報告されます。",
+      "linux_sandbox_guide": "Linux サンドボックスガイド",
       "missing": "不足",
       "open_kiro_cli_setup": "Kiro CLI のセットアップを開く",
       "or_run_in_terminal": "または、ターミナルで実行してください：",
       "refresh": "更新",
+      "remedy_apparmor_service_install": "Kiro Crew をサービスとしてインストールします。その際、ユーザー名前空間の権限のみを付与する限定的な AppArmor プロファイル (kirocrew-userns) が Kiro Crew サービスにのみ適用され、マシン上の他の部分は緩和されません。",
+      "remedy_max_user_namespaces": "ユーザー名前空間の作成がユーザーごとの上限に達しました。通常は、強化されたホストで user.max_user_namespaces が 0 になっていることを意味します。値を引き上げ、再起動後も保持されるよう /etc/sysctl.d/ に設定してください。",
+      "remedy_no_user_ns": "このカーネルはユーザー名前空間のサポート (CONFIG_USER_NS) なしでビルドされているため、変更できる設定はありません。別のカーネルを使用することが唯一の解決方法です。",
+      "remedy_userns_denied": "カーネルがユーザー名前空間の作成を拒否しました。Debian 系のホストではこのレガシー設定を確認し、再起動後も保持されるよう /etc/sysctl.d/ に値を設定してください。コンテナ内では通常、コンテナ自身の seccomp フィルターが unshare を拒否しているため、ホストの設定ではなくコンテナの実行フラグで修正します。",
       "required": "必須",
       "retry_the_gateway_check_before_starting_a_sessio": "セッションを開始する前に、ゲートウェイチェックを再試行してください。",
+      "run_kirocrew_doctor_on_the_gateway_host_for_a_ful": "ゲートウェイホストでこれを実行すると、どのサンドボックス手順が失敗したかを含む、前提条件の完全なレポートが得られます。",
       "sandbox_unavailable": "サンドボックスは利用できません",
       "secure_setup_on_your_gateway_host": "ゲートウェイホストでのセキュアなセットアップ",
       "sessions_are_paused_until_the_gateway_check_succ": "ゲートウェイチェックが成功するまで、セッションは一時停止されます。アーティファクト、設定、および\n              履歴は引き続き利用できます。",
@@ -4208,6 +4218,7 @@
       "the_gateway_returned_no_prerequisite_status": "ゲートウェイは前提条件ステータスを返しませんでした。",
       "the_repair_attempt_failed": "修復試行が失敗しました",
       "then_the_dashboard_will_open_automatically": "その後\n              ダッシュボードが自動的に開きます。",
+      "this_host_allows_user_namespaces_but_the_kernel_d": "このホストはユーザー名前空間を許可していますが、カーネルがマウント名前空間を拒否しました。これは Ubuntu 23.10 以降の特徴で、ユーザー名前空間を作成したプロセスを制限付きの AppArmor プロファイルに移動させます。Kiro Crew は認証情報を露出させるより、隔離されないままエージェントを実行することを拒否するため、プロファイルが設定されるまでブロックされた状態が続きます。",
       "this_host_provides_no_os_level_sandbox_so_kiro_c": "このホストは OS レベルのサンドボックスを提供しないため、Kiro Crew はエージェントを分離できません。認証情報を公開するのではなく、サンドボックス化されていないエージェントの実行を拒否します。",
       "this_kiro_cli_is_signed_in": "この Kiro CLI はサインイン済みです。",
       "this_page_detects_kiro_cli_automatically": "このページは開いたままにします。ゲートウェイホストを確認し、Kiro CLI のインストールが完了すると自動で次に進みます。",
@@ -4251,6 +4262,26 @@
       "two_way": "双方向",
       "unavailable": "この送信先は利用できません。"
     },
+    "localChangesView": {
+      "checking_for_changes": "Git の変更を確認中…",
+      "could_not_scan": "{{dir}} の変更をスキャンできませんでした。",
+      "couldnt_load_diff": "差分を読み込めませんでした。",
+      "diff_not_shown_for_safety": "安全のため差分を表示しません: {{reason}}。",
+      "diff_truncated": "差分が切り捨てられました — ファイルの内容が 2 MB の応答上限を超えています。先頭部分のみ表示しています。",
+      "diff_unavailable_file_unreadable": "ファイルを完全に読み取れなかったため差分を表示できません。",
+      "loading_diff": "差分を読み込み中…",
+      "no_diff_available": "このファイルの差分はありません。",
+      "no_git_repository": "このプロジェクトディレクトリに git リポジトリーがありません。変更を確認するには、チャットのプロジェクトディレクトリを git リポ（またはその中のフォルダー）に設定してください。",
+      "open_in_editor": "{{file}} をエディタで開く",
+      "partial_scan": "部分スキャン — ファイルまたは時間の上限に達しました。一部の変更が表示されていない場合があります。",
+      "pick_project_directory": "このチャットの未コミットの git 変更を表示するには、プロジェクトディレクトリを選択してください。",
+      "repo_refused_safe_read": "このリポジトリは安全な読み取りを拒否されました",
+      "repo_skipped_for_safety": "安全のためこのリポジトリはスキップされました: {{reason}}。",
+      "retry": "再試行",
+      "scan_hit_limit": "スキャンがファイルまたは出力の上限に達しました — ここに表示されている以上の変更があります。",
+      "working_tree_clean": "ワーキングツリーはクリーンです — ローカルの変更はありません。",
+      "working_tree_clean_on_branch": "ワーキングツリーはクリーンです — {{branch}} にローカルの変更はありません。"
+    },
     "logEntry": {
       "cancelled": "キャンセル済み",
       "error": "エラー",
@@ -4278,6 +4309,10 @@
       "close_find": "検索を閉じる",
       "copy_content": "コンテンツをコピー",
       "copy_path": "パスをコピー",
+      "diff_unavailable_baseline_failed": "差分を表示できません — ファイルの git ベースラインを読み込めませんでした",
+      "diff_unavailable_no_git_repo": "差分を表示できません — このファイルは git リポジトリーにありません",
+      "diff_unavailable_original_too_large": "差分を表示できません — 元のファイルが大きすぎて完全に読み込めません",
+      "diff_unavailable_with_error": "差分を表示できません — {{error}}",
       "discard_unsaved_changes": "保存されていない変更を破棄しますか？",
       "download": "ダウンロード",
       "download_failed": "ダウンロードに失敗しました",
@@ -4644,6 +4679,8 @@
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro CrewはあなたのローカルプロバイダーのCLIを使用してプルリクエストを読み込みます。ターミナルでこのコマンドを実行してから、再度やり直してください。",
       "loading_diff": "差分を読み込み中…",
       "loading_source_provider": "ソースプロバイダーを読み込み中…",
+      "local": "ローカル",
+      "local_working_tree_changes": "ローカルのワーキングツリー変更",
       "merge_blocked": "マージがブロック",
       "merge_conflicts": "マージコンフリクト",
       "merge_conflicts_detail": "このブランチは {{base}} と競合しており、解消するまでマージできません。",
@@ -4741,7 +4778,7 @@
       "loading": "読み込み中…",
       "main": "main",
       "no_external_registries": "外部レジストリなし",
-      "open_repository": "{{repo}} リポジトリを開く",
+      "open_repository": "{{repo}} リポジトリーを開く",
       "org_owned_app_catalogs_hosted_in_git_repositorie": "Git リポジトリでホストされている組織所有のアプリカタログ。これらのリポジトリからのアプリはコアレジストリアプリと一緒に「参照」タブに表示されます。",
       "refresh_registry": "{{name}} レジストリを更新",
       "registry_already_exists": "レジストリ「{{repo}}」はすでに存在します",
@@ -4830,6 +4867,10 @@
       "selected": "選択済み",
       "showing": "表示中",
       "you": "あなた"
+    },
+    "searchableSelect": {
+      "no_matches": "マッチするものがありません",
+      "search": "検索…"
     },
     "secretField": {
       "cancel": "キャンセル",
@@ -5138,6 +5179,10 @@
       "no_matches_for": "一致しません:",
       "no_noun_match": "{{noun}}に一致しません"
     },
+    "unifiedDiffView": {
+      "diff_display_capped": "差分表示は {{count}} 行に制限されています。残りの行は表示されません。",
+      "loading_diff": "差分を読み込み中…"
+    },
     "updateModal": {
       "dismiss": "閉じる",
       "dismiss_update_dialog": "更新ダイアログを閉じる",
@@ -5314,10 +5359,6 @@
       "select": "選択",
       "workspace_name": "ワークスペース名",
       "workspace_name_2": "workspace-name"
-    },
-    "searchableSelect": {
-      "no_matches": "マッチするものがありません",
-      "search": "検索…"
     }
   },
   "hooks": {
@@ -6172,6 +6213,7 @@
         "input": "入力",
         "issues": "イシュー",
         "last_tool": "最後のツール:",
+        "line_totals_unavailable_diff_truncated": "差分が切り捨てられたため行合計を表示できません",
         "load_output_from_disk": "ディスクから出力を読み込む",
         "loading": "読み込み中…",
         "logs": "ログ",

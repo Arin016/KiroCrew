@@ -3653,6 +3653,11 @@
       "to_send_to_this_chat": "чтобы отправить в этот чат",
       "toggle_additional_instruction": "Показать или скрыть дополнительную инструкцию"
     },
+    "askAgent": {
+      "ask_the_agent": "Спросить агента",
+      "open_a_chat_with_this_error_s_context_attached": "Открыть чат с полным контекстом этой ошибки",
+      "prompt_lead": "Эта ошибка только что возникла в панели Kiro Crew. Определи первопричину и устрани её."
+    },
     "autoNudgePopover": {
       "close": "Закрыть",
       "cycle": "· цикл",
@@ -4025,6 +4030,9 @@
       "something_went_wrong": "Что-то пошло не так",
       "try_again": "Повторить"
     },
+    "errorNotice": {
+      "dismiss": "Скрыть"
+    },
     "excalidrawBlock": {
       "render_failed": "Не удалось отобразить диаграмму — показан исходный код"
     },
@@ -4086,6 +4094,20 @@
       "showing_raw_content_count": "Показано исходное содержимое ({{count}} симв.)",
       "showing_raw_content_truncated_count": "Показано исходное содержимое ({{count}} симв., показаны первые {{shown}})"
     },
+    "folderColorNames": {
+      "amber": "Янтарный",
+      "blue": "Синий",
+      "cyan": "Голубой",
+      "gray": "Серый",
+      "green": "Зелёный",
+      "indigo": "Индиго",
+      "lime": "Лаймовый",
+      "orange": "Оранжевый",
+      "pink": "Розовый",
+      "red": "Красный",
+      "teal": "Бирюзовый",
+      "violet": "Фиолетовый"
+    },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}} (не установлен)",
       "browse": "Обзор",
@@ -4114,19 +4136,11 @@
       "set_color_to_name": "Задать цвет: {{name}}",
       "top_level": "Верхний уровень"
     },
-    "folderColorNames": {
-      "amber": "Янтарный",
-      "blue": "Синий",
-      "cyan": "Голубой",
-      "gray": "Серый",
-      "green": "Зелёный",
-      "indigo": "Индиго",
-      "lime": "Лаймовый",
-      "orange": "Оранжевый",
-      "pink": "Розовый",
-      "red": "Красный",
-      "teal": "Бирюзовый",
-      "violet": "Фиолетовый"
+    "folderSuggestionCard": {
+      "folder_suggestion": "Предложение папки",
+      "move_to_folder_question": "Переместить эту сессию в {{folder}}?",
+      "no_thanks": "Не сейчас",
+      "yes_move_it": "Переместить"
     },
     "followUpBar": {
       "click_to_add_to_input_double_click_to_select_and": "Нажми, чтобы добавить в поле ввода (двойное нажатие — выбрать и отправить)",
@@ -4402,6 +4416,26 @@
       "two_way": "Двусторонняя связь",
       "unavailable": "Это место назначения недоступно."
     },
+    "localChangesView": {
+      "checking_for_changes": "Проверка изменений git…",
+      "could_not_scan": "Не удалось просканировать {{dir}} на наличие изменений.",
+      "couldnt_load_diff": "Не удалось загрузить diff.",
+      "diff_not_shown_for_safety": "Diff не показан из соображений безопасности: {{reason}}.",
+      "diff_truncated": "Diff обрезан — содержимое файла превышает лимит в 2 МБ; показано только начало.",
+      "diff_unavailable_file_unreadable": "Diff недоступен — файл не удалось прочитать полностью.",
+      "loading_diff": "Загрузка diff…",
+      "no_diff_available": "Diff для этого файла недоступен.",
+      "no_git_repository": "В этой директории проекта нет git-репозитория. Укажите директорию проекта чата на git-репозиторий (или любую папку внутри него), чтобы увидеть изменения.",
+      "open_in_editor": "Открыть {{file}} в редакторе",
+      "partial_scan": "Частичное сканирование — достигнут лимит файлов или времени; некоторые изменения могут не отображаться.",
+      "pick_project_directory": "Выберите директорию проекта для этого чата, чтобы увидеть незафиксированные git-изменения.",
+      "repo_refused_safe_read": "этому репозиторию отказано в безопасном чтении",
+      "repo_skipped_for_safety": "Этот репозиторий пропущен из соображений безопасности: {{reason}}.",
+      "retry": "Повторить",
+      "scan_hit_limit": "Сканирование достигло лимита файлов или вывода — изменений больше, чем показано здесь.",
+      "working_tree_clean": "Рабочее дерево чистое — локальных изменений нет.",
+      "working_tree_clean_on_branch": "Рабочее дерево чистое — локальных изменений на {{branch}} нет."
+    },
     "logEntry": {
       "cancelled": "Отменено",
       "error": "Ошибка",
@@ -4429,6 +4463,10 @@
       "close_find": "Закрыть поиск",
       "copy_content": "Копировать содержимое",
       "copy_path": "Копировать путь",
+      "diff_unavailable_baseline_failed": "Diff недоступен — не удалось загрузить git-базу файла",
+      "diff_unavailable_no_git_repo": "Diff недоступен — этот файл не находится в git-репозитории",
+      "diff_unavailable_original_too_large": "Diff недоступен — оригинал слишком велик для полной загрузки",
+      "diff_unavailable_with_error": "Diff недоступен — {{error}}",
       "discard_unsaved_changes": "Отбросить несохранённые изменения?",
       "download": "Скачать",
       "download_failed": "Не удалось скачать",
@@ -4713,6 +4751,12 @@
       "paste_lines_one": "[ Вставка №{{seq}} · {{count}} строка ]",
       "paste_lines_other": "[ Вставка №{{seq}} · {{count}} строки ]"
     },
+    "privacyChapter": {
+      "continue": "Продолжить",
+      "eyebrow": "Конфиденциальность",
+      "subtitle": "Пять анонимных полей, которые отправляет Kiro Crew, и как их отключить.",
+      "title": "Конфиденциальность"
+    },
     "projectPicker": {
       "back": "Назад",
       "browse": "Обзор",
@@ -4761,29 +4805,50 @@
       "add_to_chat": "Добавить в чат",
       "all_checks_passed": "Все проверки пройдены",
       "auto_merge_enabled": "Автослияние включено",
+      "branch_is_behind": "Ветка отстаёт",
       "branch_is_behind_detail": "Эта ветка устарела относительно {{base}} — её нужно обновить перед слиянием.",
+      "branch_protection_requirements_approving_reviews": "Требования защиты ветки (одобрения ревью или обязательные проверки) пока не выполнены.",
       "cancel": "Отмена",
       "changes": "Изменения",
+      "check_failed": "Ошибка",
+      "check_in_progress": "Выполняется",
+      "check_passed": "Пройдено",
+      "check_skipped": "Пропущено",
       "checks": "Проверки",
+      "checks_failed": "Проверки не пройдены",
+      "checks_passed": "Проверки пройдены",
       "checks_running": "Проверки выполняются",
       "checks_unavailable": "Проверки недоступны",
+      "closed": "Закрыт",
       "collapse_comment": "Свернуть комментарий",
       "commits": "Коммиты",
       "confirm_auto_merge": "Подтвердить автослияние",
       "could_not_load_this_pull_request": "Не удалось загрузить этот пул-реквест",
       "could_not_resolve": "Не удалось разрешить",
       "description": "Описание",
+      "draft": "Черновик",
       "enable_auto_merge": "Включить автослияние",
       "expand_comment": "Развернуть комментарий",
+      "files_changed_few": "{{count}} изменённых файла",
+      "files_changed_many": "{{count}} изменённых файлов",
+      "files_changed_one": "{{count}} изменённый файл",
+      "files_changed_other": "{{count}} изменённого файла",
+      "github_cli_login_required": "Требуется вход в GitHub CLI",
       "github_merges_this_pull_request_automatically_on": "GitHub сливает этот пул-реквест автоматически, как только пройдут обязательные проверки и ревью",
       "github_will_merge_this_pull_request_once_its_req": "GitHub сольёт этот пул-реквест, когда его требования будут выполнены",
+      "gitlab_cli_login_required": "Требуется вход в GitLab CLI",
       "gitlab_merges_this_merge_request_when_the_pipeli": "GitLab сливает этот мерж-реквест при успешном пайплайне — и сразу же, если пайплайн не ожидается",
       "gitlab_will_merge_this_merge_request_when_the_pi": "GitLab сольёт этот мерж-реквест при успешном пайплайне",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew использует локальный CLI провайдера для загрузки пул-реквестов. Выполните эту команду в терминале и повторите попытку.",
       "loading_diff": "Загрузка изменений…",
       "loading_source_provider": "Загрузка провайдера источника…",
+      "local": "Локально",
+      "local_working_tree_changes": "Локальные изменения рабочего дерева",
+      "merge_blocked": "Слияние заблокировано",
+      "merge_conflicts": "Конфликты слияния",
       "merge_conflicts_detail": "У этой ветки есть конфликты с {{base}}, и слияние невозможно, пока они не разрешены.",
       "merge_now": "Слить сейчас",
+      "merged": "Объединён",
       "no_changed_files_were_returned": "Изменённые файлы не получены.",
       "no_ci_checks_were_returned": "CI-проверки не получены.",
       "no_commits_were_returned": "Коммиты не получены.",
@@ -4792,9 +4857,12 @@
       "no_written_comment": "Текст комментария отсутствует.",
       "open": "Открыт",
       "open_pull_request": "Открыть пул-реквест",
+      "provider_results_may_be_partial_merge_request": "Результаты провайдера могут быть неполными для {{sections}}. Открой мерж-реквест, чтобы увидеть полный набор.",
+      "provider_results_may_be_partial_pull_request": "Результаты провайдера могут быть неполными для {{sections}}. Открой пул-реквест, чтобы увидеть полный набор.",
       "pull_request_sections": "Разделы пул-реквеста",
       "pull_requests": "Пул-реквесты",
       "ready_for_review": "Готов к проверке",
+      "rebase_required": "Требуется перебазирование",
       "rebase_required_detail": "Этот проект требует, чтобы ветка была перебазирована на {{base}} перед слиянием; коммит слияния это не разблокирует.",
       "refresh_pull_request": "Обновить пул-реквест",
       "refreshing_pull_request": "Обновление пул-реквеста",
@@ -4802,40 +4870,18 @@
       "resolved": "Разрешено",
       "retry": "Повторить",
       "reviews": "Ревью",
-      "the_provider_did_not_return_a_patch_for_this_fil": "Провайдер не вернул патч для этого файла.",
-      "unknown_reviewer": "Проверяющий неизвестен",
-      "untitled_commit": "Коммит без названия",
-      "updated": "Обновлён",
-      "branch_is_behind": "Ветка отстаёт",
-      "branch_protection_requirements_approving_reviews": "Требования защиты ветки (одобрения ревью или обязательные проверки) пока не выполнены.",
-      "closed": "Закрыт",
-      "draft": "Черновик",
-      "files_changed_few": "{{count}} изменённых файла",
-      "files_changed_many": "{{count}} изменённых файлов",
-      "files_changed_one": "{{count}} изменённый файл",
-      "files_changed_other": "{{count}} изменённого файла",
-      "github_cli_login_required": "Требуется вход в GitHub CLI",
-      "gitlab_cli_login_required": "Требуется вход в GitLab CLI",
-      "merge_blocked": "Слияние заблокировано",
-      "merge_conflicts": "Конфликты слияния",
-      "merged": "Объединён",
-      "provider_results_may_be_partial_merge_request": "Результаты провайдера могут быть неполными для {{sections}}. Открой мерж-реквест, чтобы увидеть полный набор.",
-      "provider_results_may_be_partial_pull_request": "Результаты провайдера могут быть неполными для {{sections}}. Открой пул-реквест, чтобы увидеть полный набор.",
-      "rebase_required": "Требуется перебазирование",
-      "take_this_merge_request_out_of_draft": "Вывести этот мерж-реквест из черновика",
-      "take_this_pull_request_out_of_draft": "Вывести этот пул-реквест из черновика",
-      "this_authorizes_the_merge_as_soon_as_requirement": "Это разрешает слияние сразу после выполнения требований, со squash, если репозиторий это допускает (иначе коммит слияния, затем rebase).",
-      "this_authorizes_the_merge_when_the_pipeline_succ": "Это разрешает слияние после успешного прохождения пайплайна.",
-      "check_failed": "Ошибка",
-      "check_in_progress": "Выполняется",
-      "check_passed": "Пройдено",
-      "check_skipped": "Пропущено",
-      "checks_failed": "Проверки не пройдены",
-      "checks_passed": "Проверки пройдены",
       "state_closed": "Закрыт",
       "state_draft": "Черновик",
       "state_merged": "Влит",
-      "state_open": "Открыт"
+      "state_open": "Открыт",
+      "take_this_merge_request_out_of_draft": "Вывести этот мерж-реквест из черновика",
+      "take_this_pull_request_out_of_draft": "Вывести этот пул-реквест из черновика",
+      "the_provider_did_not_return_a_patch_for_this_fil": "Провайдер не вернул патч для этого файла.",
+      "this_authorizes_the_merge_as_soon_as_requirement": "Это разрешает слияние сразу после выполнения требований, со squash, если репозиторий это допускает (иначе коммит слияния, затем rebase).",
+      "this_authorizes_the_merge_when_the_pipeline_succ": "Это разрешает слияние после успешного прохождения пайплайна.",
+      "unknown_reviewer": "Проверяющий неизвестен",
+      "untitled_commit": "Коммит без названия",
+      "updated": "Обновлён"
     },
     "questionCard": {
       "collapse_all": "Свернуть все",
@@ -4923,6 +4969,25 @@
       "open_read_only_viewer": "Открыть просмотр только для чтения (читай и комментируй; оригинал на {{name}} открывается оттуда)",
       "v": "v"
     },
+    "reportProblemModal": {
+      "report_a_problem": "Сообщить о проблеме",
+      "what_happened": "Что произошло?",
+      "note_placeholder": "например: После обновления все сообщения падают с «process exited (rc=None)».",
+      "include_recent_logs": "Включить недавние логи",
+      "include_logs_hint": "Логи Gateway и kiro-cli. Отключите, чтобы отправить только отчёты о сбоях.",
+      "redaction_notice": "Токены Bearer, cookie сессии и ключи AWS удаляются автоматически до создания zip.",
+      "collect_failed": "Не удалось собрать диагностику",
+      "cancel": "Отмена",
+      "create_report": "Создать отчёт",
+      "collecting": "Сбор…",
+      "done": "Готово",
+      "diagnostics_ready": "Диагностика готова — скрыто секретов: {{redactions}}, обработано файлов: {{files}}.",
+      "saved_to": "Сохранено в",
+      "show_in_finder": "Показать в Finder",
+      "download_zip": "Скачать zip",
+      "open_github_issue": "Открыть issue на GitHub",
+      "prefill_hint": "При открытии issue детали подставятся автоматически — затем перетащите туда zip."
+    },
     "resizeHandle": {
       "drag_to_resize": "Потяните, чтобы изменить размер"
     },
@@ -4968,6 +5033,10 @@
       "selected": "выбрано",
       "showing": "Показано",
       "you": "Ты"
+    },
+    "searchableSelect": {
+      "no_matches": "Нет совпадений",
+      "search": "Поиск…"
     },
     "secretField": {
       "cancel": "Отмена",
@@ -5274,6 +5343,15 @@
       "tunnel_stopped": "Туннель остановлен",
       "up": "работает {{time}}"
     },
+    "ui": {
+      "clear_filter": "Очистить фильтр",
+      "no_matches_for": "Нет совпадений для",
+      "no_noun_match": "Нет совпадающих {{noun}}"
+    },
+    "unifiedDiffView": {
+      "diff_display_capped": "Отображение diff ограничено {{count}} строками. Оставшиеся строки не отображаются.",
+      "loading_diff": "Загрузка diff…"
+    },
     "updateModal": {
       "dismiss": "Скрыть",
       "dismiss_update_dialog": "Закрыть диалог обновления",
@@ -5450,54 +5528,6 @@
       "select": "Выбрать",
       "workspace_name": "Название рабочей области",
       "workspace_name_2": "workspace-name"
-    },
-    "privacyChapter": {
-      "continue": "Продолжить",
-      "eyebrow": "Конфиденциальность",
-      "subtitle": "Пять анонимных полей, которые отправляет Kiro Crew, и как их отключить.",
-      "title": "Конфиденциальность"
-    },
-    "ui": {
-      "clear_filter": "Очистить фильтр",
-      "no_matches_for": "Нет совпадений для",
-      "no_noun_match": "Нет совпадающих {{noun}}"
-    },
-    "askAgent": {
-      "ask_the_agent": "Спросить агента",
-      "open_a_chat_with_this_error_s_context_attached": "Открыть чат с полным контекстом этой ошибки",
-      "prompt_lead": "Эта ошибка только что возникла в панели Kiro Crew. Определи первопричину и устрани её."
-    },
-    "errorNotice": {
-      "dismiss": "Скрыть"
-    },
-    "reportProblemModal": {
-      "report_a_problem": "Сообщить о проблеме",
-      "what_happened": "Что произошло?",
-      "note_placeholder": "например: После обновления все сообщения падают с «process exited (rc=None)».",
-      "include_recent_logs": "Включить недавние логи",
-      "include_logs_hint": "Логи Gateway и kiro-cli. Отключите, чтобы отправить только отчёты о сбоях.",
-      "redaction_notice": "Токены Bearer, cookie сессии и ключи AWS удаляются автоматически до создания zip.",
-      "collect_failed": "Не удалось собрать диагностику",
-      "cancel": "Отмена",
-      "create_report": "Создать отчёт",
-      "collecting": "Сбор…",
-      "done": "Готово",
-      "diagnostics_ready": "Диагностика готова — скрыто секретов: {{redactions}}, обработано файлов: {{files}}.",
-      "saved_to": "Сохранено в",
-      "show_in_finder": "Показать в Finder",
-      "download_zip": "Скачать zip",
-      "open_github_issue": "Открыть issue на GitHub",
-      "prefill_hint": "При открытии issue детали подставятся автоматически — затем перетащите туда zip."
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "Предложение папки",
-      "move_to_folder_question": "Переместить эту сессию в {{folder}}?",
-      "no_thanks": "Не сейчас",
-      "yes_move_it": "Переместить"
-    },
-    "searchableSelect": {
-      "no_matches": "Нет совпадений",
-      "search": "Поиск…"
     }
   },
   "hooks": {
@@ -6429,6 +6459,7 @@
         "input": "Ввод",
         "issues": "Задачи",
         "last_tool": "Последний инструмент:",
+        "line_totals_unavailable_diff_truncated": "Итоги строк недоступны, так как diff был обрезан",
         "load_output_from_disk": "Загрузить вывод с диска",
         "loading": "Загрузка…",
         "logs": "Логи",

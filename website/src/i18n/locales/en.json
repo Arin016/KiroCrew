@@ -3192,6 +3192,12 @@
       "rows": "rows",
       "showing_500_of": "Showing 500 of"
     },
+    "folderSuggestionCard": {
+      "folder_suggestion": "Folder suggestion",
+      "move_to_folder_question": "Move this session to {{folder}}?",
+      "no_thanks": "Not now",
+      "yes_move_it": "Move it"
+    },
     "followUpBar": {
       "scroll_left": "Scroll left",
       "scroll_right": "Scroll right",
@@ -3304,6 +3310,26 @@
       "we_could_not_check_kiro_cli": "We could not check Kiro CLI.",
       "your_crew_is_almost_ready": "Your crew is almost ready."
     },
+    "localChangesView": {
+      "checking_for_changes": "Checking for git changes…",
+      "could_not_scan": "Could not scan {{dir}} for changes.",
+      "couldnt_load_diff": "Couldn't load the diff.",
+      "diff_not_shown_for_safety": "Diff not shown for safety: {{reason}}.",
+      "diff_truncated": "Diff truncated — the file's content exceeds the 2 MB response limit; showing the beginning only.",
+      "diff_unavailable_file_unreadable": "Diff unavailable because the file could not be read completely.",
+      "loading_diff": "Loading diff…",
+      "no_diff_available": "No diff available for this file.",
+      "no_git_repository": "No git repository at this project directory. Point the chat's project directory at a git repo (or any folder inside one) to see its changes.",
+      "open_in_editor": "Open {{file}} in editor",
+      "partial_scan": "Partial scan — the file or time budget was reached; some changes may not be listed.",
+      "pick_project_directory": "Pick a project directory for this chat to see its uncommitted git changes.",
+      "repo_refused_safe_read": "this repository was refused a safe read",
+      "repo_skipped_for_safety": "This repository was skipped for safety: {{reason}}.",
+      "retry": "Retry",
+      "scan_hit_limit": "The scan hit its file or output limit — more changes exist than are listed here.",
+      "working_tree_clean": "Working tree clean — no local changes.",
+      "working_tree_clean_on_branch": "Working tree clean — no local changes on {{branch}}."
+    },
     "logEntry": {
       "cancelled": "Cancelled",
       "error": "Error",
@@ -3326,6 +3352,10 @@
       "close_find": "Close find",
       "copy_content": "Copy content",
       "copy_path": "Copy path",
+      "diff_unavailable_baseline_failed": "Diff unavailable — the file's git baseline could not be loaded",
+      "diff_unavailable_no_git_repo": "Diff unavailable — this file is not in a git repository",
+      "diff_unavailable_original_too_large": "Diff unavailable — the original is too large to load in full",
+      "diff_unavailable_with_error": "Diff unavailable — {{error}}",
       "discard_unsaved_changes": "Discard unsaved changes?",
       "download": "Download",
       "exit_full_screen": "Exit full screen",
@@ -3539,6 +3569,8 @@
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew uses your local provider CLI to load pull requests. Run this command in your terminal, then retry.",
       "loading_diff": "Loading diff…",
       "loading_source_provider": "Loading source provider…",
+      "local": "Local",
+      "local_working_tree_changes": "Local working-tree changes",
       "no_changed_files_were_returned": "No changed files were returned.",
       "no_ci_checks_were_returned": "No CI checks were returned.",
       "no_commits_were_returned": "No commits were returned.",
@@ -3846,6 +3878,10 @@
       "no_matches_for": "No matches for",
       "no_noun_match": "No {{noun}} match"
     },
+    "unifiedDiffView": {
+      "diff_display_capped": "Diff display capped at {{count}} lines. Remaining lines are not rendered.",
+      "loading_diff": "Loading diff…"
+    },
     "updateModal": {
       "dismiss": "Dismiss",
       "dismiss_update_dialog": "Dismiss update dialog",
@@ -3975,12 +4011,6 @@
       "select": "Select",
       "workspace_name": "Workspace name",
       "workspace_name_2": "workspace-name"
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "Folder suggestion",
-      "move_to_folder_question": "Move this session to {{folder}}?",
-      "no_thanks": "Not now",
-      "yes_move_it": "Move it"
     }
   },
   "hooks": {
@@ -4488,6 +4518,7 @@
         "files": "Files",
         "input": "Input",
         "last_tool": "Last tool:",
+        "line_totals_unavailable_diff_truncated": "Line totals unavailable because the diff was truncated",
         "load_output_from_disk": "Load output from disk",
         "loading": "Loading…",
         "no_files_changed_yet": "No files changed yet",

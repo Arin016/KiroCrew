@@ -3559,6 +3559,11 @@
       "to_send_to_this_chat": "এই চ্যাটে পাঠাতে",
       "toggle_additional_instruction": "অতিরিক্ত নির্দেশ দেখান বা লুকান"
     },
+    "askAgent": {
+      "ask_the_agent": "এজেন্টকে জিজ্ঞাসা করুন",
+      "open_a_chat_with_this_error_s_context_attached": "এই ত্রুটির সম্পূর্ণ প্রসঙ্গ সহ একটি চ্যাট খুলুন",
+      "prompt_lead": "এই ত্রুটিটি এইমাত্র Kiro Crew ড্যাশবোর্ডে দেখা দিয়েছে। মূল কারণ নির্ণয় করে সমাধান করুন।"
+    },
     "autoNudgePopover": {
       "close": "বন্ধ করুন",
       "cycle": "· চক্র",
@@ -3923,6 +3928,9 @@
       "something_went_wrong": "কিছু ভুল হয়েছে",
       "try_again": "আবার চেষ্টা করুন"
     },
+    "errorNotice": {
+      "dismiss": "খারিজ করুন"
+    },
     "excalidrawBlock": {
       "render_failed": "ডায়াগ্রাম রেন্ডার করা যায়নি — সোর্স দেখানো হচ্ছে"
     },
@@ -3982,6 +3990,20 @@
       "showing_raw_content_count": "কাঁচা কনটেন্ট দেখানো হচ্ছে ({{count}}টি অক্ষর)",
       "showing_raw_content_truncated_count": "কাঁচা কনটেন্ট দেখানো হচ্ছে ({{count}}টি অক্ষর, প্রথম {{shown}}টি দেখানো হচ্ছে)"
     },
+    "folderColorNames": {
+      "amber": "অ্যাম্বার",
+      "blue": "নীল",
+      "cyan": "সায়ান",
+      "gray": "ধূসর",
+      "green": "সবুজ",
+      "indigo": "ইন্ডিগো",
+      "lime": "লাইম",
+      "orange": "কমলা",
+      "pink": "গোলাপি",
+      "red": "লাল",
+      "teal": "টিল",
+      "violet": "বেগুনি"
+    },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}} (ইনস্টল করা নেই)",
       "browse": "ব্রাউজ করুন",
@@ -4010,19 +4032,11 @@
       "set_color_to_name": "রং {{name}} এ সেট করুন",
       "top_level": "সর্বোচ্চ স্তর"
     },
-    "folderColorNames": {
-      "amber": "অ্যাম্বার",
-      "blue": "নীল",
-      "cyan": "সায়ান",
-      "gray": "ধূসর",
-      "green": "সবুজ",
-      "indigo": "ইন্ডিগো",
-      "lime": "লাইম",
-      "orange": "কমলা",
-      "pink": "গোলাপি",
-      "red": "লাল",
-      "teal": "টিল",
-      "violet": "বেগুনি"
+    "folderSuggestionCard": {
+      "folder_suggestion": "ফোল্ডার প্রস্তাব",
+      "move_to_folder_question": "এই সেশনটি {{folder}}-এ সরানো হবে?",
+      "no_thanks": "এখন নয়",
+      "yes_move_it": "সরান"
     },
     "followUpBar": {
       "click_to_add_to_input_double_click_to_select_and": "ইনপুটে যোগ করতে ক্লিক করো (নির্বাচন করে পাঠাতে ডাবল-ক্লিক করো)",
@@ -4292,6 +4306,26 @@
       "two_way": "দ্বিমুখী",
       "unavailable": "এই গন্তব্যটি উপলভ্য নয়।"
     },
+    "localChangesView": {
+      "checking_for_changes": "গিট পরিবর্তন পরীক্ষা করা হচ্ছে…",
+      "could_not_scan": "{{dir}} তে পরিবর্তন স্ক্যান করা যায়নি।",
+      "couldnt_load_diff": "ডিফ লোড করা যায়নি।",
+      "diff_not_shown_for_safety": "নিরাপত্তার জন্য ডিফ দেখানো হয়নি: {{reason}}।",
+      "diff_truncated": "ডিফ ছেঁটে দেওয়া হয়েছে — ফাইলের বিষয়বস্তু 2 MB সীমা ছাড়িয়েছে; শুধুমাত্র শুরুর অংশ দেখানো হচ্ছে।",
+      "diff_unavailable_file_unreadable": "ফাইল সম্পূর্ণভাবে পড়া যায়নি বলে ডিফ পাওয়া যায়নি।",
+      "loading_diff": "ডিফ লোড হচ্ছে…",
+      "no_diff_available": "এই ফাইলের জন্য কোনো ডিফ পাওয়া যায়নি।",
+      "no_git_repository": "এই প্রজেক্ট ডিরেক্টরিতে কোনো গিট রিপোজিটরি নেই। এর পরিবর্তন দেখতে চ্যাটের প্রজেক্ট ডিরেক্টরি একটি গিট রিপোতে (বা এর ভিতরের কোনো ফোল্ডারে) নির্দেশ করুন।",
+      "open_in_editor": "{{file}} সম্পাদকে খুলুন",
+      "partial_scan": "আংশিক স্ক্যান — ফাইল বা সময়ের বাজেট শেষ হয়েছে; কিছু পরিবর্তন তালিকাভুক্ত নাও হতে পারে।",
+      "pick_project_directory": "এই চ্যাটের অপ্রতিশ্রুত গিট পরিবর্তন দেখতে একটি প্রজেক্ট ডিরেক্টরি নির্বাচন করুন।",
+      "repo_refused_safe_read": "এই রিপোজিটরি নিরাপদ পঠন প্রত্যাখ্যান করেছে",
+      "repo_skipped_for_safety": "নিরাপত্তার জন্য এই রিপোজিটরি এড়িয়ে যাওয়া হয়েছে: {{reason}}।",
+      "retry": "পুনরায় চেষ্টা করুন",
+      "scan_hit_limit": "স্ক্যান তার ফাইল বা আউটপুট সীমায় পৌঁছেছে — এখানে তালিকাভুক্তের চেয়ে আরও পরিবর্তন রয়েছে।",
+      "working_tree_clean": "ওয়ার্কিং ট্রি পরিষ্কার — কোনো স্থানীয় পরিবর্তন নেই।",
+      "working_tree_clean_on_branch": "ওয়ার্কিং ট্রি পরিষ্কার — {{branch}} এ কোনো স্থানীয় পরিবর্তন নেই।"
+    },
     "logEntry": {
       "cancelled": "বাতিল করা হয়েছে",
       "error": "ত্রুটি",
@@ -4319,6 +4353,10 @@
       "close_find": "খোঁজা বন্ধ করুন",
       "copy_content": "কনটেন্ট কপি করুন",
       "copy_path": "পাথ কপি করুন",
+      "diff_unavailable_baseline_failed": "ডিফ পাওয়া যায়নি — ফাইলের গিট বেসলাইন লোড করা যায়নি",
+      "diff_unavailable_no_git_repo": "ডিফ পাওয়া যায়নি — এই ফাইল কোনো গিট রিপোজিটরিতে নেই",
+      "diff_unavailable_original_too_large": "ডিফ পাওয়া যায়নি — মূল ফাইল সম্পূর্ণ লোড করার জন্য খুব বড়",
+      "diff_unavailable_with_error": "ডিফ পাওয়া যায়নি — {{error}}",
       "discard_unsaved_changes": "অসংরক্ষিত পরিবর্তন বাতিল করবেন?",
       "download": "ডাউনলোড",
       "download_failed": "ডাউনলোড ব্যর্থ হয়েছে",
@@ -4601,6 +4639,12 @@
       "paste_lines_one": "[ পেস্ট #{{seq}} · {{count}} লাইন ]",
       "paste_lines_other": "[ পেস্ট #{{seq}} · {{count}} লাইন ]"
     },
+    "privacyChapter": {
+      "continue": "চালিয়ে যান",
+      "eyebrow": "গোপনীয়তা",
+      "subtitle": "Kiro Crew যে পাঁচটি বেনামী ফিল্ড পাঠায়, এবং কীভাবে তা বন্ধ করবেন।",
+      "title": "গোপনীয়তা"
+    },
     "projectPicker": {
       "back": "পেছনে",
       "browse": "ব্রাউজ করুন",
@@ -4647,29 +4691,48 @@
       "add_to_chat": "চ্যাটে যোগ করুন",
       "all_checks_passed": "সব চেক পাস হয়েছে",
       "auto_merge_enabled": "স্বয়ংক্রিয় মার্জ চালু",
+      "branch_is_behind": "ব্রাঞ্চ পিছিয়ে আছে",
       "branch_is_behind_detail": "এই ব্রাঞ্চটি {{base}}-এর তুলনায় পুরোনো, মার্জ করার আগে আপডেট করতে হবে।",
+      "branch_protection_requirements_approving_reviews": "ব্রাঞ্চ প্রোটেকশনের শর্ত (অনুমোদনকারী রিভিউ বা আবশ্যক চেক) এখনো পূরণ হয়নি।",
       "cancel": "বাতিল",
       "changes": "পরিবর্তন",
+      "check_failed": "ব্যর্থ",
+      "check_in_progress": "চলমান",
+      "check_passed": "পাস",
+      "check_skipped": "এড়িয়ে যাওয়া হয়েছে",
       "checks": "চেক",
+      "checks_failed": "চেক ব্যর্থ",
+      "checks_passed": "চেক পাস",
       "checks_running": "চেক চলছে",
       "checks_unavailable": "চেক পাওয়া যাচ্ছে না",
+      "closed": "বন্ধ",
       "collapse_comment": "মন্তব্য সংকুচিত করো",
       "commits": "কমিট",
       "confirm_auto_merge": "অটো-মার্জ নিশ্চিত করো",
       "could_not_load_this_pull_request": "এই পুল রিকোয়েস্ট লোড করা যায়নি",
       "could_not_resolve": "সমাধান করা যায়নি",
       "description": "বিবরণ",
+      "draft": "ড্রাফট",
       "enable_auto_merge": "অটো-মার্জ চালু করো",
       "expand_comment": "মন্তব্য প্রসারিত করো",
+      "files_changed_one": "{{count}}টি ফাইল পরিবর্তিত",
+      "files_changed_other": "{{count}}টি ফাইল পরিবর্তিত",
+      "github_cli_login_required": "GitHub CLI লগইন প্রয়োজন",
       "github_merges_this_pull_request_automatically_on": "প্রয়োজনীয় চেক ও রিভিউ পাস হলে GitHub এই পুল রিকোয়েস্ট স্বয়ংক্রিয়ভাবে মার্জ করে",
       "github_will_merge_this_pull_request_once_its_req": "শর্তগুলো পাস হলে GitHub এই পুল রিকোয়েস্ট মার্জ করবে",
+      "gitlab_cli_login_required": "GitLab CLI লগইন প্রয়োজন",
       "gitlab_merges_this_merge_request_when_the_pipeli": "পাইপলাইন সফল হলে GitLab এই মার্জ রিকোয়েস্ট মার্জ করে — কোনো পাইপলাইন অপেক্ষমাণ না থাকলে সাথে সাথেই মার্জ করে",
       "gitlab_will_merge_this_merge_request_when_the_pi": "পাইপলাইন সফল হলে GitLab এই মার্জ রিকোয়েস্ট মার্জ করবে",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew পুল রিকোয়েস্ট লোড করতে আপনার লোকাল প্রোভাইডার CLI ব্যবহার করে। আপনার টার্মিনালে এই কমান্ডটি চালান, তারপর আবার চেষ্টা করুন।",
       "loading_diff": "diff লোড হচ্ছে…",
       "loading_source_provider": "সোর্স প্রোভাইডার লোড হচ্ছে…",
+      "local": "স্থানীয়",
+      "local_working_tree_changes": "স্থানীয় ওয়ার্কিং-ট্রি পরিবর্তন",
+      "merge_blocked": "মার্জ ব্লক করা আছে",
+      "merge_conflicts": "মার্জ কনফ্লিক্ট",
       "merge_conflicts_detail": "এই ব্রাঞ্চের {{base}}-এর সঙ্গে কনফ্লিক্ট আছে, সেগুলো না মেটানো পর্যন্ত মার্জ করা যাবে না।",
       "merge_now": "এখনই মার্জ করো",
+      "merged": "মার্জ হয়েছে",
       "no_changed_files_were_returned": "কোনো পরিবর্তিত ফাইল ফেরত আসেনি।",
       "no_ci_checks_were_returned": "কোনো CI চেক ফেরত আসেনি।",
       "no_commits_were_returned": "কোনো কমিট ফেরত আসেনি।",
@@ -4678,9 +4741,12 @@
       "no_written_comment": "কোনো লিখিত মন্তব্য নেই।",
       "open": "খুলুন",
       "open_pull_request": "পুল রিকোয়েস্ট খুলুন",
+      "provider_results_may_be_partial_merge_request": "{{sections}}-এর জন্য প্রোভাইডারের ফলাফল আংশিক হতে পারে। সম্পূর্ণ তালিকার জন্য মার্জ রিকোয়েস্টটি খোলো।",
+      "provider_results_may_be_partial_pull_request": "{{sections}}-এর জন্য প্রোভাইডারের ফলাফল আংশিক হতে পারে। সম্পূর্ণ তালিকার জন্য পুল রিকোয়েস্টটি খোলো।",
       "pull_request_sections": "পুল রিকোয়েস্ট বিভাগসমূহ",
       "pull_requests": "Pull requests",
       "ready_for_review": "রিভিউয়ের জন্য প্রস্তুত",
+      "rebase_required": "রিবেস প্রয়োজন",
       "rebase_required_detail": "এই প্রজেক্টে মার্জ করার আগে ব্রাঞ্চটি {{base}}-এর উপর rebase করা লাগে; মার্জ কমিট দিয়ে এই বাধা কাটবে না।",
       "refresh_pull_request": "পুল রিকোয়েস্ট রিফ্রেশ করো",
       "refreshing_pull_request": "পুল রিকোয়েস্ট রিফ্রেশ হচ্ছে",
@@ -4688,38 +4754,18 @@
       "resolved": "সমাধান হয়েছে",
       "retry": "আবার চেষ্টা করুন",
       "reviews": "রিভিউ",
-      "the_provider_did_not_return_a_patch_for_this_fil": "প্রোভাইডার এই ফাইলের জন্য কোনো প্যাচ ফেরত দেয়নি।",
-      "unknown_reviewer": "অজানা রিভিউয়ার",
-      "untitled_commit": "শিরোনামহীন কমিট",
-      "updated": "আপডেট হয়েছে",
-      "branch_is_behind": "ব্রাঞ্চ পিছিয়ে আছে",
-      "branch_protection_requirements_approving_reviews": "ব্রাঞ্চ প্রোটেকশনের শর্ত (অনুমোদনকারী রিভিউ বা আবশ্যক চেক) এখনো পূরণ হয়নি।",
-      "closed": "বন্ধ",
-      "draft": "ড্রাফট",
-      "files_changed_one": "{{count}}টি ফাইল পরিবর্তিত",
-      "files_changed_other": "{{count}}টি ফাইল পরিবর্তিত",
-      "github_cli_login_required": "GitHub CLI লগইন প্রয়োজন",
-      "gitlab_cli_login_required": "GitLab CLI লগইন প্রয়োজন",
-      "merge_blocked": "মার্জ ব্লক করা আছে",
-      "merge_conflicts": "মার্জ কনফ্লিক্ট",
-      "merged": "মার্জ হয়েছে",
-      "provider_results_may_be_partial_merge_request": "{{sections}}-এর জন্য প্রোভাইডারের ফলাফল আংশিক হতে পারে। সম্পূর্ণ তালিকার জন্য মার্জ রিকোয়েস্টটি খোলো।",
-      "provider_results_may_be_partial_pull_request": "{{sections}}-এর জন্য প্রোভাইডারের ফলাফল আংশিক হতে পারে। সম্পূর্ণ তালিকার জন্য পুল রিকোয়েস্টটি খোলো।",
-      "rebase_required": "রিবেস প্রয়োজন",
-      "take_this_merge_request_out_of_draft": "এই মার্জ রিকোয়েস্ট ড্রাফট থেকে বের করো",
-      "take_this_pull_request_out_of_draft": "এই পুল রিকোয়েস্ট ড্রাফট থেকে বের করো",
-      "this_authorizes_the_merge_as_soon_as_requirement": "শর্তগুলো পাস হওয়ার সাথে সাথেই এটি মার্জের অনুমতি দেয়, আর এই রিপোজিটরি অনুমোদন করলে স্কোয়াশ করে (নাহলে একটি মার্জ কমিট, তারপর রিবেস)।",
-      "this_authorizes_the_merge_when_the_pipeline_succ": "পাইপলাইন সফল হলে এটি মার্জের অনুমতি দেয়।",
-      "check_failed": "ব্যর্থ",
-      "check_in_progress": "চলমান",
-      "check_passed": "পাস",
-      "check_skipped": "এড়িয়ে যাওয়া হয়েছে",
-      "checks_failed": "চেক ব্যর্থ",
-      "checks_passed": "চেক পাস",
       "state_closed": "বন্ধ",
       "state_draft": "ড্রাফট",
       "state_merged": "মার্জ হয়েছে",
-      "state_open": "খোলা"
+      "state_open": "খোলা",
+      "take_this_merge_request_out_of_draft": "এই মার্জ রিকোয়েস্ট ড্রাফট থেকে বের করো",
+      "take_this_pull_request_out_of_draft": "এই পুল রিকোয়েস্ট ড্রাফট থেকে বের করো",
+      "the_provider_did_not_return_a_patch_for_this_fil": "প্রোভাইডার এই ফাইলের জন্য কোনো প্যাচ ফেরত দেয়নি।",
+      "this_authorizes_the_merge_as_soon_as_requirement": "শর্তগুলো পাস হওয়ার সাথে সাথেই এটি মার্জের অনুমতি দেয়, আর এই রিপোজিটরি অনুমোদন করলে স্কোয়াশ করে (নাহলে একটি মার্জ কমিট, তারপর রিবেস)।",
+      "this_authorizes_the_merge_when_the_pipeline_succ": "পাইপলাইন সফল হলে এটি মার্জের অনুমতি দেয়।",
+      "unknown_reviewer": "অজানা রিভিউয়ার",
+      "untitled_commit": "শিরোনামহীন কমিট",
+      "updated": "আপডেট হয়েছে"
     },
     "questionCard": {
       "collapse_all": "সব সংকুচিত করুন",
@@ -4805,6 +4851,25 @@
       "open_read_only_viewer": "শুধু-পঠন ভিউয়ার খোলো (পড়ো ও মন্তব্য করো; সেখান থেকে {{name}}-এ আসলটি খুলতে পারবে)",
       "v": "v"
     },
+    "reportProblemModal": {
+      "report_a_problem": "সমস্যা জানান",
+      "what_happened": "কী হয়েছে?",
+      "note_placeholder": "যেমন: আপডেটের পর প্রতিটি মেসেজ “process exited (rc=None)” দিয়ে ব্যর্থ হচ্ছে।",
+      "include_recent_logs": "সাম্প্রতিক লগ যুক্ত করুন",
+      "include_logs_hint": "Gateway + kiro-cli লগ। শুধু ক্র্যাশ রিপোর্ট পাঠাতে এটি বন্ধ করুন।",
+      "redaction_notice": "zip তৈরির আগেই Bearer টোকেন, সেশন কুকি এবং AWS কী স্বয়ংক্রিয়ভাবে সরানো হয়।",
+      "collect_failed": "ডায়াগনস্টিক সংগ্রহ করা যায়নি",
+      "cancel": "বাতিল",
+      "create_report": "রিপোর্ট তৈরি করুন",
+      "collecting": "সংগ্রহ করা হচ্ছে…",
+      "done": "সম্পন্ন",
+      "diagnostics_ready": "ডায়াগনস্টিক প্রস্তুত — {{files}} ফাইলে {{redactions}} সিক্রেট সরানো হয়েছে।",
+      "saved_to": "সংরক্ষণ করা হয়েছে",
+      "show_in_finder": "Finder-এ দেখান",
+      "download_zip": "zip ডাউনলোড করুন",
+      "open_github_issue": "GitHub-এ issue খুলুন",
+      "prefill_hint": "issue খুললে বিবরণ আগেই বসে যায় — এরপর zip টেনে সেখানে দিন।"
+    },
     "resizeHandle": {
       "drag_to_resize": "আকার বদলাতে টানুন"
     },
@@ -4850,6 +4915,10 @@
       "selected": "নির্বাচিত",
       "showing": "দেখানো হচ্ছে",
       "you": "তুমি"
+    },
+    "searchableSelect": {
+      "no_matches": "কোনো মিল নেই",
+      "search": "খুঁজুন…"
     },
     "secretField": {
       "cancel": "বাতিল",
@@ -5154,6 +5223,15 @@
       "tunnel_stopped": "টানেল থেমে গেছে",
       "up": "চালু {{time}}"
     },
+    "ui": {
+      "clear_filter": "ফিল্টার মুছুন",
+      "no_matches_for": "কোনো মিল নেই",
+      "no_noun_match": "কোনো {{noun}} মিলছে না"
+    },
+    "unifiedDiffView": {
+      "diff_display_capped": "ডিফ প্রদর্শন {{count}} লাইনে সীমাবদ্ধ। বাকি লাইন রেন্ডার করা হয়নি।",
+      "loading_diff": "ডিফ লোড হচ্ছে…"
+    },
     "updateModal": {
       "dismiss": "বন্ধ করুন",
       "dismiss_update_dialog": "আপডেট ডায়ালগ বন্ধ করুন",
@@ -5330,54 +5408,6 @@
       "select": "নির্বাচন করুন",
       "workspace_name": "ওয়ার্কস্পেসের নাম",
       "workspace_name_2": "workspace-name"
-    },
-    "privacyChapter": {
-      "continue": "চালিয়ে যান",
-      "eyebrow": "গোপনীয়তা",
-      "subtitle": "Kiro Crew যে পাঁচটি বেনামী ফিল্ড পাঠায়, এবং কীভাবে তা বন্ধ করবেন।",
-      "title": "গোপনীয়তা"
-    },
-    "ui": {
-      "clear_filter": "ফিল্টার মুছুন",
-      "no_matches_for": "কোনো মিল নেই",
-      "no_noun_match": "কোনো {{noun}} মিলছে না"
-    },
-    "askAgent": {
-      "ask_the_agent": "এজেন্টকে জিজ্ঞাসা করুন",
-      "open_a_chat_with_this_error_s_context_attached": "এই ত্রুটির সম্পূর্ণ প্রসঙ্গ সহ একটি চ্যাট খুলুন",
-      "prompt_lead": "এই ত্রুটিটি এইমাত্র Kiro Crew ড্যাশবোর্ডে দেখা দিয়েছে। মূল কারণ নির্ণয় করে সমাধান করুন।"
-    },
-    "errorNotice": {
-      "dismiss": "খারিজ করুন"
-    },
-    "reportProblemModal": {
-      "report_a_problem": "সমস্যা জানান",
-      "what_happened": "কী হয়েছে?",
-      "note_placeholder": "যেমন: আপডেটের পর প্রতিটি মেসেজ “process exited (rc=None)” দিয়ে ব্যর্থ হচ্ছে।",
-      "include_recent_logs": "সাম্প্রতিক লগ যুক্ত করুন",
-      "include_logs_hint": "Gateway + kiro-cli লগ। শুধু ক্র্যাশ রিপোর্ট পাঠাতে এটি বন্ধ করুন।",
-      "redaction_notice": "zip তৈরির আগেই Bearer টোকেন, সেশন কুকি এবং AWS কী স্বয়ংক্রিয়ভাবে সরানো হয়।",
-      "collect_failed": "ডায়াগনস্টিক সংগ্রহ করা যায়নি",
-      "cancel": "বাতিল",
-      "create_report": "রিপোর্ট তৈরি করুন",
-      "collecting": "সংগ্রহ করা হচ্ছে…",
-      "done": "সম্পন্ন",
-      "diagnostics_ready": "ডায়াগনস্টিক প্রস্তুত — {{files}} ফাইলে {{redactions}} সিক্রেট সরানো হয়েছে।",
-      "saved_to": "সংরক্ষণ করা হয়েছে",
-      "show_in_finder": "Finder-এ দেখান",
-      "download_zip": "zip ডাউনলোড করুন",
-      "open_github_issue": "GitHub-এ issue খুলুন",
-      "prefill_hint": "issue খুললে বিবরণ আগেই বসে যায় — এরপর zip টেনে সেখানে দিন।"
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "ফোল্ডার প্রস্তাব",
-      "move_to_folder_question": "এই সেশনটি {{folder}}-এ সরানো হবে?",
-      "no_thanks": "এখন নয়",
-      "yes_move_it": "সরান"
-    },
-    "searchableSelect": {
-      "no_matches": "কোনো মিল নেই",
-      "search": "খুঁজুন…"
     }
   },
   "hooks": {
@@ -6285,6 +6315,7 @@
         "input": "ইনপুট",
         "issues": "ইস্যু",
         "last_tool": "শেষ টুল:",
+        "line_totals_unavailable_diff_truncated": "ডিফ ছেঁটে দেওয়ায় লাইনের মোট পাওয়া যায়নি",
         "load_output_from_disk": "ডিস্ক থেকে আউটপুট লোড করুন",
         "loading": "লোড হচ্ছে…",
         "logs": "লগ",

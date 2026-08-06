@@ -3559,6 +3559,11 @@
       "to_send_to_this_chat": "इस चैट में भेजने के लिए",
       "toggle_additional_instruction": "अतिरिक्त निर्देश टॉगल करें"
     },
+    "askAgent": {
+      "ask_the_agent": "एजेंट से पूछें",
+      "open_a_chat_with_this_error_s_context_attached": "इस त्रुटि के पूरे संदर्भ के साथ चैट खोलें",
+      "prompt_lead": "यह त्रुटि अभी Kiro Crew डैशबोर्ड में आई है। मूल कारण का निदान करें और उसे ठीक करें।"
+    },
     "autoNudgePopover": {
       "close": "बंद करें",
       "cycle": "· चक्र",
@@ -3923,6 +3928,9 @@
       "something_went_wrong": "कुछ गलत हो गया",
       "try_again": "फिर से कोशिश करें"
     },
+    "errorNotice": {
+      "dismiss": "खारिज करें"
+    },
     "excalidrawBlock": {
       "render_failed": "आरेख रेंडर नहीं हो सका — स्रोत दिखाया जा रहा है"
     },
@@ -3982,6 +3990,20 @@
       "showing_raw_content_count": "कच्चा कंटेंट दिखा रहे हैं ({{count}} वर्ण)",
       "showing_raw_content_truncated_count": "कच्चा कंटेंट दिखा रहे हैं ({{count}} वर्ण, पहले {{shown}} दिखाए गए)"
     },
+    "folderColorNames": {
+      "amber": "एम्बर",
+      "blue": "नीला",
+      "cyan": "सियान",
+      "gray": "स्लेटी",
+      "green": "हरा",
+      "indigo": "इंडिगो",
+      "lime": "लाइम",
+      "orange": "नारंगी",
+      "pink": "गुलाबी",
+      "red": "लाल",
+      "teal": "टील",
+      "violet": "बैंगनी"
+    },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}} (इंस्टॉल नहीं है)",
       "browse": "ब्राउज़ करें",
@@ -4010,19 +4032,11 @@
       "set_color_to_name": "रंग {{name}} पर सेट करें",
       "top_level": "सर्वोच्च स्तर"
     },
-    "folderColorNames": {
-      "amber": "एम्बर",
-      "blue": "नीला",
-      "cyan": "सियान",
-      "gray": "स्लेटी",
-      "green": "हरा",
-      "indigo": "इंडिगो",
-      "lime": "लाइम",
-      "orange": "नारंगी",
-      "pink": "गुलाबी",
-      "red": "लाल",
-      "teal": "टील",
-      "violet": "बैंगनी"
+    "folderSuggestionCard": {
+      "folder_suggestion": "फ़ोल्डर सुझाव",
+      "move_to_folder_question": "इस सत्र को {{folder}} में ले जाएँ?",
+      "no_thanks": "अभी नहीं",
+      "yes_move_it": "ले जाएँ"
     },
     "followUpBar": {
       "click_to_add_to_input_double_click_to_select_and": "इनपुट में जोड़ने के लिए क्लिक करें (चुनने और भेजने के लिए डबल-क्लिक करें)",
@@ -4292,6 +4306,26 @@
       "two_way": "दो-तरफ़ा",
       "unavailable": "यह गंतव्य उपलब्ध नहीं है।"
     },
+    "localChangesView": {
+      "checking_for_changes": "गिट बदलाव जाँचे जा रहे हैं…",
+      "could_not_scan": "{{dir}} में बदलाव स्कैन नहीं किया जा सका।",
+      "couldnt_load_diff": "डिफ़ लोड नहीं हो सका।",
+      "diff_not_shown_for_safety": "सुरक्षा के लिए डिफ़ नहीं दिखाया गया: {{reason}}।",
+      "diff_truncated": "डिफ़ छाँटा गया — फ़ाइल का आकार 2 MB सीमा से अधिक है; केवल शुरुआत दिखाई गई है।",
+      "diff_unavailable_file_unreadable": "फ़ाइल पूरी तरह नहीं पढ़ी जा सकी इसलिए डिफ़ उपलब्ध नहीं है।",
+      "loading_diff": "डिफ़ लोड हो रहा है…",
+      "no_diff_available": "इस फ़ाइल के लिए कोई डिफ़ उपलब्ध नहीं है।",
+      "no_git_repository": "इस प्रोजेक्ट डायरेक्टरी में कोई गिट रिपॉजिटरी नहीं है। इसके बदलाव देखने के लिए चैट की प्रोजेक्ट डायरेक्टरी को किसी गिट रिपो (या उसके अंदर किसी फ़ोल्डर) पर सेट करें।",
+      "open_in_editor": "{{file}} संपादक में खोलें",
+      "partial_scan": "आंशिक स्कैन — फ़ाइल या समय सीमा पूरी हो गई; कुछ बदलाव सूचीबद्ध नहीं हो सकते।",
+      "pick_project_directory": "इस चैट की अप्रतिबद्ध गिट बदलाव देखने के लिए एक प्रोजेक्ट डायरेक्टरी चुनें।",
+      "repo_refused_safe_read": "इस रिपॉजिटरी को सुरक्षित पठन से मना किया गया",
+      "repo_skipped_for_safety": "सुरक्षा के लिए यह रिपॉजिटरी छोड़ दी गई: {{reason}}।",
+      "retry": "पुनः प्रयास करें",
+      "scan_hit_limit": "स्कैन अपनी फ़ाइल या आउटपुट सीमा तक पहुँच गया — यहाँ सूचीबद्ध से अधिक बदलाव मौजूद हैं।",
+      "working_tree_clean": "वर्किंग ट्री स्वच्छ — कोई स्थानीय बदलाव नहीं।",
+      "working_tree_clean_on_branch": "वर्किंग ट्री स्वच्छ — {{branch}} पर कोई स्थानीय बदलाव नहीं।"
+    },
     "logEntry": {
       "cancelled": "रद्द किया गया",
       "error": "त्रुटि",
@@ -4319,6 +4353,10 @@
       "close_find": "खोज बंद करें",
       "copy_content": "सामग्री कॉपी करें",
       "copy_path": "पाथ कॉपी करें",
+      "diff_unavailable_baseline_failed": "डिफ़ उपलब्ध नहीं — फ़ाइल का गिट बेसलाइन लोड नहीं हो सका",
+      "diff_unavailable_no_git_repo": "डिफ़ उपलब्ध नहीं — यह फ़ाइल किसी गिट रिपॉजिटरी में नहीं है",
+      "diff_unavailable_original_too_large": "डिफ़ उपलब्ध नहीं — मूल फ़ाइल पूरी तरह लोड करने के लिए बहुत बड़ी है",
+      "diff_unavailable_with_error": "डिफ़ उपलब्ध नहीं — {{error}}",
       "discard_unsaved_changes": "बिना सहेजे बदलाव छोड़ दें?",
       "download": "डाउनलोड",
       "download_failed": "डाउनलोड विफल",
@@ -4601,6 +4639,12 @@
       "paste_lines_one": "[ पेस्ट #{{seq}} · {{count}} पंक्ति ]",
       "paste_lines_other": "[ पेस्ट #{{seq}} · {{count}} पंक्तियाँ ]"
     },
+    "privacyChapter": {
+      "continue": "जारी रखें",
+      "eyebrow": "गोपनीयता",
+      "subtitle": "Kiro Crew जो पाँच अनाम फ़ील्ड भेजता है, और उन्हें कैसे बंद करना है।",
+      "title": "गोपनीयता"
+    },
     "projectPicker": {
       "back": "वापस",
       "browse": "ब्राउज़ करें",
@@ -4647,29 +4691,48 @@
       "add_to_chat": "चैट में जोड़ें",
       "all_checks_passed": "सभी जाँचें पास हुईं",
       "auto_merge_enabled": "ऑटो-मर्ज सक्षम",
+      "branch_is_behind": "ब्रांच पीछे है",
       "branch_is_behind_detail": "यह ब्रांच {{base}} से पुरानी है और मर्ज करने से पहले इसे अपडेट करना ज़रूरी है।",
+      "branch_protection_requirements_approving_reviews": "ब्रांच सुरक्षा की शर्तें (स्वीकृति समीक्षाएँ या आवश्यक जाँचें) अभी पूरी नहीं हुई हैं।",
       "cancel": "रद्द करें",
       "changes": "बदलाव",
+      "check_failed": "विफल",
+      "check_in_progress": "चल रही है",
+      "check_passed": "पास",
+      "check_skipped": "छोड़ी गई",
       "checks": "जाँचें",
+      "checks_failed": "जाँच विफल रहीं",
+      "checks_passed": "जाँच पास हुईं",
       "checks_running": "जाँचें चल रही हैं",
       "checks_unavailable": "जाँचें उपलब्ध नहीं",
+      "closed": "बंद",
       "collapse_comment": "टिप्पणी समेटें",
       "commits": "कमिट",
       "confirm_auto_merge": "ऑटो-मर्ज की पुष्टि करें",
       "could_not_load_this_pull_request": "यह पुल रिक्वेस्ट लोड नहीं हो सका",
       "could_not_resolve": "हल नहीं किया जा सका",
       "description": "विवरण",
+      "draft": "ड्राफ़्ट",
       "enable_auto_merge": "ऑटो-मर्ज चालू करें",
       "expand_comment": "टिप्पणी फैलाएँ",
+      "files_changed_one": "{{count}} फ़ाइल बदली",
+      "files_changed_other": "{{count}} फ़ाइलें बदलीं",
+      "github_cli_login_required": "GitHub CLI लॉगिन आवश्यक",
       "github_merges_this_pull_request_automatically_on": "आवश्यक जाँचें और समीक्षाएँ पास होने पर GitHub इस पुल रिक्वेस्ट को अपने-आप मर्ज कर देता है",
       "github_will_merge_this_pull_request_once_its_req": "GitHub इस पुल रिक्वेस्ट को उसकी शर्तें पूरी होने पर मर्ज कर देगा",
+      "gitlab_cli_login_required": "GitLab CLI लॉगिन आवश्यक",
       "gitlab_merges_this_merge_request_when_the_pipeli": "पाइपलाइन सफल होने पर GitLab इस मर्ज रिक्वेस्ट को मर्ज कर देता है — कोई पाइपलाइन बाकी न हो तो तुरंत मर्ज कर देता है",
       "gitlab_will_merge_this_merge_request_when_the_pi": "पाइपलाइन सफल होने पर GitLab इस मर्ज रिक्वेस्ट को मर्ज कर देगा",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew पुल रिक्वेस्ट लोड करने के लिए आपके स्थानीय प्रोवाइडर CLI का उपयोग करता है। अपने टर्मिनल में यह कमांड चलाएँ, फिर पुनः प्रयास करें।",
       "loading_diff": "diff लोड हो रहा है…",
       "loading_source_provider": "स्रोत प्रोवाइडर लोड हो रहा है…",
+      "local": "स्थानीय",
+      "local_working_tree_changes": "स्थानीय वर्किंग-ट्री बदलाव",
+      "merge_blocked": "मर्ज अवरुद्ध",
+      "merge_conflicts": "मर्ज कॉन्फ़्लिक्ट",
       "merge_conflicts_detail": "इस ब्रांच में {{base}} के साथ कॉन्फ़्लिक्ट हैं और जब तक वे हल नहीं होते, यह मर्ज नहीं हो सकती।",
       "merge_now": "अभी मर्ज करें",
+      "merged": "मर्ज किया गया",
       "no_changed_files_were_returned": "कोई बदली गई फ़ाइल नहीं लौटाई गई।",
       "no_ci_checks_were_returned": "कोई CI जाँच नहीं लौटाई गई।",
       "no_commits_were_returned": "कोई कमिट नहीं लौटाया गया।",
@@ -4678,9 +4741,12 @@
       "no_written_comment": "कोई लिखित टिप्पणी नहीं।",
       "open": "खोलें",
       "open_pull_request": "पुल रिक्वेस्ट खोलें",
+      "provider_results_may_be_partial_merge_request": "{{sections}} के लिए प्रोवाइडर के नतीजे अधूरे हो सकते हैं। पूरी सूची के लिए मर्ज रिक्वेस्ट खोलें।",
+      "provider_results_may_be_partial_pull_request": "{{sections}} के लिए प्रोवाइडर के नतीजे अधूरे हो सकते हैं। पूरी सूची के लिए पुल रिक्वेस्ट खोलें।",
       "pull_request_sections": "पुल रिक्वेस्ट अनुभाग",
       "pull_requests": "Pull requests",
       "ready_for_review": "समीक्षा के लिए तैयार",
+      "rebase_required": "रीबेस आवश्यक",
       "rebase_required_detail": "इस प्रोजेक्ट में मर्ज से पहले ब्रांच को {{base}} पर रीबेस करना ज़रूरी है; मर्ज कमिट से यह रुकावट नहीं हटेगी।",
       "refresh_pull_request": "पुल रिक्वेस्ट रिफ़्रेश करें",
       "refreshing_pull_request": "पुल रिक्वेस्ट रिफ़्रेश हो रहा है",
@@ -4688,38 +4754,18 @@
       "resolved": "हल किया गया",
       "retry": "पुनः प्रयास करें",
       "reviews": "समीक्षाएँ",
-      "the_provider_did_not_return_a_patch_for_this_fil": "प्रोवाइडर ने इस फ़ाइल के लिए कोई पैच नहीं लौटाया।",
-      "unknown_reviewer": "अज्ञात समीक्षक",
-      "untitled_commit": "बिना शीर्षक कमिट",
-      "updated": "अपडेट किया गया",
-      "branch_is_behind": "ब्रांच पीछे है",
-      "branch_protection_requirements_approving_reviews": "ब्रांच सुरक्षा की शर्तें (स्वीकृति समीक्षाएँ या आवश्यक जाँचें) अभी पूरी नहीं हुई हैं।",
-      "closed": "बंद",
-      "draft": "ड्राफ़्ट",
-      "files_changed_one": "{{count}} फ़ाइल बदली",
-      "files_changed_other": "{{count}} फ़ाइलें बदलीं",
-      "github_cli_login_required": "GitHub CLI लॉगिन आवश्यक",
-      "gitlab_cli_login_required": "GitLab CLI लॉगिन आवश्यक",
-      "merge_blocked": "मर्ज अवरुद्ध",
-      "merge_conflicts": "मर्ज कॉन्फ़्लिक्ट",
-      "merged": "मर्ज किया गया",
-      "provider_results_may_be_partial_merge_request": "{{sections}} के लिए प्रोवाइडर के नतीजे अधूरे हो सकते हैं। पूरी सूची के लिए मर्ज रिक्वेस्ट खोलें।",
-      "provider_results_may_be_partial_pull_request": "{{sections}} के लिए प्रोवाइडर के नतीजे अधूरे हो सकते हैं। पूरी सूची के लिए पुल रिक्वेस्ट खोलें।",
-      "rebase_required": "रीबेस आवश्यक",
-      "take_this_merge_request_out_of_draft": "इस मर्ज रिक्वेस्ट को ड्राफ़्ट से बाहर निकालें",
-      "take_this_pull_request_out_of_draft": "इस पुल रिक्वेस्ट को ड्राफ़्ट से बाहर निकालें",
-      "this_authorizes_the_merge_as_soon_as_requirement": "इससे शर्तें पूरी होते ही मर्ज की अनुमति मिल जाती है, और यह रिपॉज़िटरी इजाज़त दे तो स्क्वैश किया जाएगा (अन्यथा मर्ज कमिट, फिर रीबेस)।",
-      "this_authorizes_the_merge_when_the_pipeline_succ": "इससे पाइपलाइन सफल होने पर मर्ज की अनुमति मिल जाती है।",
-      "check_failed": "विफल",
-      "check_in_progress": "चल रही है",
-      "check_passed": "पास",
-      "check_skipped": "छोड़ी गई",
-      "checks_failed": "जाँच विफल रहीं",
-      "checks_passed": "जाँच पास हुईं",
       "state_closed": "बंद",
       "state_draft": "ड्राफ़्ट",
       "state_merged": "मर्ज किया गया",
-      "state_open": "खुला"
+      "state_open": "खुला",
+      "take_this_merge_request_out_of_draft": "इस मर्ज रिक्वेस्ट को ड्राफ़्ट से बाहर निकालें",
+      "take_this_pull_request_out_of_draft": "इस पुल रिक्वेस्ट को ड्राफ़्ट से बाहर निकालें",
+      "the_provider_did_not_return_a_patch_for_this_fil": "प्रोवाइडर ने इस फ़ाइल के लिए कोई पैच नहीं लौटाया।",
+      "this_authorizes_the_merge_as_soon_as_requirement": "इससे शर्तें पूरी होते ही मर्ज की अनुमति मिल जाती है, और यह रिपॉज़िटरी इजाज़त दे तो स्क्वैश किया जाएगा (अन्यथा मर्ज कमिट, फिर रीबेस)।",
+      "this_authorizes_the_merge_when_the_pipeline_succ": "इससे पाइपलाइन सफल होने पर मर्ज की अनुमति मिल जाती है।",
+      "unknown_reviewer": "अज्ञात समीक्षक",
+      "untitled_commit": "बिना शीर्षक कमिट",
+      "updated": "अपडेट किया गया"
     },
     "questionCard": {
       "collapse_all": "सभी संक्षिप्त करें",
@@ -4805,6 +4851,25 @@
       "open_read_only_viewer": "केवल-पढ़ने वाला व्यूअर खोलें (पढ़ें और टिप्पणी करें; मूल को वहीं से {{name}} पर खोलें)",
       "v": "v"
     },
+    "reportProblemModal": {
+      "report_a_problem": "समस्या रिपोर्ट करें",
+      "what_happened": "क्या हुआ?",
+      "note_placeholder": "उदा. अपडेट के बाद हर मैसेज “process exited (rc=None)” के साथ फेल हो रहा है।",
+      "include_recent_logs": "हाल के लॉग शामिल करें",
+      "include_logs_hint": "Gateway + kiro-cli लॉग। सिर्फ़ क्रैश रिपोर्ट भेजने के लिए इसे बंद करें।",
+      "redaction_notice": "zip बनने से पहले Bearer टोकन, सेशन कुकी और AWS कीज़ अपने आप हटा दी जाती हैं।",
+      "collect_failed": "डायग्नोस्टिक्स इकट्ठा करना विफल रहा",
+      "cancel": "रद्द करें",
+      "create_report": "रिपोर्ट बनाएँ",
+      "collecting": "इकट्ठा कर रहे हैं…",
+      "done": "पूर्ण",
+      "diagnostics_ready": "डायग्नोस्टिक्स तैयार — {{files}} फ़ाइल में {{redactions}} सीक्रेट हटाए गए।",
+      "saved_to": "यहाँ सहेजा गया",
+      "show_in_finder": "Finder में दिखाएँ",
+      "download_zip": "zip डाउनलोड करें",
+      "open_github_issue": "GitHub पर issue खोलें",
+      "prefill_hint": "issue खोलने पर विवरण पहले से भर जाते हैं — फिर zip को उसमें खींचकर डालें।"
+    },
     "resizeHandle": {
       "drag_to_resize": "आकार बदलने के लिए खींचें"
     },
@@ -4850,6 +4915,10 @@
       "selected": "चुने गए",
       "showing": "दिखा रहे हैं",
       "you": "तुम"
+    },
+    "searchableSelect": {
+      "no_matches": "कोई मेल नहीं",
+      "search": "खोजें…"
     },
     "secretField": {
       "cancel": "रद्द करें",
@@ -5154,6 +5223,15 @@
       "tunnel_stopped": "टनल रुक गया",
       "up": "{{time}} से चालू"
     },
+    "ui": {
+      "clear_filter": "फ़िल्टर साफ़ करें",
+      "no_matches_for": "कोई मिलान नहीं",
+      "no_noun_match": "कोई {{noun}} मेल नहीं"
+    },
+    "unifiedDiffView": {
+      "diff_display_capped": "डिफ़ प्रदर्शन {{count}} लाइनों पर सीमित। शेष लाइनें रेंडर नहीं की गईं।",
+      "loading_diff": "डिफ़ लोड हो रहा है…"
+    },
     "updateModal": {
       "dismiss": "खारिज करें",
       "dismiss_update_dialog": "अपडेट डायलॉग बंद करें",
@@ -5330,54 +5408,6 @@
       "select": "चुनें",
       "workspace_name": "वर्कस्पेस का नाम",
       "workspace_name_2": "workspace-name"
-    },
-    "privacyChapter": {
-      "continue": "जारी रखें",
-      "eyebrow": "गोपनीयता",
-      "subtitle": "Kiro Crew जो पाँच अनाम फ़ील्ड भेजता है, और उन्हें कैसे बंद करना है।",
-      "title": "गोपनीयता"
-    },
-    "ui": {
-      "clear_filter": "फ़िल्टर साफ़ करें",
-      "no_matches_for": "कोई मिलान नहीं",
-      "no_noun_match": "कोई {{noun}} मेल नहीं"
-    },
-    "askAgent": {
-      "ask_the_agent": "एजेंट से पूछें",
-      "open_a_chat_with_this_error_s_context_attached": "इस त्रुटि के पूरे संदर्भ के साथ चैट खोलें",
-      "prompt_lead": "यह त्रुटि अभी Kiro Crew डैशबोर्ड में आई है। मूल कारण का निदान करें और उसे ठीक करें।"
-    },
-    "errorNotice": {
-      "dismiss": "खारिज करें"
-    },
-    "reportProblemModal": {
-      "report_a_problem": "समस्या रिपोर्ट करें",
-      "what_happened": "क्या हुआ?",
-      "note_placeholder": "उदा. अपडेट के बाद हर मैसेज “process exited (rc=None)” के साथ फेल हो रहा है।",
-      "include_recent_logs": "हाल के लॉग शामिल करें",
-      "include_logs_hint": "Gateway + kiro-cli लॉग। सिर्फ़ क्रैश रिपोर्ट भेजने के लिए इसे बंद करें।",
-      "redaction_notice": "zip बनने से पहले Bearer टोकन, सेशन कुकी और AWS कीज़ अपने आप हटा दी जाती हैं।",
-      "collect_failed": "डायग्नोस्टिक्स इकट्ठा करना विफल रहा",
-      "cancel": "रद्द करें",
-      "create_report": "रिपोर्ट बनाएँ",
-      "collecting": "इकट्ठा कर रहे हैं…",
-      "done": "पूर्ण",
-      "diagnostics_ready": "डायग्नोस्टिक्स तैयार — {{files}} फ़ाइल में {{redactions}} सीक्रेट हटाए गए।",
-      "saved_to": "यहाँ सहेजा गया",
-      "show_in_finder": "Finder में दिखाएँ",
-      "download_zip": "zip डाउनलोड करें",
-      "open_github_issue": "GitHub पर issue खोलें",
-      "prefill_hint": "issue खोलने पर विवरण पहले से भर जाते हैं — फिर zip को उसमें खींचकर डालें।"
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "फ़ोल्डर सुझाव",
-      "move_to_folder_question": "इस सत्र को {{folder}} में ले जाएँ?",
-      "no_thanks": "अभी नहीं",
-      "yes_move_it": "ले जाएँ"
-    },
-    "searchableSelect": {
-      "no_matches": "कोई मेल नहीं",
-      "search": "खोजें…"
     }
   },
   "hooks": {
@@ -6285,6 +6315,7 @@
         "input": "इनपुट",
         "issues": "इश्यू",
         "last_tool": "अंतिम टूल:",
+        "line_totals_unavailable_diff_truncated": "डिफ़ छाँटे जाने के कारण लाइन योग उपलब्ध नहीं",
         "load_output_from_disk": "डिस्क से आउटपुट लोड करें",
         "loading": "लोड हो रहा है…",
         "logs": "लॉग",

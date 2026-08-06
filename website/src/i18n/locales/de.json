@@ -3478,6 +3478,11 @@
       "to_send_to_this_chat": "um an diesen Chat zu senden",
       "toggle_additional_instruction": "Zusätzliche Anweisung umschalten"
     },
+    "askAgent": {
+      "ask_the_agent": "Agent fragen",
+      "open_a_chat_with_this_error_s_context_attached": "Chat mit dem vollständigen Kontext dieses Fehlers öffnen",
+      "prompt_lead": "Dieser Fehler ist gerade im Kiro Crew-Dashboard aufgetreten. Diagnostiziere die Ursache und behebe sie."
+    },
     "autoNudgePopover": {
       "close": "Schließen",
       "cycle": "· Zyklus",
@@ -3842,6 +3847,9 @@
       "something_went_wrong": "Etwas ist schiefgelaufen",
       "try_again": "Erneut versuchen"
     },
+    "errorNotice": {
+      "dismiss": "Schließen"
+    },
     "excalidrawBlock": {
       "render_failed": "Diagramm konnte nicht gerendert werden – Quelltext wird angezeigt"
     },
@@ -3901,6 +3909,20 @@
       "showing_raw_content_count": "Rohinhalt wird angezeigt ({{count}} Zeichen)",
       "showing_raw_content_truncated_count": "Rohinhalt wird angezeigt ({{count}} Zeichen, davon die ersten {{shown}})"
     },
+    "folderColorNames": {
+      "amber": "Bernstein",
+      "blue": "Blau",
+      "cyan": "Cyan",
+      "gray": "Grau",
+      "green": "Grün",
+      "indigo": "Indigo",
+      "lime": "Limette",
+      "orange": "Orange",
+      "pink": "Rosa",
+      "red": "Rot",
+      "teal": "Blaugrün",
+      "violet": "Violett"
+    },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}} (nicht installiert)",
       "browse": "Durchsuchen",
@@ -3929,19 +3951,11 @@
       "set_color_to_name": "Farbe auf {{name}} setzen",
       "top_level": "Oberste Ebene"
     },
-    "folderColorNames": {
-      "amber": "Bernstein",
-      "blue": "Blau",
-      "cyan": "Cyan",
-      "gray": "Grau",
-      "green": "Grün",
-      "indigo": "Indigo",
-      "lime": "Limette",
-      "orange": "Orange",
-      "pink": "Rosa",
-      "red": "Rot",
-      "teal": "Blaugrün",
-      "violet": "Violett"
+    "folderSuggestionCard": {
+      "folder_suggestion": "Ordnervorschlag",
+      "move_to_folder_question": "Diese Sitzung nach {{folder}} verschieben?",
+      "no_thanks": "Nicht jetzt",
+      "yes_move_it": "Verschieben"
     },
     "followUpBar": {
       "click_to_add_to_input_double_click_to_select_and": "Klicken, um zur Eingabe hinzuzufügen (Doppelklick zum Auswählen und Senden)",
@@ -4211,6 +4225,26 @@
       "two_way": "Bidirektional",
       "unavailable": "Dieses Ziel ist nicht verfügbar."
     },
+    "localChangesView": {
+      "checking_for_changes": "Git-Änderungen werden geprüft…",
+      "could_not_scan": "{{dir}} konnte nicht nach Änderungen durchsucht werden.",
+      "couldnt_load_diff": "Diff konnte nicht geladen werden.",
+      "diff_not_shown_for_safety": "Diff aus Sicherheitsgründen nicht angezeigt: {{reason}}.",
+      "diff_truncated": "Diff gekürzt — der Dateiinhalt überschreitet das 2-MB-Limit; nur der Anfang wird angezeigt.",
+      "diff_unavailable_file_unreadable": "Diff nicht verfügbar, da die Datei nicht vollständig gelesen werden konnte.",
+      "loading_diff": "Diff wird geladen…",
+      "no_diff_available": "Kein Diff für diese Datei verfügbar.",
+      "no_git_repository": "Kein Git-Repository in diesem Projektverzeichnis. Richten Sie das Projektverzeichnis des Chats auf ein Git-Repo (oder einen Ordner darin), um Änderungen zu sehen.",
+      "open_in_editor": "{{file}} im Editor öffnen",
+      "partial_scan": "Teilscan — das Datei- oder Zeitbudget wurde erreicht; einige Änderungen sind möglicherweise nicht aufgelistet.",
+      "pick_project_directory": "Wählen Sie ein Projektverzeichnis für diesen Chat, um nicht committete Git-Änderungen zu sehen.",
+      "repo_refused_safe_read": "diesem Repository wurde ein sicheres Lesen verweigert",
+      "repo_skipped_for_safety": "Dieses Repository wurde aus Sicherheitsgründen übersprungen: {{reason}}.",
+      "retry": "Erneut versuchen",
+      "scan_hit_limit": "Der Scan hat sein Datei- oder Ausgabelimit erreicht — es gibt mehr Änderungen als hier aufgelistet.",
+      "working_tree_clean": "Arbeitsverzeichnis sauber — keine lokalen Änderungen.",
+      "working_tree_clean_on_branch": "Arbeitsverzeichnis sauber — keine lokalen Änderungen auf {{branch}}."
+    },
     "logEntry": {
       "cancelled": "Abgebrochen",
       "error": "Fehler",
@@ -4238,6 +4272,10 @@
       "close_find": "Suche schließen",
       "copy_content": "Inhalt kopieren",
       "copy_path": "Pfad kopieren",
+      "diff_unavailable_baseline_failed": "Diff nicht verfügbar — die Git-Baseline der Datei konnte nicht geladen werden",
+      "diff_unavailable_no_git_repo": "Diff nicht verfügbar — diese Datei befindet sich nicht in einem Git-Repository",
+      "diff_unavailable_original_too_large": "Diff nicht verfügbar — das Original ist zu groß zum vollständigen Laden",
+      "diff_unavailable_with_error": "Diff nicht verfügbar — {{error}}",
       "discard_unsaved_changes": "Nicht gespeicherte Änderungen verwerfen?",
       "download": "Herunterladen",
       "download_failed": "Download fehlgeschlagen",
@@ -4520,6 +4558,12 @@
       "paste_lines_one": "[ Einfügen #{{seq}} · {{count}} Zeile ]",
       "paste_lines_other": "[ Einfügen #{{seq}} · {{count}} Zeilen ]"
     },
+    "privacyChapter": {
+      "continue": "Weiter",
+      "eyebrow": "Datenschutz",
+      "subtitle": "Die fünf anonymen Felder, die Kiro Crew sendet, und wie du sie abschaltest.",
+      "title": "Datenschutz"
+    },
     "projectPicker": {
       "back": "Zurück",
       "browse": "Durchsuchen",
@@ -4566,29 +4610,48 @@
       "add_to_chat": "Zum Chat hinzufügen",
       "all_checks_passed": "Alle Prüfungen erfolgreich",
       "auto_merge_enabled": "Automatisches Zusammenführen aktiviert",
+      "branch_is_behind": "Branch hängt zurück",
       "branch_is_behind_detail": "Dieser Branch ist nicht auf dem Stand von {{base}} und muss vor dem Zusammenführen aktualisiert werden.",
+      "branch_protection_requirements_approving_reviews": "Die Branch-Schutzanforderungen (zustimmende Reviews oder erforderliche Prüfungen) sind noch nicht erfüllt.",
       "cancel": "Abbrechen",
       "changes": "Änderungen",
+      "check_failed": "Fehlgeschlagen",
+      "check_in_progress": "Läuft",
+      "check_passed": "Erfolgreich",
+      "check_skipped": "Übersprungen",
       "checks": "Prüfungen",
+      "checks_failed": "Prüfungen fehlgeschlagen",
+      "checks_passed": "Prüfungen erfolgreich",
       "checks_running": "Prüfungen laufen",
       "checks_unavailable": "Prüfungen nicht verfügbar",
+      "closed": "Geschlossen",
       "collapse_comment": "Kommentar einklappen",
       "commits": "Commits",
       "confirm_auto_merge": "Auto-Merge bestätigen",
       "could_not_load_this_pull_request": "Dieser Pull Request konnte nicht geladen werden",
       "could_not_resolve": "Konnte nicht aufgelöst werden",
       "description": "Beschreibung",
+      "draft": "Entwurf",
       "enable_auto_merge": "Auto-Merge aktivieren",
       "expand_comment": "Kommentar aufklappen",
+      "files_changed_one": "{{count}} geänderte Datei",
+      "files_changed_other": "{{count}} geänderte Dateien",
+      "github_cli_login_required": "GitHub-CLI-Anmeldung erforderlich",
       "github_merges_this_pull_request_automatically_on": "GitHub führt diesen Pull Request automatisch zusammen, sobald erforderliche Prüfungen und Reviews erfolgreich sind",
       "github_will_merge_this_pull_request_once_its_req": "GitHub führt diesen Pull Request zusammen, sobald seine Anforderungen erfüllt sind",
+      "gitlab_cli_login_required": "GitLab-CLI-Anmeldung erforderlich",
       "gitlab_merges_this_merge_request_when_the_pipeli": "GitLab führt diesen Merge Request zusammen, wenn die Pipeline erfolgreich ist — ohne ausstehende Pipeline sofort",
       "gitlab_will_merge_this_merge_request_when_the_pi": "GitLab führt diesen Merge Request zusammen, wenn die Pipeline erfolgreich ist",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew verwendet die CLI Ihres lokalen Anbieters, um Pull Requests zu laden. Führen Sie diesen Befehl in Ihrem Terminal aus und versuchen Sie es dann erneut.",
       "loading_diff": "Diff wird geladen…",
       "loading_source_provider": "Quellanbieter wird geladen…",
+      "local": "Lokal",
+      "local_working_tree_changes": "Lokale Arbeitsverzeichnis-Änderungen",
+      "merge_blocked": "Merge blockiert",
+      "merge_conflicts": "Merge-Konflikte",
       "merge_conflicts_detail": "Dieser Branch hat Konflikte mit {{base}} und kann erst zusammengeführt werden, wenn sie behoben sind.",
       "merge_now": "Jetzt zusammenführen",
+      "merged": "Zusammengeführt",
       "no_changed_files_were_returned": "Es wurden keine geänderten Dateien zurückgegeben.",
       "no_ci_checks_were_returned": "Es wurden keine CI-Prüfungen zurückgegeben.",
       "no_commits_were_returned": "Es wurden keine Commits zurückgegeben.",
@@ -4597,9 +4660,12 @@
       "no_written_comment": "Kein schriftlicher Kommentar.",
       "open": "Offen",
       "open_pull_request": "Pull Request öffnen",
+      "provider_results_may_be_partial_merge_request": "Die Anbieterergebnisse können für {{sections}} unvollständig sein. Öffne den Merge Request für den vollständigen Satz.",
+      "provider_results_may_be_partial_pull_request": "Die Anbieterergebnisse können für {{sections}} unvollständig sein. Öffne den Pull Request für den vollständigen Satz.",
       "pull_request_sections": "Pull-Request-Abschnitte",
       "pull_requests": "Pull Requests",
       "ready_for_review": "Bereit zur Überprüfung",
+      "rebase_required": "Rebase erforderlich",
       "rebase_required_detail": "Dieses Projekt verlangt vor dem Zusammenführen ein Rebase des Branches auf {{base}}; ein Merge-Commit hebt die Blockade nicht auf.",
       "refresh_pull_request": "Pull Request aktualisieren",
       "refreshing_pull_request": "Pull Request wird aktualisiert",
@@ -4607,38 +4673,18 @@
       "resolved": "Aufgelöst",
       "retry": "Wiederholen",
       "reviews": "Reviews",
-      "the_provider_did_not_return_a_patch_for_this_fil": "Der Anbieter hat für diese Datei keinen Patch zurückgegeben.",
-      "unknown_reviewer": "Unbekannter Reviewer",
-      "untitled_commit": "Commit ohne Titel",
-      "updated": "Aktualisiert",
-      "branch_is_behind": "Branch hängt zurück",
-      "branch_protection_requirements_approving_reviews": "Die Branch-Schutzanforderungen (zustimmende Reviews oder erforderliche Prüfungen) sind noch nicht erfüllt.",
-      "closed": "Geschlossen",
-      "draft": "Entwurf",
-      "files_changed_one": "{{count}} geänderte Datei",
-      "files_changed_other": "{{count}} geänderte Dateien",
-      "github_cli_login_required": "GitHub-CLI-Anmeldung erforderlich",
-      "gitlab_cli_login_required": "GitLab-CLI-Anmeldung erforderlich",
-      "merge_blocked": "Merge blockiert",
-      "merge_conflicts": "Merge-Konflikte",
-      "merged": "Zusammengeführt",
-      "provider_results_may_be_partial_merge_request": "Die Anbieterergebnisse können für {{sections}} unvollständig sein. Öffne den Merge Request für den vollständigen Satz.",
-      "provider_results_may_be_partial_pull_request": "Die Anbieterergebnisse können für {{sections}} unvollständig sein. Öffne den Pull Request für den vollständigen Satz.",
-      "rebase_required": "Rebase erforderlich",
-      "take_this_merge_request_out_of_draft": "Diesen Merge Request aus dem Entwurfsstatus nehmen",
-      "take_this_pull_request_out_of_draft": "Diesen Pull Request aus dem Entwurfsstatus nehmen",
-      "this_authorizes_the_merge_as_soon_as_requirement": "Dies autorisiert das Zusammenführen, sobald die Anforderungen erfüllt sind — mit Squash, wenn dieses Repository es zulässt (andernfalls ein Merge-Commit, dann Rebase).",
-      "this_authorizes_the_merge_when_the_pipeline_succ": "Dies autorisiert das Zusammenführen, wenn die Pipeline erfolgreich ist.",
-      "check_failed": "Fehlgeschlagen",
-      "check_in_progress": "Läuft",
-      "check_passed": "Erfolgreich",
-      "check_skipped": "Übersprungen",
-      "checks_failed": "Prüfungen fehlgeschlagen",
-      "checks_passed": "Prüfungen erfolgreich",
       "state_closed": "Geschlossen",
       "state_draft": "Entwurf",
       "state_merged": "Zusammengeführt",
-      "state_open": "Offen"
+      "state_open": "Offen",
+      "take_this_merge_request_out_of_draft": "Diesen Merge Request aus dem Entwurfsstatus nehmen",
+      "take_this_pull_request_out_of_draft": "Diesen Pull Request aus dem Entwurfsstatus nehmen",
+      "the_provider_did_not_return_a_patch_for_this_fil": "Der Anbieter hat für diese Datei keinen Patch zurückgegeben.",
+      "this_authorizes_the_merge_as_soon_as_requirement": "Dies autorisiert das Zusammenführen, sobald die Anforderungen erfüllt sind — mit Squash, wenn dieses Repository es zulässt (andernfalls ein Merge-Commit, dann Rebase).",
+      "this_authorizes_the_merge_when_the_pipeline_succ": "Dies autorisiert das Zusammenführen, wenn die Pipeline erfolgreich ist.",
+      "unknown_reviewer": "Unbekannter Reviewer",
+      "untitled_commit": "Commit ohne Titel",
+      "updated": "Aktualisiert"
     },
     "questionCard": {
       "collapse_all": "Alle einklappen",
@@ -4724,6 +4770,25 @@
       "open_read_only_viewer": "Schreibgeschützte Ansicht öffnen (lesen und kommentieren; das Original auf {{name}} von dort öffnen)",
       "v": "v"
     },
+    "reportProblemModal": {
+      "report_a_problem": "Problem melden",
+      "what_happened": "Was ist passiert?",
+      "note_placeholder": "z. B. Nach dem Update schlägt jede Nachricht mit „process exited (rc=None)“ fehl.",
+      "include_recent_logs": "Aktuelle Protokolle einbeziehen",
+      "include_logs_hint": "Protokolle von Gateway und kiro-cli. Ausschalten, um nur Absturzberichte zu senden.",
+      "redaction_notice": "Bearer-Tokens, Sitzungs-Cookies und AWS-Schlüssel werden automatisch entfernt, bevor die ZIP-Datei erstellt wird.",
+      "collect_failed": "Diagnosedaten konnten nicht erfasst werden",
+      "cancel": "Abbrechen",
+      "create_report": "Bericht erstellen",
+      "collecting": "Wird erfasst…",
+      "done": "Fertig",
+      "diagnostics_ready": "Diagnose bereit — {{redactions}} Geheimnis(se) in {{files}} Datei(en) redigiert.",
+      "saved_to": "Gespeichert unter",
+      "show_in_finder": "Im Finder anzeigen",
+      "download_zip": "ZIP herunterladen",
+      "open_github_issue": "GitHub-Issue öffnen",
+      "prefill_hint": "Beim Öffnen des Issues werden die Details vorbefüllt — ziehen Sie dann die ZIP-Datei hinein."
+    },
     "resizeHandle": {
       "drag_to_resize": "Ziehen zum Ändern der Größe"
     },
@@ -4769,6 +4834,10 @@
       "selected": "ausgewählt",
       "showing": "Angezeigt",
       "you": "Du"
+    },
+    "searchableSelect": {
+      "no_matches": "Keine Treffer",
+      "search": "Suchen…"
     },
     "secretField": {
       "cancel": "Abbrechen",
@@ -5073,6 +5142,15 @@
       "tunnel_stopped": "Tunnel gestoppt",
       "up": "Laufzeit {{time}}"
     },
+    "ui": {
+      "clear_filter": "Filter löschen",
+      "no_matches_for": "Keine Treffer für",
+      "no_noun_match": "Keine passenden {{noun}}"
+    },
+    "unifiedDiffView": {
+      "diff_display_capped": "Diff-Anzeige auf {{count}} Zeilen begrenzt. Verbleibende Zeilen werden nicht gerendert.",
+      "loading_diff": "Diff wird geladen…"
+    },
     "updateModal": {
       "dismiss": "Schließen",
       "dismiss_update_dialog": "Aktualisierungsdialog schließen",
@@ -5249,54 +5327,6 @@
       "select": "Auswählen",
       "workspace_name": "Workspace-Name",
       "workspace_name_2": "workspace-name"
-    },
-    "privacyChapter": {
-      "continue": "Weiter",
-      "eyebrow": "Datenschutz",
-      "subtitle": "Die fünf anonymen Felder, die Kiro Crew sendet, und wie du sie abschaltest.",
-      "title": "Datenschutz"
-    },
-    "ui": {
-      "clear_filter": "Filter löschen",
-      "no_matches_for": "Keine Treffer für",
-      "no_noun_match": "Keine passenden {{noun}}"
-    },
-    "askAgent": {
-      "ask_the_agent": "Agent fragen",
-      "open_a_chat_with_this_error_s_context_attached": "Chat mit dem vollständigen Kontext dieses Fehlers öffnen",
-      "prompt_lead": "Dieser Fehler ist gerade im Kiro Crew-Dashboard aufgetreten. Diagnostiziere die Ursache und behebe sie."
-    },
-    "errorNotice": {
-      "dismiss": "Schließen"
-    },
-    "reportProblemModal": {
-      "report_a_problem": "Problem melden",
-      "what_happened": "Was ist passiert?",
-      "note_placeholder": "z. B. Nach dem Update schlägt jede Nachricht mit „process exited (rc=None)“ fehl.",
-      "include_recent_logs": "Aktuelle Protokolle einbeziehen",
-      "include_logs_hint": "Protokolle von Gateway und kiro-cli. Ausschalten, um nur Absturzberichte zu senden.",
-      "redaction_notice": "Bearer-Tokens, Sitzungs-Cookies und AWS-Schlüssel werden automatisch entfernt, bevor die ZIP-Datei erstellt wird.",
-      "collect_failed": "Diagnosedaten konnten nicht erfasst werden",
-      "cancel": "Abbrechen",
-      "create_report": "Bericht erstellen",
-      "collecting": "Wird erfasst…",
-      "done": "Fertig",
-      "diagnostics_ready": "Diagnose bereit — {{redactions}} Geheimnis(se) in {{files}} Datei(en) redigiert.",
-      "saved_to": "Gespeichert unter",
-      "show_in_finder": "Im Finder anzeigen",
-      "download_zip": "ZIP herunterladen",
-      "open_github_issue": "GitHub-Issue öffnen",
-      "prefill_hint": "Beim Öffnen des Issues werden die Details vorbefüllt — ziehen Sie dann die ZIP-Datei hinein."
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "Ordnervorschlag",
-      "move_to_folder_question": "Diese Sitzung nach {{folder}} verschieben?",
-      "no_thanks": "Nicht jetzt",
-      "yes_move_it": "Verschieben"
-    },
-    "searchableSelect": {
-      "no_matches": "Keine Treffer",
-      "search": "Suchen…"
     }
   },
   "hooks": {
@@ -6204,6 +6234,7 @@
         "input": "Eingabe",
         "issues": "Issues",
         "last_tool": "Letztes Werkzeug:",
+        "line_totals_unavailable_diff_truncated": "Zeilensummen nicht verfügbar, da der Diff gekürzt wurde",
         "load_output_from_disk": "Ausgabe vom Datenträger laden",
         "loading": "Wird geladen…",
         "logs": "Protokolle",

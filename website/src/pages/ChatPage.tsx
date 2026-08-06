@@ -125,6 +125,7 @@ import {
   adoptSourceSelections,
   commitSourceSelection,
   isSourceSelectionKey,
+  LOCAL_CHANGES_SOURCE_URL,
   loadSeenPullRequestLinks,
   loadSourceSelections,
   partitionSourceLinks,
@@ -1934,6 +1935,13 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // An uncached slot temporarily has no messages while its history hydrates.
     // Preserve the persisted strip until that source-of-truth load settles.
     if (slotLoading) return
+    // The local working-tree view is a sentinel, not a transcript link, so no
+    // amount of PR discovery can confirm or refute it. Reconciliation below
+    // decides by presence in `sourceLinks`, which the sentinel can never satisfy
+    // — leaving it in scope would clear the selection when a session mentions no
+    // PR, and bump the user onto sourceLinks[0] when it mentions one. It is
+    // dismissed by an explicit selection, never by reconciliation.
+    if (selectedSourceUrl === LOCAL_CHANGES_SOURCE_URL) return
     // A previous provisional render may have fallen back in memory while storage
     // still holds the tab the user chose; look there first once links appear.
     if (restoreFromStorage('change', sourceLinks)) return

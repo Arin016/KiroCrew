@@ -3431,6 +3431,11 @@
       "to_send_to_this_chat": "发送到此聊天",
       "toggle_additional_instruction": "切换附加指令"
     },
+    "askAgent": {
+      "ask_the_agent": "询问代理",
+      "open_a_chat_with_this_error_s_context_attached": "打开聊天，并附上该错误的完整上下文",
+      "prompt_lead": "Kiro Crew 仪表板刚刚出现了这个错误。请定位根本原因并修复。"
+    },
     "autoNudgePopover": {
       "close": "关闭",
       "cycle": "· 轮次",
@@ -3791,6 +3796,9 @@
       "something_went_wrong": "出现问题",
       "try_again": "重试"
     },
+    "errorNotice": {
+      "dismiss": "忽略"
+    },
     "excalidrawBlock": {
       "render_failed": "无法渲染此图 — 显示源码"
     },
@@ -3849,6 +3857,20 @@
       "showing_raw_content_count": "显示原始内容（{{count}} 个字符）",
       "showing_raw_content_truncated_count": "显示原始内容（共 {{count}} 个字符，仅显示前 {{shown}} 个）"
     },
+    "folderColorNames": {
+      "amber": "琥珀色",
+      "blue": "蓝色",
+      "cyan": "青色",
+      "gray": "灰色",
+      "green": "绿色",
+      "indigo": "靛蓝色",
+      "lime": "青柠色",
+      "orange": "橙色",
+      "pink": "粉色",
+      "red": "红色",
+      "teal": "蓝绿色",
+      "violet": "紫色"
+    },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}}（未安装）",
       "browse": "浏览",
@@ -3877,19 +3899,11 @@
       "set_color_to_name": "将颜色设为{{name}}",
       "top_level": "顶层"
     },
-    "folderColorNames": {
-      "amber": "琥珀色",
-      "blue": "蓝色",
-      "cyan": "青色",
-      "gray": "灰色",
-      "green": "绿色",
-      "indigo": "靛蓝色",
-      "lime": "青柠色",
-      "orange": "橙色",
-      "pink": "粉色",
-      "red": "红色",
-      "teal": "蓝绿色",
-      "violet": "紫色"
+    "folderSuggestionCard": {
+      "folder_suggestion": "文件夹建议",
+      "move_to_folder_question": "将此会话移动到 {{folder}}？",
+      "no_thanks": "暂不",
+      "yes_move_it": "移动"
     },
     "followUpBar": {
       "click_to_add_to_input_double_click_to_select_and": "点击添加到输入框（双击以选择并发送）",
@@ -4156,6 +4170,26 @@
       "two_way": "双向",
       "unavailable": "此目标当前不可用。"
     },
+    "localChangesView": {
+      "checking_for_changes": "正在检查 git 变更…",
+      "could_not_scan": "无法扫描 {{dir}} 的变更。",
+      "couldnt_load_diff": "无法加载差异。",
+      "diff_not_shown_for_safety": "出于安全考虑未显示差异：{{reason}}。",
+      "diff_truncated": "差异已截断 — 文件内容超过 2 MB 响应限制，仅显示开头部分。",
+      "diff_unavailable_file_unreadable": "差异不可用，因为文件无法完整读取。",
+      "loading_diff": "正在加载差异…",
+      "no_diff_available": "此文件没有可用的差异。",
+      "no_git_repository": "此项目目录中没有 git 仓库。将聊天的项目目录指向一个 git 仓库（或其中的任意文件夹）以查看变更。",
+      "open_in_editor": "在编辑器中打开 {{file}}",
+      "partial_scan": "部分扫描 — 已达到文件或时间预算；部分变更可能未列出。",
+      "pick_project_directory": "为此聊天选择一个项目目录以查看未提交的 git 变更。",
+      "repo_refused_safe_read": "此仓库被拒绝安全读取",
+      "repo_skipped_for_safety": "出于安全考虑已跳过此仓库：{{reason}}。",
+      "retry": "重试",
+      "scan_hit_limit": "扫描已达到文件或输出限制 — 存在比此处列出的更多变更。",
+      "working_tree_clean": "工作树干净 — 没有本地变更。",
+      "working_tree_clean_on_branch": "工作树干净 — {{branch}} 上没有本地变更。"
+    },
     "logEntry": {
       "cancelled": "已取消",
       "error": "错误",
@@ -4183,6 +4217,10 @@
       "close_find": "关闭查找",
       "copy_content": "复制内容",
       "copy_path": "复制路径",
+      "diff_unavailable_baseline_failed": "差异不可用 — 无法加载文件的 git 基线",
+      "diff_unavailable_no_git_repo": "差异不可用 — 此文件不在 git 仓库中",
+      "diff_unavailable_original_too_large": "差异不可用 — 原始文件太大无法完整加载",
+      "diff_unavailable_with_error": "差异不可用 — {{error}}",
       "discard_unsaved_changes": "放弃未保存的更改？",
       "download": "下载",
       "download_failed": "下载失败",
@@ -4464,6 +4502,12 @@
       "expand_paste": "展开粘贴内容",
       "paste_lines_other": "[ 粘贴 #{{seq}} · {{count}} 行 ]"
     },
+    "privacyChapter": {
+      "continue": "继续",
+      "eyebrow": "隐私",
+      "subtitle": "Kiro Crew 发送的五个匿名字段，以及如何关闭。",
+      "title": "隐私"
+    },
     "projectPicker": {
       "back": "返回",
       "browse": "浏览",
@@ -4509,29 +4553,47 @@
       "add_to_chat": "添加到聊天",
       "all_checks_passed": "所有检查已通过",
       "auto_merge_enabled": "已启用自动合并",
+      "branch_is_behind": "分支落后",
       "branch_is_behind_detail": "此分支落后于 {{base}}，合并前必须先更新。",
+      "branch_protection_requirements_approving_reviews": "分支保护要求（审批通过的审阅或必需的检查）尚未满足。",
       "cancel": "取消",
       "changes": "变更",
+      "check_failed": "失败",
+      "check_in_progress": "进行中",
+      "check_passed": "通过",
+      "check_skipped": "已跳过",
       "checks": "检查",
+      "checks_failed": "检查失败",
+      "checks_passed": "检查通过",
       "checks_running": "检查运行中",
       "checks_unavailable": "检查不可用",
+      "closed": "已关闭",
       "collapse_comment": "折叠评论",
       "commits": "提交",
       "confirm_auto_merge": "确认自动合并",
       "could_not_load_this_pull_request": "无法加载此拉取请求",
       "could_not_resolve": "无法解析",
       "description": "描述",
+      "draft": "草稿",
       "enable_auto_merge": "启用自动合并",
       "expand_comment": "展开评论",
+      "files_changed_other": "{{count}} 个文件已更改",
+      "github_cli_login_required": "需要登录 GitHub CLI",
       "github_merges_this_pull_request_automatically_on": "必需的检查和审查通过后，GitHub 会自动合并此拉取请求",
       "github_will_merge_this_pull_request_once_its_req": "GitHub 会在此拉取请求满足其要求后合并它",
+      "gitlab_cli_login_required": "需要登录 GitLab CLI",
       "gitlab_merges_this_merge_request_when_the_pipeli": "流水线成功后，GitLab 会合并此合并请求 — 若没有待运行的流水线则立即合并",
       "gitlab_will_merge_this_merge_request_when_the_pi": "GitLab 会在流水线成功后合并此合并请求",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew 使用你本地的服务商 CLI 加载拉取请求。请在终端中运行此命令，然后重试。",
       "loading_diff": "正在加载差异…",
       "loading_source_provider": "正在加载源服务商…",
+      "local": "本地",
+      "local_working_tree_changes": "本地工作树变更",
+      "merge_blocked": "合并受阻",
+      "merge_conflicts": "合并冲突",
       "merge_conflicts_detail": "此分支与 {{base}} 存在冲突，解决冲突后才能合并。",
       "merge_now": "立即合并",
+      "merged": "已合并",
       "no_changed_files_were_returned": "未返回任何更改的文件。",
       "no_ci_checks_were_returned": "未返回任何 CI 检查。",
       "no_commits_were_returned": "未返回任何提交。",
@@ -4540,9 +4602,12 @@
       "no_written_comment": "无文字评论。",
       "open": "打开",
       "open_pull_request": "打开拉取请求",
+      "provider_results_may_be_partial_merge_request": "服务商返回的结果可能不完整：{{sections}}。打开合并请求以获取完整内容。",
+      "provider_results_may_be_partial_pull_request": "服务商返回的结果可能不完整：{{sections}}。打开拉取请求以获取完整内容。",
       "pull_request_sections": "拉取请求分区",
       "pull_requests": "拉取请求",
       "ready_for_review": "可供审阅",
+      "rebase_required": "需要变基",
       "rebase_required_detail": "此项目要求合并前先把分支变基到 {{base}}，合并提交无法解除阻塞。",
       "refresh_pull_request": "刷新拉取请求",
       "refreshing_pull_request": "正在刷新拉取请求",
@@ -4550,37 +4615,18 @@
       "resolved": "已解决",
       "retry": "重试",
       "reviews": "审查",
-      "the_provider_did_not_return_a_patch_for_this_fil": "服务商未返回此文件的补丁。",
-      "unknown_reviewer": "未知审查者",
-      "untitled_commit": "无标题提交",
-      "updated": "已更新",
-      "branch_is_behind": "分支落后",
-      "branch_protection_requirements_approving_reviews": "分支保护要求（审批通过的审阅或必需的检查）尚未满足。",
-      "closed": "已关闭",
-      "draft": "草稿",
-      "files_changed_other": "{{count}} 个文件已更改",
-      "github_cli_login_required": "需要登录 GitHub CLI",
-      "gitlab_cli_login_required": "需要登录 GitLab CLI",
-      "merge_blocked": "合并受阻",
-      "merge_conflicts": "合并冲突",
-      "merged": "已合并",
-      "provider_results_may_be_partial_merge_request": "服务商返回的结果可能不完整：{{sections}}。打开合并请求以获取完整内容。",
-      "provider_results_may_be_partial_pull_request": "服务商返回的结果可能不完整：{{sections}}。打开拉取请求以获取完整内容。",
-      "rebase_required": "需要变基",
-      "take_this_merge_request_out_of_draft": "将此合并请求撤出草稿状态",
-      "take_this_pull_request_out_of_draft": "将此拉取请求撤出草稿状态",
-      "this_authorizes_the_merge_as_soon_as_requirement": "此操作会在要求通过后立即授权合并，若此仓库允许则压缩为单个提交（否则生成合并提交，再变基）。",
-      "this_authorizes_the_merge_when_the_pipeline_succ": "此操作会在流水线成功后授权合并。",
-      "check_failed": "失败",
-      "check_in_progress": "进行中",
-      "check_passed": "通过",
-      "check_skipped": "已跳过",
-      "checks_failed": "检查失败",
-      "checks_passed": "检查通过",
       "state_closed": "已关闭",
       "state_draft": "草稿",
       "state_merged": "已合并",
-      "state_open": "待处理"
+      "state_open": "待处理",
+      "take_this_merge_request_out_of_draft": "将此合并请求撤出草稿状态",
+      "take_this_pull_request_out_of_draft": "将此拉取请求撤出草稿状态",
+      "the_provider_did_not_return_a_patch_for_this_fil": "服务商未返回此文件的补丁。",
+      "this_authorizes_the_merge_as_soon_as_requirement": "此操作会在要求通过后立即授权合并，若此仓库允许则压缩为单个提交（否则生成合并提交，再变基）。",
+      "this_authorizes_the_merge_when_the_pipeline_succ": "此操作会在流水线成功后授权合并。",
+      "unknown_reviewer": "未知审查者",
+      "untitled_commit": "无标题提交",
+      "updated": "已更新"
     },
     "questionCard": {
       "collapse_all": "全部折叠",
@@ -4665,6 +4711,25 @@
       "open_read_only_viewer": "打开只读查看器（可阅读和评论；可从那里在 {{name}} 上打开原件）",
       "v": "v"
     },
+    "reportProblemModal": {
+      "report_a_problem": "反馈问题",
+      "what_happened": "发生了什么？",
+      "note_placeholder": "例如：更新后每条消息都失败，报“process exited (rc=None)”。",
+      "include_recent_logs": "包含最近日志",
+      "include_logs_hint": "网关与 kiro-cli 日志。关闭后仅发送崩溃报告。",
+      "redaction_notice": "Bearer 令牌、会话 cookie 和 AWS 密钥会在生成 zip 前自动移除。",
+      "collect_failed": "无法收集诊断信息",
+      "cancel": "取消",
+      "create_report": "生成报告",
+      "collecting": "正在收集……",
+      "done": "完成",
+      "diagnostics_ready": "诊断信息已就绪 — 已在 {{files}} 个文件中脱敏 {{redactions}} 处密钥。",
+      "saved_to": "保存至",
+      "show_in_finder": "在 Finder 中显示",
+      "download_zip": "下载 zip",
+      "open_github_issue": "新建 GitHub issue",
+      "prefill_hint": "打开后会自动填好详情 — 再把 zip 拖进去即可。"
+    },
     "resizeHandle": {
       "drag_to_resize": "拖动以调整大小"
     },
@@ -4710,6 +4775,10 @@
       "selected": "已选中",
       "showing": "正在显示",
       "you": "你"
+    },
+    "searchableSelect": {
+      "no_matches": "无匹配项",
+      "search": "搜索…"
     },
     "secretField": {
       "cancel": "取消",
@@ -5013,6 +5082,15 @@
       "tunnel_stopped": "隧道已停止",
       "up": "已运行 {{time}}"
     },
+    "ui": {
+      "clear_filter": "清除筛选",
+      "no_matches_for": "没有匹配",
+      "no_noun_match": "没有匹配的{{noun}}"
+    },
+    "unifiedDiffView": {
+      "diff_display_capped": "差异显示上限为 {{count}} 行。剩余行未渲染。",
+      "loading_diff": "正在加载差异…"
+    },
     "updateModal": {
       "dismiss": "忽略",
       "dismiss_update_dialog": "关闭更新对话框",
@@ -5189,54 +5267,6 @@
       "select": "选择",
       "workspace_name": "工作区名称",
       "workspace_name_2": "workspace-name"
-    },
-    "privacyChapter": {
-      "continue": "继续",
-      "eyebrow": "隐私",
-      "subtitle": "Kiro Crew 发送的五个匿名字段，以及如何关闭。",
-      "title": "隐私"
-    },
-    "ui": {
-      "clear_filter": "清除筛选",
-      "no_matches_for": "没有匹配",
-      "no_noun_match": "没有匹配的{{noun}}"
-    },
-    "askAgent": {
-      "ask_the_agent": "询问代理",
-      "open_a_chat_with_this_error_s_context_attached": "打开聊天，并附上该错误的完整上下文",
-      "prompt_lead": "Kiro Crew 仪表板刚刚出现了这个错误。请定位根本原因并修复。"
-    },
-    "errorNotice": {
-      "dismiss": "忽略"
-    },
-    "reportProblemModal": {
-      "report_a_problem": "反馈问题",
-      "what_happened": "发生了什么？",
-      "note_placeholder": "例如：更新后每条消息都失败，报“process exited (rc=None)”。",
-      "include_recent_logs": "包含最近日志",
-      "include_logs_hint": "网关与 kiro-cli 日志。关闭后仅发送崩溃报告。",
-      "redaction_notice": "Bearer 令牌、会话 cookie 和 AWS 密钥会在生成 zip 前自动移除。",
-      "collect_failed": "无法收集诊断信息",
-      "cancel": "取消",
-      "create_report": "生成报告",
-      "collecting": "正在收集……",
-      "done": "完成",
-      "diagnostics_ready": "诊断信息已就绪 — 已在 {{files}} 个文件中脱敏 {{redactions}} 处密钥。",
-      "saved_to": "保存至",
-      "show_in_finder": "在 Finder 中显示",
-      "download_zip": "下载 zip",
-      "open_github_issue": "新建 GitHub issue",
-      "prefill_hint": "打开后会自动填好详情 — 再把 zip 拖进去即可。"
-    },
-    "folderSuggestionCard": {
-      "folder_suggestion": "文件夹建议",
-      "move_to_folder_question": "将此会话移动到 {{folder}}？",
-      "no_thanks": "暂不",
-      "yes_move_it": "移动"
-    },
-    "searchableSelect": {
-      "no_matches": "无匹配项",
-      "search": "搜索…"
     }
   },
   "hooks": {
@@ -6132,6 +6162,7 @@
         "input": "输入",
         "issues": "Issues",
         "last_tool": "最后一个工具：",
+        "line_totals_unavailable_diff_truncated": "由于差异已截断，行总计不可用",
         "load_output_from_disk": "从磁盘加载输出",
         "loading": "正在加载…",
         "logs": "日志",
