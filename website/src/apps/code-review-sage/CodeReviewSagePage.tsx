@@ -6,11 +6,14 @@
 // run. Findings post as a PENDING (draft) review the human submits on GitHub.
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ScanSearch, GitPullRequest, ExternalLink, Circle, Settings, Brain, Plus, Trash2, FolderGit2, RefreshCw } from 'lucide-react'
+import { ScanSearch, GitPullRequest, ExternalLink, Circle, Settings, Brain, Plus, Trash2, FolderGit2, RefreshCw, Send } from 'lucide-react'
 
 import { SendBtn } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import SimpleSelect from '../../components/SimpleSelect'
+import PullRequestPanel from '../../components/PullRequestPanel'
+import type { PullRequestLink } from '../../utils/pullRequestLinks'
+import { api } from '../../api/client'
 
 import { i18nT } from '../../i18n/t'
 const API = '/api/apps/code-review-sage'
@@ -56,6 +59,207 @@ function changeLabel(id: string): string {
  */
 function withCurrent(opts: string[], cur: string): string[] {
   return !cur || opts.includes(cur) ? opts : [...opts, cur]
+}
+
+/**
+ * Build the source descriptor `PullRequestPanel` needs from a reviewed PR url.
+ *
+ * Deliberately not the chat extractor (`extractPullRequestLinks`): that one scans
+ * free-form message text and carries first-mention attribution and dedup rules
+ * that mean nothing here — this app only ever holds canonical GitHub PR urls it
+ * queued itself, and is GitHub-only by design. Returns null for anything that is
+ * not one, so a malformed record is skipped rather than rendered.
+ */
+function sageSourceLink(url: string): PullRequestLink | null {
+  const m = url.match(/^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)$/)
+  if (!m) return null
+  return {
+    url, provider: 'github', number: Number(m[3]), repo: `${m[1]}/${m[2]}`, kind: 'change',
+  }
+}
+
+/** The verdicts GitHub accepts when publishing a pending review. */
+const PUBLISH_EVENTS = ['COMMENT', 'REQUEST_CHANGES', 'APPROVE'] as const
+type PublishEvent = (typeof PUBLISH_EVENTS)[number]
+
+const PUBLISH_LABEL_KEY: Record<PublishEvent, string> = {
+  COMMENT: 'apps.codeReviewSage.codeReviewSagePage.submit_as_comment',
+  REQUEST_CHANGES: 'apps.codeReviewSage.codeReviewSagePage.request_changes',
+  APPROVE: 'apps.codeReviewSage.codeReviewSagePage.approve',
+}
+
+// Past-tense verdicts for the published state. The button labels are imperative
+// ("Approve"), which reads wrong once the action is done ("Published as Approve").
+const PUBLISHED_VERDICT_KEY: Record<PublishEvent, string> = {
+  COMMENT: 'apps.codeReviewSage.codeReviewSagePage.published_verdict_comment',
+  REQUEST_CHANGES: 'apps.codeReviewSage.codeReviewSagePage.published_verdict_changes_requested',
+  APPROVE: 'apps.codeReviewSage.codeReviewSagePage.published_verdict_approved',
+}
+
+/**
+ * Publish controls for the draft review Sage left on ``url``.
+ *
+ * The draft is fetched rather than assumed: Sage records that it POSTed a pending
+ * review, but the human may have submitted or discarded it on GitHub since, and
+ * publishing a stale id must not silently submit whatever draft now exists. The
+ * id shown here is the id sent back on publish, so what gets published is always
+ * what was displayed.
+ */
+function DraftReviewActions({ url, runComplete }: { url: string; runComplete: boolean }) {
+  const qc = useQueryClient()
+  const [done, setDone] = useState<PublishEvent | null>(null)
+
+  const { data, isLoading, error, refetch, isFetching } = useQuery({
+    queryKey: ['code-review-sage-draft', url],
+    queryFn: () => api.pullRequestPendingReview(url),
+    retry: false,
+  })
+
+  const publishMut = useMutation({
+    // The digest binds the publish to the CONTENT that was rendered, not just the
+    // review id: GitHub lets a draft's body and comments change under the same id,
+    // so the id alone cannot prove this is the draft the user read.
+    mutationFn: (event: PublishEvent) =>
+      api.submitPullRequestReview(url, data?.reviewId || '', event, data?.contentDigest || ''),
+    onSuccess: (_r, event) => {
+      setDone(event)
+      // The pending review is gone and the PR now carries a submitted review —
+      // drop both cached reads so the panel and this bar reflect the new state.
+      qc.invalidateQueries({ queryKey: ['code-review-sage-draft', url] })
+      qc.invalidateQueries({ queryKey: ['pull-request-source', url] })
+    },
+  })
+
+  useEffect(() => { setDone(null) }, [url])
+
+  if (isLoading) return null
+  // Only the PUBLISH failure belongs here. A failed READ is reported by the error
+  // branch below in the user's own terms; echoing its raw provider text here too
+  // would restate the same failure twice, once unreadably.
+  const err = publishMut.error instanceof Error ? publishMut.error.message : ''
+  // Publishing is refused server-side for either reason; mirror it here so the
+  // buttons are absent rather than present-and-doomed. A third ground is local to
+  // this page: until THIS run finishes the pull request, the only draft GitHub
+  // holds is whatever an earlier run left there, and publishing it would post
+  // obsolete findings irreversibly. Reading the draft stays available.
+  const blocked = !runComplete || (!!data && (data.contentRedacted || data.stale))
+  // Approve is withheld on two independent grounds, both about an approval
+  // outliving the commit it reviewed: auto-merge could merge before a stale-head
+  // check takes it back, and a base branch that keeps stale approvals lets one
+  // stand after the head moves at all.
+  const approveWithheld = !!data && (data.autoMergeArmed || !data.staleDismissalEnabled)
+
+  if (done) {
+    return (
+      <div className="border border-border rounded-md p-3 mt-3 text-xs text-muted">
+        {i18nT('apps.codeReviewSage.codeReviewSagePage.published_as')}{' '}
+        <span className="text-text">{i18nT(PUBLISHED_VERDICT_KEY[done])}</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="border border-border rounded-md p-3 mt-3">
+      <div className="text-[13px] font-medium flex items-center gap-1.5">
+        <Send size={13} /> {i18nT('apps.codeReviewSage.codeReviewSagePage.draft_review')}
+      </div>
+      {/* A FAILED read must never render as "no draft review": the read is the only
+          thing that knows a draft exists, so reporting its failure as an absence
+          tells the user their work is gone. `gh` auth lapsing is common enough that
+          this page ships a setup box for it, so branch on the error first and offer
+          a retry -- the query sets retry:false, making this the only way back. */}
+      {error ? (
+        <div className="text-xs mt-2">
+          <div className="text-warn leading-relaxed">
+            {i18nT('apps.codeReviewSage.codeReviewSagePage.couldn_t_check_for_a_draft_review_on_this_pull_r')}
+          </div>
+          <button
+            onClick={() => { void refetch() }}
+            disabled={isFetching}
+            className="text-xs px-2.5 py-1.5 mt-2 rounded-md border border-border text-muted hover:text-text hover:border-border-strong disabled:opacity-30 cursor-pointer bg-transparent"
+          >
+            {i18nT('apps.codeReviewSage.codeReviewSagePage.try_again')}
+          </button>
+        </div>
+      ) : !data?.reviewId ? (
+        <div className="text-muted text-xs mt-2">
+          {i18nT('apps.codeReviewSage.codeReviewSagePage.no_draft_review_on_this_pull_request')}
+        </div>
+      ) : (
+        <>
+          <div className="text-muted text-[11px] mt-1.5">
+            {i18nT('apps.codeReviewSage.codeReviewSagePage.pending_only_you_can_see_it_until_you_publish')}
+          </div>
+          {/* Show the draft before offering to publish it. The reviewId guard proves
+              you are publishing the draft you were TOLD about; rendering the body is
+              what makes that the draft you actually READ — a pending review may be
+              one the human started by hand, and publishing is irreversible. */}
+          <div className="mt-2.5 border border-border rounded-md px-2.5 py-2 max-h-48 overflow-auto text-xs text-text whitespace-pre-wrap break-words font-mono">
+            {data.body || (
+              <span className="text-muted">
+                {i18nT('apps.codeReviewSage.codeReviewSagePage.this_draft_has_no_summary_body')}
+              </span>
+            )}
+          </div>
+          {/* Both refusals are enforced server-side; surfacing them here means the
+              user learns WHY publishing is unavailable instead of clicking into a
+              400. `contentRedacted` is the more surprising one: the body above is
+              redacted for display, but submission publishes GitHub's stored draft,
+              so publishing it would post the original text. */}
+          {blocked ? (
+            <div className="text-warn text-[11px] mt-2.5 leading-relaxed">
+              {!runComplete
+                ? i18nT('apps.codeReviewSage.codeReviewSagePage.publishing_is_blocked_this_review_is_still_runni')
+                : data.contentRedacted
+                  ? i18nT('apps.codeReviewSage.codeReviewSagePage.publishing_is_blocked_this_draft_contains_conten')
+                  : i18nT('apps.codeReviewSage.codeReviewSagePage.publishing_is_blocked_this_draft_was_written_aga')}
+            </div>
+          ) : (
+          <div className="flex items-center gap-2 mt-2.5 flex-wrap">
+            {PUBLISH_EVENTS.map(ev => (
+              ev === 'APPROVE' && approveWithheld ? null : (
+              <button
+                key={ev}
+                onClick={() => publishMut.mutate(ev)}
+                disabled={publishMut.isPending}
+                className="text-xs px-2.5 py-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong disabled:opacity-30 cursor-pointer bg-transparent"
+              >
+                {i18nT(PUBLISH_LABEL_KEY[ev])}
+              </button>
+              )
+            ))}
+            {publishMut.isPending && (
+              <span className="text-muted text-[11px]">
+                {i18nT('apps.codeReviewSage.codeReviewSagePage.publishing')}
+              </span>
+            )}
+          </div>
+          )}
+          {!blocked && (
+            <div className="text-[11px] mt-2">
+              {data.autoMergeArmed && (
+                <div className="text-warn mb-1 leading-relaxed">
+                  {i18nT('apps.codeReviewSage.codeReviewSagePage.approve_is_unavailable_while_auto_merge_is_armed')}
+                </div>
+              )}
+              {!data.autoMergeArmed && !data.staleDismissalEnabled && (
+                <div className="text-warn mb-1 leading-relaxed">
+                  {i18nT('apps.codeReviewSage.codeReviewSagePage.approve_is_unavailable_because_this_base_branch_')}
+                </div>
+              )}
+              {/* Decision-critical copy is never the smallest, faintest text in the
+                  block: this is the one line that tells the user the click cannot be
+                  taken back, so it carries body weight, not footnote weight. */}
+              <div className="text-text text-xs">
+                {i18nT('apps.codeReviewSage.codeReviewSagePage.publishing_is_irreversible_and_visible_to_everyo')}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+      {err && <div className="text-danger text-xs mt-2">{err}</div>}
+    </div>
+  )
 }
 
 /**
@@ -119,6 +323,8 @@ export default function CodeReviewSagePage() {
   // Repo-review mode: enumerate a repo's open PRs and review the un-reviewed ones.
   const [repoUrl, setRepoUrl] = useState('')
   const [submittedRepo, setSubmittedRepo] = useState('')
+  // Which reviewed PR is open in the reused Changes panel ('' = none).
+  const [openUrl, setOpenUrl] = useState('')
 
   // React Query owns the fetch/loading/error/poll lifecycle. refetchInterval is
   // evaluated from the cached data, so a run that is already running on mount
@@ -214,6 +420,19 @@ export default function CodeReviewSagePage() {
     id,
     link: run?.changes?.[i],
   }))
+  // Sources for the reused Changes panel: every reviewable PR in this run. Built
+  // from the run's own urls, so the panel's tab strip mirrors the row list.
+  const panelSources = (run?.changes ?? [])
+    .map(sageSourceLink)
+    .filter((l): l is PullRequestLink => l !== null)
+  // Clear the open PR when the run changes — its url may not be in the new run.
+  useEffect(() => { setOpenUrl('') }, [run?.run_id])
+  // Whether THIS run has finished the open pull request. `openUrl` is always a row
+  // of the current run (the effect above clears it on a run change), so a row with
+  // no progress entry yet reads as unfinished — the fail-closed direction, since
+  // the draft on an unfinished PR belongs to an earlier run.
+  const openRunComplete = !!openUrl
+    && run?.progress?.[rows.find(r => r.link === openUrl)?.id ?? '']?.phase === 'done'
   const running = reviewMut.isPending || reviewRepoMut.isPending || run?.status === 'running'
   const reviewErr = reviewMut.error instanceof Error ? reviewMut.error.message : ''
 
@@ -366,12 +585,16 @@ export default function CodeReviewSagePage() {
               const p = run.progress?.[id]
               const phase = p?.phase ?? 'queued'
               const counts = p?.counts
+              const isOpen = !!link && link === openUrl
               return (
                 <li key={id}
                   className="flex items-center gap-2.5 text-xs py-1.5 border-b border-border">
                   {link
-                    ? <a href={link} target="_blank" rel="noreferrer"
-                        className="font-mono text-accent">{changeLabel(id)}</a>
+                    ? <button
+                        onClick={() => setOpenUrl(isOpen ? '' : link)}
+                        aria-expanded={isOpen}
+                        className={`font-mono bg-transparent border-none p-0 cursor-pointer hover:underline ${isOpen ? 'text-accent font-medium' : 'text-accent'}`}
+                      >{changeLabel(id)}</button>
                     : <span className="font-mono">{changeLabel(id)}</span>}
                   <span className={`ml-auto flex items-center gap-1 ${phase === 'failed' ? 'text-danger' : 'text-muted'}`}>
                     {phaseLabel(phase)}
@@ -389,6 +612,20 @@ export default function CodeReviewSagePage() {
               )
             })}
           </ul>
+
+          {/* Read the PR and publish the draft without leaving the app. The chat
+              Changes panel is reused verbatim; `onAddToChat` is omitted because
+              this page has no composer, which hides its chat-handoff buttons. */}
+          {openUrl && panelSources.length > 0 && (
+            <div className="mt-3.5">
+              <PullRequestPanel
+                sources={panelSources}
+                selectedUrl={openUrl}
+                onSelect={setOpenUrl}
+              />
+              <DraftReviewActions url={openUrl} runComplete={openRunComplete} />
+            </div>
+          )}
         </div>
       )}
 

@@ -123,10 +123,12 @@ from kiro_crew.dashboard.handlers.source_providers import (
     api_issue_source,
     api_pull_request_auto_merge,
     api_pull_request_checks,
+    api_pull_request_pending_review,
     api_pull_request_ready,
     api_pull_request_resolve,
     api_pull_request_source,
     api_pull_request_status,
+    api_pull_request_submit_review,
     register_status_delta_sink,
     unregister_status_delta_sink,
 )
@@ -2272,6 +2274,12 @@ async def start_dashboard(
     app.router.add_post("/api/source/pull-request/resolve", api_pull_request_resolve)
     app.router.add_post("/api/source/pull-request/auto-merge", api_pull_request_auto_merge)
     app.router.add_post("/api/source/pull-request/ready", api_pull_request_ready)
+    app.router.add_post(
+        "/api/source/pull-request/pending-review", api_pull_request_pending_review
+    )
+    app.router.add_post(
+        "/api/source/pull-request/submit-review", api_pull_request_submit_review
+    )
     app.router.add_post("/api/source/issue", api_issue_source)
     app.router.add_get("/api/chat/slots", chat.api_chat_slots)
     app.router.add_post("/api/chat/slots", chat.api_chat_slot_create)

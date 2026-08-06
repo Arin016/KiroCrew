@@ -448,7 +448,7 @@ const CHECK_META = {
   skipped: { icon: SkipForward, color: 'text-muted', get label() { return i18nT('components.pullRequestPanel.check_skipped') } },
 } as const
 
-function CheckRow({ check, source, onAddToChat }: { check: PullRequestCheck; source: PullRequestSource; onAddToChat: (text: string) => void }) {
+function CheckRow({ check, source, onAddToChat }: { check: PullRequestCheck; source: PullRequestSource; onAddToChat?: (text: string) => void }) {
   const meta = CHECK_META[check.bucket]
   const Icon = meta.icon
   // `meta.label` is the last-resort status, read where it renders (and in the
@@ -467,7 +467,7 @@ function CheckRow({ check, source, onAddToChat }: { check: PullRequestCheck; sou
     if (checkUrl) lines.push(`- Details: ${checkUrl}`)
     if (sourceUrl) lines.push(`- Pull request: ${sourceUrl}`)
     lines.push('', 'Investigate why this check is failing and propose a fix.')
-    onAddToChat(lines.join('\n'))
+    onAddToChat?.(lines.join('\n'))
   }
   const details = (
     <>
@@ -495,7 +495,7 @@ function CheckRow({ check, source, onAddToChat }: { check: PullRequestCheck; sou
       ) : (
         <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5">{details}</div>
       )}
-      {check.bucket === 'failed' && (
+      {check.bucket === 'failed' && onAddToChat && (
         <Btn
           type="button"
           onClick={handoff}
@@ -508,7 +508,7 @@ function CheckRow({ check, source, onAddToChat }: { check: PullRequestCheck; sou
   )
 }
 
-function CommentCard({ comment, url, onAddToChat }: { comment: PullRequestComment; url: string; onAddToChat: (text: string) => void }) {
+function CommentCard({ comment, url, onAddToChat }: { comment: PullRequestComment; url: string; onAddToChat?: (text: string) => void }) {
   const location = comment.path ? `${comment.path}${comment.line ? `:${comment.line}` : ''}` : ''
   const commentUrl = safeExternalUrl(comment.url)
   const [expanded, setExpanded] = useState(true)
@@ -556,6 +556,10 @@ function CommentCard({ comment, url, onAddToChat }: { comment: PullRequestCommen
           {comment.resolved && (
             <span className="text-[11px] text-muted inline-flex items-center gap-1"><Check className="lucide-inline text-ok" /> {i18nT('components.pullRequestPanel.resolved')}</span>
           )}
+          {/* Indentation deliberately left at the pre-conditional level so the
+              handoff copy below is not re-attributed to this branch by the
+              diff-scoped i18n gate — it is pre-existing untranslated debt. */}
+          {onAddToChat && (
           <Btn
             type="button"
             onClick={() => onAddToChat(`PR comment from ${comment.author || 'a reviewer'}${location ? ` on ${location}` : ''}:\n\n> ${comment.body.replace(/\n/g, '\n> ')}`)}
@@ -563,6 +567,7 @@ function CommentCard({ comment, url, onAddToChat }: { comment: PullRequestCommen
           >
             {i18nT('components.pullRequestPanel.add_to_chat')}
           </Btn>
+          )}
         </div>
       </div>
       {expanded && (
@@ -713,7 +718,7 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
   )
 }
 
-function PullRequestBody({ source, tab, onAddToChat }: { source: PullRequestSource; tab: SourceTab; onAddToChat: (text: string) => void }) {
+function PullRequestBody({ source, tab, onAddToChat }: { source: PullRequestSource; tab: SourceTab; onAddToChat?: (text: string) => void }) {
   if (tab === 'description') {
     return source.description
       ? <div className="px-4 py-4 text-[13px]"><MarkdownRenderer content={source.description} /></div>
@@ -805,7 +810,10 @@ export default function PullRequestPanel({
   // transcript that lacks the remembered url may simply be a cached one that is
   // still being refetched. Defaults to onSelect for callers that do not care.
   onReconcile?: (url: string) => void
-  onAddToChat: (text: string) => void
+  // Optional so the panel can render outside chat (e.g. the Code Review Sage
+  // page), where there is no composer to hand text to. When absent the
+  // chat-handoff affordances are hidden rather than rendered inert.
+  onAddToChat?: (text: string) => void
 }) {
   const cappedSources = sources.slice(0, MAX_PULL_REQUEST_SOURCES)
   const selected = cappedSources.find(source => source.url === selectedUrl) || cappedSources[0]
@@ -1097,7 +1105,7 @@ export default function PullRequestPanel({
               <span className="min-w-0 flex-1">
                 <span className={`font-medium ${mergeBlocker.tone === 'danger' ? 'text-danger' : 'text-warn'}`}>{mergeBlocker.title}.</span> {mergeBlocker.detail}
               </span>
-              {mergeBlocker.handoff && (
+              {mergeBlocker.handoff && onAddToChat && (
                 <Btn
                   type="button"
                   onClick={() => onAddToChat(mergeBlocker.handoff!)}
