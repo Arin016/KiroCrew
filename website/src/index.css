@@ -1436,10 +1436,28 @@ button:hover .app-icon{--ico-a:var(--accent);--ico-b:var(--text)}
 
 /* ── Frameless Electron window (Windows) ──
    titleBarOverlay places native caption controls (min/max/close) in a 138px
-   overlay strip at the top-right of the window. Inset the header's right side
-   so interactive elements (bell, settings, actions) stay clear of the overlay.
-   Keep 138px in sync with WIN_CAPTION_OVERLAY_WIDTH in src/lib/electron.ts. */
-.win-electron header.topbar-glass{padding-right:142px}
+   overlay strip at the top-right of the window. The dashboard header fills the
+   old frame area while native controls remain on the right. Keep interactive
+   menu buttons out of the drag region and reserve the native caption-control
+   strip so dashboard actions never sit underneath it. */
+.win-electron header.topbar-glass{
+  padding-right:142px;
+  -webkit-app-region:drag;
+}
+.win-electron header.topbar-glass button,
+.win-electron header.topbar-glass a,
+.win-electron header.topbar-glass input,
+.win-electron header.topbar-glass [role="button"],
+.win-electron .windows-titlebar-menu{
+  -webkit-app-region:no-drag;
+}
+.windows-titlebar-menu-item{
+  border:0;
+  background:transparent;
+  font-family:inherit;
+  cursor:default;
+  transition:background-color .12s ease,color .12s ease;
+}
 /* Embedded remote pane (option B): the pane is a separate document loaded in an
    iframe, so its SPA can't see Electron — `isMacElectron` is false inside it and
    the `.mac-electron` rule never applies. The parent relays whether it is a
