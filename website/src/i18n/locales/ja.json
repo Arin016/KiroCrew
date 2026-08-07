@@ -4572,7 +4572,8 @@
     "pastedChip": {
       "collapse_paste": "ペーストを折りたたむ",
       "expand_paste": "ペーストを展開",
-      "paste_lines_other": "[ ペースト #{{seq}} · {{count}} 行 ]"
+      "paste_lines_other": "[ ペースト #{{seq}} · {{count}} 行 ]",
+      "preview_more_lines_other": "… 他 {{count}} 行"
     },
     "privacyChapter": {
       "continue": "続行",
