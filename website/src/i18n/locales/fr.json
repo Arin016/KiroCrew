@@ -5023,6 +5023,7 @@
       "screen_capture_drag_the_area_you_want_it_attache": "Capture d'écran — faites glisser sur la zone souhaitée ; elle est jointe automatiquement au relâchement"
     },
     "tagManagerList": {
+      "change_color": "Changer la couleur de {{name}}",
       "delete_tag": "Supprimer l’étiquette « {{name}} »",
       "delete_tag_2": "Supprimer l’étiquette {{name}}",
       "filter_by_tag": "Filtrer par étiquette",
@@ -5032,6 +5033,7 @@
       "new_tag": "Nouvelle étiquette… ↵",
       "remove_status_flag_from": "Retirer l’indicateur de statut de {{name}}",
       "rename_tag": "Renommer l’étiquette {{name}}",
+      "set_color_to_name": "Définir la couleur sur {{name}}",
       "status_tag_mutually_exclusive_on_cards_click_to": "Étiquette d’état (exclusive sur les cartes) — clique pour la rendre normale"
     },
     "terminalCompletion": {

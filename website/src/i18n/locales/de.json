@@ -4962,6 +4962,7 @@
       "screen_capture_drag_the_area_you_want_it_attache": "Bildschirmaufnahme — ziehen Sie den gewünschten Bereich; er wird beim Loslassen automatisch angehängt"
     },
     "tagManagerList": {
+      "change_color": "Farbe von {{name}} ändern",
       "delete_tag": "Tag „{{name}}“ löschen",
       "delete_tag_2": "Tag {{name}} löschen",
       "filter_by_tag": "Nach Tag filtern",
@@ -4971,6 +4972,7 @@
       "new_tag": "Neuer Tag… ↵",
       "remove_status_flag_from": "Status-Markierung von {{name}} entfernen",
       "rename_tag": "Tag {{name}} umbenennen",
+      "set_color_to_name": "Farbe auf {{name}} setzen",
       "status_tag_mutually_exclusive_on_cards_click_to": "Status-Tag (auf Karten exklusiv) — klicken, um ihn normal zu machen"
     },
     "terminalCompletion": {

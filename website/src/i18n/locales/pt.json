@@ -5104,6 +5104,7 @@
       "screen_capture_drag_the_area_you_want_it_attache": "Captura de tela — arraste a área desejada; ela é anexada automaticamente ao soltar"
     },
     "tagManagerList": {
+      "change_color": "Alterar a cor de {{name}}",
       "delete_tag": "Excluir a tag \"{{name}}\"",
       "delete_tag_2": "Excluir a tag {{name}}",
       "filter_by_tag": "Filtrar por etiqueta",
@@ -5113,6 +5114,7 @@
       "new_tag": "Nova etiqueta… ↵",
       "remove_status_flag_from": "Remover a marcação de status de {{name}}",
       "rename_tag": "Renomear a tag {{name}}",
+      "set_color_to_name": "Definir cor como {{name}}",
       "status_tag_mutually_exclusive_on_cards_click_to": "Etiqueta de status (mutuamente exclusiva nos cartões) — clique para torná-la comum"
     },
     "terminalCompletion": {

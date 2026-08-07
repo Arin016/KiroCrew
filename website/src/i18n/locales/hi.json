@@ -5043,6 +5043,7 @@
       "screen_capture_drag_the_area_you_want_it_attache": "स्क्रीन कैप्चर — जो क्षेत्र चाहिए उसे ड्रैग करें; छोड़ने पर यह स्वतः अटैच हो जाता है"
     },
     "tagManagerList": {
+      "change_color": "{{name}} का रंग बदलें",
       "delete_tag": "टैग \"{{name}}\" हटाएँ",
       "delete_tag_2": "टैग {{name}} हटाएँ",
       "filter_by_tag": "टैग से फ़िल्टर करें",
@@ -5052,6 +5053,7 @@
       "new_tag": "नया टैग… ↵",
       "remove_status_flag_from": "{{name}} से स्टेटस फ़्लैग हटाएँ",
       "rename_tag": "टैग {{name}} का नाम बदलें",
+      "set_color_to_name": "रंग {{name}} पर सेट करें",
       "status_tag_mutually_exclusive_on_cards_click_to": "स्टेटस टैग (कार्ड पर एक समय में एक ही) — सामान्य बनाने के लिए क्लिक करें"
     },
     "terminalCompletion": {

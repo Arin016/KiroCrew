@@ -1328,6 +1328,7 @@
       "could_not_capture_the_selected_region_please_try": "Could not capture the selected region. Please try again."
     },
     "tagManagerList": {
+      "change_color": "Change color of {{name}}",
       "delete_tag": "Delete tag \"{{name}}\"",
       "delete_tag_2": "Delete tag {{name}}",
       "filter_by_tag": "Filter by tag",
@@ -1336,6 +1337,7 @@
       "make_status_tag": "Make status tag",
       "remove_status_flag_from": "Remove status flag from {{name}}",
       "rename_tag": "Rename tag {{name}}",
+      "set_color_to_name": "Set color to {{name}}",
       "status_tag_mutually_exclusive_on_cards_click_to": "Status tag (mutually exclusive on cards) — click to make regular"
     },
     "terminalCompletion": {

@@ -4901,6 +4901,7 @@
       "screen_capture_drag_the_area_you_want_it_attache": "屏幕截图 — 拖出你想要的区域；松开后自动附加"
     },
     "tagManagerList": {
+      "change_color": "更改{{name}}的颜色",
       "delete_tag": "删除标签“{{name}}”",
       "delete_tag_2": "删除标签 {{name}}",
       "filter_by_tag": "按标签筛选",
@@ -4910,6 +4911,7 @@
       "new_tag": "新标签… ↵",
       "remove_status_flag_from": "移除 {{name}} 的状态标记",
       "rename_tag": "重命名标签 {{name}}",
+      "set_color_to_name": "将颜色设为{{name}}",
       "status_tag_mutually_exclusive_on_cards_click_to": "状态标签（在卡片上互斥）— 点击改为普通标签"
     },
     "terminalCompletion": {

@@ -5165,6 +5165,7 @@
       "screen_capture_drag_the_area_you_want_it_attache": "Снимок экрана — выделите нужную область; она вложится автоматически при отпускании"
     },
     "tagManagerList": {
+      "change_color": "Изменить цвет {{name}}",
       "delete_tag": "Удалить тег «{{name}}»",
       "delete_tag_2": "Удалить тег {{name}}",
       "filter_by_tag": "Фильтр по тегу",
@@ -5174,6 +5175,7 @@
       "new_tag": "Новый тег… ↵",
       "remove_status_flag_from": "Убрать отметку статуса с {{name}}",
       "rename_tag": "Переименовать тег {{name}}",
+      "set_color_to_name": "Задать цвет: {{name}}",
       "status_tag_mutually_exclusive_on_cards_click_to": "Тег статуса (взаимоисключающий на карточках) — нажми, чтобы сделать обычным"
     },
     "terminalCompletion": {
