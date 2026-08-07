@@ -3837,6 +3837,9 @@
       "stop_loop": "लूप रोकें"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "टर्मिनल अपनी अलग विंडो में है",
+      "focus_popout": "पॉपआउट पर फ़ोकस करें",
+      "pop_out_to_window": "विंडो में पॉप आउट करें",
       "close_terminal": "टर्मिनल बंद करें",
       "hide_terminal_panel": "टर्मिनल पैनल छिपाएँ",
       "maximum_terminals": "अधिकतम {{n}} टर्मिनल",
@@ -5791,6 +5794,12 @@
     "webhooks": "वेबहुक"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "डॉक पर वापस जाएँ",
+      "return_to_main_window_and_close_this_popout": "मुख्य विंडो में वापस जाएँ और यह पॉपआउट बंद करें",
+      "terminal": "टर्मिनल",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "consumption_for_current_billing_period": "मौजूदा बिलिंग अवधि के लिए {{provider}} की खपत। 10 मिनट तक कैश रहती है।",
       "context_window_usage_tip": "हर सक्रिय {{label}} सत्र के लिए लाइव कॉन्टेक्स्ट विंडो उपयोग। कस्टम एजेंट अपना कॉन्फ़िगर किया मॉडल दिखाते हैं। 90% पर कॉम्पैक्शन शुरू हो जाता है।",

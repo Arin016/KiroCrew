@@ -2960,6 +2960,9 @@
       "stop_loop": "Stop loop"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "Terminal is in its own window",
+      "focus_popout": "Focus popout",
+      "pop_out_to_window": "Pop out to window",
       "close_terminal": "Close terminal",
       "hide_terminal_panel": "Hide terminal panel",
       "move_to_side_panel": "Move to side panel",
@@ -4005,6 +4008,12 @@
     }
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "Return to dock",
+      "return_to_main_window_and_close_this_popout": "Return to main window and close this popout",
+      "terminal": "Terminal",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "active_sessions_and_subagent_tasks": "Active sessions and subagent tasks",
       "agent_templates": "Agent Templates",

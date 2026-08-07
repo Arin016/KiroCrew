@@ -3837,6 +3837,9 @@
       "stop_loop": "লুপ বন্ধ করুন"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "টার্মিনাল নিজস্ব উইন্ডোতে আছে",
+      "focus_popout": "পপআউটে ফোকাস করুন",
+      "pop_out_to_window": "উইন্ডোতে পপ আউট করুন",
       "close_terminal": "টার্মিনাল বন্ধ করুন",
       "hide_terminal_panel": "টার্মিনাল প্যানেল লুকান",
       "maximum_terminals": "সর্বোচ্চ {{n}}টি টার্মিনাল",
@@ -5791,6 +5794,12 @@
     "webhooks": "ওয়েবহুক"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "ডকে ফিরে যান",
+      "return_to_main_window_and_close_this_popout": "মূল উইন্ডোতে ফিরে যান এবং এই পপআউটটি বন্ধ করুন",
+      "terminal": "টার্মিনাল",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "consumption_for_current_billing_period": "বর্তমান বিলিং সময়কালে {{provider}} ব্যবহার। 10 মিনিট ক্যাশ করা।",
       "context_window_usage_tip": "প্রতিটি সক্রিয় {{label}} সেশনের লাইভ কনটেক্সট উইন্ডো ব্যবহার। কাস্টম এজেন্ট তাদের কনফিগার করা মডেল দেখায়। 90%-এ কমপ্যাকশন শুরু হয়।",

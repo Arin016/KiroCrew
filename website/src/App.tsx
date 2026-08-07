@@ -44,6 +44,7 @@ import { CSS } from '@dnd-kit/utilities'
 import ChatPage from './pages/ChatPage'
 import PopoutFrame from './pages/PopoutFrame'
 import ArtifactPopoutFrame from './pages/ArtifactPopoutFrame'
+import TerminalPopoutFrame from './pages/TerminalPopoutFrame'
 
 import ErrorBoundary from './components/ErrorBoundary'
 import AppIcon from './components/AppIcon'
@@ -74,8 +75,9 @@ import { useUpdateSubscription } from './hooks/useUpdateSubscription'
 import UpdateModal from './components/UpdateModal'
 
 import ComputerUseLiveView from './components/ComputerUseLiveView'
-import BottomTerminalPanel from './components/BottomTerminalPanel'
+import BottomTerminalPanel, { TerminalDetachedBar } from './components/BottomTerminalPanel'
 import { toggleBottomTerminal, useBottomTerminalOpen } from './hooks/useBottomTerminal'
+import { useTerminalPoppedOut, focusPopout as focusTerminalPopout } from './utils/terminalPopout'
 import { setTerminalEnabledFlag } from './utils/terminalRegistry'
 import AppsPage from './pages/AppsPage'
 import AppPage from './pages/AppPage'
@@ -881,6 +883,10 @@ export default function App() {
   // so there is no hidden-until-fetch-resolves flash.
   const terminalEnabled = terminalConfig?.enabled !== false
   useEffect(() => { setTerminalEnabledFlag(terminalEnabled) }, [terminalEnabled])
+  // True while the terminal panel lives in its own popped-out window: the
+  // docked panel is suppressed here and the sidebar toggle focuses that
+  // window instead of opening an (empty-handed) panel.
+  const terminalPoppedOut = useTerminalPoppedOut()
   // Only the `open` flag, not the whole store — the panel's height changes on
   // every mousemove during a grip-drag, and a primitive snapshot lets
   // useSyncExternalStore's Object.is check skip those re-renders of App.
@@ -1603,6 +1609,7 @@ export default function App() {
       <Routes>
         <Route path="/popout/chat/:slug?" element={<ErrorBoundary><PopoutFrame /></ErrorBoundary>} />
         <Route path="/popout/artifact/:slug" element={<ErrorBoundary><ArtifactPopoutFrame /></ErrorBoundary>} />
+        <Route path="/popout/terminal" element={<ErrorBoundary><TerminalPopoutFrame /></ErrorBoundary>} />
         {/* Belt-and-braces: any stray in-window navigation re-pins to the
             frame this window loaded as (isPopout is sticky, so the dashboard
             branch is unreachable — without this the wildcard would bounce a
@@ -2275,11 +2282,14 @@ export default function App() {
                      "active" tracks the panel's open flag rather than the route.
                      Without it the row only lit on hover, leaving no indication
                      the panel below was open once the pointer moved away. */
-                  active={bottomTerminalOpen}
-                  pressed={bottomTerminalOpen}
+                  active={bottomTerminalOpen || terminalPoppedOut}
+                  pressed={bottomTerminalOpen || terminalPoppedOut}
                   collapsed={effectiveCollapsed}
                   onClick={closeMobileNav}
-                  onClickOverride={() => toggleBottomTerminal()}
+                  /* While popped out: focus only (a refused programmatic
+                     focus is a harmless no-op). Explicit re-dock lives in the
+                     TerminalDetachedBar below -- never a timing heuristic. */
+                  onClickOverride={() => { if (terminalPoppedOut) focusTerminalPopout(); else toggleBottomTerminal() }}
                 />
               )}
               <div>{renderNavRow(cap)}</div>
@@ -2443,7 +2453,7 @@ export default function App() {
         {/* App-wide docked terminal panel — spans every route, below <main>.
             Toggled from the sidebar Terminal icon; hosts app-wide
             shells. Distinct from the chat-scoped activity-bar terminal tabs. */}
-        {terminalEnabled && <BottomTerminalPanel />}
+        {terminalEnabled && (terminalPoppedOut ? <TerminalDetachedBar /> : <BottomTerminalPanel />)}
 
         {/* Self-managed floating panels: lifecycle-driven (hidden → small → chip),
             not motion.* children, so they live outside AnimatePresence. The browse

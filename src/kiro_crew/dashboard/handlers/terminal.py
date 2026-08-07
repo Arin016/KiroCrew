@@ -702,9 +702,14 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
             elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
                 break
     finally:
-        # WS disconnected — mark for orphan reaper, but keep PTY alive
-        sess.ws = None
-        sess.last_ws_disconnect = time.monotonic()
+        # WS disconnected — mark for orphan reaper, but keep PTY alive.
+        # Identity-guarded: a reconnect (e.g. the terminal panel popping out to
+        # its own window) REPLACES sess.ws while this displaced handler is
+        # still draining; unconditionally clearing it here would silence PTY
+        # output to the freshly attached socket.
+        if sess.ws is ws:
+            sess.ws = None
+            sess.last_ws_disconnect = time.monotonic()
         _sel().log_api_access(
             caller=caller,
             operation="terminal.ws.disconnect",

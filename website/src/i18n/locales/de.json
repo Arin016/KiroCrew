@@ -3756,6 +3756,9 @@
       "stop_loop": "Schleife stoppen"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "Das Terminal ist in einem eigenen Fenster",
+      "focus_popout": "Ausgekoppeltes Fenster fokussieren",
+      "pop_out_to_window": "In ein Fenster auskoppeln",
       "close_terminal": "Terminal schließen",
       "hide_terminal_panel": "Terminal-Panel ausblenden",
       "maximum_terminals": "Maximal {{n}} Terminals",
@@ -5710,6 +5713,12 @@
     "webhooks": "Webhooks"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "Zurück zum Dock",
+      "return_to_main_window_and_close_this_popout": "Zum Hauptfenster zurückkehren und dieses ausgekoppelte Fenster schließen",
+      "terminal": "Terminal",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "consumption_for_current_billing_period": "{{provider}}-Verbrauch für den aktuellen Abrechnungszeitraum. 10 Min. zwischengespeichert.",
       "context_window_usage_tip": "Live-Auslastung des Kontextfensters pro aktiver {{label}}-Sitzung. Eigene Agenten zeigen ihr konfiguriertes Modell. Die Verdichtung wird bei 90 % ausgelöst.",

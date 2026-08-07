@@ -3885,6 +3885,9 @@
       "stop_loop": "Detener el bucle"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "La terminal está en su propia ventana",
+      "focus_popout": "Enfocar la ventana emergente",
+      "pop_out_to_window": "Abrir en ventana",
       "close_terminal": "Cerrar la terminal",
       "hide_terminal_panel": "Ocultar el panel de la terminal",
       "maximum_terminals": "Máximo {{n}} terminales",
@@ -5853,6 +5856,12 @@
     "webhooks": "Webhooks"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "Volver al dock",
+      "return_to_main_window_and_close_this_popout": "Volver a la ventana principal y cerrar esta ventana desacoplada",
+      "terminal": "Terminal",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "consumption_for_current_billing_period": "Consumo de {{provider}} en el periodo de facturación actual. En caché 10 min.",
       "context_window_usage_tip": "Uso en vivo de la ventana de contexto por cada sesión activa de {{label}}. Los agentes personalizados muestran el modelo que tienen configurado. La compactación se activa al 90%.",

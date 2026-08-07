@@ -3735,6 +3735,9 @@
       "start_loop": "[Şţàŕţ ĺøøþ ···············]"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "[Ţèŕɱìñàĺ ìş ìñ ìţş øẁñ ẁìñðøẁ ····················]",
+      "focus_popout": "[Ƒøçùş þøþøùţ ···········]",
+      "pop_out_to_window": "[Þøþ øùţ ţø ẁìñðøẁ ···············]",
       "close_terminal": "[Çĺøşè ţèŕɱìñàĺ ·············]",
       "hide_terminal_panel": "[Ĥìðè ţèŕɱìñàĺ þàñèĺ ·················]",
       "move_to_side_panel": "[Ṁøṽè ţø şìðè þàñèĺ ················]",
@@ -5689,6 +5692,12 @@
     }
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "[Ŕèţùŕñ ţø ðøçķ ·············]",
+      "return_to_main_window_and_close_this_popout": "[Ŕèţùŕñ ţø ɱàìñ ẁìñðøẁ àñð çĺøşè ţĥìş þøþøùţ ······················]",
+      "terminal": "[Ţèŕɱìñàĺ ············]",
+      "window_title": "[{{label}} — Ķìŕø Çŕèẁ ···········]"
+    },
     "agentsPage": {
       "active_sessions_and_subagent_tasks": "[Àçţìṽè şèşşìøñş àñð şùƀàğèñţ ţàşķş ·················]",
       "agent_templates": "[Àğèñţ Ţèɱþĺàţèş ··············]",

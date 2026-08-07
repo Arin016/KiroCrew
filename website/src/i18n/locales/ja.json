@@ -3794,6 +3794,9 @@
       "stop_loop": "ループ停止"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "ターミナルは別ウィンドウで開いています",
+      "focus_popout": "ポップアウトをフォーカス",
+      "pop_out_to_window": "別ウィンドウに切り離す",
       "close_terminal": "ターミナルを閉じる",
       "hide_terminal_panel": "ターミナルパネルを非表示",
       "maximum_terminals": "最大 {{n}} 個のターミナル",
@@ -5739,6 +5742,12 @@
     "webhooks": "Webhooks"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "ドックに戻る",
+      "return_to_main_window_and_close_this_popout": "メインウィンドウに戻ってこのポップアウトを閉じる",
+      "terminal": "ターミナル",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "active_sessions_and_subagent_tasks": "アクティブなセッションとサブエージェントタスク",
       "agent_templates": "エージェントテンプレート",

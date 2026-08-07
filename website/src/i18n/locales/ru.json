@@ -3933,6 +3933,9 @@
       "stop_loop": "Остановить цикл"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "Терминал открыт в отдельном окне",
+      "focus_popout": "Перейти к отдельному окну",
+      "pop_out_to_window": "Открыть в отдельном окне",
       "close_terminal": "Закрыть терминал",
       "hide_terminal_panel": "Скрыть панель терминала",
       "maximum_terminals": "Не более {{n}} терминалов",
@@ -5915,6 +5918,12 @@
     "webhooks": "Вебхуки"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "Вернуть в док",
+      "return_to_main_window_and_close_this_popout": "Вернуться в главное окно и закрыть это отдельное окно",
+      "terminal": "Терминал",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "consumption_for_current_billing_period": "Потребление {{provider}} за текущий расчётный период. Кэш 10 мин.",
       "context_window_usage_tip": "Использование контекстного окна в реальном времени для каждой активной сессии {{label}}. У своих агентов показывается настроенная для них модель. Сжатие запускается на 90%.",

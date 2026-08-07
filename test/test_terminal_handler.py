@@ -2119,6 +2119,65 @@ class TestTerminalWsIntegration:
             await terminal._kill_session(registry["recon-sess"])
 
     @pytest.mark.asyncio
+    async def test_ws_takeover_displaced_socket_keeps_new_ws(self, monkeypatch, tmp_path):
+        """A displaced socket's cleanup must not clobber the takeover socket.
+
+        A second window (e.g. the terminal panel popping out) reconnects to a
+        session WHILE the first window's WS is still attached. The handler
+        replaces ``sess.ws`` with the new socket; when the displaced handler's
+        write loop then unwinds, its ``finally`` block must leave ``sess.ws``
+        pointing at the live takeover socket -- clearing it would silence PTY
+        output to the new window even though it is connected.
+        """
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"dashboard": {"terminal": {"enabled": True}}}))
+        monkeypatch.setattr(terminal, "config_path", lambda: cfg_file)
+        monkeypatch.setattr(terminal, "_sel", lambda: MagicMock())
+
+        registry: dict = {}
+        app = _make_app(registry=registry)
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as client:
+            ws1 = await client.ws_connect("/api/ws/terminal/takeover-sess")
+            sess = registry["takeover-sess"]
+            original_pid = terminal._sess_pid(sess)
+            first_ws = sess.ws
+            assert first_ws is not None
+
+            # Second client takes over the session while ws1 is still open.
+            ws2 = await client.ws_connect("/api/ws/terminal/takeover-sess")
+            sess = registry["takeover-sess"]
+            assert terminal._sess_pid(sess) == original_pid  # same PTY
+            takeover_ws = sess.ws
+            assert takeover_ws is not None
+            assert takeover_ws is not first_ws  # replaced by the new socket
+
+            # The displaced client closes; its server-side handler unwinds.
+            await ws1.close()
+            # Give the displaced handler's finally block a chance to run.
+            for _ in range(50):
+                await asyncio.sleep(0.05)
+                if sess.ws is takeover_ws and sess.last_ws_disconnect is None:
+                    break
+            assert sess.ws is takeover_ws  # NOT clobbered to None
+            assert sess.last_ws_disconnect is None
+
+            # And the new socket still works end-to-end (control ping).
+            await ws2.send_str(json.dumps({"type": "ping"}))
+            got_pong = False
+            for _ in range(40):
+                msg = await ws2.receive(timeout=3)
+                if msg.type == web.WSMsgType.TEXT and json.loads(msg.data).get("type") == "pong":
+                    got_pong = True
+                    break
+            assert got_pong
+
+            await ws2.close()
+            await terminal._kill_session(registry["takeover-sess"])
+
+    @pytest.mark.asyncio
     async def test_ws_invalid_json_ignored(self, monkeypatch, tmp_path):
         """Invalid JSON text frames are silently ignored."""
         cfg_file = tmp_path / "config.json"

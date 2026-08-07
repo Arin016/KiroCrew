@@ -3708,6 +3708,9 @@
       "stop_loop": "停止循环"
     },
     "bottomTerminalPanel": {
+      "terminal_is_in_its_own_window": "终端已在独立窗口中打开",
+      "focus_popout": "聚焦弹出窗口",
+      "pop_out_to_window": "弹出到窗口",
       "close_terminal": "关闭终端",
       "hide_terminal_panel": "隐藏终端面板",
       "maximum_terminals": "最多 {{n}} 个终端",
@@ -5648,6 +5651,12 @@
     "webhooks": "Webhook"
   },
   "pages": {
+    "terminalPopoutFrame": {
+      "return": "返回停靠面板",
+      "return_to_main_window_and_close_this_popout": "返回主窗口并关闭此弹出窗口",
+      "terminal": "终端",
+      "window_title": "{{label}} — Kiro Crew"
+    },
     "agentsPage": {
       "consumption_for_current_billing_period": "{{provider}} 在当前计费周期内的用量。缓存 10 分钟。",
       "context_window_usage_tip": "每个活跃 {{label}} 会话的实时上下文窗口用量。自定义代理会显示其配置的模型。达到 90% 时触发压缩。",
