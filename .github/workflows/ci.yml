@@ -400,6 +400,11 @@ jobs:
         group: [1, 2, 3, 4]
     env:
       SHARD_COUNT: 4
+      # windows-latest subprocess spawn + filesystem latency is slow and
+      # highly variable; the md_notebook git-ops default (30s) intermittently
+      # times out on plain `git add` here (#1673). Give git invocations a
+      # wider budget on this job only.
+      MDNB_GIT_TIMEOUT_SEC: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
