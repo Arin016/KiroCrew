@@ -167,7 +167,11 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            # Three elements, matching what the probe actually stores
+            # (transient, reason, remedy) and what `wrap_argv` unpacks. A
+            # two-element stand-in raises ValueError inside the code under test,
+            # so the assertions below never run.
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         # Stub SEL so no real I/O happens.
         fake_sel = MagicMock()
@@ -246,7 +250,11 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            # Three elements, matching what the probe actually stores
+            # (transient, reason, remedy) and what `wrap_argv` unpacks. A
+            # two-element stand-in raises ValueError inside the code under test,
+            # so the assertions below never run.
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         fake_sel = MagicMock()
         fake_sel.return_value = fake_sel
@@ -281,7 +289,11 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            # Three elements, matching what the probe actually stores
+            # (transient, reason, remedy) and what `wrap_argv` unpacks. A
+            # two-element stand-in raises ValueError inside the code under test,
+            # so the assertions below never run.
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         fake_sel = MagicMock()
         fake_sel.return_value = fake_sel
