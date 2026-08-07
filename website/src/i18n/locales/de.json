@@ -4407,6 +4407,9 @@
       "close": "Schließen"
     },
     "modelDropdownList": {
+      "auto_default": "Standard",
+      "credit_multiplier": "{{value}} der Credit-Kosten von Auto",
+      "credit_multiplier_baseline": "{{value}}, die Basis-Credit-Kosten",
       "no_matches": "Keine Treffer"
     },
     "modelEffortDropdown": {

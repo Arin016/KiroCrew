@@ -2,12 +2,11 @@ import { useState, useRef, useLayoutEffect } from 'react'
 import { motion } from 'framer-motion'
 import { ChevronRight, ChevronLeft, Settings2, Pin, Check } from 'lucide-react'
 import { Input } from './ui'
-import ModelDropdownList from './ModelDropdownList'
+import ModelDropdownList, { type ModelItem } from './ModelDropdownList'
 import ReasoningEffortDropdown from './ReasoningEffortDropdown'
 import { effortLabel } from './ChatInput'
 
 import { i18nT } from '../i18n/t'
-interface ModelItem { name: string; description?: string }
 
 interface Props {
   anchorRect: DOMRect

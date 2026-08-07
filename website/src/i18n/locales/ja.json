@@ -4458,6 +4458,9 @@
       "close": "閉じる"
     },
     "modelDropdownList": {
+      "auto_default": "デフォルト",
+      "credit_multiplier": "Auto のクレジット消費量の {{value}}",
+      "credit_multiplier_baseline": "{{value}}、クレジット消費量の基準",
       "no_matches": "一致するものがありません"
     },
     "modelEffortDropdown": {

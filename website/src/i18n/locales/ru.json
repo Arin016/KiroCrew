@@ -4598,6 +4598,9 @@
       "close": "Закрыть"
     },
     "modelDropdownList": {
+      "auto_default": "По умолчанию",
+      "credit_multiplier": "{{value}} от стоимости Auto в кредитах",
+      "credit_multiplier_baseline": "{{value}}, базовая стоимость в кредитах",
       "no_matches": "Совпадений нет"
     },
     "modelEffortDropdown": {

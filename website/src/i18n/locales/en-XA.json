@@ -4204,6 +4204,9 @@
       "close": "[Çĺøşè ········]"
     },
     "modelDropdownList": {
+      "auto_default": "[Ðèƒàùĺţ ···········]",
+      "credit_multiplier": "[{{value}} ţĥè çŕèðìţ çøşţ øƒ Àùţø ·················]",
+      "credit_multiplier_baseline": "[{{value}}, ţĥè ƀàşèĺìñè çŕèðìţ çøşţ ··················]",
       "no_matches": "[Ñø ɱàţçĥèş ···············]"
     },
     "modelEffortDropdown": {

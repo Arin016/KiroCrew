@@ -4462,6 +4462,9 @@
       "close": "Fermer"
     },
     "modelDropdownList": {
+      "auto_default": "Par défaut",
+      "credit_multiplier": "{{value}} le coût en crédits d'Auto",
+      "credit_multiplier_baseline": "{{value}}, le coût en crédits de référence",
       "no_matches": "Aucun résultat"
     },
     "modelEffortDropdown": {

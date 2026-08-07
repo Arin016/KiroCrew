@@ -3421,6 +3421,9 @@
       "close": "Close"
     },
     "modelDropdownList": {
+      "auto_default": "Default",
+      "credit_multiplier": "{{value}} the credit cost of Auto",
+      "credit_multiplier_baseline": "{{value}}, the baseline credit cost",
       "no_matches": "No matches"
     },
     "modelEffortDropdown": {

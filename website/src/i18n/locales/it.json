@@ -4543,6 +4543,9 @@
       "close": "Chiudi"
     },
     "modelDropdownList": {
+      "auto_default": "Predefinito",
+      "credit_multiplier": "{{value}} il costo in crediti di Auto",
+      "credit_multiplier_baseline": "{{value}}, il costo in crediti di riferimento",
       "no_matches": "Nessuna corrispondenza"
     },
     "modelEffortDropdown": {

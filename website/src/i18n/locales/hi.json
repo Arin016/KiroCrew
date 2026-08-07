@@ -4488,6 +4488,9 @@
       "close": "बंद करें"
     },
     "modelDropdownList": {
+      "auto_default": "डिफ़ॉल्ट",
+      "credit_multiplier": "Auto की तुलना में {{value}} क्रेडिट लागत",
+      "credit_multiplier_baseline": "{{value}}, आधार क्रेडिट लागत",
       "no_matches": "कोई मेल नहीं"
     },
     "modelEffortDropdown": {

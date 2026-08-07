@@ -4488,6 +4488,9 @@
       "close": "বন্ধ করুন"
     },
     "modelDropdownList": {
+      "auto_default": "ডিফল্ট",
+      "credit_multiplier": "Auto-এর তুলনায় {{value}} ক্রেডিট খরচ",
+      "credit_multiplier_baseline": "{{value}}, ভিত্তি ক্রেডিট খরচ",
       "no_matches": "কোনো মিল নেই"
     },
     "modelEffortDropdown": {

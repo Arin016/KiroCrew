@@ -4352,6 +4352,9 @@
       "close": "关闭"
     },
     "modelDropdownList": {
+      "auto_default": "默认",
+      "credit_multiplier": "积分消耗为 Auto 的 {{value}}",
+      "credit_multiplier_baseline": "{{value}}，积分消耗基准",
       "no_matches": "无匹配项"
     },
     "modelEffortDropdown": {
