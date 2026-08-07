@@ -573,6 +573,32 @@ class TestDiffScopedRun:
         assert result.returncode == 0, result.stdout
         assert "self-test passed" in result.stdout
 
+    def test_self_test_actually_judges_the_growth_ratio(self, tmp_path) -> None:
+        """The repeated-brands check must reach a verdict, not skip itself.
+
+        Its baseline used to be a fixed 20k brands, which costs fast hardware
+        ~19-21ms against a 20ms measurement floor. Landing under the floor made
+        the check print `ok ... ratio not judged` and test nothing, so on a fast
+        machine the quadratic guard was a coin-flip no-op. The workload now grows
+        until the baseline is measurable, so a real ratio is always reported.
+        """
+        root = self._repo(tmp_path)
+        self._commit(root, "doc.md", "clean\n", "base")
+        result = subprocess.run(
+            [sys.executable, os.path.join(root, "scripts", "check_brand_name.py"), "--test"],
+            cwd=root,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert result.returncode == 0, result.stdout
+        verdict = [ln for ln in result.stdout.splitlines() if "repeated-brands" in ln]
+        assert len(verdict) == 1, f"expected one repeated-brands line, got {verdict!r}"
+        assert "ratio not judged" not in verdict[0], (
+            f"the quadratic guard skipped its own measurement: {verdict[0]!r}"
+        )
+        assert "doubling cost" in verdict[0], verdict[0]
+
 
 class TestExplicitPathFailsClosed:
     """A path handed to the gate directly must be read, or the run must fail.
