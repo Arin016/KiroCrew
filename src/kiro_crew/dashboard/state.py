@@ -45,6 +45,7 @@ from kiro_crew.notifications.bus import (
 from kiro_crew.notifications.rate_limit import AppRateLimiter
 from kiro_crew.notifications.settings import ChannelSettings
 from kiro_crew.preview_text import strip_markdown_preview
+from kiro_crew.release_channel import channel as _release_channel_of_build
 from kiro_crew.safety_override import safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -2197,6 +2198,15 @@ class DashboardState:
             "no_crons": self.no_crons,
             "branch": branch,
             "commit": commit,
+            # Which release lane these bytes came from: "nightly", "insider" or
+            # "stable". Shipped as a RESOLVED ANSWER rather than leaving the
+            # dashboard to parse `version` itself, because the rule is not
+            # obvious (the same release is stamped as SemVer for desktop and
+            # PEP 440 for wheels, and neither PEP 440 prerelease spelling
+            # contains a `-`) and a frontend mirror of it would drift silently.
+            # The dashboard uses this to give prerelease users an obvious way to
+            # report a bug; see release_channel.py for the full rule.
+            "release_channel": _release_channel_of_build(),
             # True when the gateway has wired up a live Slack client (Socket Mode
             # connected). None in pure-dashboard mode or when Slack is disabled.
             "slack_connected": self.slack_client is not None,

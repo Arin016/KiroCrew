@@ -3817,6 +3817,11 @@
       "timestamp": "时间戳",
       "trigger": "触发方式"
     },
+    "feedbackPill": {
+      "nightly": "Nightly 版",
+      "insider": "Insider 版",
+      "report_bug_on_build": "反馈此 {{channel}} 的问题"
+    },
     "fileCard": {
       "audio": "音频：{{name}}",
       "save": "保存",

@@ -848,6 +848,11 @@
     "executionsView": {
       "failed_to_load": "Failed to load"
     },
+    "feedbackPill": {
+      "nightly": "Nightly",
+      "insider": "Insider",
+      "report_bug_on_build": "Report a bug on this {{channel}} build"
+    },
     "fileCard": {
       "audio": "Audio: {{name}}",
       "video": "Video: {{name}}"

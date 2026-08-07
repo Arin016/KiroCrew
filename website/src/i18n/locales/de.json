@@ -3868,6 +3868,11 @@
       "timestamp": "Zeitstempel",
       "trigger": "Auslöser"
     },
+    "feedbackPill": {
+      "nightly": "Nightly",
+      "insider": "Insider",
+      "report_bug_on_build": "Fehler in diesem {{channel}}-Build melden"
+    },
     "fileCard": {
       "audio": "Audio: {{name}}",
       "save": "Speichern",

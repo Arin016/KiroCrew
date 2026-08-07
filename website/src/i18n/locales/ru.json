@@ -4051,6 +4051,11 @@
       "timestamp": "Время",
       "trigger": "Триггер"
     },
+    "feedbackPill": {
+      "nightly": "Сборка Nightly",
+      "insider": "Сборка Insider",
+      "report_bug_on_build": "Сообщить об ошибке в этой сборке ({{channel}})"
+    },
     "fileCard": {
       "audio": "Аудио: {{name}}",
       "save": "Сохранить",

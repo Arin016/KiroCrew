@@ -5082,6 +5082,11 @@
     "excalidrawBlock": {
       "render_failed": "[Çøùĺðñ'ţ ŕèñðèŕ ðìàğŕàɱ — şĥøẁìñğ şøùŕçè ····················]"
     },
+    "feedbackPill": {
+      "nightly": "[Ñìğĥţĺý ···········]",
+      "insider": "[Ìñşìðèŕ ···········]",
+      "report_bug_on_build": "[Ŕèþøŕţ à ƀùğ øñ ţĥìş {{channel}} ƀùìĺð ···················]"
+    },
     "folderConfigModal": {
       "agent_not_installed": "[{{agent}} (ñøţ ìñşţàĺĺèð) ··············]",
       "browse": "[Ɓŕøẁşè ·········]",

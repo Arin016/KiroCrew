@@ -4000,6 +4000,11 @@
       "timestamp": "Data/hora",
       "trigger": "Acionador"
     },
+    "feedbackPill": {
+      "nightly": "Nightly",
+      "insider": "Insider",
+      "report_bug_on_build": "Relatar um erro nesta versão {{channel}}"
+    },
     "fileCard": {
       "audio": "Áudio: {{name}}",
       "save": "Salvar",

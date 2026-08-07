@@ -3919,6 +3919,11 @@
       "timestamp": "Horodatage",
       "trigger": "Déclencheur"
     },
+    "feedbackPill": {
+      "nightly": "Nightly",
+      "insider": "Insider",
+      "report_bug_on_build": "Signaler un bug sur cette version {{channel}}"
+    },
     "fileCard": {
       "audio": "Audio : {{name}}",
       "save": "Enregistrer",

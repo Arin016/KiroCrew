@@ -3949,6 +3949,11 @@
       "timestamp": "টাইমস্ট্যাম্প",
       "trigger": "ট্রিগার"
     },
+    "feedbackPill": {
+      "nightly": "Nightly বিল্ড",
+      "insider": "Insider বিল্ড",
+      "report_bug_on_build": "এই {{channel}}-এ বাগ রিপোর্ট করুন"
+    },
     "fileCard": {
       "audio": "অডিও: {{name}}",
       "save": "সংরক্ষণ",
