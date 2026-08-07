@@ -57,6 +57,11 @@ class TestMacOsSysctlPaths:
             "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
             "Pages free:                          100000.\n"
             "Pages inactive:                       50000.\n"
+            "Pages active:                        200000.\n"
+            "Pages wired down:                    120000.\n"
+            "Pages occupied by compressor:         30000.\n"
+            "Anonymous pages:                     180000.\n"
+            "Pages purgeable:                      10000.\n"
         )
 
         def fake_check_output(cmd, **kwargs):  # type: ignore[no-untyped-def]

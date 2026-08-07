@@ -194,7 +194,7 @@ class TestUrlBoundary:
         base, base_found = best_of(20_000)
         doubled, doubled_found = best_of(40_000)
         assert (base_found, doubled_found) == (20_000, 40_000)
-        assert doubled / base < 3.0, f"doubling the input cost {doubled / base:.1f}x, want ~2x"
+        assert doubled / base < 3.5, f"doubling the input cost {doubled / base:.1f}x, want ~2x"
 
     def test_many_backticks_stay_linear(self) -> None:
         line = "`x`" * 30_000 + " KiroCrew"

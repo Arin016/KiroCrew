@@ -150,11 +150,10 @@ describe('fmtCurrency', () => {
 })
 
 describe('fmtUnit', () => {
-  it('formats durations and sizes without Intl.DurationFormat', () => {
-    // DurationFormat is undefined on the Node 20 baseline; this is the
-    // replacement path, and this assertion is what would catch a future
-    // refactor reaching for the unavailable API.
-    expect(typeof (Intl as { DurationFormat?: unknown }).DurationFormat).toBe('undefined')
+  it('formats durations and sizes via NumberFormat (style: unit), not DurationFormat', () => {
+    // fmtUnit uses Intl.NumberFormat with style:'unit' rather than
+    // Intl.DurationFormat, so the output is stable regardless of whether the
+    // runtime ships DurationFormat (Node 24+ does, Node 20 did not).
     expect(fmtUnit(1.5, 'second', { maximumFractionDigits: 1 })).toBe('1.5s') // golden (en)
     expect(fmtUnit(90, 'minute')).toBe('90m') // golden (en)
     expect(fmtUnit(512, 'megabyte')).toBe('512MB') // golden (en)
@@ -206,15 +205,17 @@ describe('fmtDate / fmtTime / fmtDateTime / the numeric widths', () => {
     //
     // Asserted against the platform call itself rather than a golden literal, so
     // a CLDR data change moves both sides together instead of turning this red.
+    // No explicit timeZone on either side: both use the host's local timezone,
+    // which is what the "bare toLocale*" contract specifies.
     for (const code of SUPPORTED_LANGUAGES.filter(l => !l.devOnly).map(l => l.code)) {
       await withLanguage(code, () => {
         const tag = activeLocale()
         expect(fmtDateNumeric(INSTANT), `${code} date`)
-          .toBe(INSTANT.toLocaleDateString(tag, UTC))
+          .toBe(INSTANT.toLocaleDateString(tag))
         expect(fmtTimeNumeric(INSTANT), `${code} time`)
-          .toBe(INSTANT.toLocaleTimeString(tag, UTC))
+          .toBe(INSTANT.toLocaleTimeString(tag))
         expect(fmtDateTimeNumeric(INSTANT), `${code} date+time`)
-          .toBe(INSTANT.toLocaleString(tag, UTC))
+          .toBe(INSTANT.toLocaleString(tag))
       })
       __resetFormatterCache()
     }
