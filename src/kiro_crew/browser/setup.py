@@ -94,6 +94,10 @@ _LEGACY_DIRECT_PLAYWRIGHT_KEY = "npm:@playwright/mcp"
 _OWNED_KIRO_AGENT_FILES = OWNED_KIRO_AGENT_FILES
 _OWNED_CC_AGENT_FILES = OWNED_CC_AGENT_FILES
 
+# The env var carrying the Chrome-extension connection token. Named once so the
+# writer that ADDS it and the merge that must DROP it on mode-down agree.
+_EXTENSION_TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
+
 
 def is_playwright_installed() -> bool:
     """Check whether the Playwright MCP package is resolvable on PATH (OSS stub).
@@ -144,16 +148,6 @@ def get_extension_token() -> str | None:
     return None
 
 
-def get_playwright_mcp_env() -> dict[str, str]:
-    """Return env vars needed for Playwright MCP (extension token if set)."""
-    env: dict[str, str] = {}
-    if has_playwright_extension():
-        token = get_extension_token()
-        if token:
-            env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = token
-    return env
-
-
 def generate_playwright_config() -> Path:
     """Generate ``<config_dir>/playwright-config.json`` with absolute paths.
 
@@ -163,7 +157,17 @@ def generate_playwright_config() -> Path:
     config_path = config_dir() / "playwright-config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    storage_state = str(config_dir() / "playwright-storage-state.json")
+    storage_state = config_dir() / "playwright-storage-state.json"
+
+    # ``storageState`` is only wired in when the file is actually present.
+    # Playwright treats a missing storage-state path as a hard error and fails
+    # context creation, which surfaces to the agent as an opaque HTTP 400 on
+    # EVERY browser call — indistinguishable from a broken install. Auth is
+    # optional (public sites need none), so an absent cookie jar must degrade to
+    # an anonymous context rather than disable browsing altogether.
+    context_options: dict[str, Any] = {}
+    if storage_state.exists():
+        context_options["storageState"] = str(storage_state)
 
     config = {
         "browser": {
@@ -174,14 +178,12 @@ def generate_playwright_config() -> Path:
                 # Run headless: the live mirror in the dashboard Browser panel is
                 # the intended view surface, so a separate visible OS window is
                 # redundant (and breaks on display-less Linux hosts). Auth is
-                # seeded via ``storageState`` below, so no interactive SSO window
-                # is needed.
+                # seeded via ``storageState`` when present, so no interactive SSO
+                # window is needed.
                 "headless": True,
                 "args": [],
             },
-            "contextOptions": {
-                "storageState": storage_state,
-            },
+            "contextOptions": context_options,
         },
         "capabilities": ["network", "storage"],
     }
@@ -218,24 +220,6 @@ def refresh_storage_state() -> dict[str, Any]:
         "count": len(cookies),
         "expired": len(expired),
     }
-
-
-def get_playwright_mcp_args() -> list[str]:
-    """Return Playwright MCP launch args based on platform and mode.
-
-    Extension mode (--extension): attaches to user's running Chrome with existing auth.
-    Config mode (--config): launches separate Chromium with cookie injection.
-    """
-    args = ["@playwright/mcp"]
-    if has_playwright_extension():
-        args.append("--extension")
-        return args
-    config_path = config_dir() / "playwright-config.json"
-    if config_path.exists():
-        args.extend(["--config", str(config_path)])
-    if is_headed():
-        args.append("--headed")
-    return args
 
 
 def _kirocrew_bin() -> str:
@@ -324,6 +308,30 @@ def migrate_owned_playwright_registration() -> None:
     _migrate_owned_kiro_registration()
     _converge_kirocrew_mcp_json()
     _converge_playwright_agent_files()
+    _heal_browse_mode_drift()
+
+
+def _heal_browse_mode_drift() -> None:
+    """Re-apply the recorded browse mode to the owned agent specs on boot.
+
+    The converge steps above collapse DUPLICATE and legacy proxy keys. None of
+    them notices a single canonical entry whose ``args`` are stale for the mode
+    the user actually chose, so an install wired before the mode write-path was
+    fixed keeps launching the wrong browser across upgrade and restart — and the
+    dashboard already shows the mode they picked, so nothing prompts them to
+    re-toggle it.
+
+    Scoped to the agent specs on purpose: kiro's global ``mcp.json`` is already
+    converged by :func:`_migrate_owned_kiro_registration`, and the specs are the
+    files kiro-cli actually launches from — the drifted shape in practice is a
+    correct ``mcp.json`` beside a stale spec. Delegating to
+    :func:`_sync_agent_specs_proxy_entry` inherits its invariants unchanged: only
+    owned files, only entries whose launch target is already this proxy (so
+    Playwright is never ADDED and a user's own server is never rewritten),
+    change-detected so a healthy install performs no write, and declined outright
+    from a worktree or isolated home.
+    """
+    _sync_agent_specs_proxy_entry(_proxy_entry_for_mode())
 
 
 def _migrate_owned_kiro_registration() -> None:
@@ -691,9 +699,49 @@ def _kiro_mcp_locked() -> Iterator[None]:
 
 def _patch_mcp_extension_unlocked(token: str) -> None:
     """Write the ``--extension`` proxy entry. Caller MUST hold ``_kiro_mcp_locked``."""
+    _write_proxy_entry_unlocked(
+        {
+            "command": _kirocrew_bin(),
+            "args": ["mcp-playwright-proxy", "--extension"],
+            "env": {_EXTENSION_TOKEN_ENV: token},
+        }
+    )
+
+
+def _patch_mcp_headless_unlocked() -> None:
+    """Write the headless-config proxy entry. Caller MUST hold ``_kiro_mcp_locked``."""
+    _write_proxy_entry_unlocked(
+        {
+            "command": _kirocrew_bin(),
+            "args": [
+                "mcp-playwright-proxy",
+                "--config",
+                str(config_dir() / "playwright-config.json"),
+            ],
+        }
+    )
+
+
+def _write_proxy_entry_unlocked(entry: dict[str, Any]) -> None:
+    """Publish *entry* as the product's Playwright server everywhere it is read.
+
+    Two files matter, and writing only the first is a silent no-op:
+
+    * ``~/.kiro/settings/mcp.json`` — kiro's global registry.
+    * ``~/.kiro/agents/*.json`` — what kiro-cli ACTUALLY launches MCP servers
+      from. ``rebuild_agent_config`` merges the global file with ``setdefault``,
+      so a spec that already declares a Playwright server keeps its OLD entry
+      forever. Updating the global file alone therefore leaves the browse mode
+      the agent really gets unchanged.
+
+    Both receive the SAME spec, so the launch shape cannot drift between them.
+
+    Caller MUST hold ``_kiro_mcp_locked``.
+    """
     mcp_json = _kiro_mcp_json_path()
     if not mcp_json.exists():
         return
+    canonical = mcp_server_alias(_PLAYWRIGHT_MCP_PACKAGE)
     try:
         data = json.loads(mcp_json.read_text(encoding="utf-8"))
         # A user-owned mcp.json may hold valid JSON that isn't an object (e.g.
@@ -706,66 +754,230 @@ def _patch_mcp_extension_unlocked(token: str) -> None:
         servers = data.setdefault("mcpServers", {})
         if not isinstance(servers, dict):
             servers = data["mcpServers"] = {}
-        entry = {
-            "command": _kirocrew_bin(),
-            "args": ["mcp-playwright-proxy", "--extension"],
-            "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": token},
-        }
-        canonical = mcp_server_alias(_PLAYWRIGHT_MCP_PACKAGE)
         _drop_superseded_playwright(servers, canonical)
         servers[canonical] = entry
         mcp_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # 0600 unconditionally: the entry carries the extension token in
+        # extension mode, and the file holds other servers' credentials in both.
         platform_compat.chmod_safe(str(mcp_json), 0o600)
         _record_owned_mcp_key(canonical)
     except (json.JSONDecodeError, OSError):
-        pass
+        return
+    _sync_agent_specs_proxy_entry(entry)
 
 
-def _patch_mcp_headless_unlocked() -> None:
-    """Write the headless-config proxy entry. Caller MUST hold ``_kiro_mcp_locked``."""
-    mcp_json = _kiro_mcp_json_path()
-    if not mcp_json.exists():
+def _proxy_entry_for_mode() -> dict[str, Any]:
+    """Return the proxy spec for the recorded browse mode.
+
+    Extension mode needs a token to be usable, so a flagged-but-tokenless
+    install resolves to the headless config rather than an entry whose
+    ``PLAYWRIGHT_MCP_EXTENSION_TOKEN`` would be empty. Single source of the mode
+    decision, shared by the mcp.json patch path and the boot-time heal, so the
+    two cannot disagree about which mode is in effect.
+    """
+    if has_playwright_extension():
+        token = get_extension_token() or ""
+        if token:
+            return {
+                "command": _kirocrew_bin(),
+                "args": ["mcp-playwright-proxy", "--extension"],
+                "env": {_EXTENSION_TOKEN_ENV: token},
+            }
+    return {
+        "command": _kirocrew_bin(),
+        "args": [
+            "mcp-playwright-proxy",
+            "--config",
+            str(config_dir() / "playwright-config.json"),
+        ],
+    }
+
+
+def _merge_proxy_launch_fields(existing: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    """Return *existing* with only the MODE-dependent fields taken from *entry*.
+
+    A browse-mode change decides how the server is launched — nothing else. Every
+    sibling key is policy the user or the dashboard set (``disabled``,
+    ``disabledTools``, ``autoApprove``, tool filters), so replacing the whole
+    object would silently re-enable a tool someone deliberately turned off.
+
+    ``command`` is deliberately NOT synced. ``_kirocrew_bin`` degrades to a bare
+    ``"kirocrew"`` when PATH cannot resolve it — which a GUI/desktop launch that
+    inherits no shell profile routinely cannot — so copying it over would replace
+    a working absolute interpreter path with a name that fails at the next spawn.
+    The spec's resolved command is refreshed by ``rebuild_agent_config``, whose
+    job that is; here it is only filled in when the entry has none at all.
+
+    ``env`` is merged key-wise rather than swapped: the entry contributes only
+    ``PLAYWRIGHT_MCP_EXTENSION_TOKEN``, and any other variable on the server
+    belongs to whoever put it there. Leaving extension mode drops the token key
+    specifically — a stale secret must not linger in the spec — and removes an
+    ``env`` map that this leaves empty.
+    """
+    merged = dict(existing)
+    if not merged.get("command"):
+        merged["command"] = entry["command"]
+    merged["args"] = list(entry["args"])
+
+    env_in = entry.get("env")
+    env_out = dict(merged["env"]) if isinstance(merged.get("env"), dict) else {}
+    if isinstance(env_in, dict) and env_in:
+        env_out.update(env_in)
+    else:
+        env_out.pop(_EXTENSION_TOKEN_ENV, None)
+    if env_out:
+        merged["env"] = env_out
+    else:
+        merged.pop("env", None)
+    return merged
+
+
+def _tighten_secret_bearing_spec(path: Path, servers: dict[str, Any]) -> None:
+    """chmod *path* to 0600 when one of its proxy entries carries the secret.
+
+    Judged from what is ON DISK, not from the entry being applied: the exposure
+    is a property of the file's current contents. Only narrows, and only when
+    group or other actually hold a bit, so a spec already at 0600 is untouched
+    and a secret-free headless spec keeps whatever permissions its owner chose.
+    """
+    if not any(
+        _spec_is_proxy(s) and isinstance(s, dict) and (s.get("env") or {}).get(_EXTENSION_TOKEN_ENV)
+        for s in servers.values()
+    ):
         return
     try:
-        data = json.loads(mcp_json.read_text(encoding="utf-8"))
-        # See _patch_mcp_extension_unlocked: guard a non-object mcp.json /
-        # non-dict mcpServers so setdefault/servers[...] can't raise an uncaught
-        # AttributeError/TypeError.
-        if not isinstance(data, dict):
-            data = {}
-        servers = data.setdefault("mcpServers", {})
-        if not isinstance(servers, dict):
-            servers = data["mcpServers"] = {}
-        config_path = str(config_dir() / "playwright-config.json")
-        entry = {
-            "command": _kirocrew_bin(),
-            "args": ["mcp-playwright-proxy", "--config", config_path],
-        }
-        canonical = mcp_server_alias(_PLAYWRIGHT_MCP_PACKAGE)
-        _drop_superseded_playwright(servers, canonical)
-        servers[canonical] = entry
-        mcp_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        _record_owned_mcp_key(canonical)
-    except (json.JSONDecodeError, OSError):
-        pass
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            platform_compat.chmod_safe(str(path), 0o600)
+    except OSError:
+        return
+
+
+def _sync_agent_specs_proxy_entry(entry: dict[str, Any]) -> int:
+    """Repoint every Kiro Crew-owned agent spec declaring the proxy at *entry*.
+
+    Scoped to the EXACT filenames in ``_OWNED_KIRO_AGENT_FILES`` /
+    ``_OWNED_CC_AGENT_FILES`` — an allowlist, not a glob. A user's own agents
+    live in the same directories (even one named ``kirocrew-custom.json``) and
+    may carry intentionally distinct Playwright args or env, so matching
+    generated filenames is what keeps a mode change from rewriting a spec this
+    product did not author. Mirrors ``_converge_playwright_agent_files``.
+
+    Within those files, updates each owning key IN PLACE — no renames, no
+    deletions — so existing ``@<server>`` references in ``tools`` /
+    ``allowedTools`` keep resolving. Only entries whose launch target is the
+    proxy are touched, so a hand-authored Playwright server under a canonical
+    key is left alone, and Playwright is never ADDED to an agent that declared
+    none.
+
+    Returns the number of spec files updated.
+    """
+    # Function-local import: ``agent`` imports this module's package, so a
+    # top-level import here is a circular import. Only the shared-agent-home
+    # guard is needed, and only at call time.
+    from kiro_crew.agent import _decline_shared_agent_home
+
+    # An instance booted from a git worktree or its own isolated home is
+    # throwaway, but these specs are shared with the real install — repointing
+    # them at this tree would make the live gateway launch code that is about to
+    # disappear. Same guard, same reason, as ``rebuild_agent_config``'s.
+    if _decline_shared_agent_home() is not None:
+        return 0
+
+    spec_paths: list[Path] = []
+    kiro_dir = kiro_agents_dir()
+    for name in _OWNED_KIRO_AGENT_FILES:
+        p = kiro_dir / name
+        if p.is_file():
+            spec_paths.append(p)
+    cc_dir = Path.home() / ".claude" / "agents"
+    # The Claude sidecar lives at a HOST-absolute path that no isolation variable
+    # relocates: KIROCREW_HOME moves the data home and KIRO_HOME moves the kiro
+    # agents dir, but ``Path.home()/.claude`` is the real user's either way. An
+    # instance running on its own data home would therefore stamp ITS config path
+    # into the host's sidecar, and a pod's teardown then leaves the host launching
+    # a browser against a deleted file. The shared-agent-home guard above cannot
+    # catch this — it reasons about ``kiro_agents_dir()``, a different directory —
+    # so skip the sidecar whenever the data home is not the ambient default.
+    if not (os.environ.get("KIROCREW_HOME") or os.environ.get("KIROCREW_POD")):
+        for name in _OWNED_CC_AGENT_FILES:
+            p = cc_dir / name
+            if p.is_file():
+                spec_paths.append(p)
+
+    updated = 0
+    for path in spec_paths:
+        # Serialize on the SAME sidecar the app bridges use for this file. The
+        # read-modify-write below is otherwise racy against app registration:
+        # whichever side writes second wins wholesale, so an app's MCP server
+        # entry can silently disappear (see ``_kiro_mcp_locked`` for the same
+        # hazard on kiro's global mcp.json). The spec is re-read INSIDE the lock
+        # so a concurrent registration is never overwritten with a stale copy.
+        #
+        # Function-local import: ``apps.bridges`` pulls in the app runtime, so a
+        # top-level import here is a circular import.
+        from kiro_crew.apps.bridges import _mcp_lock
+
+        with _mcp_lock(target=path):
+            try:
+                spec = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            servers = spec.get("mcpServers")
+            if not isinstance(servers, dict):
+                continue
+            changed = False
+            for name, existing in list(servers.items()):
+                if not _spec_is_proxy(existing):
+                    continue
+                merged = _merge_proxy_launch_fields(existing, entry)
+                if merged != existing:
+                    servers[name] = merged
+                    changed = True
+            if not changed:
+                # Content already matches, but the FILE can still be group- or
+                # world-readable while holding the connection secret: another
+                # writer landing at the umask default creates exactly that state,
+                # and returning early here would leave it that way — now on every
+                # boot, since the heal reaches this path unattended. Tighten in
+                # place; no content rewrite, and a no-op for an already-0600 spec.
+                _tighten_secret_bearing_spec(path, servers)
+                continue
+            if entry.get("env"):
+                # This entry carries the extension token. A spec left at the
+                # umask default (commonly 0644) would publish that secret to
+                # every local account, so tighten rather than inherit — the
+                # token is new to the file, and 0600 only ever narrows access.
+                mode: int | None = 0o600
+            else:
+                # No secret introduced: preserve whatever the file already had
+                # rather than imposing a permission decision (mirrors
+                # ``_converge_playwright_agent_files``).
+                try:
+                    mode = stat.S_IMODE(path.stat().st_mode)
+                except OSError:
+                    mode = None
+            try:
+                # Atomic write: a live kiro-cli session reads these specs to
+                # spawn MCP servers, so a torn write could be parsed as a
+                # corrupt config and take the ACP process down.
+                atomic_write(path, json.dumps(spec, indent=2), mode=mode)
+            except OSError:
+                continue
+            updated += 1
+    return updated
 
 
 def _patch_mcp_for_mode_unlocked() -> None:
     """Write the proxy entry matching the configured browse mode.
 
-    Extension mode needs a token to be usable, so a flagged-but-tokenless install
-    falls back to the headless config rather than writing an entry whose
-    ``PLAYWRIGHT_MCP_EXTENSION_TOKEN`` is empty. Every registration path shares
-    this dispatch so the mode decision cannot drift between them.
+    Delegates the mode decision to :func:`_proxy_entry_for_mode` so this path and
+    the boot-time heal cannot disagree about which mode is in effect.
 
     Caller MUST hold ``_kiro_mcp_locked``.
     """
-    if has_playwright_extension():
-        token = get_extension_token() or ""
-        if token:
-            _patch_mcp_extension_unlocked(token)
-            return
-    _patch_mcp_headless_unlocked()
+    _write_proxy_entry_unlocked(_proxy_entry_for_mode())
 
 
 def patch_mcp_extension(token: str) -> None:

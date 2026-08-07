@@ -356,8 +356,12 @@ def _setup(agent_only: bool = False, electron_only: bool = False, clean: bool = 
 
     # Always regenerate config and register proxy in mcp.json (preserve extension mode)
     try:
-        generate_playwright_config()
+        # Storage state FIRST: generate_playwright_config only wires
+        # contextOptions.storageState when the jar is already on disk, so
+        # generating the config first leaves a fresh install with no auth until
+        # something regenerates it later.
         refresh_storage_state()
+        generate_playwright_config()
         # register_playwright_proxy owns the shared mcp.json lock, the
         # user-entry guard, and the create-when-absent path — the patch
         # primitives have none of those.

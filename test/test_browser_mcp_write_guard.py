@@ -205,10 +205,12 @@ class TestWritesHappenUnderTheLock:
         observed: list[bool] = []
 
         monkeypatch.setattr(setup_mod, "has_playwright_extension", lambda: False)
+        # Observe at the single write helper the mode dispatch now delegates to;
+        # the assertion is unchanged — the write must see the lock already held.
         monkeypatch.setattr(
             setup_mod,
-            "_patch_mcp_headless_unlocked",
-            lambda: observed.append(_try_lock_noblock(lock_path)),
+            "_write_proxy_entry_unlocked",
+            lambda entry: observed.append(_try_lock_noblock(lock_path)),
         )
         setup_mod._migrate_owned_kiro_registration()
 

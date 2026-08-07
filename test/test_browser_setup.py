@@ -26,7 +26,6 @@ from kiro_crew.browser.setup import (
     converge_playwright_servers,
     ensure_playwright_installed,
     generate_playwright_config,
-    get_playwright_mcp_args,
     inject_cookies_via_playwright,
     is_headed,
     is_playwright_installed,
@@ -91,22 +90,6 @@ class TestIsHeaded:
         # Chromium window like macOS, not the Linux headless mode.
         monkeypatch.setattr("platform.system", lambda: "Windows")
         assert is_headed() is True
-
-
-class TestGetPlaywrightMcpArgs:
-    def test_includes_headed_on_macos(self, monkeypatch):
-        monkeypatch.setattr(setup_mod, "has_playwright_extension", lambda: False)
-        monkeypatch.setattr(setup_mod, "is_headed", lambda: True)
-        args = get_playwright_mcp_args()
-        assert "--headed" in args
-        assert "@playwright/mcp" in args
-
-    def test_no_headed_on_linux(self, monkeypatch):
-        monkeypatch.setattr(setup_mod, "has_playwright_extension", lambda: False)
-        monkeypatch.setattr(setup_mod, "is_headed", lambda: False)
-        args = get_playwright_mcp_args()
-        assert "--headed" not in args
-        assert "@playwright/mcp" in args
 
 
 # ── TestInjectCookiesViaPlaywright ───────────────────────────────────────────
@@ -192,7 +175,9 @@ class TestGeneratePlaywrightConfig:
         assert "browser" in config
         assert "capabilities" in config
         assert config["browser"]["browserName"] == "chromium"
-        assert "storageState" in config["browser"]["contextOptions"]
+        # contextOptions is always present; ``storageState`` is conditional on the
+        # cookie jar existing (see TestGeneratePlaywrightConfigStorageState).
+        assert isinstance(config["browser"]["contextOptions"], dict)
 
     def test_storage_state_path_is_absolute(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         # The config path now derives from config_dir(), which reads KIROCREW_HOME
@@ -200,6 +185,10 @@ class TestGeneratePlaywrightConfig:
         # resolves from the patched Path.home -> ~/.kiro/crew under tmp_path.
         monkeypatch.delenv("KIROCREW_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # ``storageState`` is only emitted when the jar is on disk, so create it.
+        jar = tmp_path / ".kiro" / "crew" / "playwright-storage-state.json"
+        jar.parent.mkdir(parents=True, exist_ok=True)
+        jar.write_text('{"cookies": [], "origins": []}')
         config_path = generate_playwright_config()
         config = json.loads(config_path.read_text(encoding="utf-8"))
         storage_state = config["browser"]["contextOptions"]["storageState"]
@@ -373,33 +362,38 @@ class TestRefreshStorageState:
         assert isinstance(result["expired"], int)
 
 
-# ── TestGetPlaywrightMcpArgsWithConfig ───────────────────────────────────────
+# ── TestGeneratePlaywrightConfigStorageState ─────────────────────────────────
 
 
-class TestGetPlaywrightMcpArgsWithConfig:
-    def test_includes_config_flag_when_file_exists(
+class TestGeneratePlaywrightConfigStorageState:
+    """``storageState`` must only be wired in when the cookie jar exists.
+
+    Playwright fails context creation on a missing storage-state path, which the
+    agent sees as an opaque HTTP 400 on every browser call.
+    """
+
+    def _ctx_options(self, tmp_path: Path) -> dict:
+        cfg = json.loads((tmp_path / ".kiro" / "crew" / "playwright-config.json").read_text())
+        return cfg["browser"]["contextOptions"]
+
+    def test_omitted_when_storage_state_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # Data home moved to ~/.kiro/crew (config_dir()); clear KIROCREW_HOME so
-        # config_dir() resolves from the patched Path.home under tmp_path.
         monkeypatch.delenv("KIROCREW_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr(setup_mod, "is_headed", lambda: False)
-        # Create the config file
-        config_path = tmp_path / ".kiro" / "crew" / "playwright-config.json"
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text("{}")
-        args = get_playwright_mcp_args()
-        assert "--config" in args
-        assert str(config_path) in args
+        generate_playwright_config()
+        assert "storageState" not in self._ctx_options(tmp_path)
 
-    def test_no_config_flag_when_file_absent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_included_when_storage_state_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.delenv("KIROCREW_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr(setup_mod, "is_headed", lambda: False)
-        args = get_playwright_mcp_args()
-        assert "--config" not in args
-        assert "@playwright/mcp" in args
+        state = tmp_path / ".kiro" / "crew" / "playwright-storage-state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"cookies": [], "origins": []}')
+        generate_playwright_config()
+        assert self._ctx_options(tmp_path)["storageState"] == str(state)
 
 
 # ── TestPatchWritesCanonicalKey ──────────────────────────────────────────────
@@ -1161,3 +1155,400 @@ class TestConvergeForensics:
 
         assert agent_mod.AGENT_FILENAME == agent_files.AGENT_FILENAME
         assert agent_mod.AGENT_FILENAME in agent_files.OWNED_KIRO_AGENT_FILES
+
+
+# ── TestSyncAgentSpecsProxyEntry ─────────────────────────────────────────────
+
+
+class TestSyncAgentSpecsProxyEntry:
+    """kiro-cli launches MCP servers from ``~/.kiro/agents/*.json``.
+
+    A mode change that only reaches ``~/.kiro/settings/mcp.json`` is invisible to
+    the agent, because ``rebuild_agent_config`` merges the global file with
+    ``setdefault`` and so preserves whatever the spec already declared.
+    """
+
+    EXT_ENTRY = {
+        "command": "/opt/kirocrew",
+        "args": ["mcp-playwright-proxy", "--extension"],
+        "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": "tok"},
+    }
+
+    def _agents_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        agents = tmp_path / ".kiro" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(setup_mod, "kiro_agents_dir", lambda: agents)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        import kiro_crew.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "_decline_shared_agent_home", lambda **_: None)
+        return agents
+
+    STALE = {
+        "command": "/opt/kirocrew",
+        "args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"],
+    }
+
+    def _write_spec(self, agents: Path, name: str, servers: dict) -> Path:
+        p = agents / name
+        p.write_text(json.dumps({"name": name.removesuffix(".json"), "mcpServers": servers}))
+        return p
+
+    def _servers(self, path: Path) -> dict:
+        return json.loads(path.read_text())["mcpServers"]
+
+    def test_replaces_stale_config_entry_with_new_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(self.STALE)})
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 1
+        assert self._servers(spec)["playwright-mcp"] == self.EXT_ENTRY
+
+    def test_updates_legacy_key_in_place_preserving_refs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A legacy key is repointed, never renamed/removed, so an existing
+        # ``@playwright-proxy-mcp`` reference in tools/allowedTools still resolves.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-proxy-mcp": dict(self.STALE)})
+        setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY)
+        servers = self._servers(spec)
+        assert servers["playwright-proxy-mcp"] == self.EXT_ENTRY
+        assert "playwright-mcp" not in servers
+
+    def test_leaves_user_authored_agent_file_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A hand-authored agent sharing the name prefix is NOT an owned file, so
+        # its deliberately-distinct Playwright wiring must survive a mode change.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        custom = self._write_spec(
+            agents, "kirocrew-custom.json", {"playwright-mcp": dict(self.STALE)}
+        )
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert self._servers(custom)["playwright-mcp"] == self.STALE
+
+    def test_leaves_user_authored_non_proxy_server_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        user_entry = {"command": "npx", "args": ["@playwright/mcp", "--headed"]}
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(user_entry)})
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert self._servers(spec)["playwright-mcp"] == user_entry
+
+    def test_never_adds_playwright_to_an_agent_without_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew-lite.json", {"kirocrew-core": {"command": "x"}})
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert "playwright-mcp" not in self._servers(spec)
+
+    def test_preserves_resolved_command_against_unresolved_bare_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # _kirocrew_bin() degrades to a bare "kirocrew" when PATH cannot resolve
+        # it (a GUI launch inherits no shell profile). A mode toggle must not
+        # trade the spec's working absolute path for a name that fails to spawn.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        existing = {
+            "command": "/opt/venv/bin/kirocrew",
+            "args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"],
+        }
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": existing})
+        bare = {
+            "command": "kirocrew",
+            "args": ["mcp-playwright-proxy", "--extension"],
+            "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": "tok"},
+        }
+        assert setup_mod._sync_agent_specs_proxy_entry(bare) == 1
+        got = self._servers(spec)["playwright-mcp"]
+        assert got["command"] == "/opt/venv/bin/kirocrew"
+        assert got["args"] == ["mcp-playwright-proxy", "--extension"]
+
+    def test_fills_in_command_when_spec_has_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(
+            agents,
+            "kirocrew.json",
+            {"playwright-mcp": {"args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"]}},
+        )
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 1
+        assert self._servers(spec)["playwright-mcp"]["command"] == self.EXT_ENTRY["command"]
+
+    def test_preserves_per_server_policy_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A mode change decides HOW the server launches. Sibling keys are policy
+        # someone set deliberately — wiping disabledTools would silently
+        # re-enable a tool that was turned off.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        existing = dict(self.STALE)
+        existing.update(
+            {
+                "disabled": False,
+                "disabledTools": ["browser_evaluate"],
+                "autoApprove": ["browser_navigate"],
+            }
+        )
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": existing})
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 1
+        got = self._servers(spec)["playwright-mcp"]
+        assert got["args"] == self.EXT_ENTRY["args"]
+        assert got["disabledTools"] == ["browser_evaluate"]
+        assert got["autoApprove"] == ["browser_navigate"]
+        assert got["disabled"] is False
+
+    def test_leaving_extension_mode_drops_the_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A stale secret must not linger once the mode no longer uses it, while an
+        # unrelated env var the user set is left in place.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        existing = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--extension"],
+            "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": "tok", "HTTP_PROXY": "http://p:8080"},
+        }
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": existing})
+        headless = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"],
+        }
+        assert setup_mod._sync_agent_specs_proxy_entry(headless) == 1
+        env = self._servers(spec)["playwright-mcp"]["env"]
+        assert "PLAYWRIGHT_MCP_EXTENSION_TOKEN" not in env
+        assert env["HTTP_PROXY"] == "http://p:8080"
+
+    def test_no_write_when_merge_is_a_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # Already on the target mode: nothing to change, so no rewrite at all.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(self.EXT_ENTRY)})
+        before = spec.stat().st_mtime_ns
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert spec.stat().st_mtime_ns == before
+
+    def test_syncs_the_cc_sidecar_on_a_default_data_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIROCREW_POD", raising=False)
+        cc = tmp_path / ".claude" / "agents"
+        cc.mkdir(parents=True, exist_ok=True)
+        sidecar = cc / "kirocrew.mcp.json"
+        sidecar.write_text(json.dumps({"mcpServers": {"playwright-mcp": dict(self.STALE)}}))
+        assert agents.exists()
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 1
+        assert self._servers(sidecar)["playwright-mcp"]["args"] == self.EXT_ENTRY["args"]
+
+    @pytest.mark.parametrize("var", ["KIROCREW_HOME", "KIROCREW_POD"])
+    def test_leaves_the_host_cc_sidecar_alone_from_an_isolated_instance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, var: str
+    ):
+        # ``Path.home()/.claude`` is host-absolute — no isolation variable moves
+        # it — so an instance on its own data home must not stamp its config path
+        # into the host's sidecar, which teardown would leave dangling.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIROCREW_POD", raising=False)
+        monkeypatch.setenv(var, str(tmp_path / "isolated"))
+        cc = tmp_path / ".claude" / "agents"
+        cc.mkdir(parents=True, exist_ok=True)
+        sidecar = cc / "kirocrew.mcp.json"
+        sidecar.write_text(json.dumps({"mcpServers": {"playwright-mcp": dict(self.STALE)}}))
+        assert agents.exists()
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert self._servers(sidecar)["playwright-mcp"] == self.STALE
+
+    @pytest.mark.skipif(not IS_POSIX, reason="POSIX permission bits only")
+    def test_tightens_a_world_readable_secret_spec_even_when_content_matches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Another writer can land a token-bearing spec at the umask default. The
+        # content then already matches, so the no-op path must still narrow the
+        # file rather than leaving the secret readable by other local accounts.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(self.EXT_ENTRY)})
+        os.chmod(spec, 0o644)
+        body_before = spec.read_text()
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert stat.S_IMODE(spec.stat().st_mode) == 0o600
+        assert spec.read_text() == body_before
+
+    @pytest.mark.skipif(not IS_POSIX, reason="POSIX permission bits only")
+    def test_does_not_tighten_a_secret_free_spec(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # No secret on disk, so the owner's permission choice is left alone.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        headless = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"],
+        }
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(headless)})
+        os.chmod(spec, 0o644)
+        assert setup_mod._sync_agent_specs_proxy_entry(headless) == 0
+        assert stat.S_IMODE(spec.stat().st_mode) == 0o644
+
+    @pytest.mark.skipif(not IS_POSIX, reason="POSIX permission bits only")
+    def test_token_bearing_spec_is_tightened_not_inherited(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The entry carries the extension token, so a spec sitting at the umask
+        # default must NOT inherit 0644 — that would publish the token to every
+        # local account.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(self.STALE)})
+        os.chmod(spec, 0o644)
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 1
+        assert stat.S_IMODE(spec.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(not IS_POSIX, reason="POSIX permission bits only")
+    def test_headless_entry_preserves_existing_bits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # No secret is introduced by a headless entry, so the file's own
+        # permission decision is left alone.
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        ext_spec = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--extension"],
+            "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": "tok"},
+        }
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": ext_spec})
+        os.chmod(spec, 0o640)
+        headless = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"],
+        }
+        assert setup_mod._sync_agent_specs_proxy_entry(headless) == 1
+        assert stat.S_IMODE(spec.stat().st_mode) == 0o640
+
+    def test_declines_from_worktree_or_isolated_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        spec = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(self.STALE)})
+        import kiro_crew.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "_decline_shared_agent_home", lambda **_: spec)
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 0
+        assert self._servers(spec)["playwright-mcp"] == self.STALE
+
+    def test_malformed_spec_is_skipped_not_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        agents = self._agents_dir(tmp_path, monkeypatch)
+        (agents / "kirocrew-lite.json").write_text("{not json")
+        good = self._write_spec(agents, "kirocrew.json", {"playwright-mcp": dict(self.STALE)})
+        assert setup_mod._sync_agent_specs_proxy_entry(self.EXT_ENTRY) == 1
+        assert self._servers(good)["playwright-mcp"] == self.EXT_ENTRY
+
+
+# ── TestHealBrowseModeDrift ──────────────────────────────────────────────────
+
+
+class TestHealBrowseModeDrift:
+    """Gateway boot must re-apply the recorded mode, not just collapse duplicates.
+
+    The converge sweeps key off duplicate/legacy keys, so an install with exactly
+    one canonical proxy carrying stale args stayed broken across restart while the
+    dashboard showed the mode the user had already chosen.
+    """
+
+    def _wire(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        agents = tmp_path / ".kiro" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(setup_mod, "kiro_agents_dir", lambda: agents)
+        import kiro_crew.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "_decline_shared_agent_home", lambda **_: None)
+        mcp = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(setup_mod, "_kiro_mcp_json_path", lambda: mcp)
+        # Extension mode recorded, with a token, so the mode resolves to --extension.
+        monkeypatch.setattr(setup_mod, "has_playwright_extension", lambda: True)
+        monkeypatch.setattr(setup_mod, "get_extension_token", lambda: "tok")
+        monkeypatch.setattr(setup_mod, "_kirocrew_bin", lambda: "/opt/kirocrew")
+        return mcp, agents
+
+    def _spec_args(self, path: Path) -> list:
+        return json.loads(path.read_text())["mcpServers"]["playwright-mcp"]["args"]
+
+    def test_heals_stale_agent_spec_even_when_mcp_json_is_correct(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The real-world broken shape: the global file already says --extension,
+        # so anything keying off mcp.json alone concludes the install is healthy.
+        mcp, agents = self._wire(tmp_path, monkeypatch)
+        correct = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--extension"],
+            "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": "tok"},
+        }
+        mcp.write_text(json.dumps({"mcpServers": {"playwright-mcp": correct}}))
+        spec = agents / "kirocrew.json"
+        spec.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright-mcp": {
+                            "command": "/opt/kirocrew",
+                            "args": ["mcp-playwright-proxy", "--config", "/tmp/pw.json"],
+                        }
+                    }
+                }
+            )
+        )
+        setup_mod._heal_browse_mode_drift()
+        assert self._spec_args(spec) == ["mcp-playwright-proxy", "--extension"]
+
+    def test_no_write_when_already_consistent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Runs on every boot, so a healthy install must not be rewritten.
+        mcp, agents = self._wire(tmp_path, monkeypatch)
+        entry = {
+            "command": "/opt/kirocrew",
+            "args": ["mcp-playwright-proxy", "--extension"],
+            "env": {"PLAYWRIGHT_MCP_EXTENSION_TOKEN": "tok"},
+        }
+        mcp.write_text(json.dumps({"mcpServers": {"playwright-mcp": entry}}, indent=2))
+        spec = agents / "kirocrew.json"
+        spec.write_text(json.dumps({"mcpServers": {"playwright-mcp": dict(entry)}}))
+        mcp_before = mcp.stat().st_mtime_ns
+        spec_before = spec.stat().st_mtime_ns
+        setup_mod._heal_browse_mode_drift()
+        assert mcp.stat().st_mtime_ns == mcp_before
+        assert spec.stat().st_mtime_ns == spec_before
+
+    def test_never_adds_playwright_to_a_spec_without_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Runs unattended on every boot, so the "never add" invariant matters more
+        # here than on an explicit user action.
+        mcp, agents = self._wire(tmp_path, monkeypatch)
+        spec = agents / "kirocrew.json"
+        spec.write_text(json.dumps({"mcpServers": {"kirocrew-core": {"command": "x"}}}))
+        setup_mod._heal_browse_mode_drift()
+        assert "playwright-mcp" not in json.loads(spec.read_text())["mcpServers"]
+        assert not mcp.exists()
+
+    def test_boot_migration_invokes_the_heal(self, monkeypatch: pytest.MonkeyPatch):
+        calls: list[str] = []
+        for name in (
+            "_migrate_owned_kiro_registration",
+            "_converge_kirocrew_mcp_json",
+            "_converge_playwright_agent_files",
+            "_heal_browse_mode_drift",
+        ):
+            monkeypatch.setattr(setup_mod, name, lambda n=name: calls.append(n))
+        setup_mod.migrate_owned_playwright_registration()
+        assert calls[-1] == "_heal_browse_mode_drift"
