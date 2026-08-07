@@ -5071,6 +5071,7 @@
     },
     "terminalCompletion": {
       "path_completions": "पथ सुझाव",
+      "command_completions": "कमांड सुझाव",
       "use_this_folder": "इस फ़ोल्डर का इस्तेमाल करें",
       "dir_truncated": "{{dir}} (छोटा किया गया)"
     },

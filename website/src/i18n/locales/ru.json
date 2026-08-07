@@ -5193,6 +5193,7 @@
     },
     "terminalCompletion": {
       "path_completions": "Автодополнение путей",
+      "command_completions": "Автодополнение команд",
       "use_this_folder": "использовать эту папку",
       "dir_truncated": "{{dir}} (усечено)"
     },

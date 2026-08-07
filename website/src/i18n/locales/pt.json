@@ -5132,6 +5132,7 @@
     },
     "terminalCompletion": {
       "path_completions": "Sugestões de caminho",
+      "command_completions": "Sugestões de comando",
       "use_this_folder": "usar esta pasta",
       "dir_truncated": "{{dir}} (truncado)"
     },

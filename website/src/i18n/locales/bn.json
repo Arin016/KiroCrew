@@ -5071,6 +5071,7 @@
     },
     "terminalCompletion": {
       "path_completions": "পাথ কমপ্লিশন",
+      "command_completions": "কমান্ড কমপ্লিশন",
       "use_this_folder": "এই ফোল্ডার ব্যবহার করো",
       "dir_truncated": "{{dir}} (সংক্ষিপ্ত করা হয়েছে)"
     },

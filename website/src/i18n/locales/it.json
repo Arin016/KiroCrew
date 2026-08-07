@@ -5132,6 +5132,7 @@
     },
     "terminalCompletion": {
       "path_completions": "Completamenti dei percorsi",
+      "command_completions": "Completamenti dei comandi",
       "use_this_folder": "usa questa cartella",
       "dir_truncated": "{{dir}} (troncato)"
     },

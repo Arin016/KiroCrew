@@ -5061,6 +5061,7 @@
     "terminalCompletion": {
       "dir_truncated": "{{dir}} (切り詰め)",
       "path_completions": "パス補完",
+      "command_completions": "コマンド補完",
       "use_this_folder": "このフォルダーを使用"
     },
     "terminalKeyBar": {

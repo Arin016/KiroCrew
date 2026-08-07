@@ -4929,6 +4929,7 @@
     },
     "terminalCompletion": {
       "path_completions": "路径补全",
+      "command_completions": "命令补全",
       "use_this_folder": "使用此文件夹",
       "dir_truncated": "{{dir}}（已截断）"
     },

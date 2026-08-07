@@ -1352,7 +1352,8 @@
     },
     "terminalCompletion": {
       "use_this_folder": "use this folder",
-      "dir_truncated": "{{dir}} (truncated)"
+      "dir_truncated": "{{dir}} (truncated)",
+      "command_completions": "Command completions"
     },
     "terminalKeyBar": {
       "terminal_keys": "Terminal keys"
