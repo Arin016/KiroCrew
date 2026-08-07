@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 import time
 import types
 from collections import deque
@@ -35,6 +36,10 @@ from kiro_crew.acp.liveness import (
     LivenessOracle,
 )
 from kiro_crew.acp.types import ACP_BACKEND_CLAUDE, AcpPromptStats
+
+# Windows lacks os.killpg and POSIX process-tree APIs (ps, /proc).
+# Tests that exercise these paths are skipped on Windows.
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process tree APIs only")
 
 
 class TestVendoredClaudeAcp:
@@ -1682,6 +1687,7 @@ class TestGetChildPids:
         assert _get_child_pids(1000) == [2000, 4000, 3000, 5000]
 
 
+@_POSIX_ONLY
 class TestIsOurChild:
     def test_nonexistent_pid(self):
         from kiro_crew.acp.client import _is_our_child
@@ -1781,6 +1787,7 @@ class TestIsOurChild:
         assert _is_our_child(999, expected_start=42, expected_basename=None) is False
 
 
+@_POSIX_ONLY
 class TestKillEscapedChildren:
     def test_empty_dict(self):
         from kiro_crew.acp.client import _kill_escaped_children
@@ -1826,6 +1833,7 @@ class TestChildPidsField:
         assert client._child_pids == {}
 
 
+@_POSIX_ONLY
 class TestReadBasename:
     def test_reads_basename_from_ps(self, monkeypatch):
         import sys
@@ -3210,6 +3218,7 @@ class TestSendPipeErrors:
 # ── Coverage push: process lifecycle ──
 
 
+@_POSIX_ONLY
 class TestKillProcess:
     """Tests for _kill_process covering SIGTERM, SIGKILL, and edge cases."""
 
@@ -5656,6 +5665,7 @@ class TestSendMessageStreamBranches:
         assert client._turn_done.is_set()
 
 
+@_POSIX_ONLY
 class TestKillProcessPipeClose:
     """Test pipe closing in _kill_process."""
 
