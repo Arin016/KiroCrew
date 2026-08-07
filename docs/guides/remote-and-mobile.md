@@ -267,12 +267,7 @@ the same and the difference is the whole security story:
 - [`tailscale serve`](https://tailscale.com/kb/1242/tailscale-serve) publishes the
   dashboard **only inside your tailnet** — nothing is reachable from the public
   internet, you get TLS and a stable MagicDNS hostname, and who can reach it is
-  governed by your tailnet ACLs. This is the better answer for the phone case:
-  ```bash
-  tailscale serve --bg --https 443 http://127.0.0.1:5476
-  kirocrew config set dashboard.tailscale.enabled true
-  kirocrew restart
-  ```
+  governed by your tailnet ACLs. This is the better answer for the phone case.
   `dashboard.tailscale.enabled` reads your own MagicDNS name from the local
   Tailscale daemon once at startup and trusts `https://<that name>` as an origin,
   so you do **not** have to look the name up and hand-write `dashboard.url`. If
@@ -285,6 +280,51 @@ the same and the difference is the whole security story:
 
 A shared corporate tailnet is not a private network — every member who can reach
 the Serve endpoint is inside your trust boundary, so keep the ACL narrow.
+
+#### Tailscale Serve setup (step by step)
+
+1. **Install Tailscale** on the gateway host and on any device you want to reach
+   it from (phone, laptop). On macOS the App Store version is easiest; on Linux
+   follow [tailscale.com/download](https://tailscale.com/download).
+
+2. **Log in** on both devices with the same Tailscale account:
+   ```bash
+   tailscale login
+   ```
+
+3. **Verify connectivity** — you should see your machine listed:
+   ```bash
+   tailscale status
+   ```
+
+4. **Enable Serve** to proxy the KiroCrew port over HTTPS within your tailnet:
+   ```bash
+   tailscale serve --bg --https 443 http://127.0.0.1:5476
+   ```
+   Tailscale may prompt you to enable Serve on your tailnet the first time (it
+   opens a browser link to the admin console). Once confirmed, you get a stable
+   URL like `https://<machine>.<tailnet>.ts.net`.
+
+5. **Tell KiroCrew to trust the Tailscale origin:**
+   ```bash
+   kirocrew config set dashboard.url "https://<machine>.<tailnet>.ts.net"
+   kirocrew restart
+   ```
+   Replace `<machine>.<tailnet>` with your actual MagicDNS name (visible in
+   `tailscale status` output).
+
+6. **Access from your phone:**
+   - Open the Tailscale app → connect to your tailnet
+   - Navigate to `https://<machine>.<tailnet>.ts.net` in your browser
+   - Generate a token on the gateway host (`kirocrew token`) and open the
+     resulting URL, or send yourself the link via `/kirocrew dashboard` in Slack
+
+To stop serving: `tailscale serve --https=443 off`.
+
+> **Why Tailscale Serve over cloudflared / ngrok for personal use:** no domain to
+> buy, no public internet exposure, free for up to 3 users / 100 devices,
+> automatic TLS, stable MagicDNS hostname with zero maintenance, and Tailscale
+> handles reconnects after sleep/wake without a separate keepalive process.
 
 For the tunnel providers above (cloudflared / ngrok / Funnel) set the URL in
 `~/.kiro/crew/config.json` and restart:
