@@ -1384,7 +1384,7 @@ export const api = {
   defaultAgent: () => fetch('/api/config/default-agent').then(j),
   setDefaultAgent: (agent: string) => put('/api/config/default-agent', { agent }).then(j),
   kirocrewConfig: () => fetch('/api/config/kirocrew').then(j),
-  saveKirocrewConfig: (agent: object) => put('/api/config/kirocrew', { agent }).then(j),
+  saveKirocrewConfig: (agent: object) => put('/api/config/kirocrew', { agent }).then(j) as Promise<{ ok?: boolean; restart_required?: boolean; error?: string }>,
   patchConfig: (path: string, value: unknown) => fetch('/api/config/kirocrew', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, value }) }).then(j),
   // Optional integrations — backend endpoints are graceful no-ops on a public
   // install (AIM / kiro usage are stubbed). Kept so the UI compiles and
