@@ -928,6 +928,10 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/crons/{job_id}/ack", handlers.api_cron_ack)
     app.router.add_get("/api/crons/{job_id}/history", handlers.api_cron_history)
     app.router.add_get("/api/crons/{job_id}/history/{run_id}", handlers.api_cron_history_detail)
+    app.router.add_get("/api/cron-folders", handlers.api_cron_folders)
+    app.router.add_post("/api/cron-folders", handlers.api_cron_folders_create)
+    app.router.add_patch("/api/cron-folders/{folder_id}", handlers.api_cron_folders_update)
+    app.router.add_delete("/api/cron-folders/{folder_id}", handlers.api_cron_folders_delete)
     app.router.add_get("/api/taskrunner", handlers.api_taskrunner_status)
     app.router.add_post("/api/taskrunner", handlers.api_taskrunner_start)
     app.router.add_post("/api/taskrunner/cancel", handlers.api_taskrunner_cancel)
@@ -2003,6 +2007,9 @@ async def start_dashboard(
     # and the task is cancelled by the service's shutdown hook.
     app["kiro_prerequisite_service"].warm_up()
     state.load_folders()
+    # Off-loop: a large cron_folders.json would otherwise block the event
+    # loop with synchronous file I/O + JSON parsing during startup.
+    await asyncio.to_thread(state.load_cron_folders)
     state.load_tags()
     app["port"] = port
 
@@ -3454,6 +3461,9 @@ async def start_api_server(
     # and the task is cancelled by the service's shutdown hook.
     app["kiro_prerequisite_service"].warm_up()
     state.load_folders()
+    # Off-loop: a large cron_folders.json would otherwise block the event
+    # loop with synchronous file I/O + JSON parsing during startup.
+    await asyncio.to_thread(state.load_cron_folders)
     state.load_tags()
     app["port"] = port
 
@@ -3483,7 +3493,7 @@ async def start_api_server(
     app["local_secret"] = _internal_secret
 
     # SEL audit middleware — log mutating MCP tool calls
-    _sel_methods = {"GET", "POST", "PUT", "DELETE"}
+    _sel_methods = {"GET", "POST", "PUT", "PATCH", "DELETE"}
     _safe_methods = {"GET", "HEAD", "OPTIONS"}
 
     @web.middleware  # type: ignore[misc]

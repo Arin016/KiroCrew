@@ -5768,7 +5768,7 @@
       "scheduled_job_other": "{{count}} scheduled jobs",
       "script_python": "script · python",
       "select_all_jobs": "Select all jobs",
-      "select_deselect_all_jobs_matching_the_current_fi": "Select / deselect all jobs matching the current filter",
+      "select_deselect_all_jobs_matching_the_current_fi": "Select / deselect all visible jobs (collapsed folders excluded)",
       "selected": "selected",
       "start_from_a_pre_made_schedule": "Start from a pre-made schedule",
       "status": "Status",

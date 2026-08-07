@@ -8306,7 +8306,7 @@
       "script_python": "script · python",
       "select": "{{name}} নির্বাচন করো",
       "select_all_jobs": "সব কাজ নির্বাচন করুন",
-      "select_deselect_all_jobs_matching_the_current_fi": "বর্তমান ফিল্টারের সাথে মেলে এমন সব কাজ নির্বাচন / অনির্বাচন করুন",
+      "select_deselect_all_jobs_matching_the_current_fi": "সমস্ত দৃশ্যমান কাজ নির্বাচন / অনির্বাচন করুন (সংকুচিত ফোল্ডার বাদ)",
       "selected": "নির্বাচিত",
       "start_from_a_pre_made_schedule": "একটি প্রস্তুত সময়সূচি থেকে শুরু করুন",
       "status": "অবস্থা",
@@ -8321,7 +8321,25 @@
       "view": "দেখো",
       "view_last_result": "শেষ ফলাফল দেখো",
       "you_can_also_create_schedules_by_chatting_try": "চ্যাট করেও আপনি সময়সূচি তৈরি করতে পারেন — চেষ্টা করুন",
-      "jobs_noun": "জব"
+      "jobs_noun": "জব",
+      "cronFolders": {
+        "batch_move_failed_one": "{{total}} টির মধ্যে {{count}} টি কাজ সরানো যায়নি",
+        "batch_move_failed_other": "{{total}} টির মধ্যে {{count}} টি কাজ সরানো যায়নি",
+        "collapse_folder": "ফোল্ডার সংকুচিত করো",
+        "confirm_delete_folder": "\"{{name}}\" মুছে ফেলবেন? কাজগুলো আলাদা হবে।",
+        "create": "তৈরি করুন",
+        "delete_folder": "ফোল্ডার মুছে ফেলো",
+        "delete_folder_named": "\"{{name}}\" মুছুন",
+        "expand_folder": "ফোল্ডার প্রসারিত করো",
+        "folder_actions": "ফোল্ডার ক্রিয়া",
+        "job_count_one": "{{count}} টি কাজ",
+        "job_count_other": "{{count}} টি কাজ",
+        "move_to_folder": "ফোল্ডারে সরাও",
+        "new_folder": "নতুন ফোল্ডার",
+        "new_folder_name": "নতুন ফোল্ডারের নাম",
+        "rename": "নাম বদলাও",
+        "ungrouped": "গোষ্ঠীহীন"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "ফাজি ফিল্টার (সাবস্ট্রিং মিল)",

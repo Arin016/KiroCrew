@@ -1258,6 +1258,13 @@ export const api = {
     return fetch('/api/crons/history' + (p.toString() ? '?' + p : ''), { headers: { ..._sk } }).then(j)
   },
 
+  // Cron Folders
+  cronFolders: () => fetch('/api/cron-folders').then(j),
+  createCronFolder: (name: string) => post('/api/cron-folders', { name }).then(j),
+  updateCronFolder: (id: string, body: { name?: string }) =>
+    fetch('/api/cron-folders/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
+  deleteCronFolder: (id: string) => del('/api/cron-folders/' + id).then(j),
+
   // Lessons
   lessons: () => fetch('/api/lessons').then(j),
   createLesson: (rule: string, category: string) => post('/api/lessons', { rule, category }).then(j),

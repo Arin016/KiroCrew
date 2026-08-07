@@ -8392,7 +8392,7 @@
       "script_python": "script · python",
       "select": "Selecionar {{name}}",
       "select_all_jobs": "Selecionar todos os jobs",
-      "select_deselect_all_jobs_matching_the_current_fi": "Selecionar / desmarcar todos os jobs que correspondem ao filtro atual",
+      "select_deselect_all_jobs_matching_the_current_fi": "Selecionar / desmarcar todos os jobs visíveis (pastas recolhidas excluídas)",
       "selected": "selecionados",
       "start_from_a_pre_made_schedule": "Comece com um agendamento pronto",
       "status": "Status",
@@ -8408,7 +8408,27 @@
       "view": "Ver",
       "view_last_result": "Ver último resultado",
       "you_can_also_create_schedules_by_chatting_try": "Você também pode criar agendamentos pelo chat — tente",
-      "jobs_noun": "tarefas"
+      "jobs_noun": "tarefas",
+      "cronFolders": {
+        "batch_move_failed_many": "Não foi possível mover {{count}} de {{total}} tarefas",
+        "batch_move_failed_one": "Não foi possível mover {{count}} de {{total}} tarefa",
+        "batch_move_failed_other": "Não foi possível mover {{count}} de {{total}} tarefas",
+        "collapse_folder": "Recolher pasta",
+        "confirm_delete_folder": "Excluir \"{{name}}\"? As tarefas ficarão desagrupadas.",
+        "create": "Criar",
+        "delete_folder": "Excluir pasta",
+        "delete_folder_named": "Excluir \"{{name}}\"",
+        "expand_folder": "Expandir pasta",
+        "folder_actions": "Ações da pasta",
+        "job_count_many": "{{count}} tarefas",
+        "job_count_one": "{{count}} tarefa",
+        "job_count_other": "{{count}} tarefas",
+        "move_to_folder": "Mover para pasta",
+        "new_folder": "Nova pasta",
+        "new_folder_name": "Nome da nova pasta",
+        "rename": "Renomear",
+        "ungrouped": "Sem grupo"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtro aproximado (correspondência parcial)",

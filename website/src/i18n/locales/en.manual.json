@@ -2789,7 +2789,25 @@
       "scheduled_jobs_run_on_the_configured_interval_or": "Scheduled jobs run on the configured interval or cron expression.",
       "select": "Select {{name}}",
       "view": "View",
-      "view_last_result": "View last result"
+      "view_last_result": "View last result",
+      "cronFolders": {
+        "batch_move_failed_one": "{{count}} of {{total}} job could not be moved",
+        "batch_move_failed_other": "{{count}} of {{total}} jobs could not be moved",
+        "collapse_folder": "Collapse folder",
+        "confirm_delete_folder": "Delete \"{{name}}\"? Jobs will be ungrouped.",
+        "create": "Create",
+        "delete_folder": "Delete folder",
+        "delete_folder_named": "Delete \"{{name}}\"",
+        "expand_folder": "Expand folder",
+        "folder_actions": "Folder actions",
+        "job_count_one": "{{count}} job",
+        "job_count_other": "{{count}} jobs",
+        "move_to_folder": "Move to folder",
+        "new_folder": "New folder",
+        "new_folder_name": "New folder name",
+        "rename": "Rename",
+        "ungrouped": "Ungrouped"
+      }
     },
     "sessionArchive": {
       "no_matches_for_query": "No matches for \"{{query}}\".",

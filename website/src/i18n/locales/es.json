@@ -8392,7 +8392,7 @@
       "script_python": "script · python",
       "select": "Seleccionar {{name}}",
       "select_all_jobs": "Seleccionar todos los trabajos",
-      "select_deselect_all_jobs_matching_the_current_fi": "Seleccionar / deseleccionar todos los trabajos que coinciden con el filtro actual",
+      "select_deselect_all_jobs_matching_the_current_fi": "Seleccionar / deseleccionar todos los trabajos visibles (carpetas contraídas excluidas)",
       "selected": "seleccionados",
       "start_from_a_pre_made_schedule": "Empezar con una programación predefinida",
       "status": "Estado",
@@ -8408,7 +8408,27 @@
       "view": "Ver",
       "view_last_result": "Ver el último resultado",
       "you_can_also_create_schedules_by_chatting_try": "También puedes crear programaciones desde el chat — prueba",
-      "jobs_noun": "tareas"
+      "jobs_noun": "tareas",
+      "cronFolders": {
+        "batch_move_failed_many": "No se pudieron mover {{count}} de {{total}} tareas",
+        "batch_move_failed_one": "No se pudo mover {{count}} de {{total}} tarea",
+        "batch_move_failed_other": "No se pudieron mover {{count}} de {{total}} tareas",
+        "collapse_folder": "Contraer carpeta",
+        "confirm_delete_folder": "¿Eliminar \"{{name}}\"? Los trabajos quedarán sin agrupar.",
+        "create": "Crear",
+        "delete_folder": "Eliminar carpeta",
+        "delete_folder_named": "Eliminar \"{{name}}\"",
+        "expand_folder": "Expandir carpeta",
+        "folder_actions": "Acciones de carpeta",
+        "job_count_many": "{{count}} trabajos",
+        "job_count_one": "{{count}} trabajo",
+        "job_count_other": "{{count}} trabajos",
+        "move_to_folder": "Mover a carpeta",
+        "new_folder": "Nueva carpeta",
+        "new_folder_name": "Nombre de la nueva carpeta",
+        "rename": "Cambiar nombre",
+        "ungrouped": "Sin agrupar"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtro aproximado (coincidencia parcial)",

@@ -8139,7 +8139,7 @@
       "script_python": "脚本 · python",
       "select": "选择 {{name}}",
       "select_all_jobs": "选择所有任务",
-      "select_deselect_all_jobs_matching_the_current_fi": "选择 / 取消选择符合当前筛选条件的所有任务",
+      "select_deselect_all_jobs_matching_the_current_fi": "选择 / 取消选择所有可见任务（已折叠文件夹除外）",
       "selected": "已选择",
       "start_from_a_pre_made_schedule": "从预设计划开始",
       "status": "状态",
@@ -8153,7 +8153,23 @@
       "view": "查看",
       "view_last_result": "查看最近一次结果",
       "you_can_also_create_schedules_by_chatting_try": "你也可以通过聊天创建计划 — 试试",
-      "jobs_noun": "任务"
+      "jobs_noun": "任务",
+      "cronFolders": {
+        "batch_move_failed_other": "{{total}} 个任务中有 {{count}} 个无法移动",
+        "collapse_folder": "折叠文件夹",
+        "confirm_delete_folder": "删除 \"{{name}}\"？任务将变为未分组。",
+        "create": "创建",
+        "delete_folder": "删除文件夹",
+        "delete_folder_named": "删除\"{{name}}\"",
+        "expand_folder": "展开文件夹",
+        "folder_actions": "文件夹操作",
+        "job_count_other": "{{count}} 个任务",
+        "move_to_folder": "移动到文件夹",
+        "new_folder": "新建文件夹",
+        "new_folder_name": "新文件夹名称",
+        "rename": "重命名",
+        "ungrouped": "未分组"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "模糊筛选（子串匹配）",

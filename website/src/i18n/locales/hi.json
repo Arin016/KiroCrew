@@ -8306,7 +8306,7 @@
       "script_python": "script · python",
       "select": "{{name}} चुनो",
       "select_all_jobs": "सभी जॉब चुनें",
-      "select_deselect_all_jobs_matching_the_current_fi": "वर्तमान फ़िल्टर से मेल खाने वाले सभी जॉब चुनें / अचयनित करें",
+      "select_deselect_all_jobs_matching_the_current_fi": "सभी दृश्यमान जॉब चुनें / अचयनित करें (संक्षिप्त फ़ोल्डर बाहर)",
       "selected": "चयनित",
       "start_from_a_pre_made_schedule": "पहले से बने शेड्यूल से शुरू करें",
       "status": "स्थिति",
@@ -8321,7 +8321,25 @@
       "view": "देखें",
       "view_last_result": "पिछला परिणाम देखें",
       "you_can_also_create_schedules_by_chatting_try": "आप चैट करके भी शेड्यूल बना सकते हैं — आज़माएँ",
-      "jobs_noun": "जॉब"
+      "jobs_noun": "जॉब",
+      "cronFolders": {
+        "batch_move_failed_one": "{{total}} में से {{count}} कार्य स्थानांतरित नहीं किया जा सका",
+        "batch_move_failed_other": "{{total}} में से {{count}} कार्य स्थानांतरित नहीं किए जा सके",
+        "collapse_folder": "फ़ोल्डर समेटें",
+        "confirm_delete_folder": "\"{{name}}\" हटाएँ? कार्य बिना समूह के हो जाएँगे।",
+        "create": "बनाएँ",
+        "delete_folder": "फ़ोल्डर हटाएँ",
+        "delete_folder_named": "\"{{name}}\" हटाएं",
+        "expand_folder": "फ़ोल्डर फैलाएँ",
+        "folder_actions": "फ़ोल्डर क्रियाएँ",
+        "job_count_one": "{{count}} कार्य",
+        "job_count_other": "{{count}} कार्य",
+        "move_to_folder": "फ़ोल्डर में ले जाएँ",
+        "new_folder": "नया फ़ोल्डर",
+        "new_folder_name": "नए फ़ोल्डर का नाम",
+        "rename": "नाम बदलें",
+        "ungrouped": "बिना समूह"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "फ़ज़ी फ़िल्टर (सबस्ट्रिंग मैच)",

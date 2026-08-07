@@ -73,6 +73,7 @@ export interface CronJob {
   skip_dates?: string[] | null
   script?: string | null; command?: string | null; last_result?: string | null; last_error?: string | null
   is_running?: boolean; running_since?: number | null
+  folder_id?: string
 }
 
 export interface Lesson {

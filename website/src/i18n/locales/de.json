@@ -8225,7 +8225,7 @@
       "script_python": "Skript · Python",
       "select": "{{name}} auswählen",
       "select_all_jobs": "Alle Jobs auswählen",
-      "select_deselect_all_jobs_matching_the_current_fi": "Alle Jobs auswählen/abwählen, die zum aktuellen Filter passen",
+      "select_deselect_all_jobs_matching_the_current_fi": "Alle sichtbaren Jobs auswählen/abwählen (eingeklappte Ordner ausgeschlossen)",
       "selected": "ausgewählt",
       "start_from_a_pre_made_schedule": "Mit einem vorgefertigten Zeitplan beginnen",
       "status": "Status",
@@ -8240,7 +8240,25 @@
       "view": "Ansehen",
       "view_last_result": "Letztes Ergebnis ansehen",
       "you_can_also_create_schedules_by_chatting_try": "Sie können Zeitpläne auch per Chat erstellen — versuchen Sie",
-      "jobs_noun": "Jobs"
+      "jobs_noun": "Jobs",
+      "cronFolders": {
+        "batch_move_failed_one": "{{count}} von {{total}} Job konnte nicht verschoben werden",
+        "batch_move_failed_other": "{{count}} von {{total}} Jobs konnten nicht verschoben werden",
+        "collapse_folder": "Ordner einklappen",
+        "confirm_delete_folder": "\"{{name}}\" löschen? Jobs werden nicht mehr gruppiert.",
+        "create": "Erstellen",
+        "delete_folder": "Ordner löschen",
+        "delete_folder_named": "\"{{name}}\" löschen",
+        "expand_folder": "Ordner aufklappen",
+        "folder_actions": "Ordneraktionen",
+        "job_count_one": "{{count}} Job",
+        "job_count_other": "{{count}} Jobs",
+        "move_to_folder": "In Ordner verschieben",
+        "new_folder": "Neuer Ordner",
+        "new_folder_name": "Name des neuen Ordners",
+        "rename": "Umbenennen",
+        "ungrouped": "Nicht gruppiert"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Unscharfer Filter (Teilstring-Übereinstimmung)",

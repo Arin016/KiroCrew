@@ -8392,7 +8392,7 @@
       "script_python": "script · python",
       "select": "Seleziona {{name}}",
       "select_all_jobs": "Seleziona tutti i job",
-      "select_deselect_all_jobs_matching_the_current_fi": "Seleziona / deseleziona tutti i job che corrispondono al filtro attuale",
+      "select_deselect_all_jobs_matching_the_current_fi": "Seleziona / deseleziona tutti i job visibili (cartelle compresse escluse)",
       "selected": "selezionati",
       "start_from_a_pre_made_schedule": "Parti da una pianificazione predefinita",
       "status": "Stato",
@@ -8408,7 +8408,27 @@
       "view": "Visualizza",
       "view_last_result": "Visualizza l'ultimo risultato",
       "you_can_also_create_schedules_by_chatting_try": "Puoi creare pianificazioni anche chattando — prova",
-      "jobs_noun": "attività"
+      "jobs_noun": "attività",
+      "cronFolders": {
+        "batch_move_failed_many": "Impossibile spostare {{count}} processi su {{total}}",
+        "batch_move_failed_one": "Impossibile spostare {{count}} processo su {{total}}",
+        "batch_move_failed_other": "Impossibile spostare {{count}} processi su {{total}}",
+        "collapse_folder": "Comprimi cartella",
+        "confirm_delete_folder": "Eliminare \"{{name}}\"? Le attività non saranno più raggruppate.",
+        "create": "Crea",
+        "delete_folder": "Elimina cartella",
+        "delete_folder_named": "Elimina \"{{name}}\"",
+        "expand_folder": "Espandi cartella",
+        "folder_actions": "Azioni cartella",
+        "job_count_many": "{{count}} attività",
+        "job_count_one": "{{count}} attività",
+        "job_count_other": "{{count}} attività",
+        "move_to_folder": "Sposta nella cartella",
+        "new_folder": "Nuova cartella",
+        "new_folder_name": "Nome della nuova cartella",
+        "rename": "Rinomina",
+        "ungrouped": "Non raggruppate"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtro approssimativo (corrispondenza di sottostringa)",

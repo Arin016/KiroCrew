@@ -8311,7 +8311,7 @@
       "script_python": "script · python",
       "select": "Sélectionner {{name}}",
       "select_all_jobs": "Tout sélectionner",
-      "select_deselect_all_jobs_matching_the_current_fi": "Sélectionner / désélectionner toutes les tâches correspondant au filtre actuel",
+      "select_deselect_all_jobs_matching_the_current_fi": "Sélectionner / désélectionner toutes les tâches visibles (dossiers réduits exclus)",
       "selected": "sélectionnées",
       "start_from_a_pre_made_schedule": "Partir d'une planification prédéfinie",
       "status": "Statut",
@@ -8327,7 +8327,27 @@
       "view": "Afficher",
       "view_last_result": "Afficher le dernier résultat",
       "you_can_also_create_schedules_by_chatting_try": "Vous pouvez aussi créer des planifications en discutant — essayez",
-      "jobs_noun": "tâches"
+      "jobs_noun": "tâches",
+      "cronFolders": {
+        "batch_move_failed_many": "{{count}} tâches sur {{total}} n'ont pas pu être déplacées",
+        "batch_move_failed_one": "{{count}} tâche sur {{total}} n'a pas pu être déplacée",
+        "batch_move_failed_other": "{{count}} tâches sur {{total}} n'ont pas pu être déplacées",
+        "collapse_folder": "Réduire le dossier",
+        "confirm_delete_folder": "Supprimer \"{{name}}\" ? Les tâches seront dégroupées.",
+        "create": "Créer",
+        "delete_folder": "Supprimer le dossier",
+        "delete_folder_named": "Supprimer \"{{name}}\"",
+        "expand_folder": "Développer le dossier",
+        "folder_actions": "Actions du dossier",
+        "job_count_many": "{{count}} tâches",
+        "job_count_one": "{{count}} tâche",
+        "job_count_other": "{{count}} tâches",
+        "move_to_folder": "Déplacer vers un dossier",
+        "new_folder": "Nouveau dossier",
+        "new_folder_name": "Nom du nouveau dossier",
+        "rename": "Renommer",
+        "ungrouped": "Non groupées"
+      }
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtre approximatif (correspondance de sous-chaîne)",
