@@ -34,6 +34,7 @@ from kiro_crew.validation import (
     validate_string_field,
     validate_tool_args,
 )
+from kiro_crew.vector_memory_constants import LESSON_NEGATIVE_SEP as _LESSON_NEGATIVE_SEP
 
 from ._shared import (
     _blocks_reads_session,
@@ -665,6 +666,59 @@ async def api_cron_history_all(request: web.Request) -> web.Response:
     return web.json_response({"runs": runs, "total": total})
 
 
+# The join format is OWNED BY vector_memory_constants.LESSON_NEGATIVE_SEP (imported at
+# module top). It lives in that dependency-free leaf rather than in ``vector_memory``
+# because importing the latter here would pull snowballstemmer plus the optional
+# numpy/faiss deps (~175ms) and break the boot-path leaf invariant enforced by
+# test_perf_boot_path::test_memory_handler_does_not_import_vector_memory. This way the
+# import is top-level (no lazy-import rule violation) AND the format has one spelling.
+
+
+def _enrich_exact_lesson(vs: Any, rule: str, negative: str, source: str = "user_explicit") -> bool:
+    """Attach ``negative`` to an existing lesson whose rule text is exactly ``rule``.
+
+    ``write_lesson``'s substring dedup returns False when ``rule`` is contained in an
+    existing lesson -- always true when re-submitting the same rule -- so adding a
+    negative to an existing lesson was silently swallowed while this route still
+    returned HTTP 200.
+
+    The update is NON-DESTRUCTIVE: the enriched value is written back under the SAME
+    key via ``set_semantic``, which validates before upserting, so a rejected
+    replacement leaves the stored lesson exactly as it was. Nothing is ever deleted,
+    so an existing superset lesson -- which would make ``write_lesson`` refuse the
+    follow-up write -- cannot cost us the original.
+
+    The stored embedding is deliberately left alone: ``write_lesson`` embeds the RULE
+    only, and the rule text is unchanged here; only the NOT-clause is appended.
+
+    Returns True when the row already carries this clause or was enriched, so the
+    caller can skip ``write_lesson``.
+    """
+    wanted = rule.strip().casefold()
+    for row in vs.get_lessons():
+        try:
+            existing = json.loads(row["value_json"])
+        except Exception:
+            continue
+        if not isinstance(existing, str):
+            continue
+        base = existing.split(_LESSON_NEGATIVE_SEP, 1)[0]
+        # Case-INSENSITIVE, matching write_lesson's own dedup (``rule_lower in
+        # existing_lower``). A case-sensitive test would miss a case variant, fall
+        # through to write_lesson, and have the clause dropped by that same dedup.
+        if base.strip().casefold() != wanted:
+            continue
+        # Keep the stored rule's own casing: write_lesson would have kept the existing
+        # entry, so re-casing someone's lesson here would be a gratuitous edit.
+        target = f"{base.strip()}{_LESSON_NEGATIVE_SEP}{negative}"
+        if existing == target:
+            return True  # already carries this clause
+        if vs.set_semantic(row["key"], target, row["confidence"], source) is None:
+            return True
+        return False  # rejected (e.g. injection scan) -- original left untouched
+    return False
+
+
 async def api_lessons_create(request: web.Request) -> web.Response:
     """POST /api/lessons — add a lesson (vector store or JSONL fallback)."""
     from kiro_crew.learn import Lesson  # noqa: F811
@@ -800,6 +854,11 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         return web.json_response({"error": "rule is required"}, status=400)
     category = cleaned.get("category", "knowledge")
     scope = cleaned.get("scope", "global")
+    # LEARN_ADD_SCHEMA accepts and validates ``negative``, but both write paths
+    # below previously discarded it (write_lesson got a literal None; the JSONL
+    # Lesson omitted the kwarg), so every NOT-clause sent to this route -- from
+    # the learn_add MCP tool, the dashboard, or the CLI -- was silently lost.
+    negative = cleaned.get("negative") or None
     # Write to vector store if available, else JSONL
     vs = _get_memory(state).vector_store
     if vs:
@@ -814,6 +873,14 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         # embed and the write would otherwise commit it into the wrong space.
         rule_emb_generation = vs.space_generation
         rule_emb = await asyncio.to_thread(vs.embed_lesson, rule)
+        # A re-submission that only ADDS a negative to an existing identical rule is
+        # refused by write_lesson's substring dedup, so enrich that row in place
+        # instead — non-destructive, same key, validated before upsert (see
+        # _enrich_exact_lesson). Nothing is deleted, so a superset lesson that would
+        # make the follow-up write_lesson refuse cannot cost us the original.
+        enriched = False
+        if negative:
+            enriched = await asyncio.to_thread(_enrich_exact_lesson, vs, rule, negative)
         # Persist the lesson immediately so the request returns fast. The
         # contradiction sweep below makes a per-candidate LLM call (~27s each);
         # running it inline would exceed the MCP client's 30s timeout while the
@@ -821,15 +888,41 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         # for a lesson that was actually saved (and re-saved on every retry).
         # Writing first, then sweeping in the background, keeps the slow LLM call
         # off the request path.
-        await asyncio.to_thread(
-            vs.write_lesson,
-            rule,
-            category,
-            None,
-            "user_explicit",
-            rule_emb,
-            rule_emb_generation,
-        )
+        if not enriched:
+            wrote = await asyncio.to_thread(
+                vs.write_lesson,
+                rule,
+                category,
+                negative,
+                "user_explicit",
+                rule_emb,
+                rule_emb_generation,
+            )
+            # write_lesson returns False for TWO different causes with different
+            # remedies: its dedup refused the write (an existing SUPERSET covers this
+            # rule), or the composed value was rejected by the preflight (e.g. an
+            # injection-pattern ``negative``). The bool does not distinguish them, so
+            # this message must not prescribe a remedy that only fits one. An earlier
+            # revision said "remove that lesson first", which is actively wrong for a
+            # rejected clause and could send someone to delete a healthy lesson while
+            # chasing it -- data loss by bad advice, in the PR whose whole point is to
+            # stop losing lesson data. Name both causes and let the caller look.
+            if negative and not wrote:
+                return web.json_response(
+                    {
+                        "error": "negative not persisted",
+                        "code": "lesson_negative_not_persisted",
+                        "detail": (
+                            "The NOT-clause was not stored, for one of two reasons: an "
+                            "existing lesson already covers this rule, or the composed "
+                            "value was refused by memory validation. Check the stored "
+                            "lessons for one that covers this rule -- if one exists, "
+                            "submit the negative against its exact text; if none does, "
+                            "the clause content itself was refused."
+                        ),
+                    },
+                    status=409,
+                )
         candidates = await asyncio.to_thread(
             vs.find_contradiction_candidates, rule, 0.4, 0.85, rule_emb
         )
@@ -845,12 +938,42 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             state._background_tasks.add(task)
             task.add_done_callback(state._background_tasks.discard)
     else:
-        lesson = Lesson(rule=rule, category=category, ts=datetime.now(timezone.utc).isoformat())
-        if scope == "workspace":
-            ws = cleaned.get("workspace")
-            _get_lessons(state, ws).save(lesson)
-        else:
-            state.lessons.save(lesson)
+        lesson = Lesson(
+            rule=rule,
+            category=category,
+            negative=negative,
+            ts=datetime.now(timezone.utc).isoformat(),
+        )
+        store = _get_lessons(state, cleaned.get("workspace")) if scope == "workspace" else state.lessons
+        # Enrich an exact existing record IN PLACE rather than remove()-then-save().
+        # LessonStore.save() skips exact duplicates, so re-submitting the same rule
+        # with a negative was silently swallowed; the previous fix for that deleted
+        # the record first, which lost it outright on a crash between the two writes
+        # and could take out an unrelated superset (remove() matches by substring).
+        # enrich_negative() is a single atomic write and matches only an exact rule.
+        # Every LessonStore call below touches the JSONL file synchronously
+        # (enrich_negative reads it and rewrites it whole; load_all reads it; save
+        # appends), so each one is offloaded with to_thread exactly like the vector
+        # branch above -- otherwise a single lesson write stalls the event loop and
+        # with it every other dashboard request and heartbeat. Same reasoning, and
+        # the same remedy, as the earlier lessons.load_all offload guarded by
+        # test_ws_offload.
+        enriched_jsonl = False
+        if negative:
+            enriched_jsonl = await asyncio.to_thread(store.enrich_negative, rule, negative)
+        if not enriched_jsonl:
+            # No conflict check here, deliberately. This path cannot silently drop a
+            # negative, because enrich_negative and save() partition the space:
+            # enrich_negative hits on an EXACT rule match (casefold), save() skips on
+            # an EXACT rule match (lower) -- and casefold is the broader of the two.
+            # So reaching here means no exact match exists, which means save() cannot
+            # skip, which means the clause lands. An earlier revision guarded this with
+            # a substring predicate copied from the VECTOR store's dedup
+            # (`rule in le.rule`); on this store that only ever fired for rules save()
+            # would happily append, turning a valid write into a 409. Removed rather
+            # than narrowed to exact-match, since an exact-match guard here would be
+            # unreachable by the same argument.
+            await asyncio.to_thread(store.save, lesson)
     state.push_refresh("lessons")
     return web.json_response({"ok": True})
 

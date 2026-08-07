@@ -1290,6 +1290,146 @@ async def _run_eval(args: argparse.Namespace) -> None:
     print(f"\nResults saved to:\n  {report_path}\n  {json_path}")
 
 
+def _gateway_add_lesson(
+    rule: str, category: str, negative: str | None = None
+) -> tuple[bool, str | None]:
+    """Best-effort: have a RUNNING gateway write the lesson so it gets embedded.
+
+    The CLI deliberately never loads the 610MB GGUF itself -- ``make_sync_embed_fn``
+    is non-blocking and returns None until the model is resident, so a one-shot
+    process would either pay a full model load on every invocation or persist
+    embedding=NULL (invisible to vector retrieval; keyword-only at weight 0.4 in
+    hybrid search). Delegating puts the write in the process that already holds the
+    model, which additionally runs ``write_lesson``'s >0.85-cosine semantic dedup
+    and a background contradiction sweep -- both of which a vector-less local write
+    silently skips.
+
+    Returns ``(ok, refusal)``:
+
+    * ``(True, None)``  -- the gateway accepted and embedded the write.
+    * ``(False, None)`` -- the gateway was never REACHED, and no request was sent
+      (not running, stale ``dashboard.url``, no resolvable session key, health probe
+      failed). The write provably did not happen, so the caller safely degrades to
+      an unembedded local write plus a warning.
+    * ``(False, "<detail>")`` -- the request WAS sent and the write must NOT be
+      retried locally. Two cases: the gateway answered and refused (e.g. 409 because
+      an existing lesson already covers this rule), or the response was lost so the
+      outcome is UNKNOWN and a local write could duplicate a committed lesson.
+      Either way the caller surfaces the detail instead of writing again.
+
+    The pre-send / post-send split is the important one: only the pre-send case is
+    safe to retry, because only there is it certain nothing was persisted.
+
+    ponytail: no retry/backoff. Best-effort by design; the local write is the
+    fallback, so an unhealthy gateway costs at most the 2s probe + 10s post.
+    """
+    try:
+        cfg = KiroCrewConfig.load()
+        _host, port = parse_dashboard_url(cfg.dashboard.url)
+        secret = (config_dir() / ".local_secret").read_text().strip()
+    except Exception:
+        return False, None
+    if not secret:
+        return False, None
+    # POST /api/lessons rejects anonymous writes (400 "missing X-Session-Key") and
+    # validates the key against live slots / restricted keys / persisted history.
+    # Reuse the hardened resolver (env var, then PID-file ancestor walk) rather than
+    # sending the UI's literal "dashboard:ui" -- impersonating it would misattribute
+    # the write in the security event log. A plain terminal has no session, so it
+    # correctly falls through to the local path.
+    try:
+        # Imported HERE, not at module scope, on purpose. ``mcp_core`` runs
+        # ``_API = _resolve_api_base()`` at import time (mcp_core.py), which does
+        # KiroCrewConfig.load() + parse_dashboard_url(). parse_dashboard_url
+        # degrades gracefully on a malformed *string* but only catches ValueError,
+        # while ``_ensure_scheme``'s ``"://" in url`` raises TypeError on a
+        # non-string -- so a numeric ``dashboard.url`` (an easy confusion, since the
+        # port is an env var and not a config key) turned that into an import-time
+        # crash for EVERY kirocrew command, including the `config` and `doctor`
+        # commands needed to repair the config. A top-level import here would extend
+        # mcp_core's import-time config parse to the whole CLI surface, which is the
+        # blast radius parse_dashboard_url's own ValueError degradation exists to
+        # prevent. Deliberate exception to the `top-level-imports` rule: this is an
+        # import SIDE EFFECT to contain, not a circular import.
+        #
+        # Keep the hardened resolver rather than reading KIROCREW_SESSION_KEY
+        # directly: warm-pool kiro-cli processes have NO such env var (see
+        # _resolve_session_key's docstring), so the env var alone would resolve to
+        # nothing in the pooled topology and silently disable delegation -- the very
+        # thing this function exists to do. The PID-file ancestor walk is what makes
+        # it work there. The except below still covers the broken-config case by
+        # falling back to the env var and then to a warned local write.
+        from kiro_crew.mcp_core import _resolve_session_key
+
+        session_key = _resolve_session_key()
+    except Exception:
+        session_key = os.environ.get("KIROCREW_SESSION_KEY", "")
+    if not session_key:
+        return False, None
+    # Literal 127.0.0.1, never the NAME "localhost": on a dual-stack host the name
+    # may resolve to ::1 first, so a foreign process listening on [::1]:port would
+    # receive the X-Internal-Secret this request carries -- and in the benign case
+    # the probe simply misses a gateway bound to 127.0.0.1 and degrades to a local
+    # write. Amazon SSRF guidance calls this class out directly: it lists localhost /
+    # ip6-localhost / ip6-loopback as distinct OS-level names and notes IPv4 services
+    # stay reachable through IPv4-mapped IPv6, with the Odin local service -- a
+    # predictable loopback port holding cryptographic material -- as the archetype.
+    # The nosemgrep justification below depends on this being a literal address.
+    base = f"http://127.0.0.1:{port}"
+    try:  # liveness probe first: a dead port fails in ms, so the CLI never stalls
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- the host is the literal loopback ADDRESS 127.0.0.1 (not the name "localhost", which can resolve to ::1) and the path is a fixed constant; only the PORT varies, and it comes from local config via parse_dashboard_url. Nothing agent- or request-controlled reaches urlopen.  # noqa: E501
+        with urllib.request.urlopen(f"{base}/api/health", timeout=2) as resp:
+            if resp.status != 200:
+                return False, None
+    except Exception:
+        return False, None
+    body: dict[str, str] = {"rule": rule, "category": category}
+    if negative:
+        body["negative"] = negative
+    req = urllib.request.Request(
+        f"{base}/api/lessons",
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Secret": secret,
+            "X-Session-Key": session_key,
+        },
+        method="POST",
+    )
+    try:
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- see the health-probe justification above; same loopback base  # noqa: E501
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status not in (200, 201):
+                return False, None
+            payload = json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        # The gateway answered and REFUSED (e.g. 409 when an existing lesson already
+        # covers this rule, so the NOT-clause was not stored). That is a real verdict,
+        # not an unreachable gateway -- surface it instead of falling back to a local
+        # write, which would hit the same dedup and print "Saved:" for nothing.
+        try:
+            body = json.loads(exc.read() or b"{}")
+            detail = body.get("detail") or body.get("error") or f"HTTP {exc.code}"
+        except Exception:
+            detail = f"HTTP {exc.code}"
+        return False, str(detail)
+    except Exception as exc:
+        # The request WAS sent (the health probe above already proved the port is
+        # live), so a failure here -- read timeout, connection reset mid-response --
+        # leaves the outcome UNKNOWN: the gateway may well have committed the lesson
+        # and only the response was lost. Falling back to a local write would then
+        # duplicate it. Report the ambiguity and let the operator re-check rather
+        # than guessing; treat it as a refusal so the caller does NOT write again.
+        return False, (
+            f"the gateway accepted the request but the outcome is unknown ({exc}). "
+            "The lesson may already be saved -- check `kirocrew learn list` before "
+            "retrying, to avoid writing it twice."
+        )
+    if isinstance(payload, dict) and payload.get("error"):
+        return False, str(payload.get("detail") or payload["error"])
+    return True, None
+
+
 def _learn(args: argparse.Namespace) -> None:
     """Save, list, or remove learned corrections."""
 
@@ -1304,9 +1444,45 @@ def _learn(args: argparse.Namespace) -> None:
             rule = args.rule
             category = args.category
             negative = getattr(args, "negative", None)
-            if vs.write_lesson(rule, category, negative):
-                neg = f" ({negative})" if negative else ""
+            neg = f" ({negative})" if negative else ""
+            # Best-effort embedding: delegate to a running gateway, which holds the
+            # model resident; otherwise write locally WITHOUT a vector and say so.
+            # Delegation is unconditional -- the REST route now passes ``negative``
+            # through to write_lesson (it previously hardcoded None and dropped the
+            # clause), so nothing is lost by preferring the embedded path.
+            ok, refusal = _gateway_add_lesson(rule, category, negative)
+            if ok:
+                print(f"Saved: {rule}{neg} [{category}] (embedded via gateway)")
+            elif refusal is not None:
+                # The gateway ANSWERED and refused (an existing lesson already covers
+                # this rule, so the clause was not stored). Falling back to a local
+                # write would hit the same dedup and print "Saved:" for a lesson that
+                # never landed -- exactly the silent drop this change exists to end.
+                print(f"Not saved: {refusal}", file=sys.stderr)
+                raise SystemExit(1)
+            elif vs.write_lesson(rule, category, negative):
+                print(
+                    "Warning: gateway not running -- saved WITHOUT an embedding, so "
+                    "this lesson will not be found by semantic search until it is "
+                    "backfilled.",
+                    file=sys.stderr,
+                )
                 print(f"Saved: {rule}{neg} [{category}]")
+            elif negative:
+                # The vector store refused. Two possible causes with different
+                # remedies -- an existing lesson covers this rule, or the composed
+                # value was rejected by validation -- and write_lesson's bool does not
+                # say which. Do not prescribe "remove that lesson", which would be
+                # wrong for a rejected clause. Report the drop and name both causes.
+                print(
+                    "Not saved: the NOT-clause was not stored, for one of two reasons: "
+                    "an existing lesson already covers this rule, or the clause content "
+                    "was refused by memory validation. Run `kirocrew learn list` -- if a "
+                    "lesson covers this rule, submit the negative against its exact "
+                    "text; if none does, the clause itself was refused.",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
             else:
                 lesson = Lesson(
                     ts=datetime.now(timezone.utc).isoformat(),
@@ -1450,7 +1626,11 @@ def _artifact(args: argparse.Namespace) -> None:
     """List, save, view, update, or delete artifacts."""
     cfg = KiroCrewConfig.load()
     _host, port = parse_dashboard_url(cfg.dashboard.url)
-    base = f"http://localhost:{port}"
+    # Literal 127.0.0.1, not the name "localhost" -- this request carries
+    # X-Internal-Secret (below), and on a dual-stack host the name can resolve to
+    # ::1 first, handing the credential to any foreign [::1]:port listener. Same
+    # hazard, and same remedy, as _gateway_add_lesson.
+    base = f"http://127.0.0.1:{port}"
 
     action = getattr(args, "artifact_action", None) or "list"
 
