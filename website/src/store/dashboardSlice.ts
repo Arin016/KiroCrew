@@ -139,6 +139,55 @@ const dashboardSlice = createSlice({
       const slot = state.slots.find(s => s.key === action.payload.key)
       if (slot) Object.assign(slot, action.payload)
     },
+    /**
+     * Patch ONE channel's link row, against whatever is in the store right now.
+     *
+     * The channel menu's mutation callbacks used to rebuild the whole `links` array
+     * from the `links` they captured when `mutate` was called. Two toggles in flight
+     * at once (Slack and Discord, say) both derived from the same pre-mutation
+     * snapshot, so the second dispatch overwrote the first — the sibling row
+     * silently reverted or vanished until the next slots push corrected it.
+     *
+     * Each row is independently mutable by design (one row per channel), so the
+     * store operation is per-row too: a patch touches only its own channel, which
+     * makes losing a sibling impossible rather than merely unlikely. `link: null`
+     * removes the row; otherwise it replaces a matching row or appends.
+     */
+    patchSlotLink(
+      state,
+      action: PayloadAction<{
+        key: string
+        channel: string
+        link: NonNullable<ChatSlot['links']>[number] | null
+        patch?: Partial<NonNullable<ChatSlot['links']>[number]>
+      }>,
+    ) {
+      const slot = state.slots.find(s => s.key === action.payload.key)
+      if (!slot) return
+      const rows = slot.links ?? []
+      // A channel-ORIGIN session can also hold a mirror binding to that same
+      // channel, and matching on `channel` alone finds the origin row first — the
+      // read-only one, which no toggle owns. Patching it left the actual binding
+      // untouched, so the row the user just flipped snapped back. The binding is
+      // the non-origin row; an origin row is a fact about where the conversation
+      // started, so a disconnect must not remove it either.
+      const isBinding = (row: NonNullable<ChatSlot['links']>[number]) =>
+        row.channel === action.payload.channel && row.direction !== 'origin'
+      const at = rows.findIndex(isBinding)
+      if (action.payload.link === null && !action.payload.patch) {
+        slot.links = rows.filter(row => !isBinding(row))
+        return
+      }
+      if (action.payload.patch) {
+        // Patch-only: leave a row that does not exist alone rather than inventing
+        // one. An invented row cannot know `paused`, which is how a muted thread
+        // came to render as connected.
+        if (at >= 0) Object.assign(rows[at], action.payload.patch)
+        return
+      }
+      if (at >= 0) rows[at] = action.payload.link!
+      else slot.links = [...rows, action.payload.link!]
+    },
     // Patch the sidebar's PR/MR chips (rendered from `slot.source_links`, the
     // Redux slots payload) from a `source_status` websocket delta. Without this
     // the delta only updated the react-query caches (Changes strip + detail
@@ -253,7 +302,7 @@ const dashboardSlice = createSlice({
   },
 })
 
-export const { sseStatus, sseConnected, sseDisconnected, sseSlots, sseTodoUpdate, touchSlotActivity, setChannelTrusted, sseSlotTitle, addSlotOptimistic, removeSlotOptimistic, updateSlot, updateSlotFolder, updateSlotPin, triggerRefresh, markSlotUnread, markSlotRead, setUpdateProgress,
+export const { sseStatus, sseConnected, sseDisconnected, sseSlots, sseTodoUpdate, touchSlotActivity, setChannelTrusted, sseSlotTitle, addSlotOptimistic, removeSlotOptimistic, patchSlotLink, updateSlot, updateSlotFolder, updateSlotPin, triggerRefresh, markSlotUnread, markSlotRead, setUpdateProgress,
   setDesktopUpdateAvailable, sseSubagentStatus, sseSubagentText, sseSlotColor, setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, setSessionColorsIntensity, setEnabledAppIds, patchSlotSourceLinks } = dashboardSlice.actions
 
 /**
