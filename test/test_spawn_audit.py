@@ -172,6 +172,13 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # agent back to improvising — which is the failure this whole test exists for.
         "apps/builtins/ops_mission_control/tests/test_config_routes.py"
         "::test_the_auth_recipe_is_runnable_shell",
+        # security-scanner route test: ``asyncio.run`` drives the async
+        # ``_require_enabled``/``_status`` handler coroutine in-process so the
+        # deny-by-default gate (403 disabled / 200 enabled) can be asserted
+        # without a running loop. No child process is created — same
+        # ``asyncio.run`` false-positive class as the auto_improvement /
+        # issue_radar test entries; the route handlers spawn nothing.
+        "apps/builtins/security_scanner/tests/test_service.py::test_routes_denied_when_disabled",
         # Diagnostics support-bundle version probe: fixed argv
         # ``["kiro-cli", "--version"]`` with a 5s timeout, no shell, no cwd, and
         # no agent-influenced args — it only stamps the collected kiro-cli
