@@ -890,6 +890,7 @@ make this tool possible:
 <a href="https://github.com/SwapDixit" title="Swapnil Dixit"><img src="https://github.com/SwapDixit.png?size=64" width="64" height="64" alt="Swapnil Dixit" /></a>
 <a href="https://github.com/sxhmilyoyo" title="sxhmilyoyo"><img src="https://github.com/sxhmilyoyo.png?size=64" width="64" height="64" alt="sxhmilyoyo" /></a>
 <a href="https://github.com/syedmujahedalih" title="Mujahed Syed"><img src="https://github.com/syedmujahedalih.png?size=64" width="64" height="64" alt="Mujahed Syed" /></a>
+<a href="https://github.com/szto" title="SoonKim"><img src="https://github.com/szto.png?size=64" width="64" height="64" alt="SoonKim" /></a>
 <a href="https://github.com/t-jones" title="Tim Jones"><img src="https://github.com/t-jones.png?size=64" width="64" height="64" alt="Tim Jones" /></a>
 <a href="https://github.com/TakahiroIshii" title="Takahiro Ishii"><img src="https://github.com/TakahiroIshii.png?size=64" width="64" height="64" alt="Takahiro Ishii" /></a>
 <a href="https://github.com/texnewmex" title="Nolan Clayton"><img src="https://github.com/texnewmex.png?size=64" width="64" height="64" alt="Nolan Clayton" /></a>
