@@ -44,6 +44,25 @@ def _mock_provider_factory():
     return factory
 
 
+def _q(mgr):
+    """The lone warm queue in these single-pool tests.
+
+    The manager keeps one queue per configured agent; every legacy-shaped
+    test here configures exactly one pool, so this is the queue that both
+    fill and claim operate on.
+    """
+    assert len(mgr._warm_pools) == 1, mgr._warm_pools
+    return next(iter(mgr._warm_pools.values()))
+
+
+def _set_pool(mgr, agent: str, size: int = 1):
+    """Repoint the manager at a single warm pool for *agent*; returns its queue."""
+    mgr._pool_targets = {agent: size}
+    mgr._pool_size = size
+    mgr._warm_pools = {agent: asyncio.Queue()}
+    return mgr._warm_pools[agent]
+
+
 def _alive_provider_factory():
     """Like _mock_provider_factory but with an explicit live process check, so
     the fast-path session-reuse branch (which gates on is_process_alive) treats
@@ -1631,7 +1650,7 @@ class TestDrainProviders:
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         # Manually put items in the warm pool
         mock_p = AsyncMock()
-        mgr._warm_pool.put_nowait((mock_p, "agent1"))
+        _set_pool(mgr, "").put_nowait((mock_p, "agent1"))
         drained = await mgr.drain_warm_pool()
         assert len(drained) == 1
         assert drained[0] is mock_p
@@ -1791,7 +1810,7 @@ class TestReloadProviderFactory:
         mgr.release("k1")
         # Put something in warm pool
         mock_pool_p = AsyncMock()
-        mgr._warm_pool.put_nowait((mock_pool_p, "agent"))
+        _set_pool(mgr, "").put_nowait((mock_pool_p, "agent"))
 
         with (
             patch.object(KiroCrewConfig, "load", return_value=cfg),
@@ -2057,7 +2076,7 @@ class TestWarmPoolInternals:
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         mgr._pool_size = 2
         await mgr._fill_warm_pool()
-        assert mgr._warm_pool.qsize() == 2
+        assert mgr._warm_pool_qsize_total() == 2
         await mgr.close_all()
 
     @pytest.mark.asyncio
@@ -2065,14 +2084,14 @@ class TestWarmPoolInternals:
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         mgr._provider_factory = None
         await mgr._fill_warm_pool()  # should not raise
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
     @pytest.mark.asyncio
     async def test_fill_warm_pool_zero_size(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         mgr._pool_size = 0
         await mgr._fill_warm_pool()
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
     @pytest.mark.asyncio
     async def test_fill_warm_pool_stops_on_failure(self, cfg):
@@ -2088,27 +2107,27 @@ class TestWarmPoolInternals:
             return m
 
         mgr = SessionManager(cfg, provider_factory=failing_factory)
-        mgr._pool_size = 3
+        _set_pool(mgr, "", size=3)
         await mgr._fill_warm_pool()
         # Only 1 succeeded before failure stopped the loop
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
         await mgr.close_all()
 
     @pytest.mark.asyncio
     async def test_claim_from_pool_matching_agent(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_agent = "kirocrew"
+        _set_pool(mgr, "kirocrew")
         mock_p = AsyncMock()
-        mgr._warm_pool.put_nowait((mock_p, 100.0))
+        _q(mgr).put_nowait((mock_p, 100.0))
         result = mgr._claim_from_pool("kirocrew")
         assert result == (mock_p, 100.0)
 
     @pytest.mark.asyncio
     async def test_claim_from_pool_mismatched_agent(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_agent = "kirocrew"
+        _set_pool(mgr, "kirocrew")
         mock_p = AsyncMock()
-        mgr._warm_pool.put_nowait((mock_p, 100.0))
+        _q(mgr).put_nowait((mock_p, 100.0))
         result = mgr._claim_from_pool("different-agent")
         assert result is None
 
@@ -2121,10 +2140,10 @@ class TestWarmPoolInternals:
     @pytest.mark.asyncio
     async def test_drain_and_claim_healthy(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_agent = ""
+        _set_pool(mgr, "")
         mock_p = AsyncMock()
         mock_p.is_process_alive = lambda: True
-        mgr._warm_pool.put_nowait((mock_p, time.monotonic()))
+        _q(mgr).put_nowait((mock_p, time.monotonic()))
         result = await mgr._drain_and_claim(None)
         assert result is mock_p
         await mgr.close_all()
@@ -2132,11 +2151,11 @@ class TestWarmPoolInternals:
     @pytest.mark.asyncio
     async def test_drain_and_claim_dead_provider_discarded(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_agent = ""
+        _set_pool(mgr, "")
         dead_p = AsyncMock()
         dead_p.is_process_alive = lambda: False
         dead_p.exit_code = 1
-        mgr._warm_pool.put_nowait((dead_p, time.monotonic()))
+        _q(mgr).put_nowait((dead_p, time.monotonic()))
         result = await mgr._drain_and_claim(None)
         assert result is None
         dead_p.shutdown.assert_awaited_once()
@@ -2145,13 +2164,13 @@ class TestWarmPoolInternals:
     @pytest.mark.asyncio
     async def test_drain_and_claim_stale_ttl_discarded(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_agent = ""
+        _set_pool(mgr, "")
         mgr._pool_ttl_secs = 60
         stale_p = AsyncMock()
         stale_p.is_process_alive = lambda: True
 
         # Spawned 120s ago — exceeds 60s TTL
-        mgr._warm_pool.put_nowait((stale_p, time.monotonic() - 120))
+        _q(mgr).put_nowait((stale_p, time.monotonic() - 120))
         result = await mgr._drain_and_claim(None)
         assert result is None
         stale_p.shutdown.assert_awaited_once()
@@ -2164,7 +2183,7 @@ class TestPoolHealthLoop:
     @pytest.mark.asyncio
     async def test_health_loop_removes_dead_providers(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_size = 2
+        _set_pool(mgr, "", size=2)
         mgr._pool_ttl_secs = 0  # no TTL
 
         dead_p = AsyncMock()
@@ -2173,7 +2192,7 @@ class TestPoolHealthLoop:
         dead_p.client = AsyncMock()
         dead_p.client._pid = 111
 
-        mgr._warm_pool.put_nowait((dead_p, time.monotonic()))
+        _q(mgr).put_nowait((dead_p, time.monotonic()))
 
         # Run one iteration then cancel
         call_count = 0
@@ -2190,14 +2209,14 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
         dead_p.shutdown.assert_awaited_once()
         await mgr.close_all()
 
     @pytest.mark.asyncio
     async def test_health_loop_keeps_healthy_providers(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_size = 2
+        _set_pool(mgr, "", size=2)
         mgr._pool_ttl_secs = 0
 
         healthy_p = AsyncMock()
@@ -2205,7 +2224,7 @@ class TestPoolHealthLoop:
         healthy_p.client = AsyncMock()
         healthy_p.client._pid = 222
 
-        mgr._warm_pool.put_nowait((healthy_p, time.monotonic()))
+        _q(mgr).put_nowait((healthy_p, time.monotonic()))
 
         call_count = 0
 
@@ -2221,14 +2240,14 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
         healthy_p.shutdown.assert_not_awaited()
         await mgr.close_all()
 
     @pytest.mark.asyncio
     async def test_health_loop_ttl_expiry(self, cfg):
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._pool_size = 2
+        _set_pool(mgr, "", size=2)
         mgr._pool_ttl_secs = 60
 
         stale_p = AsyncMock()
@@ -2236,7 +2255,7 @@ class TestPoolHealthLoop:
         stale_p.client = AsyncMock()
         stale_p.client._pid = 333
 
-        mgr._warm_pool.put_nowait((stale_p, time.monotonic() - 120))
+        _q(mgr).put_nowait((stale_p, time.monotonic() - 120))
 
         call_count = 0
 
@@ -2251,7 +2270,7 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
         stale_p.shutdown.assert_awaited_once()
         await mgr.close_all()
 
@@ -2436,11 +2455,11 @@ class TestPoolPids:
         mock_p = AsyncMock()
         mock_p.client = AsyncMock()
         mock_p.client._pid = 42
-        mgr._warm_pool.put_nowait((mock_p, time.monotonic()))
+        _set_pool(mgr, "").put_nowait((mock_p, time.monotonic()))
         pids = mgr._pool_pids()
         assert 42 in pids
         # Non-destructive — item still in pool
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
 
     @pytest.mark.asyncio
     async def test_pool_pids_empty(self, cfg):
@@ -2618,7 +2637,7 @@ class TestScheduleReplenish:
         mgr._pool_size = 2
         mgr._schedule_replenish()
         await asyncio.sleep(0.1)  # let task run
-        assert mgr._warm_pool.qsize() >= 1
+        assert mgr._warm_pool_qsize_total() >= 1
         await mgr.close_all()
 
     @pytest.mark.asyncio
@@ -3481,7 +3500,7 @@ class TestGetOrCreatePoolClaim:
         cfg.session.pool_size = 1
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         mgr._pool_size = 1
-        mgr._pool_agent = "kirocrew"
+        _set_pool(mgr, "kirocrew")
 
         # Pre-fill pool with a mock provider that looks like AcpProvider
         mock_pooled = AsyncMock(spec=AcpProvider)
@@ -3496,7 +3515,7 @@ class TestGetOrCreatePoolClaim:
         mock_pooled.client.rekey = lambda *a, **kw: None
         mock_pooled.client.resumed = False
 
-        mgr._warm_pool.put_nowait((mock_pooled, time.monotonic()))
+        _q(mgr).put_nowait((mock_pooled, time.monotonic()))
 
         provider, is_new, _ = await mgr.get_or_create("dashboard:slot1", agent="kirocrew")
         mgr.release("dashboard:slot1")

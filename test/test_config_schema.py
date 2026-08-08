@@ -104,8 +104,14 @@ def _all_fields_recursive(
 
 
 def _resolve_type(f: dataclasses.Field) -> type:  # type: ignore[type-arg]
-    """Resolve a field's type annotation to a runtime type."""
+    """Resolve a field's type annotation to a runtime type.
+
+    ``X | None`` unions unwrap to ``X``, mirroring schema generation
+    (``schema._optional_inner``): the schema types such a field by its base
+    with null allowed, so the expectation here must compare against the base.
+    """
     import kiro_crew.config.loader as _mod
+    from kiro_crew.config.schema import _optional_inner
 
     tp = f.type
     if isinstance(tp, str):
@@ -113,6 +119,7 @@ def _resolve_type(f: dataclasses.Field) -> type:  # type: ignore[type-arg]
             tp = eval(tp, vars(_mod))  # noqa: S307
         except Exception:
             return str
+    tp, _ = _optional_inner(tp)  # type: ignore[arg-type]
     return tp  # type: ignore[return-value]
 
 

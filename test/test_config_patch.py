@@ -631,3 +631,77 @@ class TestDefaultReasoningEffortPatch:
         # A default change must NEVER take the destructive path — that clears
         # _sessions and shuts live providers down, killing in-flight turns.
         sessions.reload_provider_factory.assert_not_awaited()
+
+
+# ── Warm pool per-agent map (session.pool_agents) ──────────────────────────
+
+
+class TestPoolAgentsPatch:
+    @pytest.mark.asyncio
+    async def test_pool_agents_map_written_verbatim(self, tmp_config) -> None:
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_agents", {"kirocrew": 2, "": 1})
+            assert resp.status == 200
+        data = json.loads(tmp_config.read_text(encoding="utf-8"))
+        assert data["session"]["pool_agents"] == {"kirocrew": 2, "": 1}
+
+    @pytest.mark.asyncio
+    async def test_pool_agents_unknown_agent_rejected(self, tmp_config) -> None:
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_agents", {"no-such-agent": 1})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_pool_agents_total_over_ceiling_rejected(self, tmp_config) -> None:
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_agents", {"kirocrew": 8, "": 8})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_pool_agents_zero_counts_coerced_out(self, tmp_config) -> None:
+        """Zero entries are dropped; an all-zero map stores {} (pool off)."""
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_agents", {"kirocrew": 0})
+            assert resp.status == 200
+        data = json.loads(tmp_config.read_text(encoding="utf-8"))
+        assert data["session"]["pool_agents"] == {}
+
+    @pytest.mark.asyncio
+    async def test_legacy_patch_regenerates_existing_map(self, tmp_config) -> None:
+        """When the file carries an actual map, a legacy pool_size PATCH must
+        write through to it — otherwise the map would shadow the edit."""
+        seeded = json.loads(tmp_config.read_text(encoding="utf-8"))
+        seeded["session"]["pool_agents"] = {"kirocrew": 1}
+        tmp_config.write_text(json.dumps(seeded), encoding="utf-8")
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_size", 3)
+            assert resp.status == 200
+        data = json.loads(tmp_config.read_text(encoding="utf-8"))
+        # Regenerated from the post-write legacy pair (pool_agent is "").
+        assert data["session"]["pool_agents"] == {"": 3}
+
+    @pytest.mark.asyncio
+    async def test_legacy_patch_does_not_materialize_null_map(self, tmp_config) -> None:
+        """A null map means "defer to the legacy pair" exactly like an absent
+        key (save() serializes the tri-state default as null). A legacy PATCH
+        must NOT materialize a map from it: session_data is the post-overlay
+        merge at load, so a derived base-file map would shadow
+        config.local.json overlay edits to the legacy keys."""
+        seeded = json.loads(tmp_config.read_text(encoding="utf-8"))
+        seeded["session"]["pool_agents"] = None
+        tmp_config.write_text(json.dumps(seeded), encoding="utf-8")
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_size", 3)
+            assert resp.status == 200
+        data = json.loads(tmp_config.read_text(encoding="utf-8"))
+        assert data["session"]["pool_agents"] is None
+        assert data["session"]["pool_size"] == 3
+
+    @pytest.mark.asyncio
+    async def test_legacy_patch_leaves_absent_map_absent(self, tmp_config) -> None:
+        async with TestClient(TestServer(_make_app())) as c:
+            resp = await _patch(c, "session.pool_size", 4)
+            assert resp.status == 200
+        data = json.loads(tmp_config.read_text(encoding="utf-8"))
+        assert "pool_agents" not in data["session"]
+        assert data["session"]["pool_size"] == 4

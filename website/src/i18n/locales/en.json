@@ -5746,7 +5746,6 @@
         "will_revert": "Empty — this will revert to the bundled model."
       },
       "kiroCrewCfgTab": {
-        "agent_for_pool_processes_empty_uses_default_agen": "Agent for pool processes. Empty uses default agent. Restart required.",
         "approval_mode": "Approval Mode",
         "auto": "auto",
         "auto_size_max": "Auto-Size Max",
@@ -5775,10 +5774,7 @@
         "next_update_check_cycle": "Next update check cycle.",
         "no_agents_defined": "No agents defined",
         "no_memory_stores": "No memory stores",
-        "number_of_pre_spawned_processes_0_disables_resta": "Number of pre-spawned processes. 0 disables. Restart required.",
         "orchestrator_mode": "Orchestrator Mode",
-        "pool_agent": "Pool Agent",
-        "pool_size": "Pool Size",
         "pool_ttl": "Pool TTL",
         "provider": "Provider",
         "sandbox": "Sandbox",

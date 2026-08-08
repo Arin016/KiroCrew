@@ -100,6 +100,7 @@ from kiro_crew.config.loader import (
     build_provider_factory,
     default_project_dir,
     normalize_agent_model,
+    resolve_agent_bindings,
 )
 from kiro_crew.executors import maintenance_executor, subprocess_executor
 from kiro_crew.mcp_gateway.abort import schedule_abort
@@ -786,19 +787,22 @@ class SessionManager:
         )
 
         # ── Warm Pool ──
-        self._pool_size: int = min(_MAX_POOL, max(0, cfg.session.pool_size))
-        if cfg.session.pool_size > _MAX_POOL:
-            logger.warning(
-                "pool_size %d exceeds max %d, clamping", cfg.session.pool_size, _MAX_POOL
-            )
-        self._pool_agent: str = cfg.session.pool_agent or getattr(cfg.agent, "default_agent", "")
+        # Resolved agent name → warm count. ``""`` keys in config resolve to
+        # ``agent.default_agent`` here so claims compare concrete names.
+        self._pool_targets: dict[str, int] = self._resolve_pool_targets(cfg)
+        # Total across all agents — the "pool enabled?" gate every path checks.
+        self._pool_size: int = sum(self._pool_targets.values())
+        self._pool_default_agent: str = self._pool_key_for(cfg, "")
         self._pool_ttl_secs: int = max(0, cfg.session.pool_ttl_secs)
         # Default cwd used by pool processes — matches the workspace-dir
         # fallback in chat_handlers so sessions that didn't pick an explicit
         # project can still claim from the pool.
         self._pool_cwd: str = default_project_dir()
-        # Queue stores (provider, spawn_time) tuples for TTL tracking
-        self._warm_pool: asyncio.Queue[tuple[LLMProvider, float]] = asyncio.Queue()
+        # One queue per pooled agent; each stores (provider, spawn_time)
+        # tuples for TTL tracking.
+        self._warm_pools: dict[str, asyncio.Queue[tuple[LLMProvider, float]]] = {
+            name: asyncio.Queue() for name in self._pool_targets
+        }
         self._pool_fill_lock = asyncio.Lock()
         self._pool_health_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._pool_sweep_pids: set[int] = set()  # PIDs temporarily out of queue during health sweep
@@ -870,12 +874,13 @@ class SessionManager:
             async with self._lock:
                 self._cfg = cfg
                 self._provider_factory = build_provider_factory(cfg)
-                while not self._warm_pool.empty():
-                    try:
-                        provider, _ = self._warm_pool.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    await self._discard_pool_provider(provider, "Default changed")
+                for queue in self._warm_pools.values():
+                    while not queue.empty():
+                        try:
+                            provider, _ = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        await self._discard_pool_provider(provider, "Default changed")
         # Refill with the NEW factory. This is not optional bookkeeping: the
         # health sweep returns early on an empty pool (`if not qsize: return`),
         # so a drained pool would never refill on its own and a configured warm
@@ -900,15 +905,18 @@ class SessionManager:
             async with self._lock:
                 self._cfg = cfg
                 self._provider_factory = build_provider_factory(cfg)
-                self._pool_size = min(_MAX_POOL, max(0, cfg.session.pool_size))
-                self._pool_agent = cfg.session.pool_agent or getattr(cfg.agent, "default_agent", "")
+                self._pool_targets = self._resolve_pool_targets(cfg)
+                self._pool_size = sum(self._pool_targets.values())
+                self._pool_default_agent = self._pool_key_for(cfg, "")
                 self._pool_cwd = default_project_dir()
-                while not self._warm_pool.empty():
-                    try:
-                        provider, _ = self._warm_pool.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    await self._discard_pool_provider(provider, "Stale pool drain")
+                for queue in self._warm_pools.values():
+                    while not queue.empty():
+                        try:
+                            provider, _ = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        await self._discard_pool_provider(provider, "Stale pool drain")
+                self._warm_pools = {name: asyncio.Queue() for name in self._pool_targets}
                 # Clear all existing sessions (they use the old provider)
                 stale = list(self._sessions.items())
                 self._sessions.clear()
@@ -1513,38 +1521,116 @@ class SessionManager:
         provider = sess.provider
         return getattr(provider, "is_session_sharing_eligible", False)
 
+    @staticmethod
+    def _pool_key_for(cfg: "KiroCrewConfig", name: str) -> str:
+        """Translate a configured pool key into the kiro agent name sessions request.
+
+        Config carries Kiro Crew agent aliases (what the settings UI validates
+        against) or ``""`` for the default, while claims arrive carrying the
+        session's resolved ``kiro_agent`` (see ``resolve_agent_bindings`` in
+        chat_runner). Aliases and ``""`` translate through the same resolver;
+        a name that is not an alias passes through unchanged so a hand-edited
+        raw kiro agent name still pools correctly. Defensive against config
+        doubles: any resolution failure falls back to the raw name / the
+        legacy ``agent.default_agent`` slot.
+        """
+        try:
+            agents = getattr(cfg, "agents", None)
+            if isinstance(agents, dict) and (not name or name in agents):
+                kiro_agent = resolve_agent_bindings(cfg, name or None).kiro_agent
+                if isinstance(kiro_agent, str) and kiro_agent:
+                    return kiro_agent
+        except Exception:
+            logger.debug("pool key resolution failed for %r", name, exc_info=True)
+        if not name:
+            return str(getattr(cfg.agent, "default_agent", "") or "")
+        return name
+
+    @staticmethod
+    def _resolve_pool_targets(cfg: "KiroCrewConfig") -> dict[str, int]:
+        """Resolve ``session.pool_agents`` into concrete agent-name → count targets.
+
+        Tri-state source: an explicit dict is authoritative — including ``{}``,
+        which disables the pool; only an absent map (``None``, or a config
+        double without the field) falls back to the legacy
+        ``pool_size``/``pool_agent`` pair. Keys translate to kiro agent names
+        via :meth:`_pool_key_for` (``""`` means "the default agent");
+        duplicate keys after resolution sum their counts. The TOTAL is clamped
+        to ``_MAX_POOL`` because each entry is a pre-spawned kiro-cli process.
+        """
+        raw = getattr(cfg.session, "pool_agents", None)
+        targets: dict[str, int] = {}
+        if isinstance(raw, dict):
+            for name, count in raw.items():
+                if (
+                    not isinstance(name, str)
+                    or not isinstance(count, int)
+                    or isinstance(count, bool)
+                    or count <= 0
+                ):
+                    continue
+                resolved = SessionManager._pool_key_for(cfg, name.strip())
+                targets[resolved] = targets.get(resolved, 0) + count
+        else:
+            size = getattr(cfg.session, "pool_size", 0)
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                pool_agent = str(getattr(cfg.session, "pool_agent", "") or "")
+                targets = {SessionManager._pool_key_for(cfg, pool_agent): size}
+        total = sum(targets.values())
+        if total > _MAX_POOL:
+            logger.warning("pool total %d exceeds max %d, clamping", total, _MAX_POOL)
+            remaining = _MAX_POOL
+            clamped: dict[str, int] = {}
+            for name, count in targets.items():
+                take = min(count, remaining)
+                if take > 0:
+                    clamped[name] = take
+                remaining -= take
+            targets = clamped
+        return targets
+
+    def _warm_pool_qsize_total(self) -> int:
+        """Warm providers currently queued, summed across all agents' pools."""
+        return sum(q.qsize() for q in self._warm_pools.values())
+
     async def _fill_warm_pool(self) -> None:
         """
-        Spawn providers up to ``_pool_size`` and enqueue them.
-        Pool fill stops on first failure and does not retry until next claim.
+        Spawn providers up to each agent's target and enqueue them.
+        A spawn failure stops filling THAT agent's pool (no retry until the
+        next claim/replenish) but still advances to the remaining agents —
+        one misconfigured agent must not starve every pool ordered after it.
         """
         if not self._pool_size or not self._provider_factory:
             return
         async with self._pool_fill_lock:
-            while self._warm_pool.qsize() < self._pool_size:
-                p = None
-                try:
-                    p = self._provider_factory(
-                        "",
-                        agent=self._pool_agent or None,
-                        cwd=self._pool_cwd or None,
-                    )
-                    async with self._start_sem:
-                        await p.start()
-                    self._warm_pool.put_nowait((p, time.monotonic()))
-                    p = None  # successfully enqueued — nothing to clean up
-                    logger.info(
-                        "Warm pool: spawned process (pool=%d/%d agent=%s)",
-                        self._warm_pool.qsize(),
-                        self._pool_size,
-                        self._pool_agent or "default",
-                    )
-                except Exception:
-                    logger.warning("Warm pool: failed to spawn process", exc_info=True)
-                    break
-                finally:
-                    if p is not None:
-                        await self._discard_pool_provider(p, "Warm pool fill cleanup")
+            for agent_name, target in self._pool_targets.items():
+                queue = self._warm_pools.get(agent_name)
+                if queue is None:
+                    continue
+                while queue.qsize() < target:
+                    p = None
+                    try:
+                        p = self._provider_factory(
+                            "",
+                            agent=agent_name or None,
+                            cwd=self._pool_cwd or None,
+                        )
+                        async with self._start_sem:
+                            await p.start()
+                        queue.put_nowait((p, time.monotonic()))
+                        p = None  # successfully enqueued — nothing to clean up
+                        logger.info(
+                            "Warm pool: spawned process (pool=%d/%d agent=%s)",
+                            queue.qsize(),
+                            target,
+                            agent_name or "default",
+                        )
+                    except Exception:
+                        logger.warning("Warm pool: failed to spawn process", exc_info=True)
+                        break
+                    finally:
+                        if p is not None:
+                            await self._discard_pool_provider(p, "Warm pool fill cleanup")
 
     # Bound on the graceful shutdown attempt during a pool discard. The pool
     # health sweep is a single long-lived task: an unbounded await on a wedged
@@ -1683,19 +1769,31 @@ class SessionManager:
         except Exception:
             logger.debug("pool decision metric emit failed", exc_info=True)
 
-    def _claim_from_pool(self, agent: str | None) -> tuple[LLMProvider, float] | None:
-        """Try to claim a pre-warmed provider if the agent matches.
-        Deny-by-default: normalize both sides and positively compare.
-        None/empty agent means "use default" → promoted to pool_agent.
+    def _resolve_pool_key(self, agent: str | None) -> str:
+        """Map a requested agent to the warm-pool key that may serve it.
+
+        A concrete agent name only ever matches its own pool (deny-by-default).
+        None/empty means "use default": that resolves to the default agent's
+        pool when one exists; otherwise, when exactly ONE pool is configured,
+        the request is promoted to it — preserving the legacy behavior where
+        a single ``pool_agent=X`` pool served unspecified-agent sessions.
         """
-        if self._warm_pool.empty():
-            return None
-        requested = agent if agent else (self._pool_agent or "")
-        pool = self._pool_agent or ""
-        if requested != pool:
+        if agent:
+            return agent
+        if self._pool_default_agent in self._warm_pools or len(self._warm_pools) != 1:
+            return self._pool_default_agent
+        return next(iter(self._warm_pools))
+
+    def _claim_from_pool(self, agent: str | None) -> tuple[LLMProvider, float] | None:
+        """Try to claim a pre-warmed provider for the requested agent.
+        Deny-by-default: only the requested agent's own pool is consulted.
+        None/empty agent means "use default" → resolved by _resolve_pool_key.
+        """
+        queue = self._warm_pools.get(self._resolve_pool_key(agent))
+        if queue is None or queue.empty():
             return None
         try:
-            return self._warm_pool.get_nowait()
+            return queue.get_nowait()
         except asyncio.QueueEmpty:
             return None
 
@@ -1748,19 +1846,20 @@ class SessionManager:
     def _pool_pids(self) -> set[int]:
         """Return PIDs of all providers currently in the warm pool (non-destructive peek)."""
         pids: set[int] = set()
-        # Drain and re-enqueue to peek without losing entries
-        items: list[tuple[LLMProvider, float]] = []
-        while not self._warm_pool.empty():
-            try:
-                entry = self._warm_pool.get_nowait()
-                items.append(entry)
-            except asyncio.QueueEmpty:
-                break
-        for provider, spawn_time in items:
-            pid = getattr(getattr(provider, "client", None), "_pid", None)
-            if isinstance(pid, int):
-                pids.add(pid)
-            self._warm_pool.put_nowait((provider, spawn_time))
+        # Drain and re-enqueue each queue to peek without losing entries
+        for queue in self._warm_pools.values():
+            items: list[tuple[LLMProvider, float]] = []
+            while not queue.empty():
+                try:
+                    entry = queue.get_nowait()
+                    items.append(entry)
+                except asyncio.QueueEmpty:
+                    break
+            for provider, spawn_time in items:
+                pid = getattr(getattr(provider, "client", None), "_pid", None)
+                if isinstance(pid, int):
+                    pids.add(pid)
+                queue.put_nowait((provider, spawn_time))
         pids.update(self._pool_sweep_pids)
         return pids
 
@@ -1820,83 +1919,91 @@ class SessionManager:
                 logger.exception("Pool health sweep failed")
 
     async def _sweep_warm_pool_once(self) -> None:
-        """One health sweep: drain the pool, keep healthy entries, reap the rest."""
+        """One health sweep: drain each pool, keep healthy entries, reap the rest."""
         if not self._pool_size:
             return
-        qsize = self._warm_pool.qsize()
-        if not qsize:
-            return
-        logger.debug(
-            "Pool health: sweeping %d providers (target=%d, ttl=%ds)",
-            qsize,
-            self._pool_size,
-            self._pool_ttl_secs,
-        )
-        # Drain entire queue, keep healthy entries, discard the rest
-        healthy: list[tuple[LLMProvider, float]] = []
-        to_shutdown: list[LLMProvider] = []
-        now = time.monotonic()
-        try:
-            for _ in range(qsize):
-                try:
-                    provider, spawn_time = self._warm_pool.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                age = now - spawn_time
-                pid = getattr(getattr(provider, "client", None), "_pid", None)
-                if isinstance(pid, int):
-                    self._pool_sweep_pids.add(pid)
-                if self._pool_ttl_secs and age > self._pool_ttl_secs:
-                    logger.warning(
-                        "Pool health: %.0fs old provider (pid=%s) exceeds TTL %ds, discarding",
-                        age,
-                        pid,
-                        self._pool_ttl_secs,
-                    )
-                    to_shutdown.append(provider)
-                    continue
-                try:
-                    alive = hasattr(provider, "is_process_alive") and provider.is_process_alive()
-                except Exception:
-                    alive = False
-                if not alive:
-                    rc = provider.exit_code if hasattr(provider, "exit_code") else None
-                    logger.warning(
-                        "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), discarding",
-                        pid,
-                        rc,
-                        age,
-                    )
-                    to_shutdown.append(provider)
-                    continue
-                logger.debug("Pool health: provider pid=%s alive (age=%.0fs)", pid, age)
-                healthy.append((provider, spawn_time))
-        finally:
-            # Re-enqueue survivors first, then shut down dead providers.
-            # This avoids an empty-queue window where _drain_and_claim()
-            # would fall back to cold start.  CancelledError during
-            # shutdown may skip remaining providers in to_shutdown —
-            # acceptable because they're already dead/expired and their
-            # PIDs are tracked in kiro_session_pids.txt for startup
-            # cleanup.  Sweep PIDs are cleared in a nested finally so
-            # they can't go stale regardless of how we exit.
+        removed_total = 0
+        healthy_total = 0
+        for agent_name, queue in self._warm_pools.items():
+            qsize = queue.qsize()
+            if not qsize:
+                continue
+            logger.debug(
+                "Pool health: sweeping %d providers (agent=%s target=%d, ttl=%ds)",
+                qsize,
+                agent_name or "default",
+                self._pool_targets.get(agent_name, 0),
+                self._pool_ttl_secs,
+            )
+            # Drain entire queue, keep healthy entries, discard the rest
+            healthy: list[tuple[LLMProvider, float]] = []
+            to_shutdown: list[LLMProvider] = []
+            now = time.monotonic()
             try:
-                for entry in healthy:
-                    self._warm_pool.put_nowait(entry)
-                for p in to_shutdown:
-                    await self._discard_pool_provider(p, "Pool health discard")
+                for _ in range(qsize):
+                    try:
+                        provider, spawn_time = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    age = now - spawn_time
+                    pid = getattr(getattr(provider, "client", None), "_pid", None)
+                    if isinstance(pid, int):
+                        self._pool_sweep_pids.add(pid)
+                    if self._pool_ttl_secs and age > self._pool_ttl_secs:
+                        logger.warning(
+                            "Pool health: %.0fs old provider (pid=%s) exceeds TTL %ds, discarding",
+                            age,
+                            pid,
+                            self._pool_ttl_secs,
+                        )
+                        to_shutdown.append(provider)
+                        continue
+                    try:
+                        alive = (
+                            hasattr(provider, "is_process_alive") and provider.is_process_alive()
+                        )
+                    except Exception:
+                        alive = False
+                    if not alive:
+                        rc = provider.exit_code if hasattr(provider, "exit_code") else None
+                        logger.warning(
+                            "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), "
+                            "discarding",
+                            pid,
+                            rc,
+                            age,
+                        )
+                        to_shutdown.append(provider)
+                        continue
+                    logger.debug("Pool health: provider pid=%s alive (age=%.0fs)", pid, age)
+                    healthy.append((provider, spawn_time))
             finally:
-                self._pool_sweep_pids.clear()
-        removed = qsize - len(healthy)
-        if removed:
+                # Re-enqueue survivors first, then shut down dead providers.
+                # This avoids an empty-queue window where _drain_and_claim()
+                # would fall back to cold start.  CancelledError during
+                # shutdown may skip remaining providers in to_shutdown —
+                # acceptable because they're already dead/expired and their
+                # PIDs are tracked in kiro_session_pids.txt for startup
+                # cleanup.  Sweep PIDs are cleared in a nested finally so
+                # they can't go stale regardless of how we exit.
+                try:
+                    for entry in healthy:
+                        queue.put_nowait(entry)
+                    for p in to_shutdown:
+                        await self._discard_pool_provider(p, "Pool health discard")
+                finally:
+                    self._pool_sweep_pids.clear()
+            removed_total += qsize - len(healthy)
+            healthy_total += len(healthy)
+        if removed_total:
             logger.info(
                 "Pool health: removed %d dead/expired, %d healthy remain",
-                removed,
-                len(healthy),
+                removed_total,
+                healthy_total,
             )
             self._schedule_replenish()
-        else:
-            logger.debug("Pool health: all %d providers healthy", len(healthy))
+        elif healthy_total:
+            logger.debug("Pool health: all %d providers healthy", healthy_total)
 
     def runtime_pids(self) -> list[dict[str, object]]:
         """Per-session runtime identity: the pid tree root to sample, and whether
@@ -2437,7 +2544,7 @@ class SessionManager:
             model,
             agent,
             self._pool_size,
-            self._warm_pool.qsize(),
+            self._warm_pool_qsize_total(),
             cwd,
             self._pool_cwd,
         )
@@ -2479,9 +2586,12 @@ class SessionManager:
                     provider.client.rekey(key, channel_id)
                     # Switch model post-claim if caller requested non-default.
                     if model:
+                        # The pool that served this claim (deterministic re-run
+                        # of the resolution _drain_and_claim used).
+                        _pool_agent_name = self._resolve_pool_key(agent)
                         _pool_model = (
-                            self._resolve_agent_model(self._pool_agent)
-                            if self._pool_agent
+                            self._resolve_agent_model(_pool_agent_name)
+                            if _pool_agent_name
                             else None
                         )
                         # The requested `model` is a canonical/wire value while
@@ -2535,7 +2645,9 @@ class SessionManager:
                                     "Pool post-claim: switched model to %s", _switch_model
                                 )
                 logger.info(
-                    "Claimed warm-pool process for %s (agent=%s)", key, agent or self._pool_agent
+                    "Claimed warm-pool process for %s (agent=%s)",
+                    key,
+                    agent or self._resolve_pool_key(agent),
                 )
                 self._schedule_replenish()
             except (asyncio.CancelledError, Exception):
@@ -3444,12 +3556,13 @@ class SessionManager:
 
         # Drain warm pool — shut down pre-spawned processes
         pool_providers: list[LLMProvider] = []
-        while not self._warm_pool.empty():
-            try:
-                provider, _ = self._warm_pool.get_nowait()
-                pool_providers.append(provider)
-            except asyncio.QueueEmpty:
-                break
+        for _queue in self._warm_pools.values():
+            while not _queue.empty():
+                try:
+                    provider, _ = _queue.get_nowait()
+                    pool_providers.append(provider)
+                except asyncio.QueueEmpty:
+                    break
 
         async with self._lock:
             # Save session mappings before killing processes
@@ -4170,12 +4283,13 @@ class SessionManager:
         the old config at spawn time) are discarded.
         """
         drained = []
-        while not self._warm_pool.empty():
-            try:
-                provider, _ = self._warm_pool.get_nowait()
-                drained.append(provider)
-            except asyncio.QueueEmpty:
-                break
+        for queue in self._warm_pools.values():
+            while not queue.empty():
+                try:
+                    provider, _ = queue.get_nowait()
+                    drained.append(provider)
+                except asyncio.QueueEmpty:
+                    break
         if drained:
             logger.info("Drained %d provider(s) from warm pool", len(drained))
         return drained
@@ -4384,7 +4498,7 @@ class SessionManager:
                 logger.debug("sandbox launcher sweep failed: %s", type(exc).__name__)
 
             # Sweep kiro-cli processes tracked in kiro_session_pids.txt
-            # but no longer in self._sessions or self._warm_pool (leaked by
+            # but no longer in self._sessions or self._warm_pools (leaked by
             # failed reset/shutdown).  Warm pool PIDs are included in the
             # active set to prevent healthy pooled processes from being
             # killed as orphans.

@@ -271,6 +271,48 @@ def coerce_role_efforts(raw: object) -> dict[str, str]:
     return out
 
 
+def coerce_pool_agents(raw: object) -> dict[str, int] | None:
+    """Normalize the per-agent warm-pool map (session.pool_agents).
+
+    Tri-state: ``None`` (key absent) means "defer to the legacy
+    pool_size/pool_agent pair"; an explicit dict — including ``{}``, which
+    disables the pool — is authoritative. Keys are agent names (``""`` means
+    "the default agent"); values are warm counts. Non-string keys and
+    non-positive or non-int counts are dropped; a non-dict present value
+    collapses to ``{}`` (fail-safe: a malformed map disables rather than
+    silently re-enabling via the legacy fallback). The map's TOTAL is a
+    security-bounded resource (each entry is a pre-spawned kiro-cli process),
+    so when the sum exceeds ``POOL_SIZE_MAX`` entries are scaled back in
+    iteration order until the total fits — the same untrusted-on-disk posture
+    as the ``pool_size`` load-time clamp.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, val in raw.items():
+        if not isinstance(key, str):
+            continue
+        count = _safe_int(val, 0)
+        if count > 0:
+            out[key.strip()] = count
+    total = sum(out.values())
+    if total > POOL_SIZE_MAX:
+        logger.warning(
+            "pool_agents total %d exceeds max %d, scaling back", total, POOL_SIZE_MAX
+        )
+        remaining = POOL_SIZE_MAX
+        clamped: dict[str, int] = {}
+        for key, count in out.items():
+            take = min(count, remaining)
+            if take > 0:
+                clamped[key] = take
+            remaining -= take
+        out = clamped
+    return out
+
+
 _DEFAULT_PORT = 5476
 
 # KIROCREW_PORT is validated at CLI entry (cli.py main()).
@@ -1241,6 +1283,18 @@ class SessionConfig:
         metadata=_meta(
             "Warm Pool Agent",
             "Agent name for warm pool processes. Empty string uses agent.default_agent.",
+        ),
+    )
+    pool_agents: dict[str, int] | None = field(
+        default=None,
+        metadata=_meta(
+            "Warm Pool Agents",
+            "Per-agent warm counts: map of agent name to number of pre-spawned "
+            "processes kept ready for that agent. The empty-string key means "
+            "'the default agent' and follows agent.default_agent when it changes. "
+            "Tri-state: absent (null) defers to the legacy pool_size/pool_agent "
+            "pair; an explicit empty map disables the pool. The total across "
+            "agents is capped at the pool ceiling.",
         ),
     )
     pool_ttl_secs: int = field(
@@ -4676,6 +4730,7 @@ class KiroCrewConfig:
                 autocompact_pct=_safe_float(session_data.get("autocompact_pct", 90.0), 90.0),
                 pool_size=_safe_int(session_data.get("pool_size", 2), 2),
                 pool_agent=str(session_data.get("pool_agent", "")),
+                pool_agents=coerce_pool_agents(session_data.get("pool_agents")),
                 pool_ttl_secs=_safe_int(session_data.get("pool_ttl_secs", 1800), 1800),
                 archive_retention_days=_archive_retention_days(session_data),
                 watchdog_rss_max_mb=_safe_int(session_data.get("watchdog_rss_max_mb", 0), 0),
@@ -5233,6 +5288,14 @@ class KiroCrewConfig:
                 if isinstance(v, str):
                     needs_migration = True
                     break
+
+            # Legacy warm-pool keys are deliberately NOT write-back migrated.
+            # ``session_data`` is the post-overlay merge of config.json and
+            # config.local.json, while ``save()`` writes only the base file —
+            # deriving ``pool_agents`` from merged data and persisting it
+            # would shadow future overlay edits to the legacy keys. The
+            # legacy pair stays authoritative until ``pool_agents`` is set
+            # explicitly (see SessionManager._resolve_pool_targets).
 
             # One-time migration: create default agent when none exists
             if not cfg.agents:

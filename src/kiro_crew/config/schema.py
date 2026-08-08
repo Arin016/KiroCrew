@@ -162,6 +162,13 @@ def _build_field_schema(
     enum_values: list | None = meta.get("enum", None)
 
     tp: type = resolved_type if resolved_type is not None else str
+    # Field-level ``X | None`` unions unwrap to their base type with null
+    # allowed — without this, ``get_origin(union)`` resolves to UnionType,
+    # ``_python_type_to_json`` falls back to "string", and the sanitizer
+    # strips every legitimate value of the field at load. Tri-state fields
+    # (e.g. session.pool_agents, where null means "defer to legacy keys")
+    # depend on the null surviving validation.
+    tp, _field_optional = _optional_inner(tp)
     schema: dict = {}
 
     if _is_dataclass_type(tp):
@@ -169,14 +176,15 @@ def _build_field_schema(
         schema = _build_object_schema(tp)
     else:
         json_type = _python_type_to_json(tp)
-        # A field marked ``nullable`` in its metadata accepts JSON ``null`` in
-        # addition to its base type. Needed for disable-sentinel fields where
-        # ``null`` is a meaningful value the loader normalizes (e.g.
+        # A field marked ``nullable`` in its metadata — or annotated as an
+        # ``X | None`` union — accepts JSON ``null`` in addition to its base
+        # type. Needed for disable-sentinel fields where ``null`` is a
+        # meaningful value the loader normalizes (e.g.
         # session.archive_retention_days: null → "disable cleanup").
         # Without this the generated schema is ``{"type": "integer"}`` and
         # jsonschema strips the null on any host where jsonschema is installed
         # (incl. prod), silently reverting to the default — the opposite intent.
-        if meta.get("nullable"):
+        if meta.get("nullable") or _field_optional:
             schema["type"] = [json_type, "null"]
         else:
             schema["type"] = json_type

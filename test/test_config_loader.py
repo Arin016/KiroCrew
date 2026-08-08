@@ -2744,6 +2744,77 @@ class TestSecurityBoundClamping:
             "subagent_auto_max" in m and "out of range" in m for m in logs
         ), f"expected clamp warning, got: {logs}"
 
+
+class TestPoolAgents:
+    """session.pool_agents coercion and tri-state legacy fallback."""
+
+    def test_coerce_absent_is_none_not_empty(self) -> None:
+        """None (key absent) must survive coercion — it means 'defer to the
+        legacy pair', which an empty map deliberately does not."""
+        from kiro_crew.config.loader import coerce_pool_agents
+
+        assert coerce_pool_agents(None) is None
+
+    def test_coerce_drops_invalid_entries(self) -> None:
+        from kiro_crew.config.loader import coerce_pool_agents
+
+        # A malformed present value collapses to {} (pool disabled), never
+        # to the legacy fallback.
+        assert coerce_pool_agents("nope") == {}
+        assert coerce_pool_agents({"a": 2, "b": 0, "c": -1, "d": "x", 5: 3}) == {"a": 2}
+        # bool is not a count
+        assert coerce_pool_agents({"a": True}) == {}
+
+    def test_coerce_clamps_total_to_ceiling(self) -> None:
+        from kiro_crew.config.loader import POOL_SIZE_MAX, coerce_pool_agents
+
+        out = coerce_pool_agents({"a": 8, "b": 8})
+        assert out is not None
+        assert sum(out.values()) == POOL_SIZE_MAX == 10
+        assert out == {"a": 8, "b": 2}
+
+    def test_explicit_map_loads_verbatim(self) -> None:
+        cfg = _load_from_dict(
+            {"session": {"pool_size": 5, "pool_agent": "legacy", "pool_agents": {"coder": 1}}}
+        )
+        assert cfg.session.pool_agents == {"coder": 1}
+
+    def test_explicit_empty_map_disables_pool(self) -> None:
+        """pool_agents={} with a positive legacy pool_size must stay {} —
+        re-deriving from the legacy pair would re-enable a pool the user
+        explicitly turned off via the per-agent editor."""
+        cfg = _load_from_dict({"session": {"pool_size": 3, "pool_agents": {}}})
+        assert cfg.session.pool_agents == {}
+
+    def test_absent_map_loads_as_none(self) -> None:
+        """The legacy pair is NOT materialized into pool_agents at load —
+        session_data is the post-overlay merge (config.local.json), so a
+        derived map persisted by any save() would shadow overlay edits.
+        Legacy resolution happens in SessionManager._resolve_pool_targets."""
+        cfg = _load_from_dict({"session": {"pool_size": 3, "pool_agent": "coder"}})
+        assert cfg.session.pool_agents is None
+
+    def test_no_write_back_migration_for_legacy_keys(self) -> None:
+        """Loading a config with legacy pool keys must never derive a
+        pool_agents map into the base file (overlay-shadowing hazard).
+        The agent-creation migration in this fixture does trigger a save(),
+        which serializes the full dataclass — so the key may appear as an
+        explicit null (= "defer to legacy", semantically identical to
+        absent), but never as a derived map."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"session": {"pool_size": 3, "pool_agent": "coder"}}, f)
+            tmp = Path(f.name)
+        try:
+            with unittest.mock.patch(
+                "kiro_crew.config.loader.config_path", return_value=tmp
+            ):
+                KiroCrewConfig.load()
+            on_disk = json.loads(tmp.read_text())
+            assert on_disk.get("session", {}).get("pool_agents") is None
+        finally:
+            tmp.unlink(missing_ok=True)
+            tmp.with_suffix(".json.bak").unlink(missing_ok=True)
+
     def test_clamp_emits_security_event(self) -> None:
         with unittest.mock.patch("kiro_crew.config.loader._log_config_clamp_event") as mock_event:
             _load_from_dict({"agent": {"subagent_auto_max": 200}})

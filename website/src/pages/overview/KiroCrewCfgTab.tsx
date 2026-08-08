@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, Bot, FolderOpen, Brain, Settings, Lock, Flame } from 'lucide-react'
+import { Check, Bot, FolderOpen, Brain, Settings, Lock, Flame, X } from 'lucide-react'
 import { api } from '../../api/client'
 import { Card, CardTitle, Badge, EmptyState } from '../../components/ui'
 import InfoTip from '../../components/InfoTip'
@@ -21,7 +21,7 @@ interface KiroCrewCfg {
   memory_stores: Record<string, MemoryStoreCfg>
   default_memory_store: string
   agent: { default_agent: string; provider: string; model: string; approval_mode: string; sandbox: string; subagent_max_turns?: number; max_subagents?: number; subagent_auto_max?: number; conductor_skill?: boolean; tool_search?: boolean; max_channels: number; max_channel_agents: number; enforce_denied_commands: string }
-  session: { timeout_secs: number; pool_size: number; pool_agent: string; pool_ttl_secs: number }
+  session: { timeout_secs: number; pool_size: number; pool_agent: string; pool_agents?: Record<string, number> | null; pool_ttl_secs: number }
   memory: { embedding_provider: string }
   auto_update: boolean
 }
@@ -122,6 +122,51 @@ function CfgToggle({ label, path, value, hint, onSave }: { label: string; path: 
   )
 }
 
+function PoolAgentCount({ label, agentKey, counts, max, busy, isPending, onSave, onRemove }: { label: string; agentKey: string; counts: Record<string, number>; max: number; busy: boolean; isPending?: boolean; onSave: (p: string, v: unknown) => void; onRemove: () => void }) {
+  const value = counts[agentKey] ?? 0
+  const [local, setLocal] = useState(String(value))
+  const { ok, markDirty } = useDirtyTrack(value)
+  const [err, setErr] = useState('')
+  useEffect(() => { setLocal(String(value)); setErr('') }, [value])
+  const commit = () => {
+    // A commit rebuilds the WHOLE map from the counts prop, which only
+    // refreshes when the previous PATCH round-trips — committing a second
+    // row mid-flight would resend the first row's stale value. The input is
+    // disabled while a save is pending, so commit can trust the prop.
+    if (busy) return
+    const n = parseInt(local)
+    if (isNaN(n) || n < 0) { setErr('invalid'); return }
+    const rest = Object.entries(counts).reduce((s, [k, v]) => k === agentKey ? s : s + v, 0)
+    if (rest + n > max) { setErr(i18nT('pages.overview.kiroCrewCfgTab.max_n_of_total_cap', { n: max - rest, total: max })); return }
+    if (n !== value) {
+      markDirty(); setErr('')
+      const next: Record<string, number> = { ...counts }
+      if (n > 0) next[agentKey] = n
+      else delete next[agentKey]
+      onSave('session.pool_agents', next)
+    }
+  }
+  return (
+    <CfgRow label={label} ok={ok && !err}>
+      <input type="number" aria-label={label} min={0} max={max} disabled={busy} autoFocus={isPending}
+        className={`${inputCls} text-right ${err ? 'border-danger' : ''} ${busy ? 'opacity-50' : ''}`}
+        value={local}
+        onChange={e => { setLocal(e.target.value); setErr('') }}
+        onBlur={commit}
+        onKeyDown={e => { if (e.key === 'Enter') commit() }}
+      />
+      <span className="text-muted text-[12px]">{i18nT('pages.overview.kiroCrewCfgTab.warm_suffix')}</span>
+      {err && <span className="text-danger text-[11px]">{err}</span>}
+      {!err && isPending && <span className="text-warning text-[11px]">{i18nT('pages.overview.kiroCrewCfgTab.enter_a_count')}</span>}
+      <button aria-label={i18nT('pages.overview.kiroCrewCfgTab.remove_from_pool', { name: label })} disabled={busy}
+        className={`text-muted hover:text-danger transition-colors ${busy ? 'opacity-50' : ''}`}
+        onClick={onRemove}>
+        <X className="lucide-inline" />
+      </button>
+    </CfgRow>
+  )
+}
+
 export default function KiroCrewCfgTab() {
   const provider = useProvider()
   const queryClient = useQueryClient()
@@ -132,6 +177,9 @@ export default function KiroCrewCfgTab() {
   const err = queryErr ? (queryErr instanceof Error ? queryErr.message : String(queryErr)) : ''
   const [saveErr, setSaveErr] = useState('')
   const [rev, setRev] = useState(0)
+  // Agents added to the Warm Pool card but not yet holding a saved count.
+  // Local-only: a pending row becomes config-backed on its first commit >0.
+  const [pendingPool, setPendingPool] = useState<string[]>([])
 
   const reqId = useRef(0)
 
@@ -157,6 +205,49 @@ export default function KiroCrewCfgTab() {
   const agents = Object.entries(cfg.agents)
   const workspaces = Object.entries(cfg.workspaces)
   const stores = Object.entries(cfg.memory_stores)
+
+  // Per-agent warm counts for display, mirroring the loader's tri-state:
+  // an explicit map is authoritative (including {} = disabled); an absent
+  // map derives from the legacy pool_size/pool_agent pair. Map keys are
+  // preserved VERBATIM — the "" key is the follow-the-default sentinel
+  // (resolved to agent.default_agent at claim time), so folding it into the
+  // concrete default-agent name for saving would pin standby to whatever
+  // the default was at save time and break follow-the-default semantics.
+  // Only the row LABEL resolves "" to the current default agent's name.
+  const poolCounts: Record<string, number> = { ...(cfg.session.pool_agents ?? (
+    (cfg.session.pool_size ?? 0) > 0 ? { [cfg.session.pool_agent ?? '']: cfg.session.pool_size } : {}
+  )) }
+  // Membership is explicit: only agents in the map (or added this session and
+  // not yet committed) get a row. Map keys for since-deleted agents still
+  // render so the stale entry stays removable. Everything else cold-starts.
+  const pending = pendingPool.filter(n => !(n in poolCounts))
+  const poolRows = [
+    ...('' in poolCounts ? [''] : []),
+    ...Object.keys(cfg.agents).filter(n => n in poolCounts || pending.includes(n)),
+    ...Object.keys(poolCounts).filter(n => n !== '' && !(n in cfg.agents)),
+  ]
+  const poolAddable = Object.keys(cfg.agents).filter(n => !poolRows.includes(n))
+  // The "(default agent)" marker goes on the row that FOLLOWS the default:
+  // the "" sentinel row when present, else the row named after the current
+  // default agent. When both exist the concrete row renders plain, keeping
+  // the two labels (and their aria-labels) distinct.
+  const poolRowLabel = (name: string) => {
+    if (name === '')
+      return `${cfg.default_agent} (${i18nT('pages.overview.kiroCrewCfgTab.default_agent')})`
+    if (name === cfg.default_agent && !('' in poolCounts))
+      return `${name} (${i18nT('pages.overview.kiroCrewCfgTab.default_agent')})`
+    if (!(name in cfg.agents))
+      return `${name} (${i18nT('pages.overview.kiroCrewCfgTab.deleted_agent')})`
+    return name
+  }
+  const removePoolAgent = (name: string) => {
+    setPendingPool(p => p.filter(x => x !== name))
+    if (name in poolCounts) {
+      const next = { ...poolCounts }
+      delete next[name]
+      save('session.pool_agents', next)
+    }
+  }
 
   return (
     <>
@@ -260,10 +351,35 @@ export default function KiroCrewCfgTab() {
       {provider.capabilities.warmPool && (
       <Card>
         <CardTitle><Flame className="lucide-inline" /> {i18nT('pages.overview.kiroCrewCfgTab.warm_pool')} <InfoTip text={i18nT('pages.overview.kiroCrewCfgTab.restart_required_to_apply_changes', { description: provider.labels.warmPoolDescription })} /></CardTitle>
+        <p className="text-muted text-[13px] mb-2">{i18nT('pages.overview.kiroCrewCfgTab.only_agents_added_here_keep_warm_sessions')}</p>
         {saveErr && <p className="text-danger text-[13px] mb-2">{saveErr}</p>}
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 max-[600px]:grid-cols-1">
-          <CfgNumber key={`poolsize-${rev}`} label={i18nT('pages.overview.kiroCrewCfgTab.pool_size')} path="session.pool_size" value={cfg.session.pool_size ?? 0} min={0} max={10} hint={i18nT('pages.overview.kiroCrewCfgTab.number_of_pre_spawned_processes_0_disables_resta')} onSave={save} />
-          <CfgSelect key={`poolagent-${rev}`} label={i18nT('pages.overview.kiroCrewCfgTab.pool_agent')} path="session.pool_agent" value={cfg.session.pool_agent ?? ''} options={['', ...Object.keys(cfg.agents)]} labels={{'': `(${cfg.default_agent || i18nT('pages.overview.kiroCrewCfgTab.default_agent')})`}} hint={i18nT('pages.overview.kiroCrewCfgTab.agent_for_pool_processes_empty_uses_default_agen')} onSave={save} />
+          {poolRows.map(name => (
+            <PoolAgentCount key={`poolagents-${name}-${rev}`}
+              label={poolRowLabel(name)}
+              agentKey={name} counts={poolCounts} max={10} busy={patchMut.isPending}
+              isPending={pending.includes(name)} onSave={save}
+              onRemove={() => removePoolAgent(name)} />
+          ))}
+          {poolRows.length === 0 && (
+            <div className={rowCls}>
+              <span className="text-muted text-[13px]">{i18nT('pages.overview.kiroCrewCfgTab.no_agents_on_standby')}</span>
+            </div>
+          )}
+          {poolAddable.length > 0 && (
+            <div className={rowCls}>
+              <span className="text-muted inline-flex items-center gap-1">{i18nT('pages.overview.kiroCrewCfgTab.add_agent')}</span>
+              <SimpleSelect
+                aria-label={i18nT('pages.overview.kiroCrewCfgTab.add_agent')}
+                className="h-7 px-2 py-0.5 text-[13px] font-mono"
+                style={{ minWidth: 120 }}
+                options={poolAddable}
+                value=""
+                triggerFallback={i18nT('pages.overview.kiroCrewCfgTab.select_agent')}
+                onChange={v => { if (v) setPendingPool(p => p.includes(v) ? p : [...p, v]) }}
+              />
+            </div>
+          )}
           <CfgNumber key={`poolttl-${rev}`} label={i18nT('pages.overview.kiroCrewCfgTab.pool_ttl')} path="session.pool_ttl_secs" value={cfg.session.pool_ttl_secs} suffix="s" min={0} max={7200} hint={i18nT('pages.overview.kiroCrewCfgTab.max_age_for_pooled_processes_0_disables_expiry_r')} onSave={save} />
         </div>
       </Card>

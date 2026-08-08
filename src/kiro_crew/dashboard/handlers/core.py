@@ -27,9 +27,11 @@ from kiro_crew.computer_use.types import MIN_SCREENSHOT_MAX_PX as _CU_MIN_SCREEN
 from kiro_crew.config.loader import (
     _VALID_STT_PROVIDERS,
     MAX_SUBAGENTS_FIXED_FLOOR,
+    POOL_SIZE_MAX,
     SUBAGENT_AUTO_MAX_CEILING,
     SUBAGENT_MAX_TURNS_CEILING,
     KiroCrewConfig,
+    coerce_pool_agents,
     config_path,
 )
 from kiro_crew.context_management import RESULT_FILE_MAX_BYTES
@@ -1309,6 +1311,30 @@ def _agent_values() -> set[str]:
     return {"", *KiroCrewConfig.load().agents}
 
 
+def _validate_pool_agents(value: dict, request: web.Request) -> str:
+    """Validate the per-agent warm-pool map (session.pool_agents).
+
+    Keys must be configured agent names (or ``""`` for the default agent);
+    counts must be integers in ``0..POOL_SIZE_MAX`` and their TOTAL must fit
+    the same ceiling — each entry is a pre-spawned kiro-cli process, so the
+    sum is the security-bounded resource, mirroring the pool_size gate.
+    Returns a reason string on failure, ``""`` when valid.
+    """
+    allowed = _agent_values()
+    total = 0
+    for name, count in value.items():
+        if not isinstance(name, str) or name not in allowed:
+            return f"unknown agent: {name!r}"
+        if not isinstance(count, int) or isinstance(count, bool):
+            return f"count for {name or 'default'} must be an integer"
+        if count < 0 or count > POOL_SIZE_MAX:
+            return f"count for {name or 'default'} must be between 0 and {POOL_SIZE_MAX}"
+        total += count
+    if total > POOL_SIZE_MAX:
+        return f"total warm count must be at most {POOL_SIZE_MAX}"
+    return ""
+
+
 def _active_advertised_ids(request: web.Request) -> list[str] | None:
     """Advertised model ids from the first active provider, or None if unknown.
 
@@ -1428,6 +1454,14 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     "session.autocompact_pct": {"type": "float", "min": 5.0, "max": 90.0},
     "session.pool_size": {"type": "int", "min": 0, "max": 10},
     "session.pool_agent": {"type": "str", "values_fn": _agent_values},
+    # Per-agent warm counts. Validated as a whole map (agent membership, per-
+    # entry and TOTAL count ceiling), then coerced so only positive counts are
+    # stored — a zero entry and an absent one behave identically.
+    "session.pool_agents": {
+        "type": "dict",
+        "validate_fn": _validate_pool_agents,
+        "coerce_fn": coerce_pool_agents,
+    },
     "session.pool_ttl_secs": {"type": "int", "min": 0, "max": 7200},
     "auto_update": {"type": "bool"},
     "dashboard.mcp_probe_timeout_secs": {"type": "int", "min": 5, "max": 120},
@@ -1648,6 +1682,17 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
             reason = validate_fn(value, request)
             if reason:
                 return _deny(reason, f"{path_key}={value}")
+    elif spec["type"] == "dict":
+        if not isinstance(value, dict):
+            return _deny("must be an object", f"{path_key}={value}")
+        validate_fn = spec.get("validate_fn")
+        if validate_fn:
+            reason = validate_fn(value, request)
+            if reason:
+                return _deny(reason, f"{path_key}={value}")
+        coerce_fn = spec.get("coerce_fn")
+        if coerce_fn:
+            value = coerce_fn(value)
     else:
         return _deny("unsupported config type", f"{path_key}={value}", 500)
 
@@ -1716,6 +1761,25 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
                 )
             section = nxt
         section[parts[-1]] = value
+
+        # Legacy warm-pool keys write through to the per-agent map ONLY when
+        # the file already carries an actual map — an explicit map is
+        # authoritative at load, so without this a legacy PATCH would be
+        # silently shadowed. A null (which save() serializes for the tri-state
+        # default) means "defer to the legacy pair" exactly like an absent
+        # key, so it must NOT be materialized here: deriving a base-file map
+        # from it would shadow config.local.json overlay edits to the legacy
+        # keys.
+        if path_key in ("session.pool_size", "session.pool_agent"):
+            sess_data = data.get("session")
+            if isinstance(sess_data, dict) and isinstance(sess_data.get("pool_agents"), dict):
+                try:
+                    _size = int(sess_data.get("pool_size", 2))
+                except (TypeError, ValueError):
+                    _size = 2
+                _size = max(0, min(POOL_SIZE_MAX, _size))
+                _pool_agent = str(sess_data.get("pool_agent", "") or "")
+                sess_data["pool_agents"] = {_pool_agent: _size} if _size > 0 else {}
 
         try:
             cfg_path.parent.mkdir(parents=True, exist_ok=True)

@@ -6,9 +6,45 @@ Maps thread keys to LLMProvider instances (`session.py`). Each thread gets
 its own kiro-cli session with idle expiry, context compaction, circuit
 breaker, per-session semaphore, and persistent background session.
 
-Chat sessions are served from the warm pool when eligible (default pool
-agent, default cwd, no resume mapping); otherwise they cold-start on first
-message via `get_or_create()`.
+Chat sessions are served from the warm pool when eligible (an agent with a
+configured pool, default cwd, no resume mapping); otherwise they cold-start
+on first message via `get_or_create()`.
+
+## Warm Pool Configuration
+
+`session.pool_agents` maps agent names to warm counts (one queue per agent);
+the `""` key means "the default agent" and follows `agent.default_agent`
+when it changes. Config keys are Kiro Crew agent aliases (what the settings UI
+validates); at runtime each key is translated to the session-facing kiro
+agent name via `resolve_agent_bindings`, because claims arrive carrying
+`bindings.kiro_agent`. The TOTAL across agents is clamped to `POOL_SIZE_MAX`
+at coercion time (`coerce_pool_agents`), at target resolution
+(`_resolve_pool_targets`), and by the dashboard PATCH validator — the sum is
+the security-bounded resource.
+
+The map is tri-state: an explicit map is authoritative — including `{}`,
+which disables the pool — while an absent map (`null`) defers to the legacy
+`pool_size`/`pool_agent` pair, resolved in `_resolve_pool_targets`. There is
+deliberately NO write-back migration and no load-time materialization:
+`session_data` is the post-overlay merge of `config.json` and
+`config.local.json`, while `save()` writes only the base file, so persisting
+a derived map would shadow future overlay edits to the legacy keys. A
+dashboard PATCH of a legacy key regenerates `pool_agents` only when the file
+already carries one (so an explicit map cannot silently shadow the edit);
+otherwise the legacy pair stays authoritative on its own. Claims are
+deny-by-default per agent; a request with no agent resolves to the default
+agent's pool, or — when exactly one pool is configured — is promoted to it,
+preserving the legacy single-pool behavior. A spawn failure stops filling
+that agent's pool but still advances to the remaining agents.
+
+Dashboard membership is explicit: the Warm Pool card lists only agents
+present in the map (plus stale keys for since-deleted agents, kept visible
+so they stay removable) and offers an add picker over the remaining
+configured agents. Agents never appear in the pool by default — anything
+not added cold-starts. Map keys are stored verbatim: the `""`
+follow-the-default sentinel is never rewritten to a concrete agent name on
+save (only its row label resolves to the current default agent), so a later
+`agent.default_agent` change still moves that standby allocation.
 
 ## Background Session
 
@@ -212,7 +248,7 @@ send time.
 | Method | Purpose |
 |--------|---------|
 | `start_pool(blocking=True)` | Pre-spawn warm + background sessions. `blocking=False` for non-blocking mode. |
-| `get_or_create(key, agent=None, approval_policy="")` | Returns `(LLMProvider, is_new, resumed)`. Uses warm pool for new sessions (default agent only). Sessions with a resume mapping skip warm pool (cold start needed for `session/load`). Every decision is counted via `_record_pool_decision` (`kirocrew.session.pool.decision`) with the single disqualifying reason, so the pool's hit rate and the frequency of the `bypass_resume` case are observable. Non-default agents skip warm pool and resolve their model by precedence via `_model_fallback()` — caller model > per-agent pin > global default: `model=None` (defer to kiro's agent-JSON resolution) only when the agent pins its own model, otherwise the global default, unless that default is the `"auto"` sentinel (also `None`). The per-agent pin is resolved off the event loop via `run_in_executor` using `_resolve_named_agent_model`; blank agents inherit the global, and `kirocrew` is excluded (tracks the global). `approval_policy` is persisted on the new `_Session` — callers (e.g. subagent) pass parent policy so the session inherits it. |
+| `get_or_create(key, agent=None, approval_policy="")` | Returns `(LLMProvider, is_new, resumed)`. Uses the warm pool for new sessions when the requested agent has a configured pool (see Warm Pool Configuration). Sessions with a resume mapping skip warm pool (cold start needed for `session/load`). Every decision is counted via `_record_pool_decision` (`kirocrew.session.pool.decision`) with the single disqualifying reason, so the pool's hit rate and the frequency of the `bypass_resume` case are observable. Agents without a pool skip warm pool and resolve their model by precedence via `_model_fallback()` — caller model > per-agent pin > global default: `model=None` (defer to kiro's agent-JSON resolution) only when the agent pins its own model, otherwise the global default, unless that default is the `"auto"` sentinel (also `None`). The per-agent pin is resolved off the event loop via `run_in_executor` using `_resolve_named_agent_model`; blank agents inherit the global, and `kirocrew` is excluded (tracks the global). `approval_policy` is persisted on the new `_Session` — callers (e.g. subagent) pass parent policy so the session inherits it. |
 | `check_context_usage(key, provider)` | Returns %. Triggers compaction at configured threshold (default 90%), warns at 75%. |
 | `record_success(key)` / `record_failure(key)` | Circuit breaker tracking. |
 | `release(key)` | Release per-session semaphore (must call in `finally`). |
@@ -223,7 +259,7 @@ send time.
 | `close_all(drain_timeout=None)` | Pre-shutdown **drain** of in-flight turns (via `drain_active_turns`), then save all active session mappings, shut down every session, and drain the warm pool. `drain_timeout` bounds that drain (`None` = full default budget); a caller wrapping `close_all()` in its own hard deadline (Slack's restart wraps it in `wait_for(..., 5s)`) passes a smaller budget (e.g. `2.0`) so the kill path still fits inside the deadline. A cancel that fires mid-drain (outer deadline) **propagates** (CancelledError is deliberately not caught) so the caller's hard deadline stays honest; recovery of a still-held native-session lock is the next-startup orphan reaper's job. |
 | `drain_active_turns(timeout=None)` | Best-effort co-operative drain that brings in-flight prompts to a safe turn boundary **before** teardown, so kiro-cli closes its native turn and releases its session lock (`~/.kiro/sessions/cli/<uuid>.json`) on the subsequent SIGTERM — otherwise the next gateway's `session/load` hits "active in another process" and the slot returns empty completions (the Make-Live empty-response incident, #200). For each registered session with an **unfinished** turn (native turn-done not yet acked — independent of cancel state, so an already-cancelled-but-not-acked turn is still drained), it issues a graceful `session/cancel` and waits (bounded) for the ack; a turn already cancelled (`cancel()` → `"no_turn"`) is waited on directly via `wait_turn_done`. The whole operation is bounded by `timeout` (`None` → `_DRAIN_ACTIVE_TURNS_TIMEOUT_SECS`, default 5.0s; internal cap is `timeout+1.0`); on timeout it logs and returns so the caller falls through to the SIGTERM-first kill path — never hangs teardown, never raises. `timeout <= 0` disables the drain. Returns the count of unfinished turns (observability/tests). Only registered user sessions are drained; the warm pool holds never-prompted processes. |
 | `begin_turn(key)` | **Synchronous** pre-dispatch gate against the lease-dispatch race (#200 / Codex HIGH). A caller holds the per-session semaphore *lease* from `get_or_create` through the whole turn, but the native turn only opens on the first `provider.stream(...)` iteration; the `get_or_create` `_closing` gate cannot revoke a lease already issued before `close_all` set `_closing`. Callers (dashboard `chat_runner`, Slack handler) MUST call `begin_turn` synchronously — **no `await` between it and the `async for` stream drive** — so the `_closing` read and the stream's turn registration (`AcpClient.stream_events` clears `_turn_done` before its first `await`) form one yield-free span, strictly ordered w.r.t. `close_all`'s `_closing` set: the turn is either registered before the drain snapshot (and drained) or the caller aborts. Raises `SessionClosingError` (a `RuntimeError`) when closing; the caller's `finally` releases the lease. Deliberately NOT `async`/lock-guarded (an `await` would reopen the race). |
-| `warm_pool_size` | Property: number of warm sessions available. |
+| `_warm_pool_qsize_total()` | Warm providers currently queued, summed across all agents' pools. |
 
 ## Stop Orchestration
 
@@ -575,7 +611,7 @@ dashboard-turn-loop refactor.
 ```
 start_pool()
   ├── _enforce_denied_commands()  → inject deniedCommands into ALL agent configs
-  ├── _spawn_warm() × pool_size   → warm pool queue (instant assignment)
+  ├── _fill_warm_pool()           → per-agent queues, each filled to its target
   └── _ensure_background()        → BACKGROUND_KEY session (persistent)
 ```
 

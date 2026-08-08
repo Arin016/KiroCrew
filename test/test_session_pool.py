@@ -69,6 +69,25 @@ def _make_manager(pool_size: int = 2, pool_agent: str = "kirocrew", pool_ttl_sec
     return mgr, factory
 
 
+def _q(mgr):
+    """The lone warm queue in these single-pool tests.
+
+    The manager keeps one queue per configured agent; every legacy-shaped
+    test here configures exactly one pool, so this is the queue that both
+    fill and claim operate on.
+    """
+    assert len(mgr._warm_pools) == 1, mgr._warm_pools
+    return next(iter(mgr._warm_pools.values()))
+
+
+def _set_pool(mgr, agent: str, size: int = 1):
+    """Repoint the manager at a single warm pool for *agent*; returns its queue."""
+    mgr._pool_targets = {agent: size}
+    mgr._pool_size = size
+    mgr._warm_pools = {agent: asyncio.Queue()}
+    return mgr._warm_pools[agent]
+
+
 # ---------------------------------------------------------------------------
 # _fill_warm_pool
 # ---------------------------------------------------------------------------
@@ -80,11 +99,11 @@ class TestFillWarmPool:
         mgr, factory = _make_manager(pool_size=3)
         await mgr._fill_warm_pool()
 
-        assert mgr._warm_pool.qsize() == 3
+        assert mgr._warm_pool_qsize_total() == 3
         assert factory.call_count == 3
         # Each provider should have been started
         for _ in range(3):
-            p, spawn_time = mgr._warm_pool.get_nowait()
+            p, spawn_time = _q(mgr).get_nowait()
             p.start.assert_awaited_once()
             assert spawn_time > 0
 
@@ -93,7 +112,7 @@ class TestFillWarmPool:
         mgr, factory = _make_manager(pool_size=0)
         await mgr._fill_warm_pool()
 
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
         factory.assert_not_called()
 
     @pytest.mark.asyncio
@@ -115,9 +134,36 @@ class TestFillWarmPool:
         await mgr._fill_warm_pool()
 
         # Should have 1 successful + 1 failed (breaks loop)
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
         assert len(failed_providers) == 1
         failed_providers[0].shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failure_in_one_agent_does_not_starve_later_agents(self):
+        """A spawn failure stops filling that agent's pool but must still
+        advance to the remaining agents — otherwise one misconfigured agent
+        permanently empties every pool ordered after it (replenish re-enters
+        the same method and dies at the same first agent)."""
+        from kiro_crew.session import SessionManager
+
+        cfg = _make_cfg(pool_size=0)
+        cfg.session.pool_agents = {"broken": 1, "good": 2}
+
+        def factory(*a, **kw):
+            if kw.get("agent") == "broken":
+                p = _make_provider()
+                p.start = AsyncMock(side_effect=RuntimeError("boom"))
+                return p
+            return _make_provider()
+
+        with patch(
+            "kiro_crew.session.default_project_dir", return_value="/home/user/.kirocrew/workspace"
+        ):
+            mgr = SessionManager(cfg, provider_factory=MagicMock(side_effect=factory))
+        await mgr._fill_warm_pool()
+
+        assert mgr._warm_pools["broken"].qsize() == 0
+        assert mgr._warm_pools["good"].qsize() == 2
 
     @pytest.mark.asyncio
     async def test_cancelled_error_cleans_up_via_finally(self):
@@ -139,7 +185,7 @@ class TestFillWarmPool:
                     break
                 await asyncio.sleep(0.01)
             mock_kill.assert_called_once_with(provider)
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +204,8 @@ class TestLivenessDrainLoop:
         healthy = _make_provider()
         healthy.is_process_alive = MagicMock(return_value=True)
 
-        mgr._warm_pool.put_nowait((dead, time.monotonic()))
-        mgr._warm_pool.put_nowait((healthy, time.monotonic()))
+        _q(mgr).put_nowait((dead, time.monotonic()))
+        _q(mgr).put_nowait((healthy, time.monotonic()))
 
         pooled = await mgr._drain_and_claim("kirocrew")
 
@@ -175,8 +221,8 @@ class TestLivenessDrainLoop:
         del no_alive.is_process_alive
         healthy = _make_provider()
 
-        mgr._warm_pool.put_nowait((no_alive, time.monotonic()))
-        mgr._warm_pool.put_nowait((healthy, time.monotonic()))
+        _q(mgr).put_nowait((no_alive, time.monotonic()))
+        _q(mgr).put_nowait((healthy, time.monotonic()))
 
         pooled = await mgr._drain_and_claim("kirocrew")
 
@@ -193,38 +239,38 @@ class TestClaimFromPool:
     def test_claim_matching_agent(self):
         mgr, _ = _make_manager(pool_agent="kirocrew")
         provider = _make_provider()
-        mgr._warm_pool.put_nowait((provider, time.monotonic()))
+        _q(mgr).put_nowait((provider, time.monotonic()))
 
         result = mgr._claim_from_pool("kirocrew")
         assert result[0] is provider
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
     def test_claim_none_agent_matches_pool_agent(self):
         """None agent means 'use default' — matches pool_agent."""
         mgr, _ = _make_manager(pool_agent="kirocrew")
         provider = _make_provider()
-        mgr._warm_pool.put_nowait((provider, time.monotonic()))
+        _q(mgr).put_nowait((provider, time.monotonic()))
 
         result = mgr._claim_from_pool(None)
         assert result[0] is provider
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
     def test_claim_empty_agent_matches_empty_pool_agent(self):
         """Empty agent matches empty pool_agent."""
         mgr, _ = _make_manager(pool_agent="")
         provider = _make_provider()
-        mgr._warm_pool.put_nowait((provider, time.monotonic()))
+        _q(mgr).put_nowait((provider, time.monotonic()))
 
         result = mgr._claim_from_pool(None)
         assert result[0] is provider
 
     def test_claim_mismatched_agent_returns_none(self):
         mgr, _ = _make_manager(pool_agent="kirocrew")
-        mgr._warm_pool.put_nowait((_make_provider(), time.monotonic()))
+        _q(mgr).put_nowait((_make_provider(), time.monotonic()))
 
         result = mgr._claim_from_pool("custom-agent")
         assert result is None
-        assert mgr._warm_pool.qsize() == 1  # not consumed
+        assert mgr._warm_pool_qsize_total() == 1  # not consumed
 
     def test_claim_empty_pool_returns_none(self):
         mgr, _ = _make_manager()
@@ -233,10 +279,10 @@ class TestClaimFromPool:
 
     def test_claim_nonempty_agent_rejected_when_pool_agent_empty(self):
         mgr, _ = _make_manager(pool_agent="")
-        mgr._warm_pool.put_nowait((_make_provider(), time.monotonic()))
+        _q(mgr).put_nowait((_make_provider(), time.monotonic()))
         result = mgr._claim_from_pool("some-agent")
         assert result is None
-        assert mgr._warm_pool.qsize() == 1  # not consumed
+        assert mgr._warm_pool_qsize_total() == 1  # not consumed
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +298,7 @@ class TestScheduleReplenish:
 
         assert len(mgr._background_tasks) == 1
         await asyncio.gather(*list(mgr._background_tasks), return_exceptions=True)
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
 
     @pytest.mark.asyncio
     async def test_replenish_noop_when_disabled(self):
@@ -271,14 +317,14 @@ class TestPoolDrainOnShutdown:
     async def test_close_all_shuts_down_pool_providers(self):
         mgr, _ = _make_manager(pool_size=2)
         p1, p2 = _make_provider(), _make_provider()
-        mgr._warm_pool.put_nowait((p1, time.monotonic()))
-        mgr._warm_pool.put_nowait((p2, time.monotonic()))
+        _q(mgr).put_nowait((p1, time.monotonic()))
+        _q(mgr).put_nowait((p2, time.monotonic()))
 
         await mgr.close_all()
 
         p1.shutdown.assert_awaited_once()
         p2.shutdown.assert_awaited_once()
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +336,7 @@ class TestConfigWiring:
     def test_pool_size_from_config(self):
         mgr, _ = _make_manager(pool_size=5, pool_agent="custom")
         assert mgr._pool_size == 5
-        assert mgr._pool_agent == "custom"
+        assert mgr._pool_targets == {"custom": 5}
 
     def test_pool_agent_falls_back_to_default_agent(self):
         from kiro_crew.session import SessionManager
@@ -298,7 +344,42 @@ class TestConfigWiring:
         cfg = _make_cfg(pool_size=1, pool_agent="")
         cfg.agent.default_agent = "fallback-agent"
         mgr = SessionManager(cfg)
-        assert mgr._pool_agent == "fallback-agent"
+        assert mgr._pool_targets == {"fallback-agent": 1}
+
+    def test_pool_agents_map_from_config(self):
+        """pool_agents supersedes the legacy pair; each agent gets its own target."""
+        from kiro_crew.session import SessionManager
+
+        cfg = _make_cfg(pool_size=1, pool_agent="ignored-legacy")
+        cfg.session.pool_agents = {"coder": 2, "": 1}
+        cfg.agent.default_agent = "kirocrew"
+        mgr = SessionManager(cfg)
+        assert mgr._pool_targets == {"coder": 2, "kirocrew": 1}
+        assert mgr._pool_size == 3
+        assert set(mgr._warm_pools) == {"coder", "kirocrew"}
+
+    def test_pool_agents_total_clamped(self):
+        """The summed target across agents is clamped to the pool ceiling."""
+        from kiro_crew.session import SessionManager
+
+        cfg = _make_cfg(pool_size=0)
+        cfg.session.pool_agents = {"a": 8, "b": 8}
+        mgr = SessionManager(cfg)
+        assert mgr._pool_size == 10
+        assert mgr._pool_targets == {"a": 8, "b": 2}
+
+    def test_explicit_empty_map_disables_pool_despite_legacy_size(self):
+        """pool_agents={} is authoritative: it must NOT fall back to the
+        legacy pool_size pair, or an explicit disable via the per-agent
+        editor would silently respawn processes on the next restart."""
+        from kiro_crew.session import SessionManager
+
+        cfg = _make_cfg(pool_size=3, pool_agent="kirocrew")
+        cfg.session.pool_agents = {}
+        mgr = SessionManager(cfg)
+        assert mgr._pool_size == 0
+        assert mgr._pool_targets == {}
+        assert mgr._warm_pools == {}
 
     def test_pool_disabled_by_default(self):
         from kiro_crew.session import SessionManager
@@ -347,7 +428,7 @@ class TestGetOrCreatePoolIntegration:
         """get_or_create skips pool when session has resume_sid."""
         mgr, factory = _make_manager(pool_agent="kirocrew")
         pooled = _make_provider()
-        mgr._warm_pool.put_nowait((pooled, time.monotonic()))
+        _q(mgr).put_nowait((pooled, time.monotonic()))
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
 
         # Simulate existing session in map
@@ -370,7 +451,7 @@ class TestGetOrCreatePoolIntegration:
         """
         mgr, factory = _make_manager(pool_agent="kirocrew")
         pooled = _make_provider()
-        mgr._warm_pool.put_nowait((pooled, time.monotonic()))
+        _q(mgr).put_nowait((pooled, time.monotonic()))
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
 
         provider, is_new, _ = await mgr.get_or_create(
@@ -421,7 +502,7 @@ class TestTTLExpiration:
         mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=60)
         stale = _make_provider()
         # Simulate provider spawned 120s ago
-        mgr._warm_pool.put_nowait((stale, time.monotonic() - 120))
+        _q(mgr).put_nowait((stale, time.monotonic() - 120))
 
         result = await mgr._drain_and_claim("kirocrew")
 
@@ -433,7 +514,7 @@ class TestTTLExpiration:
         """Provider within TTL is used."""
         mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=60)
         fresh = _make_provider()
-        mgr._warm_pool.put_nowait((fresh, time.monotonic()))
+        _q(mgr).put_nowait((fresh, time.monotonic()))
 
         result = await mgr._drain_and_claim("kirocrew")
 
@@ -446,7 +527,7 @@ class TestTTLExpiration:
         mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=0)
         old = _make_provider()
         # Very old provider
-        mgr._warm_pool.put_nowait((old, time.monotonic() - 10000))
+        _q(mgr).put_nowait((old, time.monotonic() - 10000))
 
         result = await mgr._drain_and_claim("kirocrew")
 
@@ -458,7 +539,7 @@ class TestTTLExpiration:
         """Discarding stale providers triggers pool replenish."""
         mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=60)
         stale = _make_provider()
-        mgr._warm_pool.put_nowait((stale, time.monotonic() - 120))
+        _q(mgr).put_nowait((stale, time.monotonic() - 120))
         mgr._schedule_replenish = MagicMock()
 
         await mgr._drain_and_claim("kirocrew")
@@ -683,7 +764,7 @@ class TestStatelessSkipsPool:
         """get_or_create for _bg must not claim from warm pool."""
         mgr, factory = _make_manager(pool_agent="kirocrew")
         pooled = _make_provider()
-        mgr._warm_pool.put_nowait((pooled, time.monotonic()))
+        _q(mgr).put_nowait((pooled, time.monotonic()))
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
 
         provider, is_new, _ = await mgr.get_or_create("_bg", agent=None)
@@ -734,7 +815,7 @@ class TestPoolHealthLoop:
         dead = _make_provider()
         dead.is_process_alive.return_value = False
         dead.exit_code = 1
-        mgr._warm_pool.put_nowait((dead, time.monotonic()))
+        _q(mgr).put_nowait((dead, time.monotonic()))
         mgr._schedule_replenish = MagicMock()
 
         # Run one iteration by patching sleep to raise after first call
@@ -750,7 +831,7 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.empty()
+        assert mgr._warm_pool_qsize_total() == 0
         dead.shutdown.assert_awaited_once()
         mgr._schedule_replenish.assert_called_once()
 
@@ -759,7 +840,7 @@ class TestPoolHealthLoop:
         """TTL-expired provider is removed during health sweep."""
         mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=60)
         stale = _make_provider()
-        mgr._warm_pool.put_nowait((stale, time.monotonic() - 120))
+        _q(mgr).put_nowait((stale, time.monotonic() - 120))
         mgr._schedule_replenish = MagicMock()
 
         call_count = 0
@@ -774,7 +855,7 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.empty()
+        assert mgr._warm_pool_qsize_total() == 0
         stale.shutdown.assert_awaited_once()
         mgr._schedule_replenish.assert_called_once()
 
@@ -783,7 +864,7 @@ class TestPoolHealthLoop:
         """Healthy provider survives health sweep."""
         mgr, _ = _make_manager(pool_agent="kirocrew")
         healthy = _make_provider()
-        mgr._warm_pool.put_nowait((healthy, time.monotonic()))
+        _q(mgr).put_nowait((healthy, time.monotonic()))
         mgr._schedule_replenish = MagicMock()
 
         call_count = 0
@@ -798,7 +879,7 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
         healthy.shutdown.assert_not_awaited()
         mgr._schedule_replenish.assert_not_called()
 
@@ -830,9 +911,9 @@ class TestPoolHealthLoop:
         dead = _make_provider()
         dead.is_process_alive.return_value = False
         healthy2 = _make_provider()
-        mgr._warm_pool.put_nowait((healthy1, time.monotonic()))
-        mgr._warm_pool.put_nowait((dead, time.monotonic()))
-        mgr._warm_pool.put_nowait((healthy2, time.monotonic()))
+        _q(mgr).put_nowait((healthy1, time.monotonic()))
+        _q(mgr).put_nowait((dead, time.monotonic()))
+        _q(mgr).put_nowait((healthy2, time.monotonic()))
         mgr._schedule_replenish = MagicMock()
 
         call_count = 0
@@ -847,7 +928,7 @@ class TestPoolHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._pool_health_loop()
 
-        assert mgr._warm_pool.qsize() == 2
+        assert mgr._warm_pool_qsize_total() == 2
         dead.shutdown.assert_awaited_once()
         healthy1.shutdown.assert_not_awaited()
         healthy2.shutdown.assert_not_awaited()
@@ -869,14 +950,14 @@ class TestPoolPids:
         p2 = _make_provider()
         p2.client = MagicMock()
         p2.client._pid = 5678
-        mgr._warm_pool.put_nowait((p1, time.monotonic()))
-        mgr._warm_pool.put_nowait((p2, time.monotonic()))
+        _q(mgr).put_nowait((p1, time.monotonic()))
+        _q(mgr).put_nowait((p2, time.monotonic()))
 
         pids = mgr._pool_pids()
 
         assert pids == {1234, 5678}
         # Non-destructive: queue still has both entries
-        assert mgr._warm_pool.qsize() == 2
+        assert mgr._warm_pool_qsize_total() == 2
 
     def test_empty_pool_returns_empty_set(self):
         mgr, _ = _make_manager(pool_agent="kirocrew")
@@ -888,12 +969,12 @@ class TestPoolPids:
         mgr, _ = _make_manager(pool_agent="kirocrew")
         p = _make_provider()
         del p.client  # no client attribute
-        mgr._warm_pool.put_nowait((p, time.monotonic()))
+        _q(mgr).put_nowait((p, time.monotonic()))
 
         pids = mgr._pool_pids()
 
         assert pids == set()
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
 
     def test_skips_non_int_pid(self):
         """Provider with non-int PID is skipped."""
@@ -901,12 +982,12 @@ class TestPoolPids:
         p = _make_provider()
         p.client = MagicMock()
         p.client._pid = None
-        mgr._warm_pool.put_nowait((p, time.monotonic()))
+        _q(mgr).put_nowait((p, time.monotonic()))
 
         pids = mgr._pool_pids()
 
         assert pids == set()
-        assert mgr._warm_pool.qsize() == 1
+        assert mgr._warm_pool_qsize_total() == 1
 
     def test_includes_sweep_pids_during_health_check(self):
         """PIDs temporarily out of queue during health sweep are still visible."""
@@ -932,7 +1013,7 @@ class TestReloadProviderFactoryRefillsPool:
         # Simulate initial start_pool having run
         mgr._pool_started = True
         old_provider = _make_provider()
-        mgr._warm_pool.put_nowait((old_provider, time.monotonic()))
+        _q(mgr).put_nowait((old_provider, time.monotonic()))
 
         with patch("kiro_crew.session.KiroCrewConfig.load") as mock_load:
             new_cfg = _make_cfg(pool_size=1)
@@ -1035,7 +1116,7 @@ class TestRefreshDefaultsSparesLiveSessions:
         mgr, _ = _make_manager(pool_size=1)
         mgr._pool_started = True
         stale_pooled = _make_provider()
-        mgr._warm_pool.put_nowait((stale_pooled, time.monotonic()))
+        _q(mgr).put_nowait((stale_pooled, time.monotonic()))
 
         with patch("kiro_crew.session.KiroCrewConfig.load") as mock_load:
             new_cfg = _make_cfg(pool_size=1)
@@ -1049,7 +1130,7 @@ class TestRefreshDefaultsSparesLiveSessions:
             await mgr.refresh_defaults()
 
         stale_pooled.shutdown.assert_awaited()
-        assert mgr._warm_pool.empty()
+        assert mgr._warm_pool_qsize_total() == 0
 
     @pytest.mark.asyncio
     async def test_pool_is_restarted_after_the_drain(self):
@@ -1062,7 +1143,7 @@ class TestRefreshDefaultsSparesLiveSessions:
         stale_task.done.return_value = False
         stale_task.cancel = MagicMock()
         mgr._pool_health_task = stale_task
-        mgr._warm_pool.put_nowait((_make_provider(), time.monotonic()))
+        _q(mgr).put_nowait((_make_provider(), time.monotonic()))
 
         with patch("kiro_crew.session.KiroCrewConfig.load") as mock_load:
             new_cfg = _make_cfg(pool_size=1)
@@ -1180,7 +1261,7 @@ class TestPoolCwd:
             mgr = SessionManager(cfg, provider_factory=factory)
 
         pooled = _make_provider()
-        mgr._warm_pool.put_nowait((pooled, time.monotonic()))
+        _q(mgr).put_nowait((pooled, time.monotonic()))
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
 
         provider, is_new, _ = await mgr.get_or_create(
@@ -1230,7 +1311,7 @@ class TestDiscardReaping:
 
     @staticmethod
     def _expired_entry(mgr, provider):
-        mgr._warm_pool.put_nowait((provider, time.monotonic() - 10_000))
+        _q(mgr).put_nowait((provider, time.monotonic() - 10_000))
 
     @pytest.mark.asyncio
     async def test_survivor_after_noop_shutdown_is_hard_killed(self):
@@ -1315,7 +1396,7 @@ class TestDiscardReaping:
 
         survivor.shutdown.assert_awaited_once()
         mock_kill.assert_called_once_with(survivor)
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
 
     @pytest.mark.asyncio
     async def test_hard_kill_never_signals_mock_or_sentinel_pids(self):
@@ -1446,4 +1527,4 @@ class TestDiscardReaping:
         assert first in attempted and second in attempted, (
             "a failing hard kill aborted the batch and leaked later providers"
         )
-        assert mgr._warm_pool.qsize() == 0
+        assert mgr._warm_pool_qsize_total() == 0
