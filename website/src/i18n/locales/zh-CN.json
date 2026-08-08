@@ -9692,7 +9692,8 @@
         "sources": "来源",
         "test": "测试",
         "use_default": "使用默认",
-        "volume": "音量"
+        "volume": "音量",
+        "preset_pulse": "脉冲"
       },
       "postureDisclosure": {
         "filter": "筛选 {{label}}",

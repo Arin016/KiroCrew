@@ -9920,7 +9920,8 @@
         "sources": "Origini",
         "test": "Prova",
         "use_default": "Usa il predefinito",
-        "volume": "Volume"
+        "volume": "Volume",
+        "preset_pulse": "Pulsazione"
       },
       "postureDisclosure": {
         "filter": "Filtra {{label}}",

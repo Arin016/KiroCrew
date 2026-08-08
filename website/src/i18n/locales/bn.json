@@ -9806,7 +9806,8 @@
         "sources": "উৎস",
         "test": "পরীক্ষা করুন",
         "use_default": "ডিফল্ট ব্যবহার করো",
-        "volume": "ভলিউম"
+        "volume": "ভলিউম",
+        "preset_pulse": "পালস"
       },
       "postureDisclosure": {
         "filter": "{{label}} ফিল্টার করো",

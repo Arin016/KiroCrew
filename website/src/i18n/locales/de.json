@@ -9806,7 +9806,8 @@
         "sources": "Quellen",
         "test": "Testen",
         "use_default": "Standard verwenden",
-        "volume": "Lautstärke"
+        "volume": "Lautstärke",
+        "preset_pulse": "Puls"
       },
       "postureDisclosure": {
         "filter": "{{label}} filtern",

@@ -9685,6 +9685,7 @@
         "preset_ding": "Ding",
         "preset_none": "サイレント",
         "preset_pop": "Pop",
+        "preset_pulse": "Pulse",
         "priority_for": "{{name}} の優先度",
         "protected": "保護済み",
         "protected_channel": "保護されたチャネル",

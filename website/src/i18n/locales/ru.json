@@ -10034,7 +10034,8 @@
         "sources": "Источники",
         "test": "Проверить",
         "use_default": "Использовать по умолчанию",
-        "volume": "Громкость"
+        "volume": "Громкость",
+        "preset_pulse": "Пульс"
       },
       "postureDisclosure": {
         "filter": "Фильтр: {{label}}",

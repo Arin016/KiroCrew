@@ -9920,7 +9920,8 @@
         "sources": "Sources",
         "test": "Tester",
         "use_default": "Utiliser la valeur par défaut",
-        "volume": "Volume"
+        "volume": "Volume",
+        "preset_pulse": "Pulsion"
       },
       "postureDisclosure": {
         "filter": "Filtrer {{label}}",

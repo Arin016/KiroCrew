@@ -9806,7 +9806,8 @@
         "sources": "स्रोत",
         "test": "परखें",
         "use_default": "डिफ़ॉल्ट इस्तेमाल करें",
-        "volume": "वॉल्यूम"
+        "volume": "वॉल्यूम",
+        "preset_pulse": "पल्स"
       },
       "postureDisclosure": {
         "filter": "{{label}} फ़िल्टर करो",
