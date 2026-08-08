@@ -102,6 +102,34 @@ class TestMcpServerInfo:
         info = McpServerInfo(name="x", command="cmd", url="http://localhost")
         assert info.is_remote is False
 
+    def test_remote_oauth_hints_surface_unredacted(self) -> None:
+        info = McpServerInfo(
+            name="github",
+            url="https://api.githubcopilot.com/mcp/",
+            scopes=["read:user", "read:org"],
+            client_id="Iv1.public-identifier",
+        )
+        d = info.to_dict()
+        assert d["scopes"] == ["read:user", "read:org"]
+        assert d["clientId"] == "Iv1.public-identifier"
+
+    def test_oauth_hints_default_empty_and_are_omitted(self) -> None:
+        info = McpServerInfo(name="x", url="https://mcp.example.com")
+        assert info.scopes == []
+        assert info.client_id == ""
+        d = info.to_dict()
+        assert "scopes" not in d
+        assert "clientId" not in d
+
+    def test_oauth_hints_omitted_on_stdio_rows(self) -> None:
+        """to_dict gates them behind url, so a stdio row never advertises them."""
+        info = McpServerInfo(
+            name="x", command="cmd", scopes=["read"], client_id="public-id"
+        )
+        d = info.to_dict()
+        assert "scopes" not in d
+        assert "clientId" not in d
+
 
 class TestListServers:
     def setup_method(self) -> None:
@@ -598,6 +626,241 @@ class TestDiscoverNew:
         assert len(new) == 1
         assert new[0].name == "brand-new"
         assert new[0].source == "discovered"
+
+    def test_discover_new_remote_preserves_url_and_headers(self, tmp_path, monkeypatch) -> None:
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "defaults.json").write_text(json.dumps({"mcpServers": {}}))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        headers = {"Authorization": "Bearer sync-secret", "X-Tenant": "acme"}
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {
+                            "url": "https://mcp.example.com/v1",
+                            "headers": headers,
+                        }
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].name == "remote"
+        assert result[0].is_remote is True
+        assert result[0].command == ""
+        assert result[0].url == "https://mcp.example.com/v1"
+        assert result[0].headers == headers
+
+    def test_discover_flags_existing_remote_url_change(self, tmp_path, monkeypatch) -> None:
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        headers = {"Authorization": "Bearer sync-secret"}
+        cfg = {
+            "mcpServers": {
+                "remote": {"url": "https://mcp.example.com/v1", "headers": headers}
+            }
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {
+                            "url": "https://mcp.example.com/v2",
+                            "headers": headers,
+                        }
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].url == "https://mcp.example.com/v2"
+
+    def test_discover_flags_existing_remote_headers_change(self, tmp_path, monkeypatch) -> None:
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {
+            "mcpServers": {
+                "remote": {
+                    "url": "https://mcp.example.com/v1",
+                    "headers": {"Authorization": "Bearer old"},
+                }
+            }
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {
+                            "url": "https://mcp.example.com/v1",
+                            "headers": {"Authorization": "Bearer new"},
+                        }
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].headers == {"Authorization": "Bearer new"}
+
+    def test_discover_new_remote_preserves_scopes_and_client_id(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "defaults.json").write_text(json.dumps({"mcpServers": {}}))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {
+                            "url": "https://mcp.example.com/v1",
+                            "scopes": ["read:user", "read:org"],
+                            "clientId": "public-client-id",
+                        }
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].scopes == ["read:user", "read:org"]
+        assert result[0].client_id == "public-client-id"
+
+    def test_discover_flags_existing_remote_scopes_change(self, tmp_path, monkeypatch) -> None:
+        """A Connect that widens or narrows scopes must re-sync, not be ignored."""
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {
+            "mcpServers": {
+                "remote": {"url": "https://mcp.example.com/v1", "scopes": ["read"]}
+            }
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {
+                            "url": "https://mcp.example.com/v1",
+                            "scopes": ["read", "write"],
+                        }
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].scopes == ["read", "write"]
+
+    def test_discover_flags_existing_remote_client_id_change(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        cfg = {
+            "mcpServers": {
+                "remote": {"url": "https://mcp.example.com/v1", "clientId": "old-id"}
+            }
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps(cfg))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {"url": "https://mcp.example.com/v1", "clientId": "new-id"}
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].client_id == "new-id"
+
+    def test_discover_no_resync_when_oauth_hints_match(self, tmp_path, monkeypatch) -> None:
+        """Equal hints must not churn: an unchanged entry stays out of the sync set."""
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        entry = {
+            "url": "https://mcp.example.com/v1",
+            "scopes": ["read"],
+            "clientId": "public-client-id",
+        }
+        (agent_dir / "defaults.json").write_text(json.dumps({"mcpServers": {"remote": entry}}))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        mcp_json.write_text(json.dumps({"mcpServers": {"remote": entry}}))
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        assert discover_servers_to_sync() == []
+
+    @pytest.mark.parametrize(
+        "spec_extra,expected_scopes,expected_client_id",
+        [
+            ({"scopes": "read"}, [], ""),
+            # A partially-valid list degrades to NO scopes, never to its
+            # well-formed subset: truncating it would propagate a request the
+            # file never made, and would disagree with the emit path, which
+            # omits the field entirely on any malformed member.
+            ({"scopes": ["read", 7]}, [], ""),
+            ({"scopes": ["read", "  "]}, [], ""),
+            ({"scopes": None}, [], ""),
+            ({"clientId": 42}, [], ""),
+            ({"clientId": "   "}, [], ""),
+            ({"clientId": None}, [], ""),
+        ],
+    )
+    def test_discover_degrades_malformed_oauth_hints(
+        self, tmp_path, monkeypatch, spec_extra, expected_scopes, expected_client_id
+    ) -> None:
+        """Hand-edited mcp.json must not propagate a bad shape into the agent config."""
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "defaults.json").write_text(json.dumps({"mcpServers": {}}))
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        mcp_json = tmp_path / "mcp.json"
+        spec = {"url": "https://mcp.example.com/v1", **spec_extra}
+        mcp_json.write_text(json.dumps({"mcpServers": {"remote": spec}}))
+        monkeypatch.setattr("kiro_crew.mcp_discovery._MCP_JSON_PATHS", (mcp_json,))
+
+        result = discover_servers_to_sync()
+
+        assert len(result) == 1
+        assert result[0].scopes == expected_scopes
+        assert result[0].client_id == expected_client_id
 
     def test_discover_none_when_all_known(self, tmp_path, monkeypatch) -> None:
         agent_dir = tmp_path / "agents"

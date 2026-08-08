@@ -31,7 +31,7 @@ from kiro_crew import platform_compat
 from kiro_crew.config.paths import data_home, kiro_agents_dir
 from kiro_crew.env import augmented_path
 from kiro_crew.hooks import safe_read_file
-from kiro_crew.mcp_utils import mcp_server_alias
+from kiro_crew.mcp_utils import kiro_entry_client_id, kiro_entry_scopes, mcp_server_alias
 from kiro_crew.sandbox import (
     SandboxUnavailableError,
     create_subprocess_limited,
@@ -365,6 +365,11 @@ class McpServerInfo:
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    # Remote-only OAuth hints carried verbatim to the runtime, which owns the
+    # authorization exchange. Kiro Crew never enforces scopes and never registers
+    # a client — it only refuses to lose these fields while syncing.
+    scopes: list[str] = field(default_factory=list)
+    client_id: str = ""
     status: str = "unknown"  # unknown | ok | error | probing | outdated | disabled
     tools: list[str] = field(default_factory=list)
     error: str = ""
@@ -406,6 +411,17 @@ class McpServerInfo:
             d["url"] = self.url
             if self.headers:
                 d["headers"] = self.headers
+            # Not redacted: requested scopes and a public OAuth client id are
+            # non-secret configuration the user needs to see.
+            #
+            # These are the INTERNAL key names, matching the dashboard's
+            # ``McpServer`` type. This dict is an API response, never a file
+            # kiro-cli reads, so it must NOT be translated to the wire names —
+            # ``kiro_oauth_wire_entry`` is applied on the emit paths instead.
+            if self.scopes:
+                d["scopes"] = list(self.scopes)
+            if self.client_id:
+                d["clientId"] = self.client_id
         if self.disabled_tools:
             d["disabledTools"] = self.disabled_tools
         if self.disabled:
@@ -585,6 +601,29 @@ def _load_mcp_json() -> dict[str, Any]:
     return merged
 
 
+def _spec_scopes(spec: dict) -> list[str]:
+    """Requested OAuth scopes from a spec, dropping anything malformed.
+
+    On-disk specs are untrusted (hand-edited files, other tools), so a
+    non-list or a list with non-string members degrades to "no scopes"
+    rather than propagating a bad shape into the agent config.
+
+    Reads kiro-cli's ``oauthScopes`` as well as Kiro Crew's internal ``scopes``:
+    files we emit for kiro-cli carry the former, so a discovery pass that knew
+    only the latter would report a scoped server as unscoped.
+    """
+    return kiro_entry_scopes(spec)
+
+
+def _spec_client_id(spec: dict) -> str:
+    """Public OAuth client id from a spec, or "" when absent/malformed.
+
+    Accepts kiro-cli's nested ``oauth.clientId`` as well as the internal
+    top-level key, for the same round-trip reason as ``_spec_scopes``.
+    """
+    return kiro_entry_client_id(spec)
+
+
 def _server_from_spec(name: str, spec: dict, source: str) -> McpServerInfo:
     return McpServerInfo(
         name=name,
@@ -593,6 +632,8 @@ def _server_from_spec(name: str, spec: dict, source: str) -> McpServerInfo:
         env=spec.get("env", {}),
         url=spec.get("url", ""),
         headers=spec.get("headers", {}),
+        scopes=_spec_scopes(spec),
+        client_id=_spec_client_id(spec),
         source=source,
     )
 
@@ -1544,7 +1585,7 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
     """Find MCP servers in mcp.json that need syncing to the agent config.
 
     Returns new servers not yet in the agent config, plus existing servers
-    whose env, command, or args have diverged from the mcp.json source.
+    whose source-owned transport fields have diverged from mcp.json.
     """
     agent_cfg = _load_agent_config()
     agent_mcp = agent_cfg.get("mcpServers", {})
@@ -1562,18 +1603,39 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
             command=spec.get("command", ""),
             args=spec.get("args"),
             env=spec.get("env") or {},
+            url=spec.get("url", ""),
+            headers=spec.get("headers") or {},
+            scopes=_spec_scopes(spec),
+            client_id=_spec_client_id(spec),
             source="discovered",
         )
         if name not in agent_names:
             out.append(info)
         else:
-            # Include existing local servers with divergent command or env.
             # Args divergence is intentionally excluded: user-customized
             # args (e.g. --include-tools additions) are preserved by
             # install_agent()'s setdefault merge, so triggering a full
             # rebuild on args-only differences is wasted work.
             existing = agent_mcp[name]
-            if not isinstance(existing, dict) or info.is_remote:
+            if not isinstance(existing, dict):
+                continue
+            if info.is_remote:
+                existing_headers = existing.get("headers") or {}
+                # scopes/clientId are source-owned transport fields like url and
+                # headers: a registry Connect that adds or changes them must
+                # re-sync, or the agent config keeps authorizing the old shape.
+                #
+                # Reaching this set is not permission to rewrite anything: each
+                # consumer guards its own surface, so the two that Kiro Crew does
+                # not own -- the kiro-global file and the Claude Code sidecar --
+                # decide for themselves what an existing entry allows.
+                if (
+                    existing.get("url", "") != info.url
+                    or existing_headers != info.headers
+                    or _spec_scopes(existing) != info.scopes
+                    or _spec_client_id(existing) != info.client_id
+                ):
+                    out.append(info)
                 continue
             existing_env = existing.get("env", {})
             if not isinstance(existing_env, dict):
@@ -1699,6 +1761,31 @@ def sync_to_agent_config(servers: list[McpServerInfo]) -> bool:
     return added or bool(servers)
 
 
+def kirocrew_managed_names() -> set[str]:
+    """Server names the dashboard store owns, and may therefore be rewritten.
+
+    A usable dict under the ``kirocrew`` scope (``<data home>/mcp.json``) is the
+    one signal that Kiro Crew owns a name -- the same discriminator the agent-spec
+    emit path uses for its OAuth hints, so ownership means one thing everywhere.
+
+    Every write to a config surface we do NOT own -- the kiro-global
+    ``mcp.json``, the Claude Code ``~/.mcp.json`` sidecar -- must be gated on
+    this. Discovery merges ALL scopes, so a name present only in a user's global
+    file reaches the sync set exactly like a managed one; without the gate a
+    Kiro Crew sync would rewrite a server the user configured by hand, and the
+    fields it reconstructs (url, OAuth hints) would silently replace theirs.
+
+    A malformed store value is skipped for the same reason the merge skips it: it
+    contributed nothing, so it cannot make the name ours.
+    """
+    by_source = _load_mcp_json_by_source()
+    return {
+        name
+        for name, spec in by_source.get(SCOPE_KIROCREW, {}).items()
+        if isinstance(spec, dict)
+    }
+
+
 def register_servers_for_cc(
     servers: list[McpServerInfo],
     mcp_json_path: Path | None = None,
@@ -1707,6 +1794,9 @@ def register_servers_for_cc(
 
     Adds entries without removing existing ones. CC-side complement
     to sync_to_agent_config() which handles kiro-side registration.
+
+    A remote that already has an entry is left alone entirely -- see the loop
+    below for why this surface is add-only for remotes.
 
     Returns True if any servers were added or updated.
     """
@@ -1722,12 +1812,29 @@ def register_servers_for_cc(
 
     mcp = existing.setdefault("mcpServers", {})
     changed = False
+    # OAuth hints ride along when a remote is first registered, and only for a
+    # name we own -- see kirocrew_managed_names.
+    _managed = kirocrew_managed_names()
 
     for s in servers:
         if s.is_remote:
+            # Add-only: a remote already present here keeps whatever it holds.
+            # This writer rebuilds an entry from scratch rather than merging into
+            # it, and ownership on this surface is name-only -- a managed
+            # server's moved url is indistinguishable from a user's own
+            # same-named entry -- so rewriting one could silently replace
+            # configuration nobody here authored. Propagating a changed remote
+            # shape needs a record of which entries we wrote, and waits for it.
+            if s.name in mcp:
+                continue
             entry: dict = {"url": s.url}
             if s.headers:
                 entry["headers"] = s.headers
+            if s.name in _managed:
+                if s.scopes:
+                    entry["scopes"] = list(s.scopes)
+                if s.client_id:
+                    entry["clientId"] = s.client_id
         else:
             entry = {"command": s.command, "args": s.args or [], "type": "stdio"}
             if s.env:
