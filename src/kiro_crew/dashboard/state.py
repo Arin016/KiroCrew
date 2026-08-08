@@ -1814,6 +1814,13 @@ class DashboardState:
     _slots_push_suspend: int = 0
     _slots_push_pending: bool = False
     restoring_open_slots: bool = False
+    # Keys the last open-tab restore could not read (not keys it proved absent).
+    # _persist_open_slots folds these back into the snapshot so a transient read
+    # failure cannot erase the reopen seed. The class-level baseline is an
+    # IMMUTABLE frozenset on purpose: a bare set() here would be one object
+    # shared by every __new__-built instance. __init__ and the restore each
+    # assign a fresh set(), so mutation only ever touches an instance attribute.
+    unrestored_slot_keys: "frozenset[str] | set[str]" = frozenset()
 
     def __init__(
         self,
@@ -1941,6 +1948,8 @@ class DashboardState:
         # being restored from with a half-populated slot set — see
         # _persist_open_slots.
         self.restoring_open_slots = False
+        # Per-instance (see the class-level frozenset baseline for why).
+        self.unrestored_slot_keys: set[str] = set()
         self._notification_log: list[dict[str, Any]] = _load_notifications()
         self._unread_count: int = 0
         # Notification bus (schema v2) — notify() adapts legacy calls onto it;
@@ -2662,6 +2671,25 @@ class DashboardState:
                 for name, slot in list(self._slots.items())
                 if getattr(slot, "memory_mode", "persistent") == "persistent"
             ]
+            # Re-add keys the last restore could not READ. Without this, a tab
+            # dropped by a transient metadata failure is erased from the seed by
+            # the very next flush (this snapshot is taken from live _slots), so
+            # "recoverable on a later restore pass" stops being true and the tab
+            # is gone for good. Only keys that came out of open_slots.json land
+            # here, so the persistent-only filter above still holds for them.
+            #
+            # Iterating this set is safe ONLY because the restoring_open_slots
+            # early-return above covers the one writer: the restore mutates it
+            # between tabs, and this method runs from two threads (the 5s
+            # executor flush and the shutdown thread). That guard is therefore
+            # load-bearing for thread safety here, not just for partial
+            # snapshots — do not narrow it without giving this set its own lock.
+            seen = set(keys)
+            keys.extend(
+                k
+                for k in getattr(self, "unrestored_slot_keys", frozenset())
+                if k not in seen
+            )
             payload = json.dumps({"keys": keys, "ts": time.time()})
             # Use the canonical atomic_write helper, not a deterministic
             # ".json.tmp" name — _persist_open_slots can run concurrently from

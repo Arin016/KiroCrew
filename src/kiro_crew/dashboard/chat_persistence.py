@@ -200,6 +200,11 @@ def _restore_open_slots_steps(state: DashboardState) -> "Iterator[int]":
     if not isinstance(keys, list):
         return
     restored = 0
+    # Rebound each pass so it reflects only THIS restore: a key that becomes
+    # readable later must stop being carried, and a fresh set() keeps mutation
+    # off the class-level frozenset baseline.
+    unrestored: set[str] = set()
+    state.unrestored_slot_keys = unrestored
     # Built once and shared across every tab — it is identical per slot.
     kiro_model_map = _build_kiro_model_map()
     for raw in keys:
@@ -226,17 +231,46 @@ def _restore_open_slots_steps(state: DashboardState) -> "Iterator[int]":
         if raw in state._slots:
             continue
         try:
-            slot = _rehydrate_slot_from_history(state, raw, kiro_model_map=kiro_model_map)
+            # Ask whether the metadata READ succeeded, not just whether it came
+            # back empty. get_metadata() reports {} for both "never persisted"
+            # and "could not be read after retries", and treating the second as
+            # the first is what silently discards a live tab. Key it exactly as
+            # _rehydrate_slot_from_history does, so the prefetch below is a hit.
+            #
+            # This read MUST stay inside the per-tab guard. restore_open_slots_async
+            # has no except at its call site, so anything escaping here aborts
+            # dashboard startup and costs every LATER tab too, not just this one.
+            meta, readable = state.conversation_log.get_metadata_status(
+                slot_transcript_key(raw)
+            )
+            if readable:
+                slot = _rehydrate_slot_from_history(
+                    state, raw, kiro_model_map=kiro_model_map, _prefetched_meta=meta
+                )
+                if slot is not None:
+                    restored += 1
+            else:
+                unrestored.add(raw)
+                logger.warning(
+                    "restore_open_slots: metadata unreadable for %s; keeping it "
+                    "in the reopen seed for the next restore instead of "
+                    "dropping it",
+                    raw,
+                )
         except Exception:
             logger.debug("restore_open_slots: rehydrate failed for %s", raw, exc_info=True)
+            # Same epistemic position as an unreadable read: the session was not
+            # shown to be gone, so keep its key rather than erasing the seed.
+            unrestored.add(raw)
             # No rollback here: _rehydrate_slot_from_history undoes its own
             # partial slot and restricted key, so every caller gets it rather
             # than only the ones that remembered to compensate.
-            continue
-        if slot is not None:
-            restored += 1
-        # One yield point per tab. The async driver turns this into a real event-loop
-        # yield; the sync driver just spins through it.
+        # One yield point per tab, reached on EVERY outcome. A failing tab still
+        # costs real I/O (the metadata read retries, and _pause_for_transient_retry
+        # deliberately does not sleep while on the loop), so a run of failing tabs
+        # that skipped the yield would monopolise the loop and feed the stall
+        # watchdog. The async driver turns this into a real event-loop yield; the
+        # sync driver just spins through it.
         yield restored
     if restored:
         logger.info("Restored %d open tab(s) from open_slots.json", restored)

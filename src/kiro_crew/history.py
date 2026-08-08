@@ -2985,6 +2985,23 @@ class ConversationLog:
         """Return session metadata for *key*."""
         return self._read_metadata(key)
 
+    def get_metadata_status(self, key: str) -> tuple[dict, bool]:
+        """Return ``(metadata, readable)`` for *key*.
+
+        ``readable`` is ``False`` only when the transcript exists but its
+        metadata line could not be read after
+        :data:`_METADATA_READ_ATTEMPTS` attempts. Every other empty result --
+        no transcript at all, an empty first line, an undecodable one -- is a
+        genuine answer and reports ``True``.
+
+        :meth:`get_metadata` cannot express that difference: it returns ``{}``
+        for both, and a caller that reads ``{}`` as "this session was never
+        persisted" will discard live state. Use this instead of
+        :meth:`get_metadata` wherever an empty result triggers something
+        destructive.
+        """
+        return self._read_metadata_status(key)
+
     def _pause_for_transient_retry(self) -> None:
         """Pause briefly before retrying a transient read, but ONLY off the loop.
 
@@ -3009,29 +3026,38 @@ class ConversationLog:
     def _read_metadata(self, key: str) -> dict:
         """Read the metadata line (first line) from a session JSONL file.
 
+        Thin wrapper over :meth:`_read_metadata_status` that drops the
+        readability flag, so the many callers for whom "empty" and "unreadable"
+        are equivalent keep a plain ``dict`` return.
+        """
+        return self._read_metadata_status(key)[0]
+
+    def _read_metadata_status(self, key: str) -> tuple[dict, bool]:
+        """Read the metadata line, reporting whether the read itself succeeded.
+
         Uses mtime-based caching to avoid re-reading unchanged files.
 
-        Returns ``{}`` for a session that genuinely has no metadata. A caller
-        cannot distinguish that from a transient read failure, and at least one
-        does something destructive with the answer: the open-tab restore treats
-        ``{}`` as "never persisted" and silently drops the tab. So absorb the
-        transient case HERE rather than reporting it as absence -- retry a few
-        times, and if it still fails, say so at warning level instead of
-        returning a confident empty dict. Windows makes this more than
-        theoretical: a freshly written file can be briefly unopenable while an
-        indexer or AV scanner holds it (``ERROR_SHARING_VIOLATION``), which
-        surfaces as ``PermissionError`` -- an ``OSError`` subclass.
+        Returns ``({}, True)`` for a session that genuinely has no metadata and
+        ``({}, False)`` when the file exists but could not be read after
+        retries. The retry absorbs the common transient case; the flag exists
+        because absorbing it is not always possible, and at least one caller
+        does something destructive with a confident empty answer: the open-tab
+        restore treats ``{}`` as "never persisted" and drops the tab. Windows
+        makes this more than theoretical: a freshly written file can be briefly
+        unopenable while an indexer or AV scanner holds it
+        (``ERROR_SHARING_VIOLATION``), which surfaces as ``PermissionError`` --
+        an ``OSError`` subclass.
         """
         path = self._path(key)
         if not path.exists():
             self._meta_cache.pop(key, None)
-            return {}
+            return {}, True
         for attempt in range(_METADATA_READ_ATTEMPTS):
             try:
                 mtime = path.stat().st_mtime
                 cached = self._meta_cache.get(key)
                 if cached and cached[0] == mtime:
-                    return cached[1]
+                    return cached[1], True
                 # Read ONLY the first line. The previous form slurped the entire
                 # file via read_text() and then threw all but the first line away
                 # — on a 26 MB transcript that is ~10ms and ~26 MB of transient
@@ -3056,17 +3082,28 @@ class ConversationLog:
                     _METADATA_READ_ATTEMPTS,
                     exc_info=True,
                 )
-                return {}
+                return {}, False
             if not first:
-                return {}
+                return {}, True
             try:
                 data = json.loads(first)
-                meta = data if data.get("_type") == "metadata" else {}
+                # ``isinstance`` guard, not just the _type check: a first line
+                # that is valid JSON but not an OBJECT (``null``, a list, a bare
+                # string, a number) would make ``.get`` raise AttributeError
+                # rather than JSONDecodeError. That is a corrupt metadata line
+                # exactly like an undecodable one, so report it the same way --
+                # an empty dict that IS a genuine answer -- instead of throwing a
+                # non-OSError out of a read that callers treat as total.
+                meta = (
+                    data
+                    if isinstance(data, dict) and data.get("_type") == "metadata"
+                    else {}
+                )
             except json.JSONDecodeError:
                 meta = {}
             self._meta_cache[key] = (mtime, meta)
-            return meta
-        return {}
+            return meta, True
+        return {}, True
 
     def sliding_window(self, key: str, keep_recent: int = 5) -> tuple[list[dict], list[dict]]:
         """Split messages into (older, recent) for compaction.
