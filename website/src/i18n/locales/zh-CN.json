@@ -9904,6 +9904,7 @@
         "off": "已关闭",
         "optional_why_shown_to_the_agent_when_this_rule_fir": "可选：原因。此规则触发时向智能体显示",
         "other_surfaces_have_their_own_profiles": "拥有各自配置文件的面可以允许主机所不能允许的操作：{{surfaces}}。",
+        "enforced_by_floor": "由 Kiro Crew 内置的常开保护强制执行",
         "pinned_by_policy": "由你所在组织的安全策略强制执行",
         "pinned_for_the_host_surface": "由主机面配置文件设置。这仅是进程内主机操作的上限——其他面有各自的配置文件，可能允许此项。",
         "policy": "策略",

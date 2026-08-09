@@ -10132,6 +10132,7 @@
         "off": "désactivé",
         "optional_why_shown_to_the_agent_when_this_rule_fir": "Facultatif : motif. Affiché à l'agent lorsque cette règle s'applique",
         "other_surfaces_have_their_own_profiles": "Une surface avec son propre profil peut autoriser ce que l'hôte ne peut pas : {{surfaces}}.",
+        "enforced_by_floor": "Imposé par une protection toujours active intégrée à Kiro Crew",
         "pinned_by_policy": "Imposé par la politique de sécurité de ton organisation",
         "pinned_for_the_host_surface": "Défini par le profil de la surface hôte. C'est le plafond des actions hôte en cours de processus uniquement — les autres surfaces ont leurs propres profils et peuvent l'autoriser.",
         "policy": "politique",
