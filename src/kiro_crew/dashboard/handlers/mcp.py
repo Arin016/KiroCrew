@@ -18,7 +18,12 @@ from kiro_crew.config.paths import data_home, kiro_agents_dir
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.mcp_gateway import is_gateway_supported
 from kiro_crew.mcp_gateway.backend import MCP_APPS_ENV_FLAG, mcp_apps_env_override
-from kiro_crew.mcp_utils import mcp_server_alias
+from kiro_crew.mcp_utils import (
+    INTERNAL_CLIENT_ID_KEY,
+    INTERNAL_SCOPES_KEY,
+    apply_kiro_oauth_hints,
+    mcp_server_alias,
+)
 from kiro_crew.platform.governance import may_skip_gate_now
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -696,6 +701,7 @@ async def api_mcp_sync(request: web.Request) -> web.Response:
     """
     from kiro_crew.mcp_discovery import (  # noqa: F811
         discover_servers_to_sync,
+        kirocrew_managed_names,
         register_servers_for_cc,
         sync_to_agent_config,
     )
@@ -714,9 +720,93 @@ async def api_mcp_sync(request: web.Request) -> web.Response:
             except (FileNotFoundError, json.JSONDecodeError):
                 gdata = {"mcpServers": {}}
             gservers = gdata.setdefault("mcpServers", {})
+            # The kiro-global mcp.json is NOT ours. Discovery merges every scope,
+            # so a name the user configured only in their own global file reaches
+            # this sync set exactly like a managed one -- and the branch below
+            # RECONSTRUCTS the entry, so it would replace their url and OAuth
+            # fields with whatever the merged view produced. Base only ever
+            # CREATED missing entries here; the gate keeps that guarantee for
+            # names we do not own while still letting a managed entry re-sync,
+            # which is the whole point of the scope fix.
+            _managed = kirocrew_managed_names()
             for s in to_sync:
-                if s.name not in gservers:
-                    entry: dict[str, Any] = {"command": s.command}
+                if s.is_remote:
+                    current = gservers.get(s.name)
+                    if isinstance(current, dict) and s.name not in _managed:
+                        continue
+                    entry: dict[str, Any] = dict(current) if isinstance(current, dict) else {}
+                    for key in ("command", "args", "env", "type"):
+                        entry.pop(key, None)
+                    entry["url"] = s.url
+                    # A headers map is scoped to the HOST it was typed for. The
+                    # overlay below deliberately carries a credential the user put
+                    # in their own global file across a sync -- but that copy was
+                    # issued by, and for, the url already on disk. When the store
+                    # moves a managed server to a different url, keeping the map
+                    # stops being preservation and becomes forwarding: the user's
+                    # Authorization value gets written beside an origin that never
+                    # saw it, and the next session sends it there. So the map only
+                    # survives when the url is unchanged, and the test sits ahead
+                    # of BOTH write branches -- a header-less discovery never runs
+                    # the overlay, so a guard inside it would miss the entry that
+                    # simply rode along in ``dict(current)``. Dropping costs a
+                    # re-auth, which the user can redo; a leaked bearer cannot be
+                    # called back. An entry with no url on disk is treated the same
+                    # way: nothing proves that map belongs to where we are pointing.
+                    if not (isinstance(current, dict) and current.get("url") == s.url):
+                        entry.pop("headers", None)
+                    # Discovery coerces only a FALSY headers value, so a truthy
+                    # non-dict from a hand-edited entry arrives here as-is. It
+                    # carries no usable credential, so it reads as "discovery
+                    # said nothing" and leaves the on-disk map alone rather than
+                    # aborting a sync that covers every other server too.
+                    _discovered = s.headers if isinstance(s.headers, dict) else {}
+                    if _discovered:
+                        # Overlay, never replace. Discovery reads the MERGED view,
+                        # which takes the store's copy of the entry, so a header
+                        # the user hand-added to their own global file is absent
+                        # from the discovered map while still present in
+                        # ``current``. Assigning wholesale would delete exactly the
+                        # global-only credential the empty-map guard below exists
+                        # to protect -- and this write path only became reachable
+                        # for existing entries here, so it has to be as
+                        # conservative as the base ref's create-only behaviour.
+                        _prior = entry.get("headers")
+                        entry["headers"] = {
+                            **(_prior if isinstance(_prior, dict) else {}),
+                            **_discovered,
+                        }
+                    # An empty discovered header map is NOT an instruction to
+                    # delete. Discovery reads the dashboard's own mcp.json, so a
+                    # server of the same name carrying an Authorization header in
+                    # the user's global ~/.kiro/settings/mcp.json legitimately
+                    # arrives here header-less. Popping on that would erase the
+                    # only copy of a credential the user typed, silently and with
+                    # nothing to restore it from.
+                    #
+                    # scopes/clientId below are handled the opposite way ON
+                    # PURPOSE: those are written only by flows that own the whole
+                    # OAuth request, so absent means the request was narrowed and
+                    # the old grant must stop being asked for. Getting a stale
+                    # scope wrong over-requests access; getting a header wrong
+                    # destroys it.
+                    #
+                    # Both hints therefore always SPEAK here -- an empty list or
+                    # id is a real "no longer requested", not silence -- while
+                    # ``apply_kiro_oauth_hints`` edits ``oauth`` surgically, so a
+                    # sub-key we do not own (``issuer``, ...) is not collateral.
+                    entry.pop(INTERNAL_SCOPES_KEY, None)
+                    entry.pop(INTERNAL_CLIENT_ID_KEY, None)
+                    entry = apply_kiro_oauth_hints(
+                        entry,
+                        scopes=list(s.scopes),
+                        client_id=s.client_id,
+                        server=s.name,
+                    )
+                    if current != entry:
+                        gservers[s.name] = entry
+                elif s.name not in gservers:
+                    entry = {"command": s.command}
                     if s.args:
                         entry["args"] = s.args
                     if s.env:
