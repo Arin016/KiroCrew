@@ -105,6 +105,26 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "PR postmortem reports",
+        "apps/builtins/pr_postmortem/backend/routes.py",
+        "Every report, evidence bundle, backlog cluster and apply plan this app "
+        "serves is built from two untrusted sources: pull-request prose written by "
+        "anyone who can open a PR, and an analyst model's free text about it. Both "
+        "are persisted verbatim and both render in the dashboard, so a key pasted "
+        "into a PR body would reach the browser -- the same output-boundary reason "
+        "as the mochi routes below. Error prose is scrubbed too: one handler "
+        "surfaces an exception string, and a git failure can echo a remote URL.",
+    ),
+    (
+        "PR postmortem evidence bundles",
+        "apps/builtins/pr_postmortem/engine/bundle.py",
+        "A bundle carries the RAW culprit and fix diffs and is handed to an analyst "
+        "model as evidence. A fix PR's diff is precisely where a credential that "
+        "was committed and then removed still lives, so the bundle is scrubbed at "
+        "write time -- which covers the file on disk, every later reader of it, and "
+        "the analysis prompt built from it.",
+    ),
+    (
         "Session storage inventory",
         "dashboard/handlers/session_storage.py",
         "A session's title and its first message, served by "
@@ -703,6 +723,10 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # egress boundary; the modules that CALL it (mochi routes/hooks) are the
         # registered sinks.
         "apps/builtins/mochi/redact.py",
+        # The app's recursive redactor helper -- a pure scrubber, not an egress
+        # boundary; the module that CALLS it (pr_postmortem routes) is the
+        # registered sink. Same split as the mochi helper above.
+        "apps/builtins/pr_postmortem/engine/redact.py",
         "autonudge_authz.py",
         "acp/_dispatch.py",
         "acp/client.py",
