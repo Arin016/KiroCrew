@@ -6134,6 +6134,18 @@
       "select": "Seleziona",
       "workspace_name": "Nome del workspace",
       "workspace_name_2": "workspace-name"
+    },
+    "settingRef": {
+      "envVarAriaLabel": "Variabile d'ambiente {{key}}",
+      "envVarDescription": "Imposta questa variabile d'ambiente prima di avviare Kiro Crew.",
+      "envVarUnsetDescription": "Rimuovi questa variabile d'ambiente prima di avviare Kiro Crew.",
+      "fileOnlyDescription": "Imposta questo valore con il comando CLI qui sotto.",
+      "copied": "Copiato!",
+      "copyFailed": "Copia non riuscita",
+      "copyCommand": "Copia comando",
+      "orEditConfigJson": "In alternativa, modifica direttamente ~/.kiro/crew/config.json.",
+      "openSettingsAriaLabel": "Apri {{key}} in Impostazioni → {{tab}}",
+      "fileSettingAriaLabel": "Impostazione solo file {{key}}"
     }
   },
   "hooks": {
@@ -8450,7 +8462,8 @@
         "reembedding": "Ricalcolo degli embedding…",
         "subtitle": "Gira in locale. Cambiarlo ricalcola gli embedding delle memorie in background.",
         "title": "Modello di embedding",
-        "will_revert": "Vuoto: tornerà al modello incluso."
+        "will_revert": "Vuoto: tornerà al modello incluso.",
+        "err_env_override_with_ref": "<settingRef/> è impostata e sovrascrive questa impostazione. Rimuovila per cambiare il modello qui."
       },
       "kiroCrewCfgTab": {
         "agent_for_pool_processes_empty_uses_default_agen": "Agente per i processi del pool. Se vuoto usa l'agente predefinito. Richiede il riavvio.",
@@ -8742,7 +8755,9 @@
         "this_skill_changed_after_this_update_was_written": "Questo skill è cambiato dopo che questo aggiornamento è stato scritto, quindi applicarlo ora annullerebbe quelle modifiche più recenti. L'approvazione è bloccata — scarta questo candidato e verrà proposto un aggiornamento nuovo sulla versione attuale.",
         "update": "Aggiorna",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "workspace"
+        "workspace": "workspace",
+        "auto_create_hint": "Kiro Crew può anche redigere competenze dalle sessioni completate automaticamente — disattivato per impostazione predefinita, controllato da <settingRef/>.",
+        "approval_required_hint": "I candidati attendono qui fino alla tua approvazione — richiesto da <settingRef/>."
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "Convenzioni Markdown sempre attive, inserite in ogni sessione. I file globali si trovano in ~/.kiro/steering e si applicano a tutto; i file di workspace si trovano in <project>/.kiro/steering e si applicano solo a quel progetto.",
@@ -9262,11 +9277,11 @@
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtro approssimativo (corrispondenza di sottostringa)",
       "loading": "Caricamento…",
-      "no_archives_archives_are_created_when_session_fi": "Nessun archivio. Gli archivi vengono creati quando i file di sessione vengono ruotati (>2 MB) o compattati.",
       "no_matches_for_query": "Nessuna corrispondenza per \"{{query}}\".",
       "reload": "Ricarica",
       "select_an_archive_to_view_its_contents": "Seleziona un archivio per vederne il contenuto.",
-      "truncated_showing_first_200kb": "… troncato (mostrati i primi 200 KB) …"
+      "truncated_showing_first_200kb": "… troncato (mostrati i primi 200 KB) …",
+      "no_archives_with_compaction_hint": "Nessun archivio. Gli archivi vengono creati quando i file di sessione vengono ruotati (>2 MB) o compattati. La compattazione automatica è controllata da <settingRef/>."
     },
     "sessionStorage": {
       "back_to_disk": "Sistema · Prestazioni › Disco",
@@ -9821,7 +9836,6 @@
         "enabled": "attivato",
         "enabled_but_not_active_yet_restart_the_gateway": "Attivato, ma non ancora attivo. Riavvia il gateway (",
         "enabling": "Attivazione…",
-        "equivalent_cli": "Comando CLI equivalente:",
         "failed_to_add_remote_crew": "Impossibile aggiungere la crew remota",
         "failed_to_load_remote_crews": "Impossibile caricare le crew remote",
         "home_you_local_bin_kirocrew_leave_blank_for_stan": "/home/you/.local/bin/kirocrew  —  lascia vuoto per installazioni standard",
@@ -9830,8 +9844,6 @@
         "is_already_used_by_another_instance_choose_a_dif": "è già usata da un'altra crew remota — scegline un'altra\n              (e configura quella porta sull'host remoto).",
         "is_installed_somewhere_non_standard_on_the_remot": "è installato in una posizione\n            non standard sul remoto. Lascia vuoto per una normale installazione pip in PATH. Per trovarlo,\n            esegui sull'host remoto:",
         "kirocrew": "kirocrew",
-        "kirocrew_config_set_instances_enabled_true": "kirocrew config set instances.enabled true",
-        "kirocrew_config_set_instances_warm_set_cap_n": "kirocrew config set instances.warm_set_cap N",
         "kirocrew_restart": "kirocrew restart",
         "loading": "Caricamento…",
         "local_bin_kirocrew": "~/.local/bin/kirocrew",
@@ -9859,7 +9871,6 @@
         "ssm_target_instance_id": "Destinazione SSM (id istanza)",
         "the_gateway_opens_an_ssh_tunnel_and_mints_a_shor": "Il gateway apre un tunnel (SSH o AWS SSM) ed emette un token di breve durata alla connessione.\n        La porta di forwarding locale rispecchia quella remota, quindi ogni crew remota connessa\n        deve usare una porta remota distinta.",
         "the_user_the_remote_gateway_runs_as_sudo_u_for_s": "L'utente con cui gira il gateway remoto: i comandi SSM passano da sudo -u. Su AMI Ubuntu usa ubuntu.",
-        "then": "poi",
         "to_fully_tear_down_any_tunnels_still_running_fro": "per smantellare completamente eventuali tunnel ancora in esecuzione da prima.",
         "to_start_the_ssh_tunnel_manager_and_activate_ins": "per avviare il gestore dei tunnel e attivare il passaggio tra crew remote.",
         "token_left": "· token: scade in {{time}}",
@@ -9869,7 +9880,8 @@
         "unknown_error": "errore sconosciuto",
         "up_to": "Fino a",
         "update_setting_failed": "Impossibile aggiornare l’impostazione: {{error}}",
-        "use_an_absolute_path_no": ").\n            Usa un percorso assoluto (nessun"
+        "use_an_absolute_path_no": ").\n            Usa un percorso assoluto (nessun",
+        "enable_via_setting": "In alternativa, imposta <settingRef/>, quindi esegui <restartCmd/>."
       },
       "mcpPoolableServers": {
         "blocked": "bloccato",
@@ -10561,7 +10573,6 @@
       "daily_trend_point": "{{date}} · a freddo {{cold}} · a caldo {{warm}} · {{count}} avvii",
       "days": "giorni.",
       "distribution_col": "Distribuzione",
-      "enable_with": "Attiva con",
       "fault_rate": "Tasso di errore",
       "group_by": "Raggruppa per",
       "growth_col": "Crescita",
@@ -10573,7 +10584,6 @@
       "mean_col": "Media",
       "mean_credits_by_occupancy": "Crediti medi per turno, raggruppati per contesto usato",
       "measured_from_token_records": "Misurato localmente dalle sessioni elencate qui negli ultimi {{days}} giorni — conservato indipendentemente dall'interruttore di telemetria",
-      "metrics_stay_local": ". Le metriche restano locali (",
       "min_col": "min",
       "min_max": "min {{min}} · max {{max}}",
       "model_col": "Modello",
@@ -10583,7 +10593,6 @@
       "no_startups_recorded": "Nessun avvio registrato in questa finestra",
       "no_telemetry_recorded_yet_in_the_last": "Ancora nessuna telemetria registrata negli ultimi",
       "no_turns_yet": "Ancora nessun turno",
-      "nothing_leaves_this_machine": ") — nulla lascia questa macchina.",
       "occupancy_p50": "Occupazione (p50)",
       "occupancy_p90": "Occupazione (p90)",
       "otel_has_no_per_conversation_split": "Gli istogrammi OTEL non portano un id di sessione, quindi queste sono cifre dell'intero processo — la latenza del turno non è attribuibile a una singola conversazione da questo archivio.",
@@ -10618,7 +10627,6 @@
       "tab_latency": "Latenza",
       "tab_spend": "Spesa",
       "tab_startup": "Avvio",
-      "telemetry_enabled_true": "telemetry.enabled = true",
       "telemetry_is_off": "La telemetria è disattivata",
       "throughput": "Throughput",
       "to_compaction_col": "A 90%",
@@ -10639,7 +10647,8 @@
       "warm_start_p50": "Avvio a caldo (p50)",
       "was_value": "prima {{value}}",
       "window_last": "Sezioni OTEL · intervallo: ultimi",
-      "window_tokens_col": "Finestra (token)"
+      "window_tokens_col": "Finestra (token)",
+      "off_body": "Attiva con <settingRef/>. Le metriche restano locali (<metricsDir/>) — nulla esce da questa macchina."
     },
     "terminalPopoutFrame": {
       "return": "Torna al dock",
@@ -10909,7 +10918,6 @@
     "controlsTitle": "Controlli della telemetria",
     "dataNeverSentBody": "Prompt, risposte, file, credenziali, nomi host, nomi utente né il tuo sistema operativo. Il tuo IP non viene memorizzato.",
     "dataNeverSentTitle": "Mai inviato",
-    "envOverrideNote": "Il segnale è disattivato perché {{envVar}} è impostata in questo ambiente. Rimuovi la variabile per gestire la telemetria qui.",
     "governanceOverrideNote": "I criteri di sicurezza del tuo amministratore lo disattivano. Non è modificabile qui.",
     "installReceiptBody": "Dopo un’installazione o un aggiornamento riuscito dal catalogo ufficiale di Kiro Crew, viene inviata una ricevuta anonima. Registri esterni, app locali e app autoregistrate non vengono mai segnalati.",
     "installReceiptFields": "slug dell’app ufficiale · token anonimo per app (non collegabile tra app) · nuova installazione/aggiornamento · versione di Kiro Crew",
@@ -10932,7 +10940,8 @@
     "shellWindowsCmdLabel": "Prompt dei comandi di Windows",
     "toggleDescription": "Salvato per i prossimi avvii.",
     "toggleLabel": "Invia segnale di utilizzo anonimo",
-    "toggleSaveFailed": "Non è stato possibile salvare la tua scelta sulla telemetria. Riprova."
+    "toggleSaveFailed": "Non è stato possibile salvare la tua scelta sulla telemetria. Riprova.",
+    "envOverrideWithSettingRef": "L'heartbeat è disattivato perché <settingRef/> è impostata in questo ambiente. Rimuovila per gestire la telemetria qui."
   },
   "settings": {
     "display": {

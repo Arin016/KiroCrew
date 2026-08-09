@@ -3763,7 +3763,6 @@
     "controlsTitle": "Telemetry controls",
     "dataNeverSentBody": "Prompts, responses, files, credentials, hostnames, usernames, or your operating system. Your IP is not stored.",
     "dataNeverSentTitle": "Never sent",
-    "envOverrideNote": "The heartbeat is off because {{envVar}} is set in this environment. Unset it to manage telemetry here.",
     "localDataBody": "Usage and context records. Performance metrics are off by default.",
     "localDataTitle": "Stays on your device",
     "notSendingAlreadySentToday": "Today's heartbeat has already been sent.",
@@ -3786,7 +3785,8 @@
     "shellWindowsCmdLabel": "Windows Command Prompt",
     "toggleDescription": "Saved for future launches.",
     "toggleLabel": "Send anonymous usage heartbeat",
-    "toggleSaveFailed": "Couldn't save your telemetry choice. Try again."
+    "toggleSaveFailed": "Couldn't save your telemetry choice. Try again.",
+    "envOverrideWithSettingRef": "The heartbeat is off because <settingRef/> is set in this environment. Unset it to manage telemetry here."
   },
   "settings": {
     "display": {
