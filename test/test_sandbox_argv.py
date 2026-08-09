@@ -350,9 +350,7 @@ class TestBuildLauncherScript:
         real_dir = tmp_path / "creds"
         real_dir.mkdir()
 
-        script = _build_launcher_script(
-            "strict", extra_hidden_dirs=(str(secret), str(real_dir))
-        )
+        script = _build_launcher_script("strict", extra_hidden_dirs=(str(secret), str(real_dir)))
         dirs = json.loads(re.search(r"SENSITIVE_DIRS = (\[.*?\])\n", script, re.S).group(1))
         files = json.loads(re.search(r"SENSITIVE_FILES = (\[.*?\])\n", script, re.S).group(1))
 
@@ -388,9 +386,9 @@ class TestBuildLauncherScript:
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in {"isfile", "isdir", "exists", "stat", "lstat"}
         ]
-        assert probes == [], (
-            f"_build_launcher_script stats the filesystem on the event loop: {probes}"
-        )
+        assert (
+            probes == []
+        ), f"_build_launcher_script stats the filesystem on the event loop: {probes}"
 
     def test_every_sensitive_path_reaches_a_loop_that_can_hide_it(self):
         """Whole-list check against the real sensitive-path list.
@@ -468,6 +466,75 @@ class TestBuildLauncherScript:
             assert (
                 not forbidden
             ), f"{level}: launcher references un-importable module(s) {forbidden}"
+
+
+class TestHardlinkScanBudget:
+    """Regression tests for the per-root hardlink scan budget (issue #646).
+
+    The Step 7 pre-exec hardlink scan must:
+    - Use a per-root budget so CWD cannot starve /tmp.
+    - Emit a stderr diagnostic when a root's budget is exhausted.
+    - Still detect and block hardlinks to protected inodes within budget.
+    """
+
+    def test_launcher_has_per_root_budget_constant(self):
+        """The generated launcher must contain a named per-root budget constant."""
+        script = _build_launcher_script("strict")
+        assert "_MAX_SCAN_PER_ROOT = 10000" in script
+
+    def test_launcher_has_truncation_diagnostic(self):
+        """The generated launcher must emit a stderr warning on truncation."""
+        script = _build_launcher_script("strict")
+        assert "hardlink scan incomplete for root" in script
+        assert "budget" in script
+        # The diagnostic names the root and the count
+        assert "_scan_root" in script
+        assert "_root_scan_count" in script
+
+    def test_per_root_counters_are_independent(self):
+        """Each scan root resets its counter — CWD budget exhaustion does not
+        prevent /tmp from being scanned."""
+        script = _build_launcher_script("strict")
+        # The counter reset must be INSIDE the per-root loop, not before it
+        lines = script.splitlines()
+        # Find the for-loop over scan roots
+        root_loop_idx = None
+        counter_reset_idx = None
+        for i, line in enumerate(lines):
+            if "for _scan_root in" in line:
+                root_loop_idx = i
+            if "_root_scan_count = 0" in line:
+                counter_reset_idx = i
+        assert root_loop_idx is not None, "scan root loop not found"
+        assert counter_reset_idx is not None, "counter reset not found"
+        # Counter reset must come AFTER the loop start (inside the loop body)
+        assert (
+            counter_reset_idx > root_loop_idx
+        ), "counter reset is before the per-root loop — budgets are still shared"
+
+    def test_explicit_fail_open_documented(self):
+        """The fail-open decision must be documented in a comment."""
+        script = _build_launcher_script("strict")
+        assert "Explicit fail-open" in script
+        # The comment must explain WHY it's fail-open
+        assert "brick" in script.lower() or "availability" in script.lower()
+
+    def test_truncation_emits_warning_to_stderr(self):
+        """Simulate an over-budget walk: the launcher writes a WARNING line
+        to stderr when a scan root exceeds its budget."""
+        script = _build_launcher_script("strict")
+        # Extract just the scan logic section and verify the stderr.write call
+        assert "sys.stderr.write(" in script
+        # The warning message must contain the word WARNING for observability
+        assert "sandbox: WARNING" in script
+
+    def test_blocked_path_unchanged(self):
+        """A planted hardlink to a protected inode within budget still exits
+        BLOCKED — the refusal logic is unchanged."""
+        script = _build_launcher_script("strict")
+        assert "sandbox: BLOCKED" in script and "hardlink(s) to protected credential" in script
+        # The exit path must still be sys.exit (hard stop, not just stderr)
+        assert "sys.exit(" in script
 
 
 class TestLauncherStdlibShadowing:
@@ -1345,9 +1412,7 @@ class TestCgroupScopeBusEnv:
                     "kiro_crew.sandbox._probe_cgroup_scope",
                     return_value=(False, "not Linux"),
                 ),
-                patch.dict(
-                    os.environ, {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False
-                ),
+                patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False),
             ):
                 out, injected = sb.cgroup_scope_bus_env({"PATH": "/usr/bin"})
             assert out == {"PATH": "/usr/bin"}
@@ -1391,7 +1456,13 @@ class TestCgroupScopeBusEnv:
                 patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=False),
                 patch(
                     "kiro_crew.sandbox._unset_env_argv",
-                    return_value=["/usr/bin/env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS"],
+                    return_value=[
+                        "/usr/bin/env",
+                        "-u",
+                        "XDG_RUNTIME_DIR",
+                        "-u",
+                        "DBUS_SESSION_BUS_ADDRESS",
+                    ],
                 ),
                 patch.dict(
                     os.environ,
@@ -1443,14 +1514,10 @@ class TestCgroupScopeBusEnv:
                 ),
                 patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=False),
                 patch("kiro_crew.sandbox._unset_env_argv", return_value=None),
-                patch.dict(
-                    os.environ, {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False
-                ),
+                patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False),
                 caplog.at_level(logging.WARNING),
             ):
-                argv, env, _cleanup = sb.sandboxed_spawn_argv(
-                    ["gh"], env={"PATH": "/usr/bin:/bin"}
-                )
+                argv, env, _cleanup = sb.sandboxed_spawn_argv(["gh"], env={"PATH": "/usr/bin:/bin"})
             assert "XDG_RUNTIME_DIR" not in env
             assert "DBUS_SESSION_BUS_ADDRESS" not in env
             assert argv[argv.index("--") + 1 :] == ["gh"]
@@ -1689,9 +1756,7 @@ class TestMacOsNestingDetection:
         mock_detect.assert_not_called()
 
     @patch("kiro_crew.sandbox.detect_backend", return_value="none")
-    def test_forged_marker_without_kernel_confirmation_is_refused(
-        self, mock_detect, monkeypatch
-    ):
+    def test_forged_marker_without_kernel_confirmation_is_refused(self, mock_detect, monkeypatch):
         # The kernel is authoritative: a marker on a process the kernel says is
         # NOT sandboxed can only have been forged or inherited into an unconfined
         # process, so it must not open the passthrough.

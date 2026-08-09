@@ -1490,13 +1490,17 @@ def main():
                 pass
 
         if _protected_inodes:
-            _scan_count = 0
-            _MAX_SCAN = 10000
+            # Per-root scan budget. Each root gets its own counter so a large
+            # CWD (deep worktree) cannot starve /tmp — the world-writable root
+            # that motivated this check. The budget is per-root, not shared.
+            _MAX_SCAN_PER_ROOT = 10000
             _dangerous_links = []
             _cwd = os.getcwd()
             for _scan_root in (_cwd, "/tmp"):
                 if not os.path.isdir(_scan_root):
                     continue
+                _root_scan_count = 0
+                _root_truncated = False
                 for _root2, _dirs2, _files2 in os.walk(_scan_root):
                     # Depth limit: max 5 levels
                     _depth = _root2[len(_scan_root):].count(os.sep)
@@ -1504,8 +1508,9 @@ def main():
                         _dirs2.clear()
                         continue
                     for _fn2 in _files2:
-                        _scan_count += 1
-                        if _scan_count > _MAX_SCAN:
+                        _root_scan_count += 1
+                        if _root_scan_count > _MAX_SCAN_PER_ROOT:
+                            _root_truncated = True
                             break
                         _fp2 = os.path.join(_root2, _fn2)
                         try:
@@ -1515,8 +1520,21 @@ def main():
                                     _dangerous_links.append(_fp2)
                         except OSError:
                             pass
-                    if _scan_count > _MAX_SCAN:
+                    if _root_truncated:
                         break
+                # Explicit fail-open on truncation: a truncated scan is
+                # deliberately NOT a blocking error — fail-closed would brick
+                # spawns on every busy host (same availability class as the
+                # nested-passthrough comments above). The scan continues to
+                # the next root unblocked, but the truncation is now OBSERVABLE
+                # via stderr (captured by the parent) so operators and tooling
+                # can detect degraded coverage.
+                if _root_truncated:
+                    sys.stderr.write(
+                        "sandbox: WARNING — hardlink scan incomplete for root "
+                        f"{{_scan_root}} (scanned {{_root_scan_count}} files, "
+                        f"budget {{_MAX_SCAN_PER_ROOT}} exhausted)\\n"
+                    )
             if _dangerous_links:
                 sys.exit(
                     f"sandbox: BLOCKED — found hardlink(s) to protected credential "
@@ -2212,8 +2230,7 @@ def _no_backend_guidance() -> str:
             # it, and it is the same binary the desktop app already spawns.
             cli = _bundled_cli_invocation() or "kirocrew"
             where = (
-                " (that path is inside the running app, so run it while Kiro Crew "
-                "is open)"
+                " (that path is inside the running app, so run it while Kiro Crew " "is open)"
                 if cli != "kirocrew"
                 else ""
             )
@@ -2224,20 +2241,28 @@ def _no_backend_guidance() -> str:
             # substitution executed by the paste, turning a diagnostic into a
             # command-injection vector. Mirrors the quoting the desktop side
             # already does in website/electron/sandbox-profile.js.
-            return base + (
-                "This is an AppImage launch, which no profile is attached to yet. "
-                "Run this in a terminal (it needs sudo, so it cannot be done from "
-                f"the app): {cli} sandbox install-profile --path "
-                f"{shlex.quote(appimage)}{where} — then restart the app. Do NOT "
-                "set the sysctl to 0: that disables a kernel-wide protection for "
-                "every application on the machine. "
-            ) + optout
-        return base + (
-            "Run `kirocrew service install` to install the profile and have "
-            "systemd apply it to the gateway unit. Do NOT set the sysctl to 0: "
-            "that disables a kernel-wide protection for every application on the "
-            "machine. "
-        ) + optout
+            return (
+                base
+                + (
+                    "This is an AppImage launch, which no profile is attached to yet. "
+                    "Run this in a terminal (it needs sudo, so it cannot be done from "
+                    f"the app): {cli} sandbox install-profile --path "
+                    f"{shlex.quote(appimage)}{where} — then restart the app. Do NOT "
+                    "set the sysctl to 0: that disables a kernel-wide protection for "
+                    "every application on the machine. "
+                )
+                + optout
+            )
+        return (
+            base
+            + (
+                "Run `kirocrew service install` to install the profile and have "
+                "systemd apply it to the gateway unit. Do NOT set the sysctl to 0: "
+                "that disables a kernel-wide protection for every application on the "
+                "machine. "
+            )
+            + optout
+        )
     return (
         "If this host genuinely lacks a sandbox backend, set "
         "agent.sandbox_allow_unsandboxed_exec=true in "
@@ -2650,9 +2675,7 @@ def wrap_argv(
         # but the old early return never checked. Now we verify the delegation
         # on macOS kiro-cli spawns; on Linux (where kiro's internal sandbox
         # doesn't apply) or non-kiro spawns, "off" means genuinely unconfined.
-        kiro_spawn_off = (
-            _spawns_kiro_cli(argv) if is_kiro_cli is None else is_kiro_cli
-        )
+        kiro_spawn_off = _spawns_kiro_cli(argv) if is_kiro_cli is None else is_kiro_cli
         if sys.platform == "darwin" and kiro_spawn_off and kiro_internal_sandbox_enabled():
             # Delegation is valid: kiro-cli's sandbox IS active. Apply env scrub
             # (same as _delegate_to_kiro_internal_sandbox) but WITHOUT the
