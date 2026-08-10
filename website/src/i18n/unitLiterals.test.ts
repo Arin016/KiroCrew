@@ -455,7 +455,18 @@ describe('a number is never glued to a unit literal', () => {
       offenders.length,
       `${ADVICE}\n\n${offenders.slice(0, 15).join('\n')}`,
     ).toBeLessThanOrEqual(BASELINE)
-  })
+    // Explicit timeout: this is the only test here that parses the WHOLE tree, and
+    // it is inherently expensive — `ts.createSourceFile(..., setParentNodes: true)`
+    // over ~1000 files, because `inCssContext` walks `node.parent`. It measures
+    // ~4.3s on a dev machine but 15-16s on a CI runner, which straddles vitest's
+    // 15s default: `main` fails this test roughly one run in six, and any branch
+    // adding files tips it over reliably. The verdict of a ratchet must not depend
+    // on runner speed, so the budget is stated rather than inherited.
+    //
+    // This buys headroom; it does not make the scan cheap. The real win is dropping
+    // `setParentNodes` by tracking ancestry during the walk instead — worth doing,
+    // but a refactor of a gate rather than a timeout change.
+  }, 60_000)
 
   /**
    * Zero tolerance, no stored state. A finding on a line this branch wrote fails,
