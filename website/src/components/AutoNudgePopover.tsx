@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Goal, X } from 'lucide-react'
+import { Goal, ShieldCheck, X } from 'lucide-react'
 import { Popover, PopoverTrigger, PopoverContent } from './ui/popover'
 import { loadGoalDraft, saveGoalDraft, type GoalDraft } from '../utils/goalDrafts'
 import { DRAFT_SAVE_DEBOUNCE_MS } from '../utils/draftConstants'
@@ -15,6 +15,10 @@ export interface AutoNudgeLoop {
   cycle_count: number
   active: boolean
   last_fire_ts: number
+  /** Seconds left on this run's auto-approve window; 0 when it holds none. */
+  auto_approve_remaining_secs?: number
+  /** The windows an operator may choose from, in seconds. */
+  auto_approve_windows?: number[]
 }
 
 interface Props {
@@ -23,6 +27,44 @@ interface Props {
   open: boolean
   onOpenChange: (open: boolean) => void
   onChange: (loop: AutoNudgeLoop | null) => void
+}
+
+// Mirrors the server's offer so the control still renders if the field is absent
+// (an older gateway, or a loop serialized before this shipped).
+const DEFAULT_WINDOWS = [2 * 3600, 8 * 3600, 12 * 3600]
+
+const ERROR_BY_CODE: Record<string, string> = {
+  not_owner: 'components.autoNudgePopover.error_owner_only',
+  window_not_offered: 'components.autoNudgePopover.error_window_not_offered',
+  bad_window: 'components.autoNudgePopover.error_window_not_offered',
+  loop_inactive: 'components.autoNudgePopover.error_run_not_running',
+  not_found: 'components.autoNudgePopover.error_run_not_found',
+  autonudge_disabled: 'components.autoNudgePopover.error_autonudge_disabled',
+}
+
+/** A catalog string for a server error code.
+ *
+ * `fallbackKey` names the ACTION that failed: telling someone their authorization
+ * failed when they asked to revoke one is the wrong sentence on a security
+ * control, so each caller supplies its own generic case.
+ */
+function errorForCode(
+  code: unknown,
+  fallbackKey = 'components.autoNudgePopover.authorize_failed',
+): string {
+  const key = typeof code === 'string' ? ERROR_BY_CODE[code] : undefined
+  return i18nT(key || fallbackKey)
+}
+
+/** Whole hours when the window divides evenly, else hours + minutes. */
+function fmtWindow(secs: number): string {
+  if (secs < 0) return i18nT('components.autoNudgePopover.no_expiry')
+  const totalMinutes = Math.max(0, Math.round(secs / 60))
+  const h = Math.floor(totalMinutes / 60)
+  const m = totalMinutes % 60
+  if (h && m) return i18nT('components.autoNudgePopover.duration_hours_minutes', { hours: h, minutes: m })
+  if (h) return i18nT('components.autoNudgePopover.duration_hours', { hours: h })
+  return i18nT('components.autoNudgePopover.duration_minutes', { minutes: m })
 }
 
 const DEFAULT_MSG = `Your north star is in north_star.md, roadmap in roadmap.md, tasks in tasks.md. Pick the single highest-leverage next step toward the goal and execute it. Update tasks.md. Post a blocker ONCE if genuinely stuck. To halt the loop, create {{STOP_FILE}}`
@@ -43,6 +85,8 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
   const [maxCyclesInput, setMaxCyclesInput] = useState(() => String(loop?.max_cycles || 0))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  // '' | 'saved' | 'released' -- what the last save did to this run's window.
+  const [saveNotice, setSaveNotice] = useState<'' | 'saved' | 'released'>('')
 
   const parseIdle = (s: string) => parseInt(s, 10) || 60
   const parseCycles = (s: string) => parseInt(s, 10) || 0
@@ -130,10 +174,79 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
         : await fetch('/api/autonudge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+      // Save can change AUTHORIZATION state as a side effect (the backend releases
+      // the window when the goal is rewritten), so it owes the operator one
+      // statement about what happened to it. Deciding that here -- once, from the
+      // before/after pair -- rather than at each render site is what keeps this
+      // seam from growing a third silent case.
+      const hadWindow = Boolean(loop?.auto_approve_remaining_secs)
+      const nowLive = Boolean(data.loop?.active)
+      const hasWindow = Boolean(data.loop?.auto_approve_remaining_secs)
+      const needsAuthorization = nowLive && !hasWindow
+      setSaveNotice(hadWindow && !hasWindow ? 'released' : needsAuthorization ? 'saved' : '')
       onChange(data.loop)
-      onOpenChange(false)
+      // Closing here is what made the offer undiscoverable at the one moment it
+      // matters -- an operator arms an overnight run, the panel closes, and they
+      // walk away into the stall this feature exists to prevent. Closing stays the
+      // default for every other save, so the flow is unchanged once authorized.
+      if (!needsAuthorization) onOpenChange(false)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // The window is not sent as a free number: the offer comes from the server and
+  // the button posts one of its values back, so the UI cannot invent a duration
+  // the backend never offered.
+  async function authorize(windowSecs: number) {
+    setSaveNotice('')
+    if (!loop) return
+    setSaving(true)
+    setError('')
+    try {
+      const resp = await fetch(`/api/autonudge/${loop.id}/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ window_secs: windowSecs }),
+      })
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}))
+        // Map the machine-readable code to a catalog string. `body.error` is
+        // advisory English from the server, so showing it verbatim puts an
+        // untranslated fragment ("owner only") in a localized UI.
+        setError(errorForCode(body.code))
+        return
+      }
+      // Reflect the granted window immediately rather than waiting for the next
+      // poll: the operator just clicked it, and showing the offer again for a
+      // second reads as the click not having landed.
+      onChange({ ...loop, auto_approve_remaining_secs: windowSecs })
+    } catch {
+      setError(i18nT('components.autoNudgePopover.authorize_failed'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Revoking only moves the deadline earlier, so it needs no confirmation: the
+  // risky direction is granting, and that already costs a deliberate click.
+  async function revoke() {
+    setSaveNotice('')
+    if (!loop) return
+    setSaving(true)
+    setError('')
+    try {
+      const resp = await fetch(`/api/autonudge/${loop.id}/authorize`, { method: 'DELETE' })
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}))
+        setError(errorForCode(body.code, 'components.autoNudgePopover.revoke_failed'))
+        return
+      }
+      onChange({ ...loop, auto_approve_remaining_secs: 0 })
+    } catch {
+      setError(i18nT('components.autoNudgePopover.revoke_failed'))
     } finally {
       setSaving(false)
     }
@@ -158,6 +271,12 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
       setSaving(false)
     }
   }
+
+  const remaining = loop?.auto_approve_remaining_secs || 0
+  // A permanent grant reports -1; treat anything non-zero as "already covered"
+  // so the offer is never shown next to a live window.
+  const granted = remaining !== 0
+  const windows = loop?.auto_approve_windows?.length ? loop.auto_approve_windows : DEFAULT_WINDOWS
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -225,6 +344,71 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
             />
           </div>
         </div>
+
+        {saveNotice && (
+          <div
+            className={
+              saveNotice === 'released'
+                ? 'text-danger text-[11px] mb-2 leading-relaxed'
+                : 'text-muted text-[11px] mb-2'
+            }
+          >
+            {saveNotice === 'released'
+              ? i18nT('components.autoNudgePopover.auto_approve_released_by_goal_change')
+              : i18nT('components.autoNudgePopover.goal_saved')}
+          </div>
+        )}
+        {loop?.active && (
+          <div className="border border-border rounded p-2 mb-3">
+            <div className="flex items-center gap-1.5 text-text text-[11px] mb-1">
+              <ShieldCheck size={12} className={granted ? 'text-accent' : 'text-muted'} />
+              {i18nT('components.autoNudgePopover.auto_approve_for_this_run')}
+            </div>
+            {granted ? (
+              <div className="text-muted text-[11px] leading-relaxed">
+                {remaining < 0
+                  ? i18nT('components.autoNudgePopover.auto_approve_has_no_expiry')
+                  : i18nT('components.autoNudgePopover.auto_approve_ends_in', {
+                      duration: fmtWindow(remaining),
+                    })}
+                <div className="mt-0.5">
+                  {i18nT('components.autoNudgePopover.auto_approve_released_when_the_run_stops')}
+                </div>
+                <div className="mt-0.5">
+                  {i18nT('components.autoNudgePopover.auto_approve_cleared_if_you_restart_the_goal')}
+                </div>
+                <button
+                  onClick={revoke}
+                  disabled={saving}
+                  className="mt-1.5 px-2 py-1 rounded border border-border text-muted hover:text-danger hover:border-danger bg-transparent cursor-pointer disabled:opacity-50 text-[11px]"
+                >
+                  {i18nT('components.autoNudgePopover.revoke_auto_approve')}
+                </button>
+              </div>
+            ) : (
+              <>
+                <p className="text-muted text-[11px] mb-2 leading-relaxed">
+                  {i18nT('components.autoNudgePopover.authorize_this_run_for')}
+                </p>
+                <div className="flex gap-2">
+                  {windows.map(w => (
+                    <button
+                      key={w}
+                      onClick={() => authorize(w)}
+                      disabled={saving}
+                      aria-label={i18nT('components.autoNudgePopover.authorize_for_duration', {
+                        duration: fmtWindow(w),
+                      })}
+                      className="px-2 py-1 rounded border border-border text-text hover:border-accent hover:text-accent bg-transparent cursor-pointer disabled:opacity-50 text-[11px]"
+                    >
+                      {fmtWindow(w)}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {loop && (
           <div className="text-muted text-[11px] mb-3">

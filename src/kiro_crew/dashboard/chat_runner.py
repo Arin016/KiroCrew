@@ -38,7 +38,8 @@ from kiro_crew.acp.types import (
     STOP_REASON_TOOL_STALL,
 )
 from kiro_crew.agent_discovery import warm_project_agent_names
-from kiro_crew.autonudge import get_instance
+from kiro_crew.autonudge import binding_key_for, get_instance
+from kiro_crew.autonudge_grant import run_grant_scope
 from kiro_crew.config.loader import (
     KiroCrewConfig,
     data_home,
@@ -179,6 +180,7 @@ from kiro_crew.providers.base import (
     EVENT_TOOL_RESULT,
     LLMEvent,
 )
+from kiro_crew.safety_override import safety_override
 from kiro_crew.security import (
     _EXFIL_PATTERNS,
     StreamRedactor,
@@ -209,6 +211,25 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: E402
     is_synthetic_recovery_item,
     payload_for_replay,
 )
+
+
+def _run_grant_active(session_key: str) -> bool:
+    """Whether this session's unattended run holds an operator-authorized grant.
+
+    Consulted before every tool approval, so it must stay cheap and must never
+    raise into the approval path: a failure here has to fall through to the
+    ordinary interactive prompt rather than deny the turn or crash it. Deriving
+    the scope from the session key means this costs one dict lookup and never a
+    walk of the loop registry.
+    """
+    try:
+        binding = binding_key_for(session_key)
+        if not binding:
+            return False
+        return safety_override().is_scope_active(run_grant_scope(binding))
+    except Exception:
+        logger.error("Run-grant lookup failed for %s", session_key, exc_info=True)
+        return False
 
 
 def _empty_auto_continue_enabled() -> bool:
@@ -4714,6 +4735,12 @@ async def _run_chat(
                 # Detect bash tools by tool_input content (title is human-readable)
                 cmd = _extract_bash_command(event.tool_input) if event.tool_input else ""
                 yolo_active = state.is_yolo_active()
+                # A per-run grant the operator authorized when this session's
+                # unattended loop was armed. Re-read on EVERY approval so the
+                # grant lapsing takes effect on the next tool call rather than at
+                # the end of the turn, and kept separate from `yolo_active` so
+                # the SEL records which authority approved the call.
+                run_grant_active = _run_grant_active(session_key)
                 if slot._trust_reads and not slot._trust and not yolo_active and cmd:
                     if is_read_only_bash(cmd):
                         try:
@@ -4749,8 +4776,9 @@ async def _run_chat(
                             metadata={"reason": "trust_reads"},
                         )
                         continue
-                # Trust mode (per-slot) or YOLO mode (global) — auto-approve
-                if slot._trust or yolo_active:
+                # Trust mode (per-slot), YOLO mode (global), or the operator's
+                # per-run grant for this session's unattended loop — auto-approve
+                if slot._trust or yolo_active or run_grant_active:
                     try:
                         validated_tool = _validate_tool_name(event.title, is_shell=event.is_shell)
                     except ValueError as e:
@@ -4801,7 +4829,13 @@ async def _run_chat(
                         tool_kind=event.tool_kind,
                         outcome="auto_approved",
                         request_id=event.request_id,
-                        metadata={"reason": "yolo" if yolo_active else "trust"},
+                        metadata={
+                            "reason": (
+                                "yolo"
+                                if yolo_active
+                                else ("trust" if slot._trust else "run_grant")
+                            )
+                        },
                     )
                     continue
                 # Auto-reject remaining tools after one rejection in a batch

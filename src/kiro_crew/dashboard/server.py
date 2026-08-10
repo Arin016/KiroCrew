@@ -1017,9 +1017,11 @@ def _register_mcp_routes(app: web.Application) -> None:
 
     # Auto-nudge (feature-flagged — returns 503 when KIROCREW_AUTONUDGE unset)
     from kiro_crew.dashboard.handlers.autonudge import (
+        api_autonudge_authorize,
         api_autonudge_delete,
         api_autonudge_get,
         api_autonudge_list,
+        api_autonudge_revoke,
         api_autonudge_start,
         api_autonudge_update,
     )
@@ -1029,6 +1031,12 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_get("/api/autonudge/slot/{slot_key}", api_autonudge_get)
     app.router.add_patch("/api/autonudge/{loop_id}", api_autonudge_update)
     app.router.add_delete("/api/autonudge/{loop_id}", api_autonudge_delete)
+    app.router.add_post(
+        "/api/autonudge/{loop_id}/authorize", api_autonudge_authorize
+    )
+    app.router.add_delete(
+        "/api/autonudge/{loop_id}/authorize", api_autonudge_revoke
+    )
 
     # Agent questions — blocking question-card round-trip for the ask_question
     # MCP tool. The POST holds open until the user answers, so it must not be

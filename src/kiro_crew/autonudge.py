@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Iterator
 
 from kiro_crew import platform_compat, shutdown_event
 from kiro_crew.atomic_write import replace_with_retry
+from kiro_crew.autonudge_grant import release_run_grant
 from kiro_crew.config.loader import config_dir
 from kiro_crew.config.paths import legacy_home
 from kiro_crew.security import is_sensitive_path
@@ -527,7 +528,7 @@ class AutoNudgeService:
             # removal+add atomically, avoiding a duplicate blocking save here.
             existing = self._find_by_slot(slot_key)
             if existing:
-                self.remove_sync(existing.id, persist=False)
+                self.remove_sync(existing.id, persist=False, reason="replaced")
             loop = NudgeLoop(
                 id=uuid.uuid4().hex[:8],
                 slot_key=slot_key,
@@ -625,6 +626,15 @@ class AutoNudgeService:
             if not loop:
                 return None
             if message is not None:
+                # Rewriting the goal makes this a different run in the only sense
+                # that matters to a grant: the operator authorized a window against
+                # a specific set of instructions, and new instructions must not
+                # inherit it. Same reasoning as the one-loop-per-slot replace path,
+                # and the same fail-safe direction -- releasing can only reduce
+                # authority. The budget fields are deliberately NOT a trigger: they
+                # change how long the run may go, not what it is told to do.
+                if message != loop.message:
+                    release_run_grant(loop.slot_key, reason="goal_rewritten")
                 loop.message = message
             if idle_secs is not None:
                 loop.idle_secs = max(_MIN_IDLE_SECS, min(_MAX_IDLE_SECS, int(idle_secs)))
@@ -666,6 +676,14 @@ class AutoNudgeService:
                         loop.stopped_reason = ""
                     else:
                         loop.stopped_reason = stopped_reason or "manual"
+                        # A run that has stopped must not keep the auto-approve
+                        # window the operator granted it. Released here rather
+                        # than on a timer because this is the one transition
+                        # every terminal path already funnels through, so the
+                        # grant cannot outlive the work by an interval.
+                        release_run_grant(
+                            loop.slot_key, reason=loop.stopped_reason or "manual"
+                        )
             # Persist WITHOUT blocking the event loop — _write_state fsyncs, and
             # a wedged disk must not freeze chat/heartbeat/liveness. Snapshot
             # under THIS lock hold (mutation safety + serialization vs the
@@ -695,12 +713,28 @@ class AutoNudgeService:
         self._emit("updated", loop)
         return loop
 
-    def remove_sync(self, loop_id: str, *, persist: bool = True) -> None:
+    def remove_sync(
+        self, loop_id: str, *, persist: bool = True, reason: str = "removed"
+    ) -> None:
         """Remove a loop. ``persist=False`` skips the blocking save — used by
-        async callers that snapshot+offload the write themselves right after."""
+        async callers that snapshot+offload the write themselves right after.
+
+        ``reason`` is carried into the per-run grant release so the audit can tell
+        an operator stopping a run from the one-loop-per-slot REPLACE path, which
+        drops a live authorization for a run that no longer exists.
+        """
         loop = self._loops.pop(loop_id, None)
         if loop is None:
             return
+        # Removal is the other terminal transition (autonudge_stop and the
+        # runaway paths land here rather than in update()), so the grant has to
+        # be handed back on this side too -- a removed loop leaves no state
+        # behind that a later sweep could reconcile.
+        # A re-armed slot lands here too (see _add_locked's replace path): the new
+        # loop is a DIFFERENT run, so it must not inherit a window the operator
+        # granted to the previous one. Dropping it is the fail-safe direction; the
+        # reason is what makes the drop legible instead of silent.
+        release_run_grant(loop.slot_key, reason=reason)
         self._cancel_timer(loop_id)
         self._rearm_fail_count.pop(loop_id, None)
         self._rearm_pending.discard(loop_id)
