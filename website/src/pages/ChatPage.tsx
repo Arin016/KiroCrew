@@ -13,7 +13,7 @@ import { useAppSelector, useAppDispatch, store } from '../store'
 import { useConnected } from '../hooks/useConnected'
 import { useChatPopouts } from '../hooks/useChatPopouts'
 import {
-  switchSlot, createSlot, deleteSlot, fetchHistory,
+  switchSlot, createSlot, deleteSlot, fetchHistory, loadOlderMessages,
   appendMessage, appendSlotMessage, resumeFromHistory, forkSlot,
   setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, editQueuedMessage,
   selectComposerBusy,
@@ -59,6 +59,10 @@ import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, prune
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 /** Delay (ms) before scrolling to bottom after a state update, giving React time to commit. */
 const SCROLL_AFTER_RENDER_MS = 100
+// No arbitrary cap on pinned-jump page loads: the loop terminates when the
+// target message is found OR history is exhausted (!slotHasMore / null result).
+// The `cancelled` flag in the useEffect cleanup and the loadOlderMessages null
+// sentinel prevent infinite loops.  A ref tracks loads for diagnostics only.
 // Canonical home is utils/navIntent (shared with the popout nav-intent
 // applier); re-exported here for this page's historical importers.
 export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
@@ -113,6 +117,8 @@ import { JiraHostsCtx } from '../lib/jiraHosts'
 import MessageErrorBoundary from '../components/MessageErrorBoundary'
 import TypewriterText from '../components/TypewriterText'
 import { useChatNavigation } from '../hooks/useChatNavigation'
+import { useChatPins } from '../hooks/useChatPins'
+import { PinnedMessagesPanel } from './chat/PinnedMessagesPanel'
 import SubagentProgressBar from './chat/SubagentProgressBar'
 import TaskProgressBar from './chat/TaskProgressBar'
 import SidePanel, { CHAT_PANE_MIN_W, sidePanelFillWidth } from './chat/SidePanel'
@@ -154,7 +160,7 @@ import { focusComposerAfter } from './chat/composerFocus'
 import { useHoverIntent } from '../hooks/useHoverIntent'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
-import { BookOpen, EyeOff, Loader, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Undo2, Columns2, ExternalLink, Paperclip, Folder } from 'lucide-react'
+import { BookOpen, EyeOff, Loader, Pen, ChevronDown, ChevronRight, Plug, ArrowDown, MessageSquare, MessageSquareDot, Sparkles, VenetianMask, Clock, Undo2, Columns2, ExternalLink, Paperclip, Folder, Pin, X } from 'lucide-react'
 import { PanelLeftSolid, PanelLeftLight, PanelRightSolid } from '../components/icons/panels'
 
 import InfoTip from '../components/InfoTip'
@@ -890,6 +896,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const toolLogLen = useAppSelector(s => s.chat.toolLog.length)
   const activityOpen = useAppSelector(s => s.chat.activityOpen)
   const slotHasMore = useAppSelector(s => s.chat.slotHasMore)
+  const slotOldestIndex = useAppSelector(s => s.chat.slotOldestIndex)
+  const loadingOlder = useAppSelector(s => s.chat.loadingOlder)
   const history = useAppSelector(s => s.chat.history)
   const historyHasMore = useAppSelector(s => s.chat.historyHasMore)
 
@@ -4878,6 +4886,121 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
 
   const chatNav = useChatNavigation(messages, messageToDisplayIdx)
 
+  // ── Chat Pins ──────────────────────────────────────────────────────────────
+  const {
+    pins: chatPins,
+    loading: chatPinsLoading,
+    error: chatPinsError,
+    clearError: clearChatPinsError,
+    isPinned,
+    pinMessage,
+    unpinMessage,
+    unpinById,
+  } = useChatPins(activeSlot ?? undefined)
+  const [pinsPanelOpen, setPinsPanelOpen] = useState(false)
+  const [pinNotice, setPinNotice] = useState<string | null>(null)
+  const [pendingPinnedJump, setPendingPinnedJump] = useState<{
+    slotKey: string
+    messageTs: string
+    mid?: string
+  } | null>(null)
+  const pinnedJumpPageLoadsRef = useRef(0)
+  const togglePinsPanel = useCallback(() => setPinsPanelOpen(p => !p), [])
+  const jumpToLoadedPinnedMessage = useCallback((messageTs: string, mid?: string): boolean => {
+    // Prefer mid-based resolution (unique identity); fall back to ts for legacy pins.
+    let msgIdx = -1
+    if (mid) {
+      msgIdx = messages.findIndex(m => (m.meta as Record<string, unknown> | undefined)?.mid === mid)
+    }
+    if (msgIdx < 0) {
+      msgIdx = messages.findIndex(m => m.ts === messageTs)
+    }
+    if (msgIdx < 0) return false
+    const di = messageToDisplayIdxRef.current.get(msgIdx)
+    if (di === undefined) return false
+    setPinNotice(null)
+    navToDisplayIndex(di, { behavior: 'smooth', align: 'center' })
+    setHighlightTs(messageTs)
+    setTimeout(() => setHighlightTs(null), 3000)
+    return true
+  }, [messages, navToDisplayIndex])
+  const handleJumpToPinnedMessage = useCallback((messageTs: string, mid?: string) => {
+    if (jumpToLoadedPinnedMessage(messageTs, mid)) return
+    if (activeSlot && slotHasMore && slotOldestIndex > 0) {
+      pinnedJumpPageLoadsRef.current = 0
+      setPinNotice(null)
+      setPendingPinnedJump({ slotKey: activeSlot, messageTs, mid })
+      return
+    }
+    setPinNotice(i18nT('pages.chat.pins.message_unavailable'))
+  }, [activeSlot, jumpToLoadedPinnedMessage, slotHasMore, slotOldestIndex])
+  useEffect(() => {
+    if (!pendingPinnedJump) return
+    if (pendingPinnedJump.slotKey !== activeSlot) {
+      pinnedJumpPageLoadsRef.current = 0
+      setPendingPinnedJump(null)
+      return
+    }
+    if (jumpToLoadedPinnedMessage(pendingPinnedJump.messageTs, pendingPinnedJump.mid)) {
+      pinnedJumpPageLoadsRef.current = 0
+      setPendingPinnedJump(null)
+      return
+    }
+    if (!slotHasMore || slotOldestIndex <= 0) {
+      pinnedJumpPageLoadsRef.current = 0
+      setPinNotice(i18nT('pages.chat.pins.message_unavailable'))
+      setPendingPinnedJump(null)
+      return
+    }
+    if (loadingOlder) return
+
+    pinnedJumpPageLoadsRef.current += 1
+    let cancelled = false
+    void dispatch(loadOlderMessages()).unwrap().then(result => {
+      if (!cancelled && result === null) {
+        pinnedJumpPageLoadsRef.current = 0
+        setPinNotice(i18nT('pages.chat.pins.message_unavailable'))
+        setPendingPinnedJump(null)
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        pinnedJumpPageLoadsRef.current = 0
+        setPinNotice(i18nT('pages.chat.pins.message_unavailable'))
+        setPendingPinnedJump(null)
+      }
+    })
+    return () => { cancelled = true }
+  }, [
+    activeSlot,
+    dispatch,
+    jumpToLoadedPinnedMessage,
+    loadingOlder,
+    pendingPinnedJump,
+    slotHasMore,
+    slotOldestIndex,
+  ])
+  const handleTogglePinForMessage = useCallback((mid: string, messageTs: string, role: 'user' | 'assistant', content: string) => {
+    const action = isPinned(mid)
+      ? unpinMessage(mid)
+      : pinMessage({ mid, message_ts: messageTs, role, preview: content })
+    void action.catch(() => {}) // useChatPins exposes the localized error state.
+  }, [isPinned, pinMessage, unpinMessage])
+  const handleUnpinById = useCallback((id: string) => {
+    void unpinById(id).catch(() => {})
+  }, [unpinById])
+  const pinStatus = pinNotice ?? (chatPinsError
+    ? i18nT(chatPinsError === 'pin' ? 'pages.chat.pins.pin_failed' : 'pages.chat.pins.unpin_failed')
+    : null)
+  const dismissPinStatus = useCallback(() => {
+    setPinNotice(null)
+    clearChatPinsError()
+  }, [clearChatPinsError])
+  useEffect(() => {
+    if (!pinStatus) return
+    const timeout = window.setTimeout(dismissPinStatus, 8000)
+    return () => window.clearTimeout(timeout)
+  }, [pinStatus, dismissPinStatus])
+
   // Track the timestamp of the previous search-nav step so we can tell "user is
   // holding Enter through many matches" apart from "user landed on one match".
   // Rapid consecutive steps snap instantly (behavior:'auto') — a smooth glide
@@ -5107,6 +5230,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               slotKey={activeSlot || undefined}
               slotTitle={activeSlotTitle}
               mode={mode}
+              pinned={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? isPinned((m.meta as Record<string, unknown>).mid as string) : false}
+              onTogglePin={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? () => handleTogglePinForMessage((m.meta as Record<string, unknown>).mid as string, m.ts!, 'user', m.content) : undefined}
             />
           ) : isInject ? (
             (() => {
@@ -5130,7 +5255,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             })()
           ) : (
             <div className="flex flex-col gap-0">
-              <AssistantMessage linkPreviews={linkPreviewsOn} content={m.content} isStreaming={isStreaming} isRegenerating={regenerating && i === lastTextIdx} onFileOpen={handleFileOpen} onFolderOpen={handleFolderOpen} onArtifactOpen={handleArtifactOpen} onQuote={handleQuote} onAsk={handleAsk} slotRunning={slotRunning} planTaskId={planTaskId} timestamp={chatConfig.showTimestamps ? msgTime : undefined} timestampTitle={msgTimeFull} messageTs={m.ts} slotKey={activeSlot || undefined} slotTitle={activeSlotTitle} mode={mode} fileChanges={(m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined} turnStats={chatConfig.showTurnStats ? (m.meta as Record<string, unknown> | undefined)?.turn_stats as TurnStats | undefined : undefined} onOpenDiff={handleOpenDiff} fileChipStyle={chatConfig.fileChipStyle} artifactPaths={artifactPaths} showFooter={(() => {
+              <AssistantMessage linkPreviews={linkPreviewsOn} content={m.content} isStreaming={isStreaming} isRegenerating={regenerating && i === lastTextIdx} onFileOpen={handleFileOpen} onFolderOpen={handleFolderOpen} onArtifactOpen={handleArtifactOpen} onQuote={handleQuote} onAsk={handleAsk} slotRunning={slotRunning} planTaskId={planTaskId} timestamp={chatConfig.showTimestamps ? msgTime : undefined} timestampTitle={msgTimeFull} messageTs={m.ts} slotKey={activeSlot || undefined} slotTitle={activeSlotTitle} mode={mode} fileChanges={(m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined} turnStats={chatConfig.showTurnStats ? (m.meta as Record<string, unknown> | undefined)?.turn_stats as TurnStats | undefined : undefined} onOpenDiff={handleOpenDiff} fileChipStyle={chatConfig.fileChipStyle} artifactPaths={artifactPaths} pinned={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? isPinned((m.meta as Record<string, unknown>).mid as string) : false} onTogglePin={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? () => handleTogglePinForMessage((m.meta as Record<string, unknown>).mid as string, m.ts!, 'assistant', m.content) : undefined} showFooter={(() => {
                 // Show footer on the last assistant message of each completed turn
                 if (isStreaming) return false
                 // Find next message after this one that's assistant, user, or streaming
@@ -5155,7 +5280,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // apply-plan handler, so it belongs here for correctness. approve/send/
     // dismissApproval are NOT referenced in this renderer (user/approval rows go
     // through renderUserContentCb), so they are omitted to keep it stable.
-  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleArtifactOpen, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, handleSubagentPanelOpen])
+  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleArtifactOpen, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage])
 
   const [mobileSessions, setMobileSessions] = useState(false)
   // Close mobile sessions panel when a session is selected
@@ -5501,6 +5626,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             <button onClick={() => setSidError('')} aria-label={i18nT('pages.chatPage.dismiss_error')} className="text-muted hover:text-text text-lg leading-none">&times;</button>
           </div>
         )}
+        {pinStatus && (
+          <div role="status" className="mx-4 mt-2 mb-0 bg-bg-elevated border rounded-lg p-3 flex items-center gap-3 animate-rise" style={{ borderColor: 'color-mix(in srgb, var(--warn) 45%, transparent)' }}>
+            <span className="text-sm text-text flex-1">{pinStatus}</span>
+            <button onClick={dismissPinStatus} aria-label={i18nT('app.dismiss')} className="text-muted hover:text-text leading-none p-0.5"><X className="w-4 h-4" /></button>
+          </div>
+        )}
         {isMobile && !sidebarOpen && !(activeSlot && (messages.length > 0 || slotRunning)) && (
           <div className="fixed top-[42px] left-2 z-10">
             <button className="p-2 rounded-lg text-muted hover:text-text bg-bg-elevated border border-border shadow-sm cursor-pointer" onClick={() => setMobileSessions(true)} aria-label={i18nT('pages.chatPage.toggle_sessions')}>
@@ -5607,6 +5738,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   below the mobile breakpoint the panel opens full width, at or
                   above it opens beside the chat. There is no width at which
                   the button does nothing. */}
+              {!embedMode && !popout && !activityOpen && (
+                <Clickable
+                  className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 pointer-events-auto cursor-pointer ${pinsPanelOpen ? 'text-accent bg-accent/10' : 'text-muted hover:text-text hover:bg-bg-hover'}`}
+                  onClick={togglePinsPanel}
+                  title={i18nT('pages.chat.pins.open_pinned_messages')}
+                  aria-label={i18nT('pages.chat.pins.open_pinned_messages')}
+                >
+                  <Pin size={15} />
+                </Clickable>
+              )}
               {!embedMode && !popout && !activityOpen && (
                 <Clickable
                   className="pi-morph flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 pointer-events-auto text-muted hover:text-text hover:bg-bg-hover cursor-pointer"
@@ -6282,6 +6423,31 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         )}
       </div>
       )}
+      <AnimatePresence initial={false}>
+        {pinsPanelOpen && (
+          <motion.div
+            key="pins-panel"
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 300, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
+            className="h-full overflow-hidden shrink-0 border-l border-border shadow-lg"
+          >
+            <div className="w-[300px] h-full">
+              <PinnedMessagesPanel
+                pins={chatPins}
+                loading={chatPinsLoading}
+                slotKey={activeSlot || ''}
+                slotTitle={activeSlotTitle}
+                mode={mode}
+                onClose={() => setPinsPanelOpen(false)}
+                onJumpToMessage={handleJumpToPinnedMessage}
+                onUnpin={handleUnpinById}
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {search.isOpen && (
           <DetailPanel
             key="search-panel"

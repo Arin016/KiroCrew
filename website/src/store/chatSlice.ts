@@ -1160,8 +1160,9 @@ export const loadOlderMessages = createAsyncThunk(
     const state = (getState() as { chat: ChatState }).chat
     if (!state.activeSlot || !state.slotHasMore || state.loadingOlder) return null
     if (state.slotOldestIndex <= 0) return null
-    const d = await api.chatSlotDetail(state.activeSlot, 100, state.slotOldestIndex)
-    return { messages: filterMessages(d.messages || []), hasMore: d.has_more || false, total: d.total || 0 }
+    const slot = state.activeSlot
+    const d = await api.chatSlotDetail(slot, 100, state.slotOldestIndex)
+    return { slot, messages: filterMessages(d.messages || []), hasMore: d.has_more || false, total: d.total || 0 }
   },
 )
 
@@ -3171,7 +3172,7 @@ const chatSlice = createSlice({
       })
       .addCase(loadOlderMessages.fulfilled, (state, action) => {
         state.loadingOlder = false
-        if (action.payload) {
+        if (action.payload && action.payload.slot === state.activeSlot) {
           // Merge paste state into the older messages first, then prepend so
           // historical pastes re-tokenize from localStorage instead of showing
           // as fully-expanded text.
