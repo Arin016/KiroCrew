@@ -1194,7 +1194,7 @@ SEL audit events are emitted on every lifecycle transition:
 - `safety_override:activate` — override enabled
 - `safety_override:renew` — session extended within grace window
 - `safety_override:expired` — TTL reached, auto-deactivated
-- `safety_override:deactivate` — manually disabled
+- `safety_override:deactivate` — manually disabled; emitted for every explicit deactivation against a grant that exists in any form, including one whose TTL already lapsed (`resources` records the pre-call state: `was_active`, `was_permanent`, `remaining`, `prior_source`). Only a never-activated instance stays silent.
 
 Transitions that create or extend auto-approval authority (`activate`,
 `activate_scoped`, `renew`) are audited fail-closed: the SEL event is written
