@@ -1334,6 +1334,15 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                         data.pop("model_managed", None)
                         data.pop("cc_model", None)
                         f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                        if "model" in patch_body:
+                            # AFTER the spec write: this write makes the spec's
+                            # model THIS editor's, so any propagated-model
+                            # provenance for it is void — but only once the value
+                            # it describes is actually on disk. Voiding it first
+                            # and then failing the write would leave the old
+                            # propagated pin in place with nothing left to
+                            # recognize it by, so it could never be un-pinned.
+                            agent_state.set_config_model(agent_name, None)
                     # The list_agents() cache keys on a (count, newest-mtime-ns)
                     # signature; two writes inside the same mtime granularity
                     # would otherwise serve a stale skill list.

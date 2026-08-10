@@ -1541,14 +1541,48 @@ def build_agent_config() -> dict:
     return config
 
 
-def _refresh_dynamic_fields(config: dict) -> None:
+def _resolve_config_model_record(name_or_config: dict) -> None:
+    """Retire the propagated-model record once a spec that supersedes it is on disk.
+
+    Call ONLY after a successful spec write. The record exists to recognize a spec
+    model this propagation wrote, so a record that still equals the persisted model
+    describes the live value and is kept. Anything else — the ``"auto"`` sentinel an
+    un-pin just wrote, or a value some other writer owns — means the record is spent,
+    and keeping it would let a later raw edit back to that value be mistaken for the
+    old propagation and un-pinned.
+
+    Deliberately after the write rather than at the decision: nothing is retired
+    unless the spec that supersedes it actually landed, so an interrupted or failed
+    write leaves the record in place and the un-pin retries on the next refresh.
+    """
+    name = name_or_config.get("name")
+    if not isinstance(name, str) or not name:
+        # A spec with no `name` is still the main agent's file — the sidecar is
+        # keyed by agent name, so falling back here is what lets a spent record be
+        # retired instead of outliving the spec it described.
+        name = _MAIN_AGENT_NAME
+    recorded = agent_state.get_config_model(name)
+    if recorded and name_or_config.get("model") != recorded:
+        # Compare-and-clear: a concurrent rebuild propagating a concrete model may
+        # have recorded a NEWER value since this one was read, and discarding that
+        # would leave its pin un-un-pinnable.
+        agent_state.clear_config_model_if(name, recorded)
+
+
+def _refresh_dynamic_fields(config: dict) -> str:
     """Update security-critical and dynamic fields in an existing config.
 
     Called when ``kirocrew.json`` already exists so user customizations are
     preserved while security controls and runtime paths stay current.
+
+    Returns the model that the global ``agent.model`` propagated into *config*, or
+    ``""`` when it propagated nothing. The caller MUST record it (via
+    :func:`agent_state.set_config_model`) only after the spec is written — see the
+    note at the propagation site for why the record must not outrun the spec.
     """
     # Prompt URI — always resolve at install time
     config["prompt"] = f"file://{_prompt_path()}"
+    pending_config_model = ""
 
     # Managed MCP servers — ensure present and up-to-date.
     # Only refresh command/args; preserve user customizations (e.g. autoApprove).
@@ -1660,9 +1694,60 @@ def _refresh_dynamic_fields(config: dict) -> None:
     # the agent file so kiro-cli's --agent startup load matches it; otherwise the
     # stale agent-file model shadows config.json and session/set_model loses the
     # startup race. "auto" defers to managed/shipped resolution above.
+    #
+    # The propagated value is recorded in the sidecar so that write can be UNDONE.
+    # Without a reverse branch the propagation is one-way: resolve_effective_model
+    # ranks the spec model ABOVE the global, so a model propagated once outranks
+    # the global forever and returning agent.model to "auto" changes nothing —
+    # sessions keep running (and billing at) a model the user believes they turned
+    # off. Only a spec model still EQUAL to what was propagated is cleared; a
+    # value that diverged since belongs to whoever wrote it (the Agent Templates
+    # editor writes the spec directly) and is left alone.
+    #
+    # Cleared to the "auto" sentinel rather than by dropping the field: an absent
+    # model lets kiro-cli fall through to its own configured default, which is not
+    # necessarily auto, while the sentinel says what the user actually chose.
     mc_model = (mc_cfg.get("agent") or {}).get("model")
     if mc_model and mc_model != "auto":
+        # Provenance is recorded ONLY when this write replaces a different value.
+        # Equality is not proof of authorship: the Agent Templates editor and a
+        # hand edit both write the spec directly, so a spec that already reads
+        # `mc_model` may be someone else's explicit pick that happens to agree
+        # with the global. Recording it would let the un-pin below erase a value
+        # this code never wrote. The consequence is that the un-pin only ever
+        # reaches pins THIS code is known to have made — see the note on
+        # pre-existing pins in the module docstring of agent_state.
+        if config.get("model") != mc_model:
+            # NOT written here. The record must not outrun the spec: if it lands
+            # and the spec write then fails, the record names the new model while
+            # disk still holds the old pin, and a later return to "auto" cannot
+            # un-pin either of them. Returned instead, for the caller to commit
+            # once the spec is actually on disk. Nothing is persisted if this
+            # process dies first, which retains the previous record — the safe
+            # direction, since it still describes what is on disk.
+            pending_config_model = mc_model
         config["model"] = mc_model
+    else:
+        # A record can only exist for a value the propagation overwrote, so a
+        # record still equal to the spec model proves the live value is ours and
+        # no editor pick is being destroyed. That is why `model_managed` is not
+        # consulted here: an editor pick that merely COINCIDES with the global
+        # never gets a record, so it is already out of reach of this branch.
+        # Compared against the pre-migration value too: the deprecated-alias
+        # migration above rewrites the spec model in place, so a record holding
+        # the old alias would stop matching and the migrated replacement would
+        # stay pinned.
+        propagated = agent_state.get_config_model(name)
+        if propagated and propagated in (config.get("model"), cur_model):
+            config["model"] = "auto"
+        # The record is NOT retired here. This function mutates an in-memory dict
+        # and the spec reaches disk much later, so retiring it on the spot would
+        # make an interrupted or failed write permanent: the spec would still hold
+        # the pinned model with no record left to recognize it by, and no later
+        # refresh could ever un-pin it. `_resolve_config_model_record` retires it
+        # after the write succeeds instead, which both keeps the un-pin
+        # retry-safe and stops a spent record from outliving the spec it
+        # described.
 
     # Ensure kiro-cli uses agent-level mcpServers exclusively (not global
     # mcp.json).  Existing configs created before this field was added lack
@@ -1700,6 +1785,8 @@ def _refresh_dynamic_fields(config: dict) -> None:
     ):
         tools.append("tool_search")
 
+    return pending_config_model
+
 
 def get_shipped_tools() -> dict[str, list[str]]:
     """Return shipped tool lists. Public API for cross-module use."""
@@ -1707,24 +1794,26 @@ def get_shipped_tools() -> dict[str, list[str]]:
     return {k: shipped.get(k, []) for k in ("tools", "allowedTools")}
 
 
-def _load_existing_config(path: Path) -> tuple[dict, bool]:
+def _load_existing_config(path: Path) -> tuple[dict, bool, str]:
     """Load and refresh an existing kirocrew.json.
 
-    Returns (config, fresh_install).  Falls back to build_agent_config()
-    when the file is corrupt or refresh fails.
+    Returns (config, fresh_install, pending_config_model).  Falls back to
+    build_agent_config() when the file is corrupt or refresh fails.
+    ``pending_config_model`` is the propagated model the caller must record only
+    after the spec write succeeds (see :func:`_refresh_dynamic_fields`).
     """
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, ValueError):
         config = None
     if not isinstance(config, dict):
-        return build_agent_config(), True
+        return build_agent_config(), True, ""
     try:
-        _refresh_dynamic_fields(config)
+        pending = _refresh_dynamic_fields(config)
     except (AttributeError, TypeError, RuntimeError) as exc:
         logger.error("Refresh failed, rebuilding from defaults: %s", exc)
-        return build_agent_config(), True
-    return config, False
+        return build_agent_config(), True, ""
+    return config, False, pending
 
 
 def _norm_mcp_spec(spec: Any) -> Any:
@@ -2193,10 +2282,11 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     if not clean and path.exists():
         # Existing config — preserve user customizations, only refresh
         # security-critical and dynamic fields.
-        config, fresh_install = _load_existing_config(path)
+        config, fresh_install, pending_config_model = _load_existing_config(path)
     else:
         config = build_agent_config()
         fresh_install = True
+        pending_config_model = ""
 
     # Seed default-model tracking for a fresh/clean build. A clean regen always
     # resumes tracking the shipped default; a first-time install seeds tracking
@@ -2743,6 +2833,26 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
             # imported config; filtering here, on the final map, covers every source.
             config["mcpServers"] = _strip_ungoverned_auto_approve(servers_map)
         _atomic_json_write(path, config)
+        # Bookkeeping, strictly AFTER the spec is committed. Both directions are
+        # ordered this way on purpose: a record that lands before a failed spec
+        # write would name a model that is not on disk, and a retirement that
+        # lands before one would strand a pin with nothing to recognize it by.
+        # A sidecar failure here is logged, never raised — the spec is already
+        # written, and turning that into an exception would skip the remaining
+        # agent installs. Both operations are retried by the next refresh.
+        try:
+            if pending_config_model:
+                agent_state.set_config_model(
+                    config.get("name") or _MAIN_AGENT_NAME, pending_config_model
+                )
+            _resolve_config_model_record(config)
+        except OSError:
+            logger.warning(
+                "Could not update the propagated-model record for %s; "
+                "it will be retried on the next refresh",
+                config.get("name"),
+                exc_info=True,
+            )
 
     try:
         is_kirocrew_json = path.resolve() == _mcp_json_path().resolve()
