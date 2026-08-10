@@ -2242,6 +2242,20 @@ async def api_mcp_gateway_servers(request: web.Request) -> web.Response:
 
     allowlist = set(KiroCrewConfig.load().mcp_gateway.poolable_servers)
 
+    # Which servers a live backend has seen declare a ui:// resource. Absent from
+    # this mapping means "not observed", which the row reports as unknown rather
+    # than as "no app" — only a server that has actually run through the broker
+    # can be spoken about. Empty when the broker is down, which is the same
+    # statement.
+    state: DashboardState = request.app["state"]
+    gw_manager = getattr(state, "_mcp_gateway_manager", None)
+    declared: dict[str, bool] = {}
+    if gw_manager is not None and gw_manager.is_running:
+        try:
+            declared = await gw_manager.apps_declared()
+        except Exception:  # pragma: no cover - defensive; a read must not fail the list
+            logger.debug("mcp-apps: apps-declared query failed", exc_info=True)
+
     rows: dict[str, dict[str, Any]] = {}
     agents_dir = kiro_agents_dir_path()
     if agents_dir.is_dir():
@@ -2286,6 +2300,11 @@ async def api_mcp_gateway_servers(request: web.Request) -> web.Response:
                 "agents": sorted(row["agents"]),
                 "transport": row["transport"],
                 "denylisted": denylisted,
+                # True = a live backend saw this server declare a ui:// resource;
+                # False = a listing was observed and declared none; None = never
+                # observed, so nothing can be claimed either way. The three are
+                # distinct on purpose — see BackendPool.apps_declared_by_server.
+                "has_ui": declared.get(name),
             }
         )
     return web.json_response({"servers": result})

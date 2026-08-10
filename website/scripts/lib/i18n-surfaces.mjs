@@ -117,7 +117,6 @@ export const SURFACES = [
   { id: 'developer-archive', url: '/developer?tab=archive' },
   { id: 'developer-config', url: '/developer?tab=config' },
   { id: 'developer-logs', url: '/developer?tab=logs' },
-  { id: 'developer-mcp-pool', url: '/developer?tab=mcp-pool' },
   { id: 'developer-memory', url: '/developer?tab=memory' },
   { id: 'developer-storage', url: '/developer?tab=storage' },
   { id: 'developer-telemetry', url: '/developer?tab=telemetry' },

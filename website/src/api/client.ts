@@ -54,6 +54,11 @@ export type McpPoolableServer = {
   agents: string[]         // agent configs that declare this server
   transport: string        // "stdio" (poolable-eligible) or "http"
   denylisted: boolean      // in UNPOOLABLE_SERVERS — can never be pooled
+  // Whether a live shared backend has seen this server declare a ui:// resource.
+  // TRI-STATE on purpose: true = has an app, false = a tool listing was observed
+  // and declared none, null/absent = never observed, so nothing can be claimed.
+  // Only a server that has run shared can be spoken about at all.
+  has_ui?: boolean | null
 }
 
 export const SEARCH_MIN_CHARS = 2  // backend session search threshold (must match kiro_crew.history.SEARCH_MIN_CHARS)

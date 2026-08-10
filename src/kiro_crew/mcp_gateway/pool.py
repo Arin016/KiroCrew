@@ -507,6 +507,39 @@ class BackendPool:
         ]
         return {**self.stats(), "backends": backends}
 
+    async def apps_declared_by_server(self) -> dict[str, bool]:
+        """Per-server MCP Apps declaration, as observed by live backends.
+
+        ``{server_name: True}``  — a tools/list declared at least one ``ui://``
+        ``{server_name: False}`` — a tools/list was observed and declared none
+        A server ABSENT from the result has not been observed at all, which is a
+        third answer, and not spelled ``False``: "declares no app" is
+        a fact about the server, "we have not looked" is a fact about us, and a
+        dashboard that conflates them tells the user a server cannot render when
+        nobody has asked it yet.
+
+        One server can back several pool keys (one per agent), so the values are
+        OR-ed: any backend that saw a declaration settles it for the server.
+
+        Walks the private map as well as the shared one. A server that is not on
+        the poolable allowlist gets a connection-private backend in
+        ``_exclusive``, and ``poolable_servers`` defaults to EMPTY — so on a
+        default install every backend is private and a shared-only walk would
+        report "not checked yet" forever, for every server, no matter how many
+        apps had actually rendered.
+
+        Taken under the pool lock, because both maps are mutated by attach and
+        evict and a bare iteration can raise "dict changed size during iteration".
+        """
+        out: dict[str, bool] = {}
+        async with self._lock:
+            for b in (*self._backends.values(), *self._exclusive.values()):
+                if not b._apps_tools_listed:
+                    continue
+                name = b.pool_key.server_name
+                out[name] = out.get(name, False) or bool(b._apps_declared_uris)
+        return out
+
     async def metrics_snapshot_async(self) -> dict[str, Any]:
         """Race-free, off-loop variant of :meth:`_metrics_snapshot`.
 

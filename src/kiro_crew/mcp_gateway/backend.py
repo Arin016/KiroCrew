@@ -313,9 +313,11 @@ def _mcp_apps_enabled() -> bool:
        environment.
     3. ``KIROCREW_MCP_APPS`` on -> enabled (explicit override for tests and the
        e2e harness), having cleared the opt-out above.
-    4. Otherwise ``mcp_gateway.enabled`` — the broker must be running, because
-       the render and callback paths live inside it, so ``apps_enabled`` alone
-       can never grant the feature.
+    4. Otherwise **enabled**. ``mcp_gateway.enabled`` is NOT consulted:
+       it decides whether backends are SHARED, not whether the stub exists, and the
+       stub is what carries the render and callback paths. The broker starts for
+       either switch, so ``apps_enabled`` alone does grant the feature — a server
+       kept off the poolable allowlist still renders its apps.
 
     ``apps_enabled`` defaults True when absent, so step 2 fires only on a value
     an operator actually wrote: "not configured" is not an opt-out.
@@ -517,6 +519,15 @@ class Backend:
     # (see test_declared_only_server_still_intercepted). Keying this map per
     # session would drop the association and break rendering.
     _apps_declared_uris: dict[str, str] = field(default_factory=dict)
+    # Whether a tools/list response has ever been harvested for this backend.
+    #
+    # Separate from `_apps_declared_uris` being empty, because the two mean very
+    # different things to a reader: "this server declares no app" is a fact about
+    # the server, while "we have not looked yet" is a fact about us. Collapsing
+    # them lets the dashboard claim a server has no app when the backend simply
+    # has not been asked for its tools yet — a spawned-but-unqueried backend is
+    # the normal state right after a session attaches.
+    _apps_tools_listed: bool = False
 
     def __post_init__(self) -> None:
         # Serialize concurrent writes to the SHARED backend stdin. Every
@@ -1452,6 +1463,11 @@ class Backend:
                 # so later successful calls would still render the withdrawn
                 # app resource.
                 self._apps_declared_uris = declared
+                # Set here rather than on entry to the branch: a listing counts as
+                # observed only once its result actually parsed, so a malformed
+                # reply leaves the dashboard reporting "not checked yet" instead
+                # of "no app", which is the honest reading.
+                self._apps_tools_listed = True
             return False
         # Everything below is the RENDER path, which the feature gate owns.
         if not _mcp_apps_enabled():

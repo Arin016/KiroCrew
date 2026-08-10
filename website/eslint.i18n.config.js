@@ -760,6 +760,31 @@ export default [
               // `config.json`, not copy. Already exempt as an object property below; a
               // JSX attribute of the same name carries the same machine value.
               'path',
+              // `configKey="mcp_gateway.apps_enabled"` — the same dotted `config.json`
+              // path as `path` directly above, under the name the settings primitives
+              // take it by. The value is consumed as a machine key: it flows into the
+              // generated settings registry and is what `<SettingRef configKey=…>`
+              // matches on to deep-link a control, so translating one would orphan the
+              // link rather than change a word anyone reads.
+              //
+              // website/AGENTS.md requires this attribute on every new
+              // `SettingsToggle`/`SettingsField` that writes a config path, so without
+              // the exemption the two rules contradict: following the settings rule
+              // fails the i18n gate at `[added-lines]` zero tolerance.
+              //
+              // Why an ATTRIBUTE entry is needed when a dotted path is already exempt
+              // by CONTENT: the catalog-key pattern below
+              // (`^[a-z][a-zA-Z0-9]*(?:\.[a-z][a-zA-Z0-9_]*)+$`) admits an underscore
+              // only in a NON-first segment, so `dashboard.mcp_app_panel` is exempt
+              // while `mcp_gateway.apps_enabled` is not. Naming the attribute covers the
+              // whole class instead of leaving it to depend on which config section a
+              // setting happens to live in.
+              //
+              // Measured, per the standard the `aliases` entry below records: exempting
+              // it changes NO other file's count. Of the 14 live `configKey` literals,
+              // 12 already matched the content pattern above; the two it releases are
+              // the `mcp_gateway.*` pair.
+              'configKey',
               'data-\\w+', 'aria-(hidden|live|orientation|current|haspopup)',
               'autoComplete', 'inputMode', 'enterKeyHint', 'spellCheck',
               'viewBox', 'xmlns', 'fill', 'stroke', 'd', 'points', 'transform',

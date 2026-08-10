@@ -1858,6 +1858,16 @@ async def _handle_connection(
         await _write_json_line(writer, {"type": "stats", **snapshot})
         return
 
+    if register.get("type") == "apps-declared":
+        # Read-only query for the dashboard's MCP servers list: which servers has
+        # a live backend seen declare a ui:// resource. Same one-shot control
+        # connection shape as "stats" — the uid-gated socket is the authentication.
+        await _write_json_line(
+            writer,
+            {"type": "apps-declared", "servers": await pool.apps_declared_by_server()},
+        )
+        return
+
     # Claim-push short-circuit (one-shot control connection from the main
     # gateway process): "session S now owns runtime PID P" — re-target the
     # caller identity of every live stub connection under that PID. This is

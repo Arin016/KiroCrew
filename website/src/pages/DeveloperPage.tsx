@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { ScrollText, Monitor, Brain, Archive, Database, Network, Activity, FileCode2 } from 'lucide-react'
+import { ScrollText, Monitor, Brain, Archive, Database, Activity, FileCode2 } from 'lucide-react'
 import SidePanelLayout from '../components/SidePanelLayout'
 import { ContentSkeleton } from '../components/ui'
 import { LogViewer } from './LogsPage'
@@ -7,8 +7,6 @@ import SystemPage from './SystemPage'
 import TelemetryPanel from './TelemetryPanel'
 import SessionArchive from './SessionArchive'
 import LocalStorageDebug from './LocalStorageDebug'
-import { SharedMcpGatewayToggle } from './settings/SharedMcpGatewayToggle'
-import { McpPoolableServers } from './settings/McpPoolableServers'
 import { KiroCrewCfgTab, AgentCfgTab } from './overview'
 import { PreviewSurfacesCard } from './developer/PreviewSurfacesCard'
 
@@ -36,7 +34,6 @@ function buildTabs() {
     { key: 'system', label: i18nT('pages.developerPage.tabs.system.label'), icon: <Monitor size={16} />, description: i18nT('pages.developerPage.tabs.system.description') },
     { key: 'telemetry', label: i18nT('pages.developerPage.tabs.telemetry.label'), icon: <Activity size={16} />, description: i18nT('pages.developerPage.tabs.telemetry.description') },
     { key: 'storage', label: i18nT('pages.developerPage.tabs.storage.label'), icon: <Database size={16} />, description: i18nT('pages.developerPage.tabs.storage.description') },
-    { key: 'mcp-pool', label: i18nT('pages.developerPage.tabs.mcpPool.label'), icon: <Network size={16} />, description: i18nT('pages.developerPage.tabs.mcpPool.description') },
     { key: 'memory', label: i18nT('pages.developerPage.tabs.memory.label'), icon: <Brain size={16} />, description: i18nT('pages.developerPage.tabs.memory.description') },
     { key: 'config', label: i18nT('pages.developerPage.tabs.config.label'), icon: <FileCode2 size={16} />, description: i18nT('pages.developerPage.tabs.config.description') },
     { key: 'archive', label: i18nT('pages.developerPage.tabs.archive.label'), icon: <Archive size={16} />, description: i18nT('pages.developerPage.tabs.archive.description') },
@@ -52,12 +49,6 @@ export default function DeveloperPage() {
         {tab === 'system' && <SystemPage embedded />}
         {tab === 'telemetry' && <TelemetryPanel />}
         {tab === 'storage' && <LocalStorageDebug />}
-        {tab === 'mcp-pool' && (
-          <>
-            <SharedMcpGatewayToggle />
-            <McpPoolableServers />
-          </>
-        )}
         {tab === 'memory' && (
           <>
             {/* The memory GRAPH visualizer is an internals view. The

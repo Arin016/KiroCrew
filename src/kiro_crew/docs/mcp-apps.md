@@ -9,42 +9,59 @@ other servers ship PDF viewers, forms, and dashboards the same way. This is the
 `ui` extension — Kiro Crew targets the **Stable 2026-01-26** revision — and it works
 with any conforming server: nothing is hardcoded per vendor.
 
-If you just want it working: **Developer → Shared MCP gateway → on**, then switch
-your server on under **Poolable MCP servers**. The rest of this page explains why
-both are needed and what to check when a render does not appear.
+If you just want it working: it already is. Rendering is on by default and needs
+nothing switched on. The rest of this page covers the one switch that turns it off,
+why backend sharing is a separate choice that does not affect rendering, and what to
+check when a render does not appear.
 
 ## Enabling it
 
-Two gates must both pass. Neither is about the app itself — both are about **MCP
-pooling**, because the gateway daemon is what intercepts the tool result and
-resolves the `ui://` resource. Both have a UI toggle; you should not need to edit
-config by hand.
+One switch decides whether apps render: `mcp_gateway.apps_enabled`, and it defaults
+to **on**. Backend sharing is a separate, unrelated decision — it chooses whether
+several sessions reuse one MCP server *process*, and a server that is not shared
+still renders its apps.
 
-> **Platform:** the shared gateway needs Unix-domain sockets, so it is supported on
-> **macOS and Linux only**. On Windows the toggle is disabled and MCP Apps are
-> unavailable.
+What rendering does need is the gateway **daemon** (the broker), because that is what
+intercepts the tool result and resolves the `ui://` resource. The broker starts when
+either backend sharing or MCP Apps is on, so on a default install it is already
+running. Both switches have a UI toggle; you should not need to edit config by hand.
+
+> **Platform:** the broker needs Unix-domain sockets, so it is supported on
+> **macOS and Linux only**. On Windows the sharing toggle is disabled and MCP Apps
+> are unavailable.
 
 ### From the dashboard
 
-Both live on the **Developer** page (sidebar → **Developer**):
+The controls live on the **Agent Capabilities → Connections** page, each on its own
+sub-tab:
 
-1. **Turn on "Shared MCP gateway."** ⚠️ This restarts all active sessions onto the
-   new MCP routing, so in-flight agent work is interrupted — do it between tasks,
-   not mid-turn. Your dashboard stays signed in. The toggle asks for confirmation
-   and offers a roll-back.
-2. **Nothing else is required for apps.** "Share MCP Backends" and the poolable
-   allowlist decide whether several sessions reuse one MCP server *process* —
-   a resource choice, independent of whether apps render. A server that is not
-   shared still renders its apps.
+1. **Nothing to turn on for rendering.** It is on by default. The only control that
+   decides it is **Connections → MCP Apps → "Render MCP apps in chat"**.
+2. **Backend sharing is optional and unrelated to rendering.** **Connections →
+   Shared MCP backends** decides whether several sessions reuse one MCP server
+   *process*. A server that is not shared still renders its apps. ⚠️ Turning sharing
+   on restarts all active sessions onto the new MCP routing, so in-flight agent work
+   is interrupted — do it between tasks, not mid-turn. Your dashboard stays signed
+   in. That toggle asks for confirmation and offers a roll-back.
+
+   Each row in the per-server list shows a tri-state: **has an app** / **no app
+   found** / **not checked yet**. The third is genuine: Kiro Crew only learns whether
+   a server ships an app once that server has run through the broker and been asked
+   for its tools.
 
    A row in the allowlist is **read-only** when the server can't be shared: it's
    denylisted, its transport isn't stdio (HTTP servers aren't shared), or it's
    already opted in via its own `poolable: true` and so isn't governed by the
    allowlist.
 
-Optionally, to render apps in the right side panel instead of inline, turn on
-**Settings → Chat → Messages → "MCP Apps in Side Panel."** No restart or refresh
-needed.
+The **Connections → MCP Apps** sub-tab shows two controls:
+
+- **"Render MCP apps in chat"** (`mcp_gateway.apps_enabled`) — the single switch that
+  decides whether apps render. On by default. Turning it off stops rendering and
+  changes nothing else: it never stops the broker, which backend sharing and other
+  sessions may still be using.
+- **"Open apps in the side panel"** (`dashboard.mcp_app_panel`) — renders apps in
+  the right side panel instead of inline. No restart or refresh needed.
 
 ### The same thing in config
 
@@ -71,8 +88,9 @@ for third-party configs you don't want to duplicate into the allowlist:
 { "mcpServers": { "excalidraw": { "command": "...", "poolable": true } } }
 ```
 
-MCP Apps have their own switch, `mcp_gateway.apps_enabled`, independent of
-backend sharing. The full resolution order in `_mcp_apps_enabled()` is:
+MCP Apps have their own switch, `mcp_gateway.apps_enabled`, independent of backend
+sharing, and the **Connections → MCP Apps** sub-tab surfaces exactly that switch —
+no conjunction. The full resolution order in `_mcp_apps_enabled()` is:
 
 | Condition | Result |
 |---|---|
@@ -287,10 +305,10 @@ app HTML is **server-controlled code running in your dashboard**.
 |---|---|
 | Tool output renders as plain text | `mcp_gateway.apps_enabled` is off, or `KIROCREW_MCP_APPS` is set to an off value and is overriding it |
 | Still text with both of those right | the broker did not start — check the gateway log for `mcp-gateway: broker ready`, which names the switch that started it |
-| The gateway toggle is disabled / greyed out | you're on Windows — the broker needs Unix-domain sockets (macOS and Linux only) |
+| The sharing toggle is disabled / greyed out | you're on Windows — the broker needs Unix-domain sockets (macOS and Linux only) |
 | A server's sharing row won't toggle | it's denylisted, or not stdio transport (HTTP servers can't be shared), or already opted in via its own `poolable: true` |
 | Frame mounts but the canvas is blank | the app's scripts did not execute — check the browser console for CSP or network errors reaching its CDN |
-| Feature toggle missing from Settings | stale frontend bundle — hard-refresh the dashboard |
+| Feature toggle missing from Connections page | stale frontend bundle — hard-refresh the dashboard |
 | A new render appears inline despite `mcp_app_panel: true` | the flag is read at render time; diagrams already in scrollback do not move |
 | Panel shows "This app render is no longer available" | the payload was evicted (bounded per slot) — ask the agent to render it again |
 | Agent sessions all restarted unexpectedly | expected: flipping the **Shared MCP gateway** toggle re-routes MCP and interrupts in-flight work |

@@ -57,12 +57,42 @@ export function pooledViaAgentConfig(servers: McpPoolableServer[]): number {
   return servers.filter(srv => poolableRowLocked(srv) && srv.poolable).length
 }
 
-function Chip({ kind, children }: { kind: 'blocked' | 'http'; children: ReactNode }) {
+function Chip({ kind, children }: { kind: 'blocked' | 'http' | 'app'; children: ReactNode }) {
   const cls =
     kind === 'blocked'
       ? 'border border-border text-danger'
-      : 'border border-border text-muted'
+      : kind === 'app'
+        ? 'border border-accent text-accent'
+        : 'border border-border text-muted'
   return <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${cls}`}>{children}</span>
+}
+
+/**
+ * The per-server answer to "does this server have an app we can render".
+ *
+ * Three answers, not two: `undefined`/`null` means no shared backend has ever been
+ * asked for this server's tools, so "no app" would be a claim we cannot support.
+ * Rendering it as its own state is what keeps the list from telling a user a
+ * server cannot render when nobody has looked.
+ */
+export function appStateKey(hasUi: boolean | null | undefined): 'app_yes' | 'app_no' | 'app_unknown' {
+  if (hasUi === true) return 'app_yes'
+  if (hasUi === false) return 'app_no'
+  return 'app_unknown'
+}
+
+/** Label for the state above. Literal keys, never a template — a dynamic key
+ *  cannot be verified by the `[key-refs]` gate and lands in the dynamic-key
+ *  ledger for no benefit. Only the positive state is emphasised; "no app" and
+ *  "not checked yet" are facts, not warnings. */
+function AppStateChip({ hasUi }: { hasUi: boolean | null | undefined }) {
+  const state = appStateKey(hasUi)
+  const label = state === 'app_yes'
+    ? i18nT('pages.settings.mcpPoolableServers.app_yes')
+    : state === 'app_no'
+      ? i18nT('pages.settings.mcpPoolableServers.app_no')
+      : i18nT('pages.settings.mcpPoolableServers.app_unknown')
+  return <Chip kind={state === 'app_yes' ? 'app' : 'http'}>{label}</Chip>
 }
 
 /**
@@ -137,6 +167,12 @@ export function McpPoolableServers() {
             {i18nT('pages.settings.mcpPoolableServers.pooling_takes_effect_when_the_shared_mcp_gateway')}
           </div>
         )}
+        {/* Said ONCE for the whole list rather than as a per-row tooltip: it
+            explains a state, not a specific server, and a native `title` would
+            repeat it on every line while being invisible to touch users. */}
+        <div className="text-[12px] text-muted mb-2">
+          {i18nT('pages.settings.mcpPoolableServers.app_unknown_title')}
+        </div>
 
         {serversQ.isLoading ? (
           <div className="flex items-center gap-2 text-[13px] text-muted py-2">
@@ -200,6 +236,7 @@ export function McpPoolableServers() {
                   <div className="flex-1 min-w-0 mr-4">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[13px] font-semibold text-text">{srv.name}</span>
+                      <AppStateChip hasUi={srv.has_ui} />
                       {srv.denylisted && <Chip kind="blocked">{i18nT('pages.settings.mcpPoolableServers.blocked')}</Chip>}
                       {!isStdio && <Chip kind="http">{srv.transport} {i18nT('pages.settings.mcpPoolableServers.shared')}</Chip>}
                       {srv.entry_poolable && !srv.in_allowlist && <Chip kind="http">{i18nT('pages.settings.mcpPoolableServers.poolable_true')}</Chip>}

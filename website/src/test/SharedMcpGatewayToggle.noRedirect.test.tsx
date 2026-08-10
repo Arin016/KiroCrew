@@ -1,4 +1,4 @@
-// Enabling the shared MCP gateway must NOT navigate away.
+// Enabling shared MCP backends must NOT navigate away.
 //
 // It used to `navigate('/developer?tab=system')` on success, which was wrong
 // twice over: enabling the pool is the first half of the job (the user then
@@ -21,7 +21,7 @@ function LocationProbe() {
 function mount() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <MemoryRouter initialEntries={['/developer?tab=mcp-pool']}>
+    <MemoryRouter initialEntries={['/capabilities?tab=mcp']}>
       <QueryClientProvider client={qc}>
         <SharedMcpGatewayToggle />
         <LocationProbe />
@@ -58,7 +58,7 @@ describe('SharedMcpGatewayToggle', () => {
     // Selected by accessible name: the section also carries the MCP Apps render
     // switch, so a bare getByRole('switch') matches two elements.
     const toggle = await waitFor(() => {
-      const el = screen.getByRole('switch', { name: 'Shared MCP gateway' })
+      const el = screen.getByRole('switch', { name: 'Share one backend per server' })
       expect(el.getAttribute('aria-disabled')).toBeNull()
       return el
     })
@@ -70,7 +70,7 @@ describe('SharedMcpGatewayToggle', () => {
 
     await waitFor(() => expect(enable).toHaveBeenCalledWith(true))
     // The verified-state modal is the feedback, and the route is untouched.
-    await waitFor(() => expect(screen.getByText(/is active/i)).toBeTruthy())
-    expect(screen.getByTestId('loc').textContent).toBe('/developer?tab=mcp-pool')
+    await waitFor(() => expect(screen.getByText(/backends are active/i)).toBeTruthy())
+    expect(screen.getByTestId('loc').textContent).toBe('/capabilities?tab=mcp')
   })
 })

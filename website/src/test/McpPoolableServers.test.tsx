@@ -5,6 +5,7 @@ import {
   toggleAllChecked,
   toggleAllTargets,
   pooledViaAgentConfig,
+  appStateKey,
 } from '../pages/settings/McpPoolableServers'
 import type { McpPoolableServer } from '../api/client'
 
@@ -109,5 +110,24 @@ describe('pooledViaAgentConfig', () => {
     // Denylisted and HTTP rows are locked but never pooled — counting them
     // would inflate the reconciliation and invent servers in the pool.
     expect(pooledViaAgentConfig([srv({ transport: 'http' }), srv({ denylisted: true })])).toBe(0)
+  })
+})
+
+describe('appStateKey — three answers, not two', () => {
+  it('reports an observed declaration', () => {
+    expect(appStateKey(true)).toBe('app_yes')
+  })
+
+  it('reports an observed ABSENCE of a declaration', () => {
+    expect(appStateKey(false)).toBe('app_no')
+  })
+
+  it('reports UNKNOWN when nothing has been observed', () => {
+    // The load-bearing case. `undefined`/`null` means no shared backend has ever
+    // been asked for this server's tools, so "no app" would be a claim the
+    // dashboard cannot support — and it is the state EVERY server is in before
+    // it first runs shared, which is exactly when a user reads this list.
+    expect(appStateKey(undefined)).toBe('app_unknown')
+    expect(appStateKey(null)).toBe('app_unknown')
   })
 })

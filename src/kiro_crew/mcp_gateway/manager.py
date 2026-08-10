@@ -435,6 +435,34 @@ class GatewayManager:
 
     async def stats(self) -> dict:
         """Return the daemon's pool snapshot, or ``{}`` on any error."""
+        return await self._query("stats")
+
+    async def apps_declared(self) -> dict[str, bool]:
+        """Per-server MCP Apps declaration, as observed by live backends.
+
+        ``server_name -> True`` (a tools/list declared a ``ui://`` resource) or
+        ``False`` (a listing was observed and declared none). A server ABSENT from
+        the mapping has not been observed at all — the dashboard renders that as
+        "not checked yet" rather than "no app", because the two are different
+        claims. See :meth:`BackendPool.apps_declared_by_server`.
+
+        ``{}`` on any error, which reads correctly rather than defensively: an
+        unreachable broker is precisely the case where nothing has been observed.
+        """
+        reply = await self._query("apps-declared")
+        servers = reply.get("servers")
+        if not isinstance(servers, dict):
+            return {}
+        return {str(k): bool(v) for k, v in servers.items()}
+
+    async def _query(self, kind: str) -> dict:
+        """One-shot control-plane read: connect, send ``{"type": kind}``, read one
+        line. ``{}`` on any failure — every caller treats an unreachable daemon as
+        absence of data rather than an error to surface.
+
+        Shared by every read query so a second one cannot drift from the first on
+        timeouts, buffer limit, or reply-type validation.
+        """
         try:
             reader, writer = await asyncio.wait_for(
                 transport.connect(
@@ -444,14 +472,14 @@ class GatewayManager:
                 timeout=_PING_TIMEOUT_SECS,
             )
         except (asyncio.TimeoutError, OSError) as exc:
-            logger.warning("mcp-gateway stats connect failed: %s", exc)
+            logger.warning("mcp-gateway %s connect failed: %s", kind, exc)
             return {}
         try:
-            writer.write(b'{"type":"stats"}\n')
+            writer.write(json.dumps({"type": kind}).encode("utf-8") + b"\n")
             await asyncio.wait_for(writer.drain(), timeout=_PING_TIMEOUT_SECS)
             line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=_PING_TIMEOUT_SECS)
             msg = json.loads(line.decode("utf-8"))
-            return msg if isinstance(msg, dict) and msg.get("type") == "stats" else {}
+            return msg if isinstance(msg, dict) and msg.get("type") == kind else {}
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError,
                 asyncio.LimitOverrunError, UnicodeDecodeError, json.JSONDecodeError):
             return {}

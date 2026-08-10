@@ -82,9 +82,14 @@ export function __resetCatalogCache(): void {
 /** Panel file → tab key mapping (derived from SettingsPage.tsx switch).
  *  Only panels that actually render inside a Settings tab are mapped — the
  *  fork is KiroACP-only and de-Amazoned, so upstream's Provider / Secretary /
- *  Sync / TaskKeeper panels are absent, and SharedMcpGatewayToggle /
- *  McpPoolableServers live on the standalone Developer page (not a Settings
- *  tab), so they are intentionally excluded to avoid dead deep-links.
+ *  Sync / TaskKeeper panels are absent, and McpAppsPanel /
+ *  SharedMcpGatewayToggle / McpPoolableServers render under Agent Capabilities >
+ *  Connections (not a Settings tab), so they are intentionally excluded to avoid
+ *  dead deep-links. That exclusion has a cost worth naming: the side-panel
+ *  toggle moved out of ChatPanel, so `chat.mcp-apps-in-side-panel` left the
+ *  registry and searching the palette for it now finds nothing. Restoring it
+ *  needs a deep-link target outside Settings routing, which this map cannot
+ *  express yet.
  *
  *  Entries may carry `params` — extra query params the deep link needs for
  *  the panel to actually mount (the Channels tab is a list-detail view, so

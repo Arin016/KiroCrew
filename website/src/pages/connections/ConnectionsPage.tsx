@@ -3,11 +3,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
   AlertTriangle,
+  Blocks,
   CheckCircle2,
   CircleDashed,
   ExternalLink,
   Link2,
   Loader2,
+  Network,
   RotateCw,
   Server,
   Unplug,
@@ -19,12 +21,29 @@ import type { ChatMessage, McpApplyChange, McpServer } from '../../types'
 import { fmtDate } from '../../i18n/format'
 import { Badge, Btn, ContentSkeleton, SearchInput } from '../../components/ui'
 import McpTab from '../overview/McpTab'
+import { McpAppsPanel } from '../settings/McpAppsPanel'
+import { SharedMcpGatewayToggle } from '../settings/SharedMcpGatewayToggle'
+import { McpPoolableServers } from '../settings/McpPoolableServers'
 import ProviderLogo from './ProviderLogo'
 import {
   CONNECTION_PROVIDERS,
   serverForConnection,
   type ConnectionProvider,
 } from './registry'
+
+/**
+ * Everything a user configures about MCP lives on this page, so the sub-tabs are
+ * the four questions asked in order: what can I connect, what IS connected, what
+ * can those connections render, and how do they run.
+ *
+ * Single source of order — the strip maps this list and ArrowLeft/ArrowRight
+ * cycles it, so a tab cannot be reachable by mouse yet invisible to the keyboard.
+ */
+type ConnectionsTab = 'services' | 'mcp-servers' | 'mcp-apps' | 'shared-backends'
+
+const CONNECTIONS_TAB_KEYS: ConnectionsTab[] = [
+  'services', 'mcp-servers', 'mcp-apps', 'shared-backends',
+]
 
 export type ConnectionCardState =
   | 'not-connected'
@@ -439,7 +458,7 @@ function ConnectionCard({
 export default function ConnectionsPage({ servicesEnabled = false }: { servicesEnabled?: boolean } = {}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState<'services' | 'mcp-servers'>('services')
+  const [activeTab, setActiveTab] = useState<ConnectionsTab>('services')
   const [search, setSearch] = useState('')
   /** Pending connect attempts. `kind` decides Cancel semantics (only a
    *  cancelled *new* connect uninstalls the entry it just created); `sinceTs`
@@ -611,11 +630,19 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
     await queryClient.invalidateQueries({ queryKey: ['mcp-servers'] })
   })
 
-  const selectTab = (tab: 'services' | 'mcp-servers') => setActiveTab(tab)
+  const selectTab = (tab: ConnectionsTab) => setActiveTab(tab)
+  // Cycles the whole list rather than toggling a pair: the strip grew past two
+  // tabs, and a toggle silently strands every tab after the second for keyboard
+  // users.
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
-    setActiveTab(current => current === 'services' ? 'mcp-servers' : 'services')
+    const step = event.key === 'ArrowRight' ? 1 : -1
+    setActiveTab(current => {
+      const at = CONNECTIONS_TAB_KEYS.indexOf(current)
+      const next = (at + step + CONNECTIONS_TAB_KEYS.length) % CONNECTIONS_TAB_KEYS.length
+      return CONNECTIONS_TAB_KEYS[next]
+    })
   }
   const openProvider = (slug: string) => {
     setSearch('')
@@ -626,35 +653,34 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
   return (
     <section className="min-w-0" aria-label={t('pages.connectionsPage.connections')}>
       <div className="mb-4 flex border-b border-border" role="tablist" aria-label={t('pages.connectionsPage.connection_views')}>
-        <button
-          id="connections-services-tab"
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'services'}
-          aria-controls="connections-services-panel"
-          tabIndex={activeTab === 'services' ? 0 : -1}
-          onClick={() => selectTab('services')}
-          onKeyDown={onTabKeyDown}
-          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${activeTab === 'services' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-text'}`}
-        >
-          <Link2 className="h-4 w-4" aria-hidden="true" /> {t('pages.connectionsPage.services')}
-        </button>
-        <button
-          id="connections-mcp-tab"
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'mcp-servers'}
-          aria-controls="connections-mcp-panel"
-          tabIndex={activeTab === 'mcp-servers' ? 0 : -1}
-          onClick={() => selectTab('mcp-servers')}
-          onKeyDown={onTabKeyDown}
-          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${activeTab === 'mcp-servers' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-text'}`}
-        >
-          <Server className="h-4 w-4" aria-hidden="true" /> {t('pages.connectionsPage.mcp_servers')}
-        </button>
+        {CONNECTIONS_TAB_KEYS.map(key => {
+          const meta = {
+            'services': { label: t('pages.connectionsPage.services'), icon: <Link2 className="h-4 w-4" aria-hidden="true" /> },
+            'mcp-servers': { label: t('pages.connectionsPage.mcp_servers'), icon: <Server className="h-4 w-4" aria-hidden="true" /> },
+            'mcp-apps': { label: t('pages.connectionsPage.mcp_apps'), icon: <Blocks className="h-4 w-4" aria-hidden="true" /> },
+            'shared-backends': { label: t('pages.connectionsPage.shared_backends'), icon: <Network className="h-4 w-4" aria-hidden="true" /> },
+          }[key]
+          const on = activeTab === key
+          return (
+            <button
+              key={key}
+              id={`connections-${key}-tab`}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              aria-controls={`connections-${key}-panel`}
+              tabIndex={on ? 0 : -1}
+              onClick={() => selectTab(key)}
+              onKeyDown={onTabKeyDown}
+              className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${on ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-text'}`}
+            >
+              {meta.icon} {meta.label}
+            </button>
+          )
+        })}
       </div>
 
-      {activeTab === 'services' ? (
+      {activeTab === 'services' && (
         <div id="connections-services-panel" role="tabpanel" aria-labelledby="connections-services-tab">
           {servicesEnabled && <div className="mb-4 flex items-center gap-3">
             <SearchInput
@@ -709,9 +735,28 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
             </div>
           )}
         </div>
-      ) : (
-        <div id="connections-mcp-panel" role="tabpanel" aria-labelledby="connections-mcp-tab">
+      )}
+
+      {activeTab === 'mcp-servers' && (
+        <div id="connections-mcp-servers-panel" role="tabpanel" aria-labelledby="connections-mcp-servers-tab">
           <McpTab onManagedProviderClick={openProvider} />
+        </div>
+      )}
+
+      {activeTab === 'mcp-apps' && (
+        <div id="connections-mcp-apps-panel" role="tabpanel" aria-labelledby="connections-mcp-apps-tab">
+          <McpAppsPanel />
+        </div>
+      )}
+
+      {/* Rendering depends on a server running under the shared backend, so the
+          switch that starts it and the per-server list it applies to are one
+          panel. Splitting them would put the cause on one tab and the effect on
+          another. */}
+      {activeTab === 'shared-backends' && (
+        <div id="connections-shared-backends-panel" role="tabpanel" aria-labelledby="connections-shared-backends-tab">
+          <SharedMcpGatewayToggle />
+          <McpPoolableServers />
         </div>
       )}
     </section>

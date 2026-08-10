@@ -2167,7 +2167,7 @@
       "templates_label": "Agent Templates",
       "templates_description": "Manage what each agent starts from: its model, skills, tools, MCP servers, and guardrails",
       "connections_label": "Connections",
-      "connections_description": "Connect official services and manage custom MCP servers",
+      "connections_description": "Connect official services, manage custom MCP servers, and choose which ones render apps or run shared",
       "skills_label": "Skills",
       "skills_description": "Specialized knowledge files your agent loads on demand for specific tasks",
       "steering_label": "Steering",
@@ -2226,7 +2226,9 @@
       "tool_controlled_access": "Access is controlled by enabled tools.",
       "unknown_error": "Unknown error",
       "waiting_for_approval": "Waiting for approval",
-      "waiting_for_approval_address": "Waiting for the approval address… it appears here when the agent next connects — send any chat message to start authorization now."
+      "waiting_for_approval_address": "Waiting for the approval address… it appears here when the agent next connects — send any chat message to start authorization now.",
+      "mcp_apps": "MCP Apps",
+      "shared_backends": "Shared MCP backends"
     },
     "agentsPage": {
       "consumption_for_current_billing_period": "{{provider}} consumption for the current billing period. Cached 10 min.",
@@ -3387,10 +3389,14 @@
       "mcpPoolableServers": {
         "could_not_update_all_try_again": "Could not update servers. No changes were made. Try again.",
         "could_not_update_try_again": "Could not update {{name}}. Try again.",
-        "n_of_m_pooled": "{{on}} of {{total}} poolable servers pooled",
-        "n_of_m_pooled_plus_agent": "{{on}} of {{total}} poolable servers pooled, +{{extra}} via agent config",
-        "pool": "Pool {{name}}",
-        "toggle_all": "Toggle all"
+        "n_of_m_pooled": "{{on}} of {{total}} servers shared",
+        "n_of_m_pooled_plus_agent": "{{on}} of {{total}} servers shared, +{{extra}} via agent config",
+        "pool": "Share {{name}}",
+        "toggle_all": "Toggle all",
+        "app_yes": "has an app",
+        "app_no": "no app found",
+        "app_unknown": "not checked yet",
+        "app_unknown_title": "Kiro Crew learns this the first time the server runs and is asked for its tools."
       },
       "postureDisclosure": {
         "filter": "Filter {{label}}",
@@ -3754,21 +3760,26 @@
         }
       },
       "sharedMcpGatewayToggle": {
-        "active_sessions_share_pooled_mcp_backends_see_th": "Active — sessions share pooled MCP backends. See the live pool under Developer > System.",
+        "active_sessions_share_pooled_mcp_backends_see_th": "Active — sessions share one backend per server. See the running backends under Developer > System.",
         "could_not_apply": "Could not apply",
-        "disable_shared_mcp_gateway": "Disable shared MCP gateway?",
+        "disable_shared_mcp_gateway": "Disable shared MCP backends?",
         "disabled_each_session_spawns_its_own_mcp_backend": "Disabled — each session spawns its own MCP backends.",
-        "disabling_shared_mcp_gateway": "Disabling shared MCP gateway",
+        "disabling_shared_mcp_gateway": "Disabling shared MCP backends",
         "done": "Done",
-        "enable_shared_mcp_gateway": "Enable shared MCP gateway?",
+        "enable_shared_mcp_gateway": "Enable shared MCP backends?",
         "enabled_broker_not_reachable_toggle_off_and_on_t": "Enabled — broker not reachable; toggle off and on to re-apply.",
-        "enabling_shared_mcp_gateway": "Enabling shared MCP gateway",
-        "gateway_stuck_retry": "The gateway did not reach the expected state. Try again.",
-        "gateway_stuck_roll_back": "The gateway did not reach the expected state. Roll back to the safe (disabled) state, or try again.",
-        "shared_mcp_gateway_is_active": "Shared MCP gateway is active.",
-        "shared_mcp_gateway_is_disabled": "Shared MCP gateway is disabled.",
+        "enabling_shared_mcp_gateway": "Enabling shared MCP backends",
+        "gateway_stuck_retry": "Shared backends did not reach the expected state. Try again.",
+        "gateway_stuck_roll_back": "Shared backends did not reach the expected state. Roll back to the safe (disabled) state, or try again.",
+        "shared_mcp_gateway_is_active": "Shared MCP backends are active.",
+        "shared_mcp_gateway_is_disabled": "Shared MCP backends are disabled.",
         "starting_broker_restarting_sessions_verifying_co": "Starting broker, restarting sessions, verifying connectivity…",
-        "stopping_broker_and_restarting_sessions": "Stopping broker and restarting sessions…"
+        "stopping_broker_and_restarting_sessions": "Stopping broker and restarting sessions…",
+        "share_one_backend_per_server": "Share one backend per server",
+        "explain_normal": "Normally each chat session starts its own copy of every MCP server. Ten sessions and nine servers is ninety processes.",
+        "explain_shared": "A shared MCP backend means Kiro Crew starts one copy per server and every session uses that one. Less memory, and a new session does not wait for servers to boot.",
+        "explain_tradeoff": "A shared copy cannot hold anything that differs per session, so a server that reads per-session credentials should stay unshared. That is why sharing is chosen per server instead of by one switch.",
+        "explain_title": "What is a shared backend, and when should a server stay out of one?"
       },
       "skillsPanel": {
         "failed_to_save_skills_setting": "Failed to save skills setting"
@@ -3908,6 +3919,24 @@
         "support": "Support",
         "blurb": "Something not working? Send us a diagnostics report — logs are scrubbed of secrets first.",
         "report_a_problem": "Report a Problem"
+      },
+      "mcpAppsPanel": {
+        "aria_label": "MCP Apps",
+        "what_title": "Interactive apps from MCP servers",
+        "what_body": "Some MCP servers include a small web app alongside their tools. When the agent calls one, Kiro Crew renders that app in the conversation instead of printing text, so you can click, edit, and explore the result.",
+        "example_diagram": "Editable diagram",
+        "example_dashboard": "Live dashboard",
+        "example_viewer": "PDF and 3D viewer",
+        "sandbox_body": "An app runs in a sandboxed frame with no access to your dashboard, its cookies, or its storage. It can still call tools on the server that provided it.",
+        "learn_more": "How MCP Apps work",
+        "section_rendering": "Rendering",
+        "render_label": "Render MCP apps in chat",
+        "render_description": "When off, a tool that includes an app returns plain text instead.",
+        "unsupported_platform": "MCP Apps needs the MCP broker, which is not available on this platform.",
+        "render_save_failed": "Could not apply. The setting was not changed.",
+        "panel_save_failed": "Could not save the side-panel setting. Try again.",
+        "side_panel_label": "Open apps in the side panel",
+        "side_panel_description": "Render apps in their own right-side panel tab instead of inline in the message. The app keeps running while you scroll the chat."
       }
     },
     "systemPage": {},
@@ -3951,10 +3980,6 @@
         "logs": {
           "description": "Live log viewer with level filtering and search",
           "label": "Logs"
-        },
-        "mcpPool": {
-          "description": "Shared MCP gateway and poolable server configuration",
-          "label": "MCP Pool"
         },
         "memory": {
           "description": "Memory graph, embedding provider, and vector store internals",
