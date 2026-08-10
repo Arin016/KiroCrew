@@ -185,6 +185,20 @@ def test_active_names_filters_to_our_prefix_and_liveness(cfg, monkeypatch):
 
     monkeypatch.setattr(launchd, "launchctl", fake)
     assert launchd.active_names(cfg) == {"alpha"}
+    # loaded_names keeps the restart-pending label `active_names` drops. A
+    # KeepAlive agent whose process exited still comes back and can still resume
+    # its sessions, so a caller deciding whether it may DESTROY that data must
+    # see it -- treating it as gone is the fail-open.
+    assert launchd.loaded_names(cfg) == {"alpha", "beta"}
+
+
+def test_loaded_names_refuses_to_guess_on_an_operational_error(cfg, monkeypatch):
+    """An unenumerable domain must raise, not read as "no pods loaded"."""
+    monkeypatch.setattr(
+        launchd, "launchctl", lambda *a, **k: _cp(returncode=1, stderr="boom")
+    )
+    with pytest.raises(launchd.LaunchdError, match="cannot .*enumerate"):
+        launchd.loaded_names(cfg)
 
 
 # --------------------------------------------------------------------------
@@ -458,6 +472,37 @@ def test_runtime_probes_surface_launchd_errors_as_pod_errors(cfg, monkeypatch):
         rt.is_active(cfg, "smoke")
     with pytest.raises(rt.PodError):
         rt.active_names(cfg)
+    with pytest.raises(rt.PodError):
+        rt.live_names(cfg)
+    with pytest.raises(rt.PodError):
+        rt.live_main_pid(cfg, "smoke")
+
+
+def test_live_names_counts_a_restart_pending_launchd_pod(cfg, monkeypatch):
+    """`active_names` answers "running now"; this decision needs "can come back".
+
+    A KeepAlive label whose process exited is loaded without a pid. Dropping it
+    would let a reclaim stage its resumable sessions in the window before launchd
+    restarts it, so `live_names` enumerates LOADED labels on macOS.
+    """
+    monkeypatch.setattr(rt, "IS_MACOS", True)
+    domain_dump = (
+        "dev.kirocrew.pod.kirocrew-pod.alpha\n"
+        "dev.kirocrew.pod.kirocrew-pod.beta\n"
+    )
+
+    def fake(*args, **kwargs):
+        target = args[1] if len(args) > 1 else ""
+        if target.count("/") <= 1:
+            return _cp(domain_dump)
+        return _cp(_RUNNING if target.endswith("alpha") else _DEAD)
+
+    monkeypatch.setattr(launchd, "launchctl", fake)
+    assert rt.active_names(cfg) == {"alpha"}
+    assert rt.live_names(cfg) == {"alpha", "beta"}
+    # And the dead-but-loaded pod cannot pass the store check either, because it
+    # has no live main pid to bind its record to.
+    assert launchd.main_pid(cfg, "beta") is None
 
 
 def test_pod_mutex_is_reentrant_within_a_thread(cfg):

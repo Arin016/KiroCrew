@@ -387,6 +387,27 @@ def is_active(cfg: PodConfig, name: str) -> bool:
     return _PID_RE.search(cp.stdout or "") is not None
 
 
+def main_pid(cfg: PodConfig, name: str) -> int | None:
+    """PID of the pod's live process, or ``None`` when it is not running.
+
+    Same evidence :func:`is_active` reads, returning the pid itself so a caller can
+    bind per-boot state to the process that is actually running. An OPERATIONAL
+    failure raises for the same reason it does there: reporting "not running" would
+    fail open.
+    """
+    cp = _print(cfg, name)
+    if cp.returncode != 0:
+        if _service_absent(cp):
+            return None
+        raise LaunchdError(
+            f"launchctl print failed (rc={cp.returncode}) for "
+            f"{pod_label(cfg, name)}; cannot tell whether the pod is running, "
+            f"refusing to report it absent: {(cp.stderr or cp.stdout or '').strip()}"
+        )
+    found = _PID_RE.search(cp.stdout or "")
+    return int(found.group(1)) if found else None
+
+
 def unit_state(cfg: PodConfig, name: str) -> tuple[str, int]:
     """``(state, restarts)`` shaped like the systemd backend's return.
 
@@ -433,6 +454,32 @@ def active_names(cfg: PodConfig) -> set[str]:
         if candidate and is_active(cfg, candidate):
             names.add(candidate)
     return names
+
+
+def loaded_names(cfg: PodConfig) -> set[str]:
+    """Names of pods launchd has LOADED, whether or not one has a pid right now.
+
+    Wider than :func:`active_names` on purpose. A ``KeepAlive`` label whose process
+    has exited is still registered and will be restarted, so it is a pod that can
+    come back and resume its sessions — while `active_names` filters it out,
+    correctly, for callers asking "is something running this instant".
+
+    A caller deciding whether it may DESTROY a pod's data needs this wider set:
+    treating a restart-pending pod as gone is the fail-open that lets its
+    resumable sessions be reclaimed in the window before launchd brings it back.
+    """
+    cp = launchctl("print", domain())
+    if cp.returncode != 0:
+        raise LaunchdError(
+            f"launchctl print {domain()} failed (rc={cp.returncode}); cannot "
+            f"enumerate pods: {(cp.stderr or cp.stdout or '').strip()}"
+        )
+    prefix = pod_label(cfg, "")
+    return {
+        tok[len(prefix):]
+        for tok in re.findall(rf"{re.escape(prefix)}[A-Za-z0-9._-]+", cp.stdout or "")
+        if tok[len(prefix):]
+    }
 
 
 def recent_journal(cfg: PodConfig, name: str, lines: int = 50) -> str:
