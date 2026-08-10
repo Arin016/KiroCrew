@@ -411,6 +411,36 @@ The duration is resolved from live config at activation time, so a value saved i
 Settings applies to the next activation without a restart. A 5-minute grace
 window after expiry allows renewal instead of a fresh activation.
 
+**One exception to expiry-then-re-authorize: an unattended loop in flight.** When
+an AutoNudge loop is driving a session, there is no human present to answer the
+approval prompts that expiry produces, so the run does not degrade gracefully — it
+stops accomplishing anything while appearing healthy. Before each nudge fires, the
+grant is therefore extended by one short **lease** (`max(900s, 2 x` the loop's idle
+interval`)`), issued off the event loop and audited like any other renewal
+(`authorized` before the commit, then `renewed` or `aborted`).
+
+The lease is bounded, and every bound is deliberate:
+
+- **Absolute ceiling**, anchored on activation and PROPORTIONAL to the duration the
+  operator chose: `min(24h, 4 x activation_ttl)`. A 1 h grant reaches 4 h, the 6 h
+  default reaches the 24 h cap. A flat 24 h would have erased the operator's own
+  judgement — a deliberately tight grant would land where a loose one landed. The
+  TTL is frozen at activation, so editing config later cannot widen a live grant.
+- **Extends only, never revives.** A lease applies only to a grant that is live at
+  that moment, and only if it moves the deadline forward. Anything that has lapsed
+  — or that the operator explicitly disabled — stays dead and needs a fresh human
+  activation.
+- **Does not grow.** Each lease is the same length; backoff would enlarge the
+  unsupervised window exactly as the run gets longer.
+- **`agent.override_lease_for_armed_loops`** (default `true`) turns the whole
+  mechanism off, restoring `yolo_duration` as a hard ceiling.
+
+The operator is notified on the first lease of a grant — the moment the TTL stops
+being the last word — and again if the ceiling is reached while a loop is still
+armed. Both notices are unconditional: they are not gated behind
+`agent.notify_override_expiry`, which silences a recurring *expiry* notice, because
+an authorization *extension* is a different and stronger fact.
+
 The one non-expiring grant is `agent.dangerously_skip_permissions` in
 operator-owned config: a standing instruction, deliberately config-file-only with
 no dashboard toggle, re-established and re-audited on every startup. An

@@ -27,6 +27,7 @@ from kiro_crew.apps.hooks_integration import (
 )
 from kiro_crew.apps.manager import cleanup_migrated_builtin, register_builtin_apps
 from kiro_crew.autonudge import get_instance as _autonudge_get
+from kiro_crew.autonudge import set_pre_fire_hook as _autonudge_set_pre_fire_hook
 from kiro_crew.autonudge_authz import authorize_and_add_nudge
 from kiro_crew.browser.setup import migrate_owned_playwright_registration
 from kiro_crew.channel_transcript_migration import migrate_channel_transcripts
@@ -264,6 +265,35 @@ async def _should_prevent_sleep(state: DashboardState) -> bool:
     except Exception:
         logger.debug("prevent-sleep active-turn check failed", exc_info=True)
         return False
+
+
+# Floor for one automatic safety-override lease (see
+# ``_renew_override_headroom``). The lease is normally derived from the firing
+# loop's own idle interval; this only matters for a very fast loop, where twice
+# the interval would be too short to be worth the bookkeeping.
+_OVERRIDE_LEASE_FLOOR_SECS = 900  # 15 min
+
+
+def _override_lease_secs(idle_secs_values: "list[int]") -> int:
+    """Lease length for one automatic safety-override extension.
+
+    Derived from the loop's own cadence — ``2 x`` the SLOWEST idle interval
+    passed in, floored — rather than a fixed number. A lease shorter than a
+    loop's idle interval lapses BETWEEN two of its cycles, so the next cycle
+    wakes with no grant and the extension buys nothing; with the 300-420s loops
+    observed in practice any fixed 5-minute lease is broken on arrival. Taking
+    the slowest (not the fastest, not the mean) is what makes one lease cover
+    every loop it is granted for, which mattered when a single lease had to serve
+    all armed loops at once and is retained so the derivation is still correct if
+    a caller ever batches them again.
+
+    A module-level function, not a closure detail, so the derivation is
+    directly testable — the claim "derived, not constant" is exactly the kind
+    that silently regresses into a magic number.
+    """
+    if not idle_secs_values:
+        return 0
+    return max(_OVERRIDE_LEASE_FLOOR_SECS, 2 * max(idle_secs_values))
 
 
 # Strict internal API paths — exact paths that ONLY internal processes
@@ -3463,9 +3493,190 @@ async def start_dashboard(
             "\U0001f512 Safety override expired. Tools now require approval. Reply `/kirocrew yolo` to re-authorize.",
         )
 
+    def _renew_override_headroom(idle_secs: int) -> tuple[str, int, int]:
+        """Blocking half of the pre-fire hook — MUST run in a worker thread.
+
+        Returns ``(action, granted, ceiling_left)`` where action is one of
+        ``"noop"`` (headroom already sufficient, or extension disabled, or nothing
+        to extend), ``"first"`` (first lease of this grant), ``"renewed"``,
+        ``"capped"`` (the proportional ceiling is reached) or ``"raced"``.
+
+        Everything that can touch the filesystem lives here: the config read and
+        the fail-closed SEL write. Callers keep notification and WS work on the
+        event loop, where it is safe to touch ``state``.
+        """
+        ov = safety_override()
+        needed = _override_lease_secs([idle_secs])
+        # Passive read: the plain accessor calls is_active(), which is the lazy
+        # expiry trigger, and this function runs in a worker thread where the
+        # expiry handler's WebSocket sends have no event loop to run on.
+        remaining = ov.remaining_secs_passive()
+        if remaining < 0:
+            return ("noop", 0, -1)  # permanent grant: no deadline to extend
+        if remaining >= needed:
+            # The common case by far. Checked BEFORE the config read so a healthy
+            # grant costs one in-memory comparison per nudge, not a stat.
+            return ("noop", remaining, ov.lease_ceiling_remaining_secs())
+        if not KiroCrewConfig.load().agent.override_lease_for_armed_loops:
+            # Opt-out: the operator wants yolo_duration to stay a hard ceiling.
+            # Read live so it can be flipped without a restart. Audited, because
+            # refusing to extend is the same class of permission decision as the
+            # denials renew_lease records itself — and it is the one an auditor
+            # would otherwise find no trace of.
+            ov.log_lease_denied("autonudge-prefire", "policy_opt_out")
+            return ("noop", 0, 0)
+        first = not ov.has_been_renewed()
+        result = ov.renew_lease("autonudge-prefire", needed)
+        if not result.renewed:
+            if result.reason == "lease_cap":
+                return ("capped", 0, 0)
+            if result.reason == "never_active":
+                # No grant has ever existed. The ordinary state of an install that
+                # does not use auto-approve, and NOT an event — notifying here would
+                # fire on every nudge, forever, for people who never enabled it.
+                return ("noop", 0, 0)
+            if result.reason == "not_active":
+                # A grant existed and is gone while a loop is still running. Terminal
+                # for the mechanism, because a lease extends and never revives — every
+                # later pre-fire lands here too. Surfaced rather than swallowed: it is
+                # the exact state the operator asked to be told about, and it is
+                # reachable without anyone deactivating anything, because a turn can
+                # outrun the lease that covered it and lapse mid-turn.
+                return ("lapsed", 0, ov.lease_ceiling_remaining_secs())
+            if result.reason == "raced":
+                return ("raced", 0, ov.lease_ceiling_remaining_secs())
+            if result.reason == "no_extension":
+                # The grant already outlasts what a lease could give it — a human
+                # renewal can carry it past the automatic ceiling. Nothing is
+                # wrong and nothing is needed.
+                return ("noop", 0, ov.lease_ceiling_remaining_secs())
+            return ("noop", 0, ov.lease_ceiling_remaining_secs())
+        return ("first" if first else "renewed", result.ttl, ov.lease_ceiling_remaining_secs())
+
+    # Terminal lease outcomes recur on every nudge once reached, so each is
+    # announced once per episode. Cleared by a successful lease, which means a human
+    # re-enabled and the next lapse is genuinely new.
+    _lease_notice_sent: set[str] = set()
+
+    async def _ensure_override_headroom(loop: Any) -> None:
+        """Pre-fire hook: make sure auto-approval outlives the turn about to run.
+
+        Registered on the AutoNudge service, so it is called only for a loop that
+        has already passed every terminal check — no "is a loop still armed?"
+        question, and no work on the approval path. The grant is extended BEFORE
+        the TTL lapses rather than repaired afterwards, which is why this exists
+        instead of an expiry callback.
+        """
+        action, granted, ceiling_left = await asyncio.to_thread(
+            _renew_override_headroom, int(getattr(loop, "idle_secs", 0) or 0)
+        )
+        if action == "noop":
+            return
+        if action == "raced":
+            logger.info("override headroom: a concurrent grant won the race; leaving it alone")
+            return
+        if action in ("capped", "lapsed"):
+            if action in _lease_notice_sent:
+                return
+            _lease_notice_sent.add(action)
+        else:
+            _lease_notice_sent.clear()
+
+        if action == "capped":
+            logger.warning(
+                "Safety override reached its automatic-extension ceiling with loop %s "
+                "still armed — it will lapse; re-enable to continue",
+                getattr(loop, "id", "?"),
+            )
+            try:
+                state.notify(
+                    "safety_override",
+                    "🔒 Safety override stopped being auto-extended",
+                    (
+                        "It was kept alive for an unattended loop up to the limit "
+                        "scaled from the duration you chose when enabling it. Tools "
+                        "now require approval, so that loop will stall until you "
+                        "re-enable it."
+                    ),
+                    meta={"loop": getattr(loop, "id", ""), "reason": "lease_ceiling"},
+                )
+            except Exception:
+                # ERROR, not debug: this notice is the only operator-visible trace
+                # that a grant stopped being auto-extended. Losing it silently is
+                # how an unattended run appears to "just stop".
+                logger.error("override cap notification failed", exc_info=True)
+            return
+        if action == "lapsed":
+            logger.warning(
+                "Safety override is gone while loop %s is still armed; leases extend "
+                "but never revive, so it stays gone for the rest of this run",
+                getattr(loop, "id", "?"),
+            )
+            try:
+                state.notify(
+                    "safety_override",
+                    "🔒 Safety override lapsed while a loop is still running",
+                    (
+                        "Auto-approval ended mid-run — most often because a turn ran "
+                        "longer than the lease covering it. A lease extends a live "
+                        "grant but never revives a dead one, so this loop will keep "
+                        "waiting on per-tool approval until you re-enable it."
+                    ),
+                    meta={"loop": getattr(loop, "id", ""), "reason": "lapsed_mid_run"},
+                )
+            except Exception:
+                logger.error("override lapse notification failed", exc_info=True)
+            return
+
+        state.broadcast_ws(
+            "yolo_lease_extended",
+            {
+                "source": "autonudge-prefire",
+                "lease_secs": granted,
+                "loop": getattr(loop, "id", ""),
+                "ceiling_remaining_secs": ceiling_left,
+            },
+        )
+        # Notify a human on the FIRST lease of a grant, not per renewal: an
+        # overnight run renews many times and a ping each time is the kind of
+        # noise that trains people to ignore the channel.
+        #
+        # Deliberately NOT gated behind agent.notify_override_expiry. That switch
+        # silences a recurring *expiry* notice; this reports an authorization
+        # EXTENSION — a different and stronger fact, and the one place the semantic
+        # change to a security setting becomes visible.
+        if action == "first":
+            try:
+                state.notify(
+                    "safety_override",
+                    "🔓 Safety override is being auto-extended",
+                    (
+                        "An unattended loop is still running, so it is being renewed "
+                        "in short leases rather than demoting to per-tool approval. "
+                        "It lapses within one lease of that loop stopping, and at a "
+                        "ceiling scaled from the duration you chose. Turn off "
+                        "agent.override_lease_for_armed_loops to keep the TTL hard."
+                    ),
+                    meta={"lease_secs": granted, "loop": getattr(loop, "id", "")},
+                )
+            except Exception:
+                # ERROR for the same reason as the cap notice: this is the ONE
+                # signal that makes the changed TTL semantics visible. It does NOT
+                # fail the lease — a notification bug must not disable the
+                # mechanism keeping unattended runs alive.
+                logger.error("override lease notification failed", exc_info=True)
+
     def _on_override_expired(source: str) -> None:
-        """Notify all interfaces when safety override expires."""
+        """Notify all interfaces when safety override expires.
+
+        Keeping an unattended loop working past the TTL is NOT done here — see
+        ``_ensure_override_headroom``, which runs before each nudge fires instead.
+        Extending from this callback meant deciding, on the event loop and inside
+        the approval path, whether some loop was still armed; the pre-fire hook is
+        asked by a loop that demonstrably is.
+        """
         state.broadcast_ws("yolo_expired", {"source": source})
+
         state.push_slots_update()
         if state.sessions is not None:
             for slot in state._slots.values():
@@ -3484,6 +3695,7 @@ async def start_dashboard(
         _dispatch_override_expiry_notification(state, _notify_slack_override_expired)
 
     safety_override().on_expired = _on_override_expired
+    _autonudge_set_pre_fire_hook(_ensure_override_headroom)
 
     # Restore exactly the tabs the user had open at last shutdown — these
     # come back regardless of mtime, so long-running tabs don't silently

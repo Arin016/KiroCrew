@@ -226,6 +226,23 @@ def get_instance() -> "AutoNudgeService | None":
     return _INSTANCE
 
 
+# Hook invoked immediately BEFORE an unattended turn is dispatched, once every
+# loop-terminal check has already passed. Module-level (like ``_INSTANCE``) so
+# registration does not have to race the service's ``start()``.
+#
+# Awaited, not called: the registered coroutine is expected to push its own
+# blocking work (config reads, audit writes) onto a worker thread. This hook runs
+# on the gateway's event loop, so doing filesystem I/O inline here would stall the
+# heartbeat and risk a watchdog exit.
+_PRE_FIRE_HOOK: "Callable[[NudgeLoop], Awaitable[None]] | None" = None
+
+
+def set_pre_fire_hook(fn: "Callable[[NudgeLoop], Awaitable[None]] | None") -> None:
+    """Register (or clear) the pre-fire hook. See ``_PRE_FIRE_HOOK``."""
+    global _PRE_FIRE_HOOK
+    _PRE_FIRE_HOOK = fn
+
+
 @dataclass
 class NudgeLoop:
     """A single auto-nudge loop bound to one session.
@@ -875,6 +892,26 @@ class AutoNudgeService:
         # prematurely trip max_cycles. Missing callback → nothing to deliver.
         if self._on_fire is None:
             return
+        # Establish auto-approval headroom for the turn we are about to dispatch.
+        #
+        # Deliberately HERE rather than in a safety-override expiry callback. The
+        # reactive shape had to answer "is some loop still armed?" from inside the
+        # approval path, on the event loop, at the moment the grant lapsed; this
+        # asks nothing — every terminal check above has already passed, so this
+        # loop IS live and IS about to run unattended. The hook pushes its own
+        # blocking work to a thread, so nothing here touches the filesystem.
+        #
+        # Failure is non-fatal: a loop that cannot get headroom still fires and
+        # merely waits on approval, which is strictly better than not firing.
+        if _PRE_FIRE_HOOK is not None:
+            try:
+                await _PRE_FIRE_HOOK(loop)
+            except Exception:
+                logger.warning(
+                    "AutoNudge: pre-fire hook failed for %s; firing anyway",
+                    loop.id,
+                    exc_info=True,
+                )
         self._firing.add(loop.id)
         try:
             await self._run_fire_cycle(loop)

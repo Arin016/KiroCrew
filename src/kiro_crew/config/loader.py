@@ -959,6 +959,19 @@ class AgentConfig:
             "Disable to silence the recurring expiry DM; the dashboard banner still shows.",
         ),
     )
+    override_lease_for_armed_loops: bool = field(
+        default=True,
+        metadata=_meta(
+            "Keep Override Alive for Unattended Loops",
+            "When a time-limited safety override (YOLO) reaches its TTL while an "
+            "unattended monitor loop is still armed, extend it in short leases "
+            "instead of demoting to per-tool approval — otherwise every remaining "
+            "cycle stalls on a prompt nobody is there to answer. Bounded absolutely "
+            "at 24h from activation. Disable to keep yolo_duration as a hard "
+            "ceiling: unattended runs then stop working at the TTL, which is the "
+            "pre-existing behaviour.",
+        ),
+    )
     bot_name: str = field(
         default="",
         metadata=_meta(
@@ -4986,6 +4999,9 @@ class KiroCrewConfig:
                 dangerously_skip_permissions=_read_skip_permissions(agent_data),
                 yolo_duration=_normalize_yolo_duration(agent_data.get("yolo_duration")),
                 notify_override_expiry=agent_data.get("notify_override_expiry", True),
+                override_lease_for_armed_loops=_safe_bool(
+                    agent_data.get("override_lease_for_armed_loops", True), True
+                ),
                 conductor_skill=agent_data.get("conductor_skill", False),
                 tool_search=bool(agent_data.get("tool_search", True)),
                 session_sharing=bool(agent_data.get("session_sharing", True)),

@@ -105,6 +105,32 @@ class SafetyOverride:
     # ``agent.yolo_duration``, clamped to ``_MAX_TTL``.
     _ADHOC_TTL_DEFAULT: int = 21600  # 6 h
     _RENEW_GRACE_SECS: int = 300  # 5-min grace window after expiry
+    # How far AUTOMATIC lease extensions may carry ONE ad-hoc grant, measured from
+    # ``_activated_at`` — a deadline, not a budget of extension seconds.
+    #
+    # PROPORTIONAL to the TTL the operator chose, capped by ``_MAX_TTL``:
+    #
+    #     ceiling = _activated_at + min(_MAX_TTL, 4 x activation_ttl)
+    #
+    # A flat ``_MAX_TTL`` was the previous shape and it erased the operator's own
+    # judgement: someone who deliberately set a 1h grant was softened to 24h the
+    # moment any loop was armed, ending up in exactly the same place as someone
+    # who set 6h. The cautious setting bought nothing. Scaling keeps a tight grant
+    # proportionally tight (1h -> 4h) while the default 6h still reaches the 24h
+    # cap, so the common case is unchanged.
+    #
+    # A cumulative-extension budget was the shape before that, and was wrong for a
+    # different reason: 24h of activation plus 24h of leases authorizes 48h on one
+    # human decision, which is what ``_MAX_TTL`` exists to forbid. Anchoring on the
+    # activation instant is what makes the bound absolute rather than additive.
+    #
+    # This exists for one pathological shape, not for normal use. The agent itself
+    # calls ``monitor_start`` and can raise ``max_cycles`` through
+    # ``monitor_update``, so "keep renewing while a loop is armed" would otherwise
+    # let the authorized party set its own authorization's lifetime. Human
+    # renewals (``renew``) are a fresh decision by someone who can see what they
+    # are approving and are not bound by it.
+    _LEASE_CEILING_MULTIPLE: int = 4
 
     # The one source carrying STANDING authority: a grant the operator DECLARED
     # in config (``dangerouslySkipPermissions``), as opposed to one toggled ad hoc
@@ -159,6 +185,9 @@ class SafetyOverride:
             lock = threading.Lock()
             object.__setattr__(self, "_lock", lock)
             return lock
+        if name == "_activation_ttl":
+            object.__setattr__(self, "_activation_ttl", 0)
+            return 0
         if name == "_scoped":
             scoped: dict[str, tuple[float, float]] = {}
             object.__setattr__(self, "_scoped", scoped)
@@ -342,6 +371,10 @@ class SafetyOverride:
             self._activation_count += 1
             self._last_renewed_at = 0.0
             self._last_renewed_by = ""
+            # The TTL the operator chose for THIS grant, which scales the
+            # automatic-lease ceiling. Stored rather than re-read from config so a
+            # later config edit cannot retroactively widen a live grant.
+            self._activation_ttl = ttl if ttl > 0 else self._MAX_TTL
 
         cb = self._on_activated
         if cb is not None:
@@ -410,6 +443,287 @@ class SafetyOverride:
             resources=f"source:{source}, new_ttl:{ttl}s",
         )
         return RenewResult(renewed=True, ttl=ttl, source=source)
+
+    def _grant_is_live_locked(self, now_mono: float) -> bool:
+        """Is there a grant to EXTEND right now? Caller must hold ``_lock``.
+
+        ``is_active()`` without the expiry callback: the same question, asked from
+        a context that must not cause side effects.
+
+        ``_expires_at > 0`` is NOT a sufficient stand-in for this. It was used as
+        the "lapsed versus explicitly stopped" discriminator on the theory that
+        ``deactivate()`` zeroes it -- but ``deactivate()`` returns early when the
+        grant is already inactive, which is exactly the state lazy expiry leaves
+        behind. So an operator switching back to normal mode on a lapsed grant
+        left ``_expires_at`` positive and indistinguishable from "merely lapsed",
+        and a lease would have re-enabled auto-approval they had just turned off.
+
+        Requiring the grant to be LIVE removes the ambiguity instead of refining
+        it: a lease only ever extends something already in force, and nothing dead
+        is revived regardless of how it died. Proactive renewal always satisfies
+        this, because it runs while headroom remains.
+        """
+        if not self._active or self._activated_at <= 0:
+            return False
+        if self._permanent:
+            return True
+        return now_mono < self._expires_at
+
+    def _lease_ceiling_locked(self) -> float:
+        """Absolute instant past which no automatic lease may extend this grant.
+
+        Caller must hold ``_lock``. Proportional to the operator's chosen TTL and
+        capped at ``_MAX_TTL`` — see ``_LEASE_CEILING_MULTIPLE``.
+        """
+        ttl = self._activation_ttl if self._activation_ttl > 0 else self._MAX_TTL
+        span = min(self._MAX_TTL, self._LEASE_CEILING_MULTIPLE * ttl)
+        return self._activated_at + span
+
+    def renew_lease(self, source: str, ttl: int) -> RenewResult:
+        """Extend the live grant by one short AUTOMATIC lease.
+
+        Separate from :meth:`renew` on purpose. ``renew`` is a human action and
+        takes the configured ad-hoc duration; this is a machine action taken on
+        behalf of an unattended loop, so it carries an explicit short lease
+        rather than a 6 h refill, and it is bounded absolutely by
+        ``_activated_at + _MAX_TTL``.
+
+        That ceiling is anchored on the ACTIVATION, not on this call, which is
+        what makes it a real bound: no ad-hoc grant stays active more than
+        ``_MAX_TTL`` past the moment a human enabled it, however many leases are
+        issued. A lease that would cross the ceiling is truncated to land exactly
+        on it; one issued at or after it is refused. A cumulative
+        extension-seconds budget was tried first and was wrong -- a 24 h
+        activation plus 24 h of leases authorizes 48 h on one human decision,
+        which is precisely what ``_MAX_TTL`` exists to forbid.
+
+        Only ever EXTENDS a grant that is live at the moment of the call; it never
+        revives a dead one, whether it died by expiry or by ``deactivate``. The
+        renew grace window is therefore irrelevant here -- there is no
+        post-expiry renewal to grant, so nothing depends on how far past the
+        deadline the caller arrived.
+
+        That is stricter than tracking "lapsed versus explicitly stopped", and it
+        is stricter on purpose: ``deactivate()`` returns early when the grant is
+        already inactive, so it does not zero ``_expires_at`` for a grant that had
+        already lapsed. An operator switching back to normal mode in that state
+        was indistinguishable from a grant merely waiting to be renewed, and a
+        lease would have re-enabled auto-approval they had just turned off.
+
+        Proactive callers are unaffected: renewal runs while headroom remains, so
+        the grant is live by construction.
+
+        Fails (``renewed=False``) with ``reason``:
+
+        - ``invalid_ttl`` -- non-positive lease.
+        - ``never_active`` -- no grant has ever been activated. The ordinary state
+          of an install that does not use auto-approve; not an event.
+        - ``not_active`` -- a grant existed and is gone: lapsed, or deactivated.
+          Terminal for the mechanism, because a lease extends and never revives, so
+          a caller should surface it rather than retry.
+        - ``lease_cap`` -- the absolute ceiling is reached. Terminal: let the
+          grant lapse and say so. Only a human re-activation lifts it, and
+          because the bound is a deadline rather than a budget it cannot be
+          walked down in ever-smaller retries.
+        - ``audit_failed`` -- the SEL audit could not be written, so the lease is
+          refused rather than granted unrecorded.
+        - ``raced`` -- a concurrent ``activate``/``renew`` replaced or extended the
+          grant while the audit ran unlocked, so this lease would have overwritten
+          it. The override is still LIVE: a caller must not treat this like an
+          expiry and demote.
+        - ``no_extension`` -- the ceiling-truncated lease would land at or before
+          the deadline the grant already has, so applying it would SHORTEN the
+          grant. Also LIVE; also not an expiry.
+
+        A permanent grant returns ``renewed=True, ttl=-1`` and is left alone --
+        there is no deadline to extend, and installing one would be a silent
+        downgrade of the operator's standing decision.
+
+        Audit shape: ``authorized`` is written fail-closed BEFORE the commit (no
+        authority extended without a durable trace), then resolved by exactly one
+        of ``renewed`` or ``aborted``. The pre-commit event deliberately does NOT
+        say "renewed": unlike ``_commit_activation``, whose commit cannot be
+        refused, this one can be, and a log that over-reports renewals is worse
+        than one that reports them a moment late.
+        """
+        if ttl <= 0:
+            return RenewResult(renewed=False, ttl=0, source=source, reason="invalid_ttl")
+        lease = min(int(ttl), self._MAX_TTL)
+        now_mono = time.monotonic()
+        denied_reason = ""
+        granted = 0
+        seen_activated_at = 0.0
+        seen_expires_at = 0.0
+        with self._lock:
+            if self._active and self._permanent:
+                return RenewResult(renewed=True, ttl=-1, source=source)
+            if not self._grant_is_live_locked(now_mono):
+                # Two shapes of "no": never granted at all (the ordinary state of an
+                # install that does not use auto-approve) versus granted and now
+                # gone. Only the second is an event.
+                denied_reason = "never_active" if self._activated_at <= 0 else "not_active"
+            else:
+                ceiling = self._lease_ceiling_locked()
+                # Reduce the float clock to WHOLE SECONDS once, here, and do all
+                # lease arithmetic in ints from this point on. Computing the grant
+                # as `int(min(now + lease, ceiling) - now)` looks equivalent and is
+                # not: `(now + 900.0) - now` is 899.9999999999999 for some `now`,
+                # and int() truncates toward zero, so a full 900s lease silently
+                # became 899s depending on the host's clock bits. It passed locally
+                # and failed on three CI platforms at once.
+                #
+                # Flooring is also the correct direction for a ceiling bound: a
+                # partial second is dropped rather than crossed.
+                remaining = int(ceiling - now_mono)
+                if remaining <= 0:
+                    # Also catches sub-second headroom, which `now_mono >= ceiling`
+                    # let through and would have granted a 0s lease — nominally
+                    # "renewed" while expiring at once.
+                    denied_reason = "lease_cap"
+                else:
+                    # Truncate rather than refuse when only part of the lease
+                    # fits: refusing would drop the grant early for no gain, and
+                    # the ceiling still holds exactly. Both operands are ints, so
+                    # a lease that fits is granted EXACTLY.
+                    granted = min(lease, remaining)
+                    # Snapshot the grant's identity so the post-audit commit can
+                    # tell whether it is still extending the SAME grant it was
+                    # authorized against. Every mutator moves at least one of
+                    # these: activate() sets both, renew() moves the expiry,
+                    # deactivate() zeroes it.
+                    seen_activated_at = self._activated_at
+                    seen_expires_at = self._expires_at
+
+        if denied_reason:
+            ceiling_left = self.lease_ceiling_remaining_secs()
+            self._log_sel(
+                caller="safety_override",
+                operation="safety_override:renew_lease",
+                outcome="denied",
+                resources=(
+                    f"source:{source}, lease:{lease}s, reason:{denied_reason}, "
+                    f"ceiling_in:{ceiling_left}s"
+                ),
+            )
+            return RenewResult(renewed=False, ttl=0, source=source, reason=denied_reason)
+
+        # Audit BEFORE committing, fail-closed — the same contract
+        # ``_commit_activation`` follows: no extension of auto-approval authority
+        # without a durable trace of it. This path needs it MORE than a human
+        # renewal does, not less, because there is no operator present to notice
+        # that tools kept being approved.
+        #
+        # But the outcome word is ``authorized``, NOT ``renewed``. Unlike
+        # ``_commit_activation``, whose commit cannot be refused, this commit CAN
+        # be (a concurrent deactivate or re-activation), so recording "renewed"
+        # here would put a renewal in the audit log that never happened — the log
+        # would over-report exactly the fact an auditor consults it for. Intent is
+        # what is durable before the act; the act is recorded after it.
+        ceiling_left = self.lease_ceiling_remaining_secs()
+        try:
+            self._log_sel(
+                caller="safety_override",
+                operation="safety_override:renew_lease",
+                outcome="authorized",
+                resources=(
+                    f"source:{source}, granted:{granted}s, requested:{lease}s, "
+                    f"ceiling_in:{ceiling_left}s"
+                ),
+                critical=True,
+            )
+        except Exception:
+            logger.error("SEL audit failed; refusing safety override lease", exc_info=True)
+            return RenewResult(renewed=False, ttl=0, source=source, reason="audit_failed")
+
+        # What the `authorized` event above actually claimed. The commit block
+        # re-derives `granted` from a fresh clock, so without this the `aborted`
+        # event could cite a number that was never authorized.
+        authorized = granted
+
+        commit_failed = ""
+        with self._lock:
+            # The audit ran with the lock RELEASED (a SEL write must not be done
+            # under it), so both the grant AND the clock may have moved. Every
+            # decision below is re-derived from a FRESHLY read clock: reusing the
+            # pre-audit instant would let a grant that expired during the SEL write
+            # still read as live, and would then install a deadline measured from
+            # an instant already in the past.
+            commit_now = time.monotonic()
+            if not self._grant_is_live_locked(commit_now):
+                # Deactivated, or lapsed, while the audit ran unlocked. Refuse,
+                # and let the caller demote.
+                commit_failed = "not_active"
+            elif self._activated_at != seen_activated_at or self._expires_at != seen_expires_at:
+                # A concurrent activate()/renew() replaced or extended the grant.
+                # This lease was authorized against the OLD one, and committing it
+                # would overwrite a fresh multi-hour grant with one short lease.
+                # Refuse — but the caller must NOT demote, because the override is
+                # live; it is simply no longer this lease's business.
+                commit_failed = "raced"
+            else:
+                remaining = int(self._lease_ceiling_locked() - commit_now)
+                granted = min(lease, remaining) if remaining > 0 else 0
+                new_deadline = commit_now + granted
+                if granted <= 0:
+                    commit_failed = "lease_cap"
+                elif new_deadline <= self._expires_at:
+                    # A lease must never move the deadline BACKWARDS. A human
+                    # ``renew()`` can carry a grant past the automatic ceiling, so
+                    # the ceiling-truncated lease can be shorter than what the
+                    # operator already has — installing it would quietly cut their
+                    # grant short in the name of extending it.
+                    commit_failed = "no_extension"
+                else:
+                    self._active = True
+                    self._expires_at = new_deadline
+                    self._last_renewed_at = commit_now
+                    self._last_renewed_by = source
+
+        if commit_failed:
+            # Resolve the ``authorized`` record above: the lease was authorized but
+            # NOT applied. Non-critical — the fail-closed requirement is already
+            # satisfied by the pre-commit event, and refusing to report a refusal
+            # would be the wrong way round.
+            self._log_sel(
+                caller="safety_override",
+                operation="safety_override:renew_lease",
+                outcome="aborted",
+                resources=(
+                    f"source:{source}, authorized:{authorized}s, reason:{commit_failed}"
+                ),
+            )
+            return RenewResult(renewed=False, ttl=0, source=source, reason=commit_failed)
+
+        self._log_sel(
+            caller="safety_override",
+            operation="safety_override:renew_lease",
+            outcome="renewed",
+            resources=f"source:{source}, granted:{granted}s",
+        )
+        return RenewResult(renewed=True, ttl=granted, source=source)
+
+    def has_been_renewed(self) -> bool:
+        """True when the current grant has already been renewed at least once.
+
+        Lets a caller tell a grant's FIRST automatic lease from its later ones
+        without tracking that itself — used to notify a human once per grant
+        rather than once per lease.
+        """
+        with self._lock:
+            return self._last_renewed_at > 0
+
+    def lease_ceiling_remaining_secs(self) -> int:
+        """Seconds left before the absolute automatic-extension ceiling.
+
+        0 when there is nothing to extend or the ceiling has passed; -1 for a
+        permanent grant, which has no ceiling.
+        """
+        with self._lock:
+            if self._active and self._permanent:
+                return -1
+            if self._expires_at <= 0 or self._activated_at <= 0:
+                return 0
+            return max(0, int(self._lease_ceiling_locked() - time.monotonic()))
 
     def deactivate(self, source: str) -> None:
         """Deactivate the override immediately.  No-op if already inactive."""
@@ -586,7 +900,25 @@ class SafetyOverride:
             except Exception:
                 logger.warning("on_expired callback raised", exc_info=True)
 
-        return False
+        # Re-read rather than returning a literal False. The callback runs
+        # outside the lock precisely so it may act, and one legitimate action is
+        # to renew the grant (``renew_lease``, for an unattended loop that is
+        # still armed). Returning False unconditionally would report the grant
+        # as gone to the very caller that triggered the lapse, while every later
+        # caller saw it live — and that caller is frequently a tool-approval
+        # check, so the visible symptom was one unexplained approval prompt
+        # immediately after the boundary, then normal operation. That is a
+        # near-unattributable flake, not a graceful degradation.
+        #
+        # Reading under the lock keeps this honest against a concurrent
+        # deactivate: the answer is whatever the state says now, not what this
+        # frame decided a moment ago.
+        with self._lock:
+            if not self._active:
+                return False
+            if self._permanent:
+                return True
+            return time.monotonic() < self._expires_at
 
     def remaining_secs(self) -> int:
         """Return seconds remaining; 0 if inactive, -1 if it never expires."""
@@ -599,6 +931,48 @@ class SafetyOverride:
                 return -1
             remaining = self._expires_at - now_mono
             return max(0, int(remaining))
+
+    def remaining_secs_passive(self) -> int:
+        """Seconds remaining, WITHOUT triggering lazy expiry.
+
+        ``remaining_secs`` calls ``is_active()`` first, which is the lazy-expiry
+        trigger: it can fire ``on_expired``, and the dashboard's handler touches
+        ``state`` (WebSocket sends, slot updates). That makes the plain accessor
+        unsafe to call from a worker thread, where there is no running event loop —
+        the sends fail, clients are dropped, and the expiry notice is lost.
+
+        Callers off the event loop use this. Nothing is lost by not triggering
+        expiry here: every other ``is_active()`` caller still does, so the
+        callback fires from a thread that can service it.
+
+        A grant already past its deadline reports 0 rather than a negative number,
+        so a caller sees "no headroom" and can decide to renew — which
+        ``renew_lease`` handles, bounded by the ceiling.
+        """
+        now_mono = time.monotonic()
+        with self._lock:
+            if not self._active:
+                return 0
+            if self._permanent:
+                return -1
+            return max(0, int(self._expires_at - now_mono))
+
+    def log_lease_denied(self, source: str, reason: str) -> None:
+        """Record a lease denial decided by a CALLER, not by this object.
+
+        ``renew_lease`` audits every denial it makes itself; a caller that refuses
+        to even ask — because policy forbids extending — is making the same kind of
+        permission decision and it belongs in the same audit stream under the same
+        operation name. Without this, "auto-approval stopped being extended because
+        the operator disabled it" is the one such decision with no trace, and an
+        auditor reconstructing why an unattended run stalled would find nothing.
+        """
+        self._log_sel(
+            caller="safety_override",
+            operation="safety_override:renew_lease",
+            outcome="denied",
+            resources=f"source:{source}, reason:{reason}",
+        )
 
     def status(self) -> OverrideStatus:
         """Return a point-in-time status snapshot.
