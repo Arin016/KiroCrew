@@ -61,6 +61,31 @@ The doctor also runs a live handshake probe against each managed server and
 prints the child's stderr tail on failure, which is usually where the real cause
 (an import error, a bad path) shows up.
 
+### MCP servers stop sharing a pooled backend
+
+With the shared MCP gateway enabled (`mcp_gateway.enabled`), each session reaches
+a server through a small stub that registers with the gateway daemon. If that
+registration does not complete in time the stub starts its own copy of the server
+instead: the session keeps working, but it no longer shares a backend, and the
+only signal is one record in `$KIROCREW_HOME/logs/stub_fallback.jsonl` (default
+`~/.kiro/crew/logs/stub_fallback.jsonl`) whose `reason` is `handshake_timeout`.
+
+```bash
+grep -c handshake_timeout ~/.kiro/crew/logs/stub_fallback.jsonl
+```
+
+The budget covers only the local connect-and-register with the daemon, so a slow
+MCP server cannot spend it — a saturated host or a stalled gateway can.
+
+- **Default:** 10 seconds
+- **Env override:** `KIROCREW_MCP_HANDSHAKE_TIMEOUT_SECS`, greater than 0 and
+  under 300. A value that is not a number, or outside that range, is ignored and
+  the default applies.
+
+Raise it if those records cluster while heavy local builds or test runs are
+saturating the machine. An absent or refused socket fails immediately and is
+unaffected by this setting.
+
 ### Dashboard not loading
 
 ```bash

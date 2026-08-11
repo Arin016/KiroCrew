@@ -41,7 +41,35 @@ from kiro_crew.mcp_gateway.pool import READ_BUFFER_LIMIT_BYTES, PoolKey
 
 logger = logging.getLogger(__name__)
 
-_HANDSHAKE_TIMEOUT_SECS = 3.0
+#: Budget for the whole of :func:`handshake` — connect, write Register, read the
+#: gateway's reply. That is local IPC with gatewayd only; the target server's own
+#: startup happens later and inside gatewayd, so a slow ``npx`` or a remote
+#: endpoint can never spend this budget.
+#:
+#: Only ONE condition can reach it: a gateway that is listening but slow to
+#: answer, i.e. a stalled loop or a CPU-starved host. Every other refusal shape
+#: (socket absent, connect refused, rejected, malformed reply) raises inside
+#: ``handshake`` and returns immediately without consuming the budget — so a
+#: generous value costs nothing on the paths users actually hit, and is paid only
+#: where waiting is the correct answer.
+#:
+#: Sized generously because expiry is self-amplifying: the stub degrades to a
+#: per-session ``execvpe``, which spawns a backend that pooling would have
+#: shared, so the extra processes add load to the contended host that caused the
+#: stall in the first place.
+#:
+#: What bounds raising it further is the MCP client's own ``initialize`` budget:
+#: the real server is not exec'd until this expires, so a value approaching that
+#: budget trades a lost pool for a dropped server.
+_HANDSHAKE_TIMEOUT_SECS = 10.0
+
+#: Seconds, overriding :data:`_HANDSHAKE_TIMEOUT_SECS`.
+_HANDSHAKE_TIMEOUT_ENV = "KIROCREW_MCP_HANDSHAKE_TIMEOUT_SECS"
+
+#: Exclusive upper bound on an accepted override. Bounds a typo (``600`` for
+#: ``6.00``) that would otherwise hang session startup for minutes waiting on a
+#: gateway that is never going to answer.
+_HANDSHAKE_TIMEOUT_MAX_SECS = 300.0
 
 # --- Bridge liveness (ping-while-outstanding) constants ---------------------
 # Interval between successive stub→gateway liveness pings while at least one
@@ -510,6 +538,48 @@ class FallbackRequestedError(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+def _handshake_timeout_secs() -> float:
+    """Resolve the :func:`handshake` budget, honouring the env override.
+
+    Read from the environment rather than ``config.json`` to stay inside the
+    import budget this module's own docstring declares (stdlib + pool +
+    mcp_caller), and because this is a stub-process diagnostic knob rather than a
+    product setting -- the same shape as ``KIROCREW_MCP_LOG`` and
+    ``KIROCREW_MCP_SOCKET``. The pool and backend tunables that do carry config
+    keys are resolved inside the gateway daemon, which loads config regardless.
+
+    A malformed, non-positive, or absurd value yields the default instead of
+    raising. The stub's contract is to always degrade to a per-session exec, and
+    an override typo that killed it here would do so *before* ``fallback_exec``
+    can run — the same trap the logging-level guard in ``_amain`` exists for.
+    """
+    raw = os.environ.get(_HANDSHAKE_TIMEOUT_ENV)
+    if not raw:
+        return _HANDSHAKE_TIMEOUT_SECS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "ignoring unparseable %s=%r; using %ss",
+            _HANDSHAKE_TIMEOUT_ENV,
+            raw,
+            _HANDSHAKE_TIMEOUT_SECS,
+        )
+        return _HANDSHAKE_TIMEOUT_SECS
+    # Chained comparison also rejects NaN (every comparison against it is false)
+    # and both infinities, neither of which is a usable wait_for timeout.
+    if not 0.0 < value < _HANDSHAKE_TIMEOUT_MAX_SECS:
+        logger.warning(
+            "ignoring out-of-range %s=%r (want 0 < secs < %s); using %ss",
+            _HANDSHAKE_TIMEOUT_ENV,
+            raw,
+            _HANDSHAKE_TIMEOUT_MAX_SECS,
+            _HANDSHAKE_TIMEOUT_SECS,
+        )
+        return _HANDSHAKE_TIMEOUT_SECS
+    return value
 
 
 async def handshake(
@@ -1096,7 +1166,7 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
     try:
         reader, writer, stub_uuid, registered = await asyncio.wait_for(
             handshake(args.socket, payload),
-            timeout=_HANDSHAKE_TIMEOUT_SECS,
+            timeout=_handshake_timeout_secs(),
         )
     except asyncio.TimeoutError:
         log_fallback("handshake_timeout", payload["stub_uuid"], pool_label, args)
