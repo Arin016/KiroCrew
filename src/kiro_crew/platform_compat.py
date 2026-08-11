@@ -1077,6 +1077,72 @@ def tool_outside_trusted_dirs(name: str) -> str | None:
     return shutil.which(name)
 
 
+# Where third-party developer CLIs install, per platform. These are NOT system
+# binaries: `git` and `gh` never live in the system directory, so
+# `trusted_system_bin` cannot find them, and resolving them off ``PATH`` is what
+# `trusted_cli_bin` exists to avoid. The knowledge is platform-specific by nature,
+# which is why it lives in this module.
+#
+# ``/run/current-system/sw/bin`` is the NixOS system profile: on that distribution it
+# is where git actually is, and `_TRUSTED_SYSTEM_BIN_DIRS` already trusts it, so
+# leaving it out here would fail closed on a whole platform. The ``sbin`` entries from
+# that list are deliberately NOT copied -- no developer CLI installs there.
+_CLI_BIN_DIRS_POSIX = (
+    "/usr/bin",
+    "/bin",
+    "/run/current-system/sw/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+)
+_CLI_BIN_DIRS_WINDOWS = (
+    r"C:\Program Files\Git\cmd",
+    r"C:\Program Files\Git\bin",
+    r"C:\Program Files (x86)\Git\cmd",
+    r"C:\Program Files\GitHub CLI",
+)
+
+
+def _cli_candidate_trusted(path: str) -> bool:
+    """False when THIS user could replace the binary at *path*.
+
+    Both the file and its directory are checked, because writing the directory is
+    enough to swap the entry out. Two of the POSIX directories are routinely
+    chowned to the console user (Homebrew's prefix, and ``/usr/local/bin`` on some
+    setups), so the check is what makes the pinned list meaningful rather than
+    decorative. Windows entries need elevation to write, so it is POSIX-only.
+    """
+
+    if not IS_POSIX:
+        return True
+    return not (os.access(path, os.W_OK)
+                or os.access(os.path.dirname(path) or os.sep, os.W_OK))
+
+
+def trusted_cli_bin(name: str) -> str | None:
+    """Resolve a third-party developer CLI to an absolute path, ignoring ``PATH``.
+
+    A gateway's ``PATH`` can legitimately lead with agent-writable directories (a
+    worktree venv's ``bin``, ``~/.local/bin``), so a bare name in argv lets a
+    planted shim run with the gateway's environment. Unattended callers — a
+    scheduled scan, a background audit — are where that goes unnoticed longest.
+
+    Returns ``None`` when the tool is absent OR only present somewhere this user
+    could overwrite; the caller decides whether that is fatal or a degraded mode.
+    """
+
+    directories = _CLI_BIN_DIRS_WINDOWS if IS_WINDOWS else _CLI_BIN_DIRS_POSIX
+    suffixes = _WINDOWS_BIN_SUFFIXES if IS_WINDOWS else ("",)
+    for directory in directories:
+        for suffix in suffixes:
+            candidate = os.path.join(directory, name + suffix)
+            if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+                continue
+            if not _cli_candidate_trusted(candidate):
+                continue
+            return candidate
+    return None
+
+
 def _posix_process_parent_map() -> dict[int, int]:
     """Return one ``ps`` PID -> PPID snapshot; empty when enumeration fails."""
 

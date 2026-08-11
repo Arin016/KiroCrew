@@ -115,6 +115,17 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "the sidecar is durable and read straight back to the panel.",
     ),
     (
+        "PR postmortem evidence bundles",
+        "apps/builtins/pr_postmortem/engine/bundle.py",
+        "An evidence bundle carries the fix PR's raw diff, the culprit's diff, and "
+        "PR titles, bodies and review comments written by anyone who can open a "
+        "pull request. It is written to disk and then handed to an analyst model as "
+        "evidence, and a fix PR's diff is precisely where a credential that was "
+        "committed and then removed still lives — so the write is the output "
+        "boundary and is redacted there, covering the file and every reader of it "
+        "including the prompt built from it.",
+    ),
+    (
         "Session storage inventory",
         "dashboard/handlers/session_storage.py",
         "A session's title and its first message, served by "
@@ -749,6 +760,10 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # egress boundary; the modules that CALL it (mochi routes/hooks) are the
         # registered sinks.
         "apps/builtins/mochi/redact.py",
+        # Same shape: a leaf scrubber for the PR-postmortem app. The registered
+        # sink is `pr_postmortem/engine/bundle.py`, which is where the scrubbed
+        # value is actually written.
+        "apps/builtins/pr_postmortem/engine/redact.py",
         # Same shape: applies a redactor the CALLER injects, to scan the form a
         # platform will actually render (markup collapsed, ANSI stripped). It owns
         # no output of its own -- the registered sinks are the modules that call

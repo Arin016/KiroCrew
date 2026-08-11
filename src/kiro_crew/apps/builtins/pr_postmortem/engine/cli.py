@@ -1,0 +1,255 @@
+"""CLI for the attribution engine.
+    python3 -m engine.cli attribute --repo owner/name --repo-path /path --pr 1799
+    python3 -m engine.cli batch     --repo owner/name --repo-path /path --limit 20
+    python3 -m engine.cli discover  --repo-path /path --limit 20
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import sys
+
+from .analysis import build_prompt, fix_pr_from_path, is_about, load_and_validate
+from .attribution import attribute
+from .bundle import write_bundles
+from .discover import discover_fix_prs
+from .store import import_jsonl, reports_dir, touch_scan
+
+# Distinguishes "no bundle to compare against" from a bundle whose culprit is None.
+_NO_EXPECTATION = object()
+
+
+def _common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--repo", default="kirodotdev/KiroCrew", help="owner/name on GitHub")
+    p.add_argument("--repo-path", required=True, help="local clone of that repo")
+    p.add_argument("--branch", default="origin/main", help="branch fixes land on")
+    p.add_argument(
+        "--detect-moves",
+        action="store_true",
+        help="pass -C to git blame (follows moved code; slower)",
+    )
+
+
+def _summary(d: dict) -> str:
+    top = (d.get("candidates") or [{}])[0]
+    culprit = f"#{top.get('pr')}" if top.get("pr") else (top.get("commits") or [""])[0][:12]
+    flags = ",".join(d.get("flags") or []) or "-"
+    return (
+        f"fix #{d['fix_pr']:<6} -> culprit {culprit:<10} "
+        f"conf={d.get('confidence', 0):<5} {d.get('verdict', ''):<9} "
+        f"signal={d.get('signal_weight', 0):<7} flags={flags}"
+    )
+
+
+def _bundle_culprit(bundle_dir: str, fix_pr: int) -> tuple[bool, object]:
+    """The culprit a bundle names for *fix_pr*: ``(found, culprit_pr)``.
+
+    ``found`` distinguishes "no bundle to compare against" from "the bundle says
+    the culprit is None", which is a real value for a culprit commit that predates
+    the PR workflow.
+    """
+    path = os.path.join(bundle_dir, f"bundle-{fix_pr}.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False, None
+    if not isinstance(data, dict):
+        return False, None
+    return True, data.get("culprit_pr")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="engine.cli")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p_att = sub.add_parser("attribute", help="attribute one fix PR")
+    _common(p_att)
+    p_att.add_argument("--pr", type=int, required=True)
+    p_att.add_argument("--out", help="write JSON here instead of stdout")
+    p_batch = sub.add_parser("batch", help="attribute the N most recent fix PRs")
+    _common(p_batch)
+    p_batch.add_argument("--limit", type=int, default=20)
+    p_batch.add_argument("--out", required=True, help="JSONL output path")
+    p_disc = sub.add_parser("discover", help="list recent merged fix PRs")
+    p_disc.add_argument("--repo-path", required=True)
+    p_disc.add_argument("--branch", default="origin/main")
+    p_disc.add_argument("--limit", type=int, default=20)
+    p_bun = sub.add_parser("bundles", help="build evidence bundles from a batch JSONL")
+    p_bun.add_argument("--repo", default="kirodotdev/KiroCrew")
+    p_bun.add_argument("--repo-path", required=True)
+    p_bun.add_argument("--jsonl", required=True, help="attribution batch output")
+    p_bun.add_argument("--out-dir", required=True)
+    p_bun.add_argument(
+        "--only",
+        help="comma-separated fix PR numbers; default = every report in the JSONL",
+    )
+    p_chk = sub.add_parser("check-analysis", help="validate analysis JSON files")
+    p_chk.add_argument("--dir", required=True)
+    p_chk.add_argument(
+        "--bundle-dir",
+        help="cross-check each analysis against the bundle that requested it; "
+             "without this only the schema and the filename are validated",
+    )
+    p_pr = sub.add_parser("prompts", help="write per-pair analysis prompt files")
+    p_pr.add_argument("--repo", default="kirodotdev/KiroCrew")
+    p_pr.add_argument("--bundle-dir", required=True)
+    p_pr.add_argument("--out-dir", required=True, help="where analysis-*.json will go")
+    p_pr.add_argument("--prompt-dir", required=True)
+    p_pr.add_argument(
+        "--force",
+        action="store_true",
+        help="rewrite prompts for pairs that already have an analysis",
+    )
+    p_imp = sub.add_parser(
+        "import-reports", help="split a batch JSONL into per-PR report files"
+    )
+    p_imp.add_argument("--jsonl", required=True)
+    args = ap.parse_args(argv)
+    if args.cmd == "import-reports":
+        n = import_jsonl(args.jsonl)
+        print(f"imported {n} reports into {reports_dir()}")
+        return 0
+    if args.cmd == "prompts":
+
+        os.makedirs(args.prompt_dir, exist_ok=True)
+        os.makedirs(args.out_dir, exist_ok=True)
+        written = []
+        skipped = 0
+        for bpath in sorted(glob.glob(f"{args.bundle_dir}/bundle-*.json")):
+            with open(bpath, encoding="utf-8") as fh:
+                b = json.load(fh)
+            fix_pr = b["fix_pr"]
+            out_path = os.path.join(args.out_dir, f"analysis-{fix_pr}.json")
+            # Idempotence: a repeat scan must not re-analyse pairs it already
+            # explained, or every cycle pays for every pair again.
+            # Existence alone is the wrong test, though -- when attribution moves
+            # a pair to a different culprit, the stored analysis is about the old
+            # one and has to be redone. So freshness means "the stored analysis is
+            # about THIS culprit", and a stale one is simply regenerated: the
+            # analysis file is derived from the bundle, so there is nothing in it
+            # worth preserving once the bundle names a different culprit.
+            fresh = is_about(out_path, fix_pr, b.get("culprit_pr"))
+            if fresh and not args.force:
+                skipped += 1
+                continue
+            text = build_prompt(
+                args.repo, bpath, out_path, fix_pr, b.get("culprit_pr")
+            )
+            ppath = os.path.join(args.prompt_dir, f"prompt-{fix_pr}.txt")
+            with open(ppath, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            written.append(ppath)
+            print(ppath)
+        print(
+            f"{len(written)} prompts written, {skipped} skipped (already analysed)",
+            file=sys.stderr,
+        )
+        return 0
+    if args.cmd == "bundles":
+        reports = [json.loads(line) for line in open(args.jsonl, encoding="utf-8") if line.strip()]
+        if args.only:
+            wanted = {int(x) for x in args.only.split(",") if x.strip()}
+            reports = [r for r in reports if r.get("fix_pr") in wanted]
+        paths = write_bundles(args.repo, args.repo_path, reports, args.out_dir)
+        for p in paths:
+            print(p)
+        print(f"{len(paths)} bundles written", file=sys.stderr)
+        return 0
+    if args.cmd == "check-analysis":
+
+        files = sorted(glob.glob(f"{args.dir}/analysis-*.json"))
+        if not files:
+            print(f"no analysis-*.json under {args.dir}")
+            return 1
+        bad = 0
+        for path in files:
+            # When a bundle dir is given, the bundle is the authority on which pair
+            # was requested, so the analysis's own `culprit_pr` is checked against
+            # it rather than taken on trust.
+            named = fix_pr_from_path(path)
+            expected: object = _NO_EXPECTATION
+            if args.bundle_dir and named is not None:
+                found, culprit = _bundle_culprit(args.bundle_dir, named)
+                if found:
+                    expected = culprit
+            if expected is _NO_EXPECTATION:
+                obj, errs = load_and_validate(path)
+            else:
+                obj, errs = load_and_validate(path, expected_culprit=expected)
+            name = path.rsplit("/", 1)[-1]
+            if errs or obj is None:
+                bad += 1
+                print(f"INVALID {name}")
+                for e in errs or ["unreadable"]:
+                    print(f"    - {e}")
+            else:
+                verdict = obj.get("culprit_link_verdict")
+                rule = obj.get("candidate_rule") or {}
+                kind = rule.get("kind", "-") if isinstance(rule, dict) else "-"
+                mode = (obj.get("failure_mode") or "-")[:44]
+                inj = " INJECTION-SEEN" if obj.get("prompt_injection_observed") else ""
+                print(f"ok      {name:<22} {verdict:<10} [{kind:<4}] {mode}{inj}")
+        print(f"\n{len(files) - bad}/{len(files)} valid")
+        return 1 if bad else 0
+    if args.cmd == "discover":
+        for fx in discover_fix_prs(args.repo_path, args.branch, args.limit):
+            print(f"#{fx.pr:<6} {fx.sha[:12]} {fx.date[:10]} {fx.subject}")
+        return 0
+    if args.cmd == "attribute":
+        att = attribute(
+            args.repo, args.repo_path, args.pr, args.branch, args.detect_moves
+        )
+        payload = json.dumps(att.to_dict(), indent=2)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(payload + "\n")
+            print(_summary(att.to_dict()))
+        else:
+            print(payload)
+        return 0
+    # batch
+    fixes = discover_fix_prs(args.repo_path, args.branch, args.limit)
+    print(f"discovered {len(fixes)} fix PRs", file=sys.stderr)
+    verdicts: dict[str, int] = {}
+    errors = 0
+    with open(args.out, "w", encoding="utf-8") as fh:
+        for fx in fixes:
+            try:
+                att = attribute(
+                    args.repo, args.repo_path, fx.pr, args.branch, args.detect_moves
+                )
+                d = att.to_dict()
+            except Exception as exc:  # noqa: BLE001 - one bad PR must not kill the run
+                d = {
+                    "repo": args.repo,
+                    "fix_pr": fx.pr,
+                    "verdict": "error",
+                    "flags": ["engine_error"],
+                    "notes": [f"{type(exc).__name__}: {exc}"],
+                }
+            v = str(d.get("verdict") or "?")
+            verdicts[v] = verdicts.get(v, 0) + 1
+            errors += 1 if v == "error" else 0
+            fh.write(json.dumps(d) + "\n")
+            fh.flush()
+            print(_summary(d) if d.get("verdict") != "error" else f"fix #{fx.pr} ERROR: {d['notes'][0]}")
+    # Record the scan so the UI can show when it last ran. Doing it here rather
+    # than leaving it to the cron's agent means the timestamp cannot silently go
+    # missing when the workflow is driven some other way.
+    rec = touch_scan(
+        {
+            "repo": args.repo,
+            "scanned": len(fixes),
+            "verdicts": verdicts,
+            "errors": errors,
+        }
+    )
+    print(f"last_scan recorded at {rec['at']}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
