@@ -4720,6 +4720,8 @@
       "type_2_chars_to_search_files": "Geben Sie 2+ Zeichen ein, um Dateien und Ordner zu suchen…"
     },
     "fileRenderers": {
+      "download": "Herunterladen",
+      "download_file": "{{filename}} herunterladen",
       "empty_file": "Leere Datei",
       "html_preview": "HTML-Vorschau",
       "invalid_json": "Ungültiges JSON:",
@@ -4727,6 +4729,7 @@
       "lines": "Zeilen",
       "more": "mehr",
       "null": "null",
+      "office_download_hint": "Office-Dokumente können nicht inline vorangezeigt werden. Zum Öffnen in Word, Excel, PowerPoint oder einem kompatiblen Viewer herunterladen.",
       "open_in_new_tab": "In neuem Tab öffnen",
       "pdf_preview": "PDF-Vorschau",
       "rows": "Zeilen",

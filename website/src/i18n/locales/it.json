@@ -4796,6 +4796,8 @@
       "type_2_chars_to_search_files": "Digita almeno 2 caratteri per cercare file e cartelle…"
     },
     "fileRenderers": {
+      "download": "Scarica",
+      "download_file": "Scarica {{filename}}",
       "empty_file": "File vuoto",
       "html_preview": "Anteprima HTML",
       "invalid_json": "JSON non valido:",
@@ -4803,6 +4805,7 @@
       "lines": "righe",
       "more": "altri",
       "null": "null",
+      "office_download_hint": "I documenti Office non possono essere visualizzati in linea. Scaricalo per aprirlo in Word, Excel, PowerPoint o un visualizzatore compatibile.",
       "open_in_new_tab": "Apri in una nuova scheda",
       "pdf_preview": "Anteprima PDF",
       "rows": "righe",

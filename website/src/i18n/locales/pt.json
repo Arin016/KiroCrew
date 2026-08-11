@@ -4796,6 +4796,8 @@
       "type_2_chars_to_search_files": "Digite 2+ caracteres para pesquisar arquivos e pastas…"
     },
     "fileRenderers": {
+      "download": "Baixar",
+      "download_file": "Baixar {{filename}}",
       "empty_file": "Arquivo vazio",
       "html_preview": "Pré-visualização HTML",
       "invalid_json": "JSON inválido:",
@@ -4803,6 +4805,7 @@
       "lines": "linhas",
       "more": "mais",
       "null": "null",
+      "office_download_hint": "Documentos do Office não podem ser visualizados diretamente. Baixe para abrir no Word, Excel, PowerPoint ou um visualizador compatível.",
       "open_in_new_tab": "Abrir em nova aba",
       "pdf_preview": "Pré-visualização de PDF",
       "rows": "linhas",

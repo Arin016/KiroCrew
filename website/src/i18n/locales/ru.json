@@ -4872,6 +4872,8 @@
       "type_2_chars_to_search_files": "Введите 2+ символа для поиска файлов и папок…"
     },
     "fileRenderers": {
+      "download": "Скачать",
+      "download_file": "Скачать {{filename}}",
       "empty_file": "Пустой файл",
       "html_preview": "Просмотр HTML",
       "invalid_json": "Некорректный JSON:",
@@ -4879,6 +4881,7 @@
       "lines": "строк",
       "more": "ещё",
       "null": "null",
+      "office_download_hint": "Документы Office нельзя просмотреть встроенно. Скачайте, чтобы открыть в Word, Excel, PowerPoint или совместимом просмотрщике.",
       "open_in_new_tab": "Открыть в новой вкладке",
       "pdf_preview": "Просмотр PDF",
       "rows": "строк",

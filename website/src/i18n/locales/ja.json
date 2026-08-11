@@ -4644,6 +4644,8 @@
       "type_2_chars_to_search_files": "ファイルとフォルダーを検索するには 2 文字以上入力してください…"
     },
     "fileRenderers": {
+      "download": "ダウンロード",
+      "download_file": "{{filename}} をダウンロード",
       "empty_file": "空のファイル",
       "html_preview": "HTML プレビュー",
       "invalid_json": "無効な JSON：",
@@ -4651,6 +4653,7 @@
       "lines": "行",
       "more": "その他",
       "null": "null",
+      "office_download_hint": "Office ドキュメントはインラインでプレビューできません。Word、Excel、PowerPoint、または互換ビューアーで開くには、ダウンロードしてください。",
       "open_in_new_tab": "新しいタブで開く",
       "pdf_preview": "PDF プレビュー",
       "rows": "行",

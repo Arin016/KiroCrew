@@ -4796,6 +4796,8 @@
       "type_2_chars_to_search_files": "Escribe 2+ caracteres para buscar archivos y carpetas…"
     },
     "fileRenderers": {
+      "download": "Descargar",
+      "download_file": "Descargar {{filename}}",
       "empty_file": "Archivo vacío",
       "html_preview": "Vista previa HTML",
       "invalid_json": "JSON no válido:",
@@ -4803,6 +4805,7 @@
       "lines": "líneas",
       "more": "más",
       "null": "null",
+      "office_download_hint": "Los documentos de Office no se pueden previsualizar en línea. Descárgalo para abrirlo en Word, Excel, PowerPoint o un visor compatible.",
       "open_in_new_tab": "Abrir en una pestaña nueva",
       "pdf_preview": "Vista previa PDF",
       "rows": "filas",

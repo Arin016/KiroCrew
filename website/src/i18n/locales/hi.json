@@ -4720,6 +4720,8 @@
       "type_2_chars_to_search_files": "फ़ाइलें और फ़ोल्डर खोजने के लिए 2+ अक्षर टाइप करें…"
     },
     "fileRenderers": {
+      "download": "डाउनलोड करें",
+      "download_file": "{{filename}} डाउनलोड करें",
       "empty_file": "खाली फ़ाइल",
       "html_preview": "HTML पूर्वावलोकन",
       "invalid_json": "अमान्य JSON:",
@@ -4727,6 +4729,7 @@
       "lines": "पंक्तियाँ",
       "more": "और",
       "null": "null",
+      "office_download_hint": "Office दस्तावेज़ों का इनलाइन पूर्वावलोकन नहीं किया जा सकता। Word, Excel, PowerPoint या किसी संगत व्यूअर में खोलने के लिए डाउनलोड करें।",
       "open_in_new_tab": "नए टैब में खोलें",
       "pdf_preview": "PDF पूर्वावलोकन",
       "rows": "पंक्तियाँ",

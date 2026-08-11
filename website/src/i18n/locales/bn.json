@@ -4720,6 +4720,8 @@
       "type_2_chars_to_search_files": "ফাইল ও ফোল্ডার খুঁজতে 2+ অক্ষর টাইপ করুন…"
     },
     "fileRenderers": {
+      "download": "ডাউনলোড",
+      "download_file": "{{filename}} ডাউনলোড করুন",
       "empty_file": "খালি ফাইল",
       "html_preview": "HTML প্রিভিউ",
       "invalid_json": "অবৈধ JSON:",
@@ -4727,6 +4729,7 @@
       "lines": "লাইন",
       "more": "আরও",
       "null": "null",
+      "office_download_hint": "Office ডকুমেন্ট ইনলাইনে প্রিভিউ করা যায় না। Word, Excel, PowerPoint বা সামঞ্জস্যপূর্ণ কোনও ভিউয়ারে খুলতে ডাউনলোড করুন।",
       "open_in_new_tab": "নতুন ট্যাবে খুলুন",
       "pdf_preview": "PDF প্রিভিউ",
       "rows": "সারি",
