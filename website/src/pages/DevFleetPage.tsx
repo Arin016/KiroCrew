@@ -559,6 +559,7 @@ export default function DevFleetPage() {
     queryKey: ['dev-fleet', 'fleet'],
     queryFn: () => api.get<FleetData>('/fleet'),
     refetchInterval: POLL_MS,
+    refetchOnMount: 'always',
   })
 
   /* ─── react-query: disk data ─── */
@@ -661,14 +662,22 @@ export default function DevFleetPage() {
   /* ─── Sync reattach on page load ─── */
   useEffect(() => {
     if (!fleet?.sync_run_id || syncAttachedRef.current) return
+    if (syncRun?.rid === fleet.sync_run_id) return // already tracking this run
     syncAttachedRef.current = true
     const rid = fleet.sync_run_id
-    api.get<{ status?: string; output?: string[]; started?: number; step_label?: string }>('/run?id=' + rid)
+    api.get<{ status?: string; output?: string[]; exit_code?: number; started?: number; step_label?: string }>('/run?id=' + rid)
       .then((run) => {
-        if (run?.status === 'running') {
-          const t0 = run.started ? run.started * 1000 : Date.now()
-          setSyncRun({ rid, status: 'running', lines: run.output || [], startedAt: t0, stepLabel: run.step_label })
+        if (!run) return
+        const t0 = run.started ? run.started * 1000 : Date.now()
+        const out = run.output || []
+        const last = [...out].reverse().find((l) => l?.trim() && !STEP_MARKER_RE.test(l)) || ''
+        if (run.status === 'running') {
+          setSyncRun({ rid, status: 'running', lines: out, startedAt: t0, stepLabel: run.step_label })
           pollSyncRun(rid, t0)
+        } else if (run.status === 'done' || run.status === 'timeout') {
+          // Show the completed/failed result so user sees it on revisit
+          const okRun = run.exit_code === 0
+          setSyncRun({ rid, status: okRun ? 'done' : 'error', lines: out, startedAt: t0, exit: run.exit_code, last })
         }
       })
       .catch(() => { /* run endpoint unreachable — nothing to reattach */ })
@@ -862,6 +871,12 @@ export default function DevFleetPage() {
     setFlag('__syncmain', true)
     try {
       const r = await api.post<{ ok?: boolean; run_id?: string; error?: string }>('/sync', {})
+      if (!r?.ok && r?.run_id) {
+        // Sync already running — reattach to the in-flight run instead of erroring
+        setSyncRun({ rid: r.run_id, status: 'running', lines: [], startedAt: Date.now() })
+        pollSyncRun(r.run_id, Date.now())
+        return
+      }
       if (!r?.ok || !r.run_id) { notify(r?.error || i18nT('pages.devFleetPage.pull_build_failed_to_start'), { type: 'error' }); setFlag('__syncmain', false); return }
       setSyncRun({ rid: r.run_id, status: 'running', lines: [], startedAt: Date.now() })
       pollSyncRun(r.run_id, Date.now())

@@ -219,6 +219,60 @@ describe('DevFleetPage', () => {
     await waitFor(() => expect(runCalls).toBeGreaterThan(0), { timeout: 3000 })
   })
 
+  it('reattaches to in-flight sync when syncMain gets "already running" with run_id', async () => {
+    let runPolls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url, opts) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      if (u.includes('/fleet')) return Promise.resolve(new Response(JSON.stringify(FLEET), { status: 200 }))
+      if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 51200 }), { status: 200 }))
+      // POST /sync returns "already running" with the in-flight run_id
+      if (u.includes('/sync') && opts?.method?.toUpperCase() === 'POST') {
+        return Promise.resolve(new Response(JSON.stringify({ ok: false, error: 'sync already running', run_id: 'run-inflight-99' }), { status: 200 }))
+      }
+      if (u.includes('/run?id=run-inflight-99')) {
+        runPolls++
+        return Promise.resolve(new Response(JSON.stringify({
+          status: 'running', output: ['npm ci...'], started: Date.now() / 1000 - 10,
+        }), { status: 200 }))
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('feature-x')).toBeInTheDocument())
+    // Click Pull+Build confirm
+    const trigger = screen.getByText('Pull+Build').closest('button') as HTMLButtonElement
+    fireEvent.click(trigger)
+    const start = await screen.findByRole('button', { name: 'Start' })
+    fireEvent.click(start)
+    // Should reattach and start polling the in-flight run
+    await waitFor(() => expect(runPolls).toBeGreaterThan(0), { timeout: 3000 })
+  })
+
+  it('reattaches to completed sync on page load showing result', async () => {
+    const FLEET_WITH_DONE_SYNC = {
+      ...FLEET,
+      sync_run_id: 'run-done-456',
+      build_pending: true,
+    }
+    let runCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      if (u.includes('/fleet')) return Promise.resolve(new Response(JSON.stringify(FLEET_WITH_DONE_SYNC), { status: 200 }))
+      if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 51200 }), { status: 200 }))
+      if (u.includes('/run?id=run-done-456')) {
+        runCalls++
+        return Promise.resolve(new Response(JSON.stringify({
+          status: 'done', exit_code: 0, output: ['All steps complete'], started: Date.now() / 1000 - 120,
+        }), { status: 200 }))
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getAllByText('main').length).toBeGreaterThan(0))
+    // Should fetch and display the completed run result
+    await waitFor(() => expect(runCalls).toBeGreaterThan(0), { timeout: 3000 })
+  })
+
   it('renders sort dropdown with all 4 options', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
       const u = typeof url === 'string' ? url : (url as Request).url
