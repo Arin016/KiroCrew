@@ -6060,9 +6060,17 @@ class KiroCrewConfig:
         # via Popen's default env=os.environ.copy() — even when their view of
         # ~/.kiro/crew/.env is a bind-mounted empty file. setdefault() preserves
         # any value the caller already set explicitly.
-        for k, v in creds.items():
-            if v:
-                os.environ.setdefault(k, v)
+        #
+        # EXCEPTION: when the Docker entrypoint has deliberately scrubbed
+        # credentials from the process environ (setting _KIROCREW_CREDS_SCRUBBED=1),
+        # re-injecting them here would leak into /proc/<pid>/environ — the exact
+        # attack surface the entrypoint closed. In that case, children that need
+        # credentials get them via their own .env read or via an explicit env=
+        # kwarg on Popen (the sandbox and ACP spawners already do this).
+        if not os.environ.get("_KIROCREW_CREDS_SCRUBBED"):
+            for k, v in creds.items():
+                if v:
+                    os.environ.setdefault(k, v)
 
         return creds
 
