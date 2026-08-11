@@ -10,9 +10,13 @@ export interface FollowUpDerivation {
  * Derive the follow-up `[OPTIONS:]` buttons for the current chat by scanning
  * backward for the most recent real assistant turn.
  *
- * Two messages short-circuit the scan:
+ * Three messages short-circuit the scan:
  *  - a `user` message ends the previous turn, so its options no longer apply →
  *    return none.
+ *  - a `queued` message means the user already acted (Quick Send while the
+ *    slot was busy). The optimistic user bubble was suppressed, but the intent
+ *    is identical — hide options immediately so they don't linger until the
+ *    queue drains.
  *  - a `compaction` notice is skipped. Auto-compaction appends a
  *    "✅ Conversation compacted" message with the `assistant` role but tagged
  *    `kind="compaction"` (see `chat_utils._broadcast_compaction_result`). It
@@ -28,7 +32,7 @@ export function deriveFollowUpOptions(
   if (isStreaming) return { followUpOptions: [], followUpIsPlan: false }
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
-    if (m.role === 'user') return { followUpOptions: [], followUpIsPlan: false }
+    if (m.role === 'user' || m.role === 'queued') return { followUpOptions: [], followUpIsPlan: false }
     if ((m.kind ?? (m.meta?.kind as string | undefined)) === 'compaction') continue
     if (m.role === 'assistant' && m.content) {
       const { options, isPlan } = parseOptions(m.content)
