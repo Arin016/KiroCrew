@@ -105,6 +105,15 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "PR postmortem evidence bundles",
+        "apps/builtins/pr_postmortem/engine/bundle.py",
+        "A bundle carries the RAW culprit and fix diffs and is handed to an analyst "
+        "model as evidence. A fix PR's diff is precisely where a credential that "
+        "was committed and then removed still lives, so the bundle is scrubbed at "
+        "write time -- which covers the file on disk, every later reader of it, and "
+        "the analysis prompt built from it.",
+    ),
+    (
         "Session storage inventory",
         "dashboard/handlers/session_storage.py",
         "A session's title and its first message, served by "
@@ -724,6 +733,10 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # no output of its own -- the registered sinks are the modules that call
         # it (slack/format.py, messaging/renderer.py).
         "messaging/display_safety.py",
+        # The app's recursive redactor helper -- a pure scrubber, not an egress
+        # boundary; the module that CALLS it (pr_postmortem's bundle writer) is the
+        # registered sink. Same split as the mochi helper above.
+        "apps/builtins/pr_postmortem/engine/redact.py",
         "autonudge_authz.py",
         "acp/_dispatch.py",
         "acp/client.py",
