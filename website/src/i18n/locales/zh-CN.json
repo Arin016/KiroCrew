@@ -4429,7 +4429,10 @@
       "pop_out_to_window": "弹出到窗口",
       "resize_terminal_panel": "调整终端面板大小",
       "terminal": "终端",
-      "terminal_is_in_its_own_window": "终端已在独立窗口中打开"
+      "terminal_is_in_its_own_window": "终端已在独立窗口中打开",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "认证关卡：{{gateType}}",
@@ -7415,8 +7418,6 @@
         "menu_side_desc": "并行聊天，共享上下文",
         "menu_subagents": "子代理",
         "menu_subagents_desc": "实时代理活动与记录",
-        "menu_terminal": "终端",
-        "menu_terminal_desc": "网关主机上的 Shell",
         "menu_workflows": "工作流",
         "menu_workflows_desc": "运行、阶段与可重启的步骤",
         "move_to_bottom_panel": "移到底部面板",

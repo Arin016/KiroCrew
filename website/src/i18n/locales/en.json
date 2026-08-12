@@ -3435,7 +3435,10 @@
       "hide_terminal_panel": "Hide terminal panel",
       "move_to_side_panel": "Move to side panel",
       "new_terminal": "New terminal",
-      "resize_terminal_panel": "Resize terminal panel"
+      "resize_terminal_panel": "Resize terminal panel",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "browser_needs_authentication": "Browser needs authentication",

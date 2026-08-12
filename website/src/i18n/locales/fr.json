@@ -4575,7 +4575,10 @@
       "pop_out_to_window": "Détacher dans une fenêtre",
       "resize_terminal_panel": "Redimensionner le panneau du terminal",
       "terminal": "Terminal",
-      "terminal_is_in_its_own_window": "Le terminal est dans sa propre fenêtre"
+      "terminal_is_in_its_own_window": "Le terminal est dans sa propre fenêtre",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "Barrière d’authentification : {{gateType}}",
@@ -7617,8 +7620,6 @@
         "menu_side_desc": "Chat parallèle, contexte partagé",
         "menu_subagents": "Sous-agents",
         "menu_subagents_desc": "Activité des agents en direct et transcriptions",
-        "menu_terminal": "Terminal",
-        "menu_terminal_desc": "Shell sur l’hôte de la passerelle",
         "menu_workflows": "Workflows",
         "menu_workflows_desc": "Exécutions, phases et étapes redémarrables",
         "move_to_bottom_panel": "Déplacer vers le panneau inférieur",

@@ -78,7 +78,7 @@ import UpdateModal from './components/UpdateModal'
 
 import ComputerUseLiveView from './components/ComputerUseLiveView'
 import BottomTerminalPanel, { TerminalDetachedBar } from './components/BottomTerminalPanel'
-import { toggleBottomTerminal, useBottomTerminalOpen } from './hooks/useBottomTerminal'
+import { toggleBottomTerminal, useBottomTerminalOpen, useTerminalPosition } from './hooks/useBottomTerminal'
 import { useTerminalPoppedOut, focusPopout as focusTerminalPopout } from './utils/terminalPopout'
 import { setTerminalEnabledFlag } from './utils/terminalRegistry'
 import AppsPage from './pages/AppsPage'
@@ -901,6 +901,7 @@ export default function App() {
   // Selected session's project directory: a terminal opened from the nav row
   // starts there (server default when no session is selected or it has none).
   const activeSlotProject = useAppSelector(selectActiveSlotProject)
+  const terminalPosition = useTerminalPosition()
   const navigate = useNavigate()
 
   // Main-dashboard role for the artifact popout nav-intent handshake: perform
@@ -2512,6 +2513,7 @@ export default function App() {
 
       {/* Content */}
       <div className="flex flex-col min-h-0 min-w-0" style={{ gridArea: 'content' }}>
+        <div className={`flex min-h-0 min-w-0 flex-1 ${terminalPosition === 'right' ? 'flex-row' : 'flex-col'}`}>
         <main id="main-content" tabIndex={-1} className={`flex flex-col min-h-0 min-w-0 flex-1 overflow-x-hidden ${needsFixedHeight ? 'overflow-hidden p-0' : 'overflow-y-auto'}`}>
           <MigrationCheck />
           <Routes>
@@ -2550,10 +2552,12 @@ export default function App() {
             <Route path="*" element={<ChatRedirect />} />
           </Routes>
         </main>
-        {/* App-wide docked terminal panel — spans every route, below <main>.
-            Toggled from the sidebar Terminal icon; hosts app-wide
-            shells. Distinct from the chat-scoped activity-bar terminal tabs. */}
-        {terminalEnabled && (terminalPoppedOut ? <TerminalDetachedBar /> : <BottomTerminalPanel />)}
+        {/* App-wide docked terminal panel — renders beside <main> (right) or
+            below it (bottom). The detached bar (popped-out state) always renders
+            below the flex wrapper as a full-width strip regardless of position. */}
+        {terminalEnabled && !terminalPoppedOut && <BottomTerminalPanel />}
+        </div>{/* /flex-row or flex-col wrapper */}
+        {terminalEnabled && terminalPoppedOut && <TerminalDetachedBar />}
 
         {/* Self-managed floating panels: lifecycle-driven (hidden → small → chip),
             not motion.* children, so they live outside AnimatePresence. The browse

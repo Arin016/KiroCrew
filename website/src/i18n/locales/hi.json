@@ -4502,7 +4502,10 @@
       "pop_out_to_window": "विंडो में पॉप आउट करें",
       "resize_terminal_panel": "टर्मिनल पैनल का आकार बदलें",
       "terminal": "टर्मिनल",
-      "terminal_is_in_its_own_window": "टर्मिनल अपनी अलग विंडो में है"
+      "terminal_is_in_its_own_window": "टर्मिनल अपनी अलग विंडो में है",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "प्रमाणन गेट: {{gateType}}",
@@ -7516,8 +7519,6 @@
         "menu_side_desc": "समानांतर चैट, साझा कॉन्टेक्स्ट",
         "menu_subagents": "सब-एजेंट",
         "menu_subagents_desc": "लाइव एजेंट गतिविधि और ट्रांसक्रिप्ट",
-        "menu_terminal": "टर्मिनल",
-        "menu_terminal_desc": "गेटवे होस्ट पर शेल",
         "menu_workflows": "वर्कफ़्लो",
         "menu_workflows_desc": "रन, फ़ेज़ और दोबारा शुरू होने वाले चरण",
         "move_to_bottom_panel": "नीचे के पैनल में ले जाएँ",

@@ -4502,7 +4502,10 @@
       "pop_out_to_window": "উইন্ডোতে পপ আউট করুন",
       "resize_terminal_panel": "টার্মিনাল প্যানেলের আকার বদলান",
       "terminal": "টার্মিনাল",
-      "terminal_is_in_its_own_window": "টার্মিনাল নিজস্ব উইন্ডোতে আছে"
+      "terminal_is_in_its_own_window": "টার্মিনাল নিজস্ব উইন্ডোতে আছে",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "অথেন্টিকেশন গেট: {{gateType}}",
@@ -7516,8 +7519,6 @@
         "menu_side_desc": "সমান্তরাল চ্যাট, একই কনটেক্সট",
         "menu_subagents": "সাবএজেন্ট",
         "menu_subagents_desc": "লাইভ এজেন্ট অ্যাক্টিভিটি ও ট্রান্সক্রিপ্ট",
-        "menu_terminal": "টার্মিনাল",
-        "menu_terminal_desc": "গেটওয়ে হোস্টে শেল",
         "menu_workflows": "ওয়ার্কফ্লো",
         "menu_workflows_desc": "রান, ফেজ ও আবার চালানো যায় এমন ধাপ",
         "move_to_bottom_panel": "নিচের প্যানেলে সরান",

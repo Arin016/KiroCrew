@@ -4429,7 +4429,10 @@
       "new_terminal": "新規ターミナル",
       "open_a_chat_page_to_move_this_terminal_there": "チャットページを開いてこのターミナルを移動",
       "resize_terminal_panel": "ターミナルパネルをリサイズ",
-      "terminal": "ターミナル"
+      "terminal": "ターミナル",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "認証ゲート：{{gateType}}",
@@ -7415,8 +7418,6 @@
         "menu_side_desc": "コンテキストを共有する並行チャット",
         "menu_subagents": "サブエージェント",
         "menu_subagents_desc": "エージェントのライブ活動とトランスクリプト",
-        "menu_terminal": "ターミナル",
-        "menu_terminal_desc": "ゲートウェイホスト上のシェル",
         "menu_workflows": "ワークフロー",
         "menu_workflows_desc": "実行、フェーズ、再実行可能なステップ",
         "move_to_bottom_panel": "下部パネルへ移動",

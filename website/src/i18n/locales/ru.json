@@ -4648,7 +4648,10 @@
       "pop_out_to_window": "Открыть в отдельном окне",
       "resize_terminal_panel": "Изменить размер панели терминала",
       "terminal": "Терминал",
-      "terminal_is_in_its_own_window": "Терминал открыт в отдельном окне"
+      "terminal_is_in_its_own_window": "Терминал открыт в отдельном окне",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "Проверка аутентификации: {{gateType}}",
@@ -7718,8 +7721,6 @@
         "menu_side_desc": "Параллельный чат, общий контекст",
         "menu_subagents": "Субагенты",
         "menu_subagents_desc": "Активность агентов и расшифровки в реальном времени",
-        "menu_terminal": "Терминал",
-        "menu_terminal_desc": "Оболочка на хосте шлюза",
         "menu_workflows": "Рабочие процессы",
         "menu_workflows_desc": "Запуски, этапы и перезапускаемые шаги",
         "move_to_bottom_panel": "Переместить в нижнюю панель",

@@ -55,7 +55,7 @@ const KIND_ICON: Record<TabKind, ReactNode> = {
  * Keyed by `ViewKind | 'terminal'` (not `string`) so adding a view without its
  * label and description is a type error rather than a missing-key render.
  */
-export const NEW_MENU_LABEL_KEY: Record<ViewKind | 'terminal', string> = {
+export const NEW_MENU_LABEL_KEY: Record<ViewKind, string> = {
   changes: 'pages.chat.sidePanel.menu_changes',
   issues: 'pages.chat.sidePanel.menu_issues',
   files: 'pages.chat.sidePanel.menu_files',
@@ -66,10 +66,9 @@ export const NEW_MENU_LABEL_KEY: Record<ViewKind | 'terminal', string> = {
   context: 'pages.chat.sidePanel.menu_context',
   side: 'pages.chat.sidePanel.menu_side',
   browser: 'pages.chat.sidePanel.menu_browser',
-  terminal: 'pages.chat.sidePanel.menu_terminal',
 }
 
-export const NEW_MENU_DESC_KEY: Record<ViewKind | 'terminal', string> = {
+export const NEW_MENU_DESC_KEY: Record<ViewKind, string> = {
   changes: 'pages.chat.sidePanel.menu_changes_desc',
   issues: 'pages.chat.sidePanel.menu_issues_desc',
   files: 'pages.chat.sidePanel.menu_files_desc',
@@ -80,7 +79,6 @@ export const NEW_MENU_DESC_KEY: Record<ViewKind | 'terminal', string> = {
   context: 'pages.chat.sidePanel.menu_context_desc',
   side: 'pages.chat.sidePanel.menu_side_desc',
   browser: 'pages.chat.sidePanel.menu_browser_desc',
-  terminal: 'pages.chat.sidePanel.menu_terminal_desc',
 }
 
 /** Views offered by the + menu, in the three semantic groups the menu renders
@@ -97,7 +95,7 @@ export const NEW_MENU_DESC_KEY: Record<ViewKind | 'terminal', string> = {
  *  Every key of `NEW_MENU_LABEL_KEY` must appear exactly once across the
  *  groups — `sidePanelAddMenu.test.tsx` pins that partition, so adding a view
  *  without placing it in a group fails rather than silently dropping it. */
-const NEW_MENU_GROUPS: { kind: ViewKind | 'terminal'; icon: ReactNode }[][] = [
+const NEW_MENU_GROUPS: { kind: ViewKind; icon: ReactNode }[][] = [
   // Session output — what this chat referenced or produced. (Changes / Files /
   // Artifacts are auto-pinned and filtered out below; they are listed here so
   // this table stays the complete catalog of views.)
@@ -113,7 +111,6 @@ const NEW_MENU_GROUPS: { kind: ViewKind | 'terminal'; icon: ReactNode }[][] = [
   [
     { kind: 'side', icon: <MessageSquare size={15} /> },
     { kind: 'browser', icon: <Globe size={15} /> },
-    { kind: 'terminal', icon: <TerminalSquare size={15} /> },
   ],
   // Diagnostics.
   [
@@ -131,7 +128,7 @@ const VIEW_KINDS = new Set<TabKind>(['changes', 'issues', 'files', 'artifacts', 
  *  belongs in a non-developer's menu. Gating BOTH empties the diagnostics group
  *  outright when Developer Mode is off — which is exactly the empty-group case
  *  `newMenuSections` drops. */
-const DEV_ONLY_VIEWS = new Set<ViewKind | 'terminal'>(['logs', 'context'])
+const DEV_ONLY_VIEWS = new Set<ViewKind>(['logs', 'context'])
 
 /** Which `+`-menu entries are offered, given the two gates that hide entries:
  *  Terminal is hidden when the feature is disabled server-side, and the
@@ -140,16 +137,14 @@ const DEV_ONLY_VIEWS = new Set<ViewKind | 'terminal'>(['logs', 'context'])
  *  listed; they appear on their own when they have content.
  *
  *  Grouped, and **emptied groups are dropped**: with Developer Mode off the
- *  whole diagnostics group disappears, and Terminal disabled shrinks Workspaces
- *  to two rows — a group that filtered down to nothing would otherwise render
- *  as a separator with no rows after it. */
+ *  whole diagnostics group disappears. A group that filtered down to nothing
+ *  would otherwise render as a separator with no rows after it. */
 export function newMenuSections(
   opts: { devMode: boolean; terminalEnabled: boolean },
-): { kind: ViewKind | 'terminal'; icon: ReactNode }[][] {
+): { kind: ViewKind; icon: ReactNode }[][] {
   return NEW_MENU_GROUPS
     .map(group => group.filter(item =>
-      (opts.terminalEnabled || item.kind !== 'terminal')
-      && (opts.devMode || !DEV_ONLY_VIEWS.has(item.kind))
+      (opts.devMode || !DEV_ONLY_VIEWS.has(item.kind))
       && !(PINNED_VIEWS as string[]).includes(item.kind),
     ))
     .filter(group => group.length > 0)

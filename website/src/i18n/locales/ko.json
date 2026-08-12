@@ -4429,7 +4429,10 @@
       "pop_out_to_window": "별도 창으로 분리",
       "resize_terminal_panel": "터미널 패널 크기 조절",
       "terminal": "터미널",
-      "terminal_is_in_its_own_window": "터미널이 별도 창에 있습니다"
+      "terminal_is_in_its_own_window": "터미널이 별도 창에 있습니다",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "인증 게이트: {{gateType}}",
@@ -7415,8 +7418,6 @@
         "menu_side_desc": "컨텍스트를 공유하는 병렬 채팅",
         "menu_subagents": "서브에이전트",
         "menu_subagents_desc": "실시간 에이전트 활동과 기록",
-        "menu_terminal": "터미널",
-        "menu_terminal_desc": "게이트웨이 호스트의 셸",
         "menu_workflows": "워크플로",
         "menu_workflows_desc": "실행·단계·재실행 가능한 스텝",
         "move_to_bottom_panel": "하단 패널로 이동",

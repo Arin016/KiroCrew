@@ -4502,7 +4502,10 @@
       "pop_out_to_window": "In ein Fenster auskoppeln",
       "resize_terminal_panel": "Größe des Terminal-Panels ändern",
       "terminal": "Terminal",
-      "terminal_is_in_its_own_window": "Das Terminal ist in einem eigenen Fenster"
+      "terminal_is_in_its_own_window": "Das Terminal ist in einem eigenen Fenster",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "Authentifizierung: {{gateType}}",
@@ -7516,8 +7519,6 @@
         "menu_side_desc": "Parallel laufender Chat, gemeinsamer Kontext",
         "menu_subagents": "Subagenten",
         "menu_subagents_desc": "Live-Agentenaktivität & Transkripte",
-        "menu_terminal": "Terminal",
-        "menu_terminal_desc": "Shell auf dem Gateway-Host",
         "menu_workflows": "Workflows",
         "menu_workflows_desc": "Ausführungen, Phasen & neu startbare Schritte",
         "move_to_bottom_panel": "In das untere Panel verschieben",

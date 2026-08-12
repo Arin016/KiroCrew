@@ -4575,7 +4575,10 @@
       "pop_out_to_window": "Apri in una finestra",
       "resize_terminal_panel": "Ridimensiona il pannello del terminale",
       "terminal": "Terminale",
-      "terminal_is_in_its_own_window": "Il terminale è in una finestra separata"
+      "terminal_is_in_its_own_window": "Il terminale è in una finestra separata",
+      "move_panel_to_right": "Move panel to right",
+      "move_panel_to_bottom": "Move panel to bottom",
+      "more_actions": "More actions"
     },
     "browserAuthPrompt": {
       "auth_gate": "Controllo di autenticazione: {{gateType}}",
@@ -7617,8 +7620,6 @@
         "menu_side_desc": "Chat parallela, contesto condiviso",
         "menu_subagents": "Subagenti",
         "menu_subagents_desc": "Attività degli agenti in tempo reale e trascrizioni",
-        "menu_terminal": "Terminale",
-        "menu_terminal_desc": "Shell sull’host del gateway",
         "menu_workflows": "Workflow",
         "menu_workflows_desc": "Esecuzioni, fasi e passaggi riavviabili",
         "move_to_bottom_panel": "Sposta nel pannello inferiore",
