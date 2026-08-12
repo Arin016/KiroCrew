@@ -652,3 +652,28 @@ describe('ToolCallLine auto-denied detection', () => {
     expect(container.querySelector('.text-warn')).toBeFalsy()
   })
 })
+
+describe('ToolCallLine elapsed timer survives remount', () => {
+  it('shows elapsed time anchored to the tool log timestamp, not mount time', () => {
+    // Simulate a tool that started 30 seconds ago
+    const startTs = Date.now() - 30_000
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', tool_call_id: 'tc_1', is_shell: true, ts: startTs }],
+        slotRunning: true,
+      } as unknown as ChatState,
+    })
+    const { unmount } = renderWithProviders(<ToolCallLine message={toolMsg()} running />, { store })
+    // Should show ~30s, not 0s — proving the timer uses the persisted ts
+    const statusText = screen.getByText(/Running ·/)
+    expect(statusText.textContent).toMatch(/30|29|31/)
+
+    // Unmount and remount (simulates navigating away and back)
+    unmount()
+    renderWithProviders(<ToolCallLine message={toolMsg()} running />, { store })
+    const afterRemount = screen.getByText(/Running ·/)
+    // Still shows ~30s, NOT reset to 0s
+    expect(afterRemount.textContent).toMatch(/30|29|31/)
+  })
+})

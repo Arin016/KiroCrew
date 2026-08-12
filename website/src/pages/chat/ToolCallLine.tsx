@@ -294,8 +294,16 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
   }, shallowEqual)
   const showWaitCountdown = !!waitState && waitState.deadline_ts > 0
   const [activityNow, setActivityNow] = useState(() => Date.now())
-  const activityStartRef = useRef(Date.now())
+  // Seed from the tool log's start timestamp so the elapsed clock survives
+  // unmount/remount (e.g. navigating away and back). Falls back to Date.now()
+  // only when no persisted timestamp is available (first mount of a brand-new
+  // tool call before the log entry arrives).
+  const activityStartRef = useRef(ts || Date.now())
   const wasPendingRef = useRef(hasPendingPerm)
+  // Tracks whether approval resolved during this mount — once set, the ts
+  // re-anchor effect is suppressed so the post-approval Date.now() anchor
+  // is not overwritten by the pre-approval ts.
+  const approvalResolvedRef = useRef(false)
   const [endingWait, setEndingWait] = useState(false)
 
   // Re-arm the button for a NEW sleep. Left latched otherwise: after a
@@ -328,9 +336,22 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
     if (wasPendingRef.current) {
       activityStartRef.current = Date.now()
       wasPendingRef.current = false
+      approvalResolvedRef.current = true
       setActivityNow(Date.now())
     }
   }, [hasPendingPerm])
+
+  // When the tool log timestamp arrives (or on remount with a persisted ts),
+  // re-anchor the elapsed clock so it reflects real wall time since the tool
+  // started — not time since the component mounted. Skip if approval just
+  // resolved in this mount — the post-approval Date.now() is the correct anchor
+  // for approved commands (the pre-approval ts would inflate the timer by the
+  // entire approval wait).
+  useEffect(() => {
+    if (ts && !hasPendingPerm && !approvalResolvedRef.current) {
+      activityStartRef.current = ts
+    }
+  }, [ts, hasPendingPerm])
 
   useEffect(() => {
     if (!showShellActivity && !showWaitCountdown) return
