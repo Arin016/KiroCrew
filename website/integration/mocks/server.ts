@@ -608,6 +608,21 @@ handlers.push(
     new HttpResponse(null, { status: 404, headers: { 'X-Path-Kind': 'missing' } })),
 )
 
+// Vendor script paths that happy-dom eager-loads when buildSrcdoc /
+// buildSketchSrcdoc append a <script src="..."> to a detached document.
+// Explicit handlers (not just the catch-all) because:
+//   1. They fire even if the catch-all's origin check has a stale TEST_ORIGIN.
+//   2. They return valid JS (empty string, not 501) so happy-dom's script
+//      loader doesn't throw a parse error that propagates as an unhandled
+//      rejection in some shard configurations.
+//   3. They are named — a grep for "vendor/tailwindcss" finds this immediately.
+handlers.push(
+  http.get('/vendor/tailwindcss-browser.js', () =>
+    new HttpResponse('', { status: 200, headers: { 'Content-Type': 'application/javascript' } })),
+  http.get('/vendor/mermaid.min.js', () =>
+    new HttpResponse('', { status: 200, headers: { 'Content-Type': 'application/javascript' } })),
+)
+
 handlers.push(
   http.all('*', ({ request }) => {
     const scheme = request.url.slice(0, 5)
