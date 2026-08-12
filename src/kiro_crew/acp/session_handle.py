@@ -597,9 +597,12 @@ class AcpSessionHandle:
                     # `finally`, not a trailing statement: an abandoned generator
                     # unwinds with GeneratorExit and would otherwise leave
                     # `_parked_since` set forever, which reads from outside as a
-                    # turn parked since the abandonment.
-                    self._parked_total += time.monotonic() - self._parked_since
-                    self._parked_since = None
+                    # turn parked since the abandonment.  Guard against None:
+                    # a turn boundary (line ~517) may reset _parked_since before
+                    # a lingering generator's finally fires on GC.
+                    if self._parked_since is not None:
+                        self._parked_total += time.monotonic() - self._parked_since
+                        self._parked_since = None
         finally:
             if not self._turn_done.is_set():
                 self._turn_done.set()
