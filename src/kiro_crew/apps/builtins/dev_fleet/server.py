@@ -4079,7 +4079,19 @@ async def _gateway_service_active() -> bool:
     if _GATEWAY_SERVICE_ACTIVE is not None and (now - _GATEWAY_SERVICE_CHECK_AT) < _GATEWAY_SERVICE_TTL:
         return _GATEWAY_SERVICE_ACTIVE
     svc = _gateway_backend()
-    _GATEWAY_SERVICE_ACTIVE = False if svc is None else await svc.active()
+    active = False if svc is None else await svc.active()
+    if not active:
+        # Foreground backend is the last-resort restart path for hosts without
+        # a drivable service manager. If eligible, the Restart button and the
+        # auto-restart-after-sync flow should still be available — but ONLY
+        # when the backend is not confined (status() == STATUS_OK), mirroring
+        # the _make_live probe at line ~4558.
+        status = await _live_user_unit_status()
+        if _foreground_eligible(status):
+            fg = _foreground_backend()
+            if fg is not None and await fg.status() == gateway_service.STATUS_OK:
+                active = True
+    _GATEWAY_SERVICE_ACTIVE = active
     _GATEWAY_SERVICE_CHECK_AT = now
     return _GATEWAY_SERVICE_ACTIVE
 
@@ -4133,27 +4145,57 @@ def _foreground_eligible(status: str) -> bool:
 
 
 async def _restart_gateway() -> dict:
-    """Restart the gateway service via a detached systemd-run.
+    """Restart the gateway, preferring the service backend with foreground fallback.
 
-    The restart kills the current process, so we use systemd-run --collect
-    to schedule a restart that survives our own death.
+    Tries the platform service manager first (systemd/launchd). When that is
+    unavailable or inactive, falls through to the foreground backend — the same
+    detach-and-respawn path that Make Live uses on hosts without a drivable
+    service manager.
 
-    Returns the pre-restart ``start_id`` (the live unit's start identity
-    captured BEFORE scheduling) so the caller can poll until a DIFFERENT
-    identity appears -- a 200 from this same process still winding down must
-    not read as "recovered". ``start_id`` is None-safe (see _gateway_start_id).
+    Returns the pre-restart ``start_id`` so the frontend can poll until a
+    DIFFERENT identity appears.
     """
-    svc = _gateway_backend()
-    if svc is None or not await svc.active():
-        return {"ok": False, "error": "gateway is not running as a user service"}
-    # Capture identity BEFORE scheduling the restart: afterwards the detached
-    # bounce can tear this process down at any moment, and the whole point is to
-    # hand the frontend the OLD identity to wait past.
-    start_id = await _gateway_start_id()
-    ok, err = await svc.restart_detached()
-    if not ok:
-        return {"ok": False, "error": _redact(err)}
-    return {"ok": True, "start_id": start_id}
+    # Reject while a Make Live cutover is in-flight: restarting mid-staging
+    # would tear the gateway down between the pointer write and the reload,
+    # leaving persisted and loaded targets diverged. Acquire the lock to
+    # prevent a concurrent Make Live from starting while we restart.
+    global _MAKE_LIVE_COMMITTED
+    if _MAKE_LIVE_COMMITTED:
+        return {"ok": False, "error": "a Make Live cutover is in progress — retry after it completes"}
+    if _MAKE_LIVE_LOCK.locked():
+        return {"ok": False, "error": "a Make Live cutover is in progress — retry after it completes"}
+    async with _MAKE_LIVE_LOCK:
+        if _MAKE_LIVE_COMMITTED:
+            return {"ok": False, "error": "a Make Live cutover is in progress — retry after it completes"}
+
+        svc = _gateway_backend()
+        service_active = False if svc is None else await svc.active()
+
+        if service_active:
+            assert svc is not None  # narrowing: service_active implies svc is not None
+            start_id = await _gateway_start_id()
+            ok, err = await svc.restart_detached()
+            if not ok:
+                return {"ok": False, "error": _redact(err)}
+            _MAKE_LIVE_COMMITTED = True
+            return {"ok": True, "start_id": start_id}
+
+        # Foreground fallback: hosts without a drivable service manager (e.g. AL2
+        # with broken sudo, no systemd --user bus) can still restart via the
+        # detach-and-respawn path — but only when not confined (status check
+        # mirrors _make_live and _gateway_service_active).
+        status = await _live_user_unit_status()
+        if _foreground_eligible(status):
+            fg = _foreground_backend()
+            if fg is not None and await fg.status() == gateway_service.STATUS_OK:
+                start_id = await _gateway_start_id()
+                ok, err = await fg.restart_detached()
+                if not ok:
+                    return {"ok": False, "error": _redact(err)}
+                _MAKE_LIVE_COMMITTED = True
+                return {"ok": True, "start_id": start_id}
+
+    return {"ok": False, "error": "gateway is not running as a user service"}
 
 
 @_audited("dev_fleet_restart_gateway")

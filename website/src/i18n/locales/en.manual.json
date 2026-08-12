@@ -2793,6 +2793,7 @@
       "pull_build_2": "Pull+Build",
       "pull_build_failed_to_start": "Pull+Build failed to start",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "Pulls main and rebuilds (~6 min). Does NOT restart.",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "qa_pod_is_running_but_failing_its_health_check": "QA pod is running but failing its health check",
       "qa_pod_is_running_click_open_to_use_it": "QA pod is running — click Open to use it",
       "qa_video": "QA + video",

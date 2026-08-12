@@ -8046,6 +8046,7 @@
       "pull_build_failed_to_start": "풀+빌드를 시작하지 못했습니다",
       "pull_build_main": "main 풀 + 빌드",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "main을 풀하고 다시 빌드합니다(약 6분). 재시작하지는 않습니다.",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "purpose": "목적:",
       "qa_pod_is_running_but_failing_its_health_check": "QA 포드는 실행 중이지만 상태 검사에 실패하고 있습니다",
       "qa_pod_is_running_click_open_to_use_it": "QA 포드가 실행 중입니다 — ‘열기’를 클릭해 사용하세요",

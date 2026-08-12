@@ -721,7 +721,36 @@ export default function DevFleetPage() {
         const okRun = run.exit_code === 0
         setSyncRun({ rid, status: okRun ? 'done' : 'error', lines: out, startedAt: t0, exit: run.exit_code, last })
         setFlag('__syncmain', false)
-        if (okRun) notify(i18nT('pages.devFleetPage.synced_restart_gateway_to_apply_the_new_build'), { type: 'success' })
+        if (okRun) {
+          // Auto-restart the gateway when the service is drivable — the build
+          // just updated static/dist on the live checkout, so applying it only
+          // needs a bounce. Skip the confirm dialog since the user already
+          // explicitly started Pull+Build knowing it updates their live code.
+          if (fleet?.gateway_service_active) {
+            notify(i18nT('pages.devFleetPage.pulls_main_rebuilds_then_restarts_automatically'), { type: 'success' })
+            setRestarting(true)
+            setGatewayError(null)
+            api.post<{ ok?: boolean; error?: string; start_id?: string | null }>('/restart-gateway', {})
+              .then(async (r) => {
+                if (!r?.ok) {
+                  const msg = r?.error || i18nT('pages.devFleetPage.restart_failed')
+                  notify(msg, { type: 'error' })
+                  setGatewayError(msg)
+                  setRestarting(false)
+                } else {
+                  await awaitGatewayBack(r.start_id ?? null)
+                }
+              })
+              .catch((e: unknown) => {
+                const msg = `${i18nT('pages.devFleetPage.restart_failed')}: ${(e as Error)?.message || String(e)}`
+                notify(msg, { type: 'error' })
+                setGatewayError(msg)
+                setRestarting(false)
+              })
+          } else {
+            notify(i18nT('pages.devFleetPage.synced_restart_gateway_to_apply_the_new_build'), { type: 'success' })
+          }
+        }
         else notify(i18nT('pages.devFleetPage.pull_build_failed_exit_code_detail', { code: run.exit_code, detail: last }), { type: 'error' })
         invalidateFleet()
         return
@@ -1187,7 +1216,7 @@ export default function DevFleetPage() {
   function rowButtons(w: Worktree): ReactNode[] {
     if (w.is_main) {
       const out: ReactNode[] = [
-        <ConfirmBtn key="sync" title={i18nT('pages.devFleetPage.pull_build_main')} desc={i18nT('pages.devFleetPage.pulls_main_and_rebuilds_6_min_does_not_restart')} confirmLabel={i18nT('pages.devFleetPage.start')} onConfirm={() => syncMain()} btn={{ disabled: !!busy['__syncmain'] || syncRun?.status === 'running' || gatewayMutating }}>
+        <ConfirmBtn key="sync" title={i18nT('pages.devFleetPage.pull_build_main')} desc={fleet?.gateway_service_active ? i18nT('pages.devFleetPage.pulls_main_rebuilds_then_restarts_automatically') : i18nT('pages.devFleetPage.pulls_main_and_rebuilds_6_min_does_not_restart')} confirmLabel={i18nT('pages.devFleetPage.start')} onConfirm={() => syncMain()} btn={{ disabled: !!busy['__syncmain'] || syncRun?.status === 'running' || gatewayMutating }}>
           {iconLabel(<RefreshCw size={13} className="lucide-inline" />, busy['__syncmain'] || syncRun?.status === 'running' ? i18nT('pages.devFleetPage.building') : i18nT('pages.devFleetPage.pull_build_2'))}
         </ConfirmBtn>,
       ]

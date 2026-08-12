@@ -8262,6 +8262,7 @@
       "pull_build_failed_to_start": "No se pudo iniciar Pull+Compilar",
       "pull_build_main": "Pull + Compilar main",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "Hace pull de main y recompila (~6 min). NO reinicia.",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "purpose": "Propósito:",
       "qa_pod_is_running_but_failing_its_health_check": "El pod de QA está en ejecución, pero no pasa su comprobación de estado",
       "qa_pod_is_running_click_open_to_use_it": "El pod de QA está en ejecución — haz clic en Abrir para usarlo",

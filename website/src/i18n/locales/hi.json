@@ -8154,6 +8154,7 @@
       "pull_build_failed_to_start": "पुल+बिल्ड शुरू नहीं हो सका",
       "pull_build_main": "main पुल + बिल्ड करें",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "main पुल करके दोबारा बिल्ड करता है (~6 मिनट)। पुनः आरंभ नहीं करता।",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "purpose": "उद्देश्य:",
       "qa_pod_is_running_but_failing_its_health_check": "QA पॉड चल रहा है पर उसकी हेल्थ जाँच विफल हो रही है",
       "qa_pod_is_running_click_open_to_use_it": "QA पॉड चल रहा है — इसे उपयोग करने के लिए खोलें पर क्लिक करें",

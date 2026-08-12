@@ -8046,6 +8046,7 @@
       "pull_build_failed_to_start": "プル+ビルド開始失敗",
       "pull_build_main": "main をプル + ビルド",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "main をプルして再ビルド（約 6 分）。再起動は しません。",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "purpose": "目的：",
       "qa_pod_is_running_but_failing_its_health_check": "QA ポッドは実行中ですがヘルスチェックに失敗しています",
       "qa_pod_is_running_click_open_to_use_it": "QA ポッドは実行中 — 「開く」をクリックして使用してください",

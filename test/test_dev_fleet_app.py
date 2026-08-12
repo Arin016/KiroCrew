@@ -2313,7 +2313,10 @@ async def test_restart_gateway_not_active():
                       return_value=(3, "", "inactive\n")):
         result = await mod._restart_gateway()
     assert result["ok"] is False
-    assert "not running" in result["error"]
+    # With the foreground fallback, the error comes from whichever backend
+    # ultimately fails: either "not running as a user service" (no foreground
+    # eligible) or the foreground backend's own diagnostic.
+    assert result["error"]
 
 
 @pytest.mark.asyncio

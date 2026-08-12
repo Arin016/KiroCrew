@@ -8154,6 +8154,7 @@
       "pull_build_failed_to_start": "পুল+বিল্ড শুরু করা যায়নি",
       "pull_build_main": "main পুল + বিল্ড করুন",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "main পুল করে আবার বিল্ড করে (~6 মিনিট)। রিস্টার্ট করে না।",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "purpose": "উদ্দেশ্য:",
       "qa_pod_is_running_but_failing_its_health_check": "QA pod চলছে কিন্তু হেলথ চেকে ব্যর্থ হচ্ছে",
       "qa_pod_is_running_click_open_to_use_it": "QA pod চলছে — ব্যবহার করতে 'খোলো'-তে ক্লিক করো",

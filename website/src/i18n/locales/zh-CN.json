@@ -8046,6 +8046,7 @@
       "pull_build_failed_to_start": "拉取+构建启动失败",
       "pull_build_main": "拉取 + 构建 main",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "拉取 main 并重新构建（约 6 分钟）。不会重启。",
+      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
       "purpose": "用途：",
       "qa_pod_is_running_but_failing_its_health_check": "QA pod 正在运行，但健康检查未通过",
       "qa_pod_is_running_click_open_to_use_it": "QA pod 正在运行 — 点击“打开”即可使用",
