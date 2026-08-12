@@ -767,12 +767,36 @@ function applyNonActiveFrame(
     }
     // Reconcile the optimistic user bubble (appendSlotMessage) rather than
     // pushing a 2nd identical one when the server echoes the user frame — same
-    // pattern as sseSideResult. Kills the during-turn duplicate user message.
-    const lastUser = msgs[msgs.length - 1]
-    if (lastUser?.role === 'user' && lastUser.content === content) {
-      if (ts) lastUser.ts = ts
-      if (meta) lastUser.meta = { ...(lastUser.meta || {}), ...meta }
-      return
+    // pattern as sseSideResult / steer reconcile. The bubble is NOT necessarily
+    // the last message: the agent can start streaming (thinking/tool/assistant
+    // frames) before the server echoes the user frame, so a tail-only check
+    // misses the bubble and the echo is pushed as a duplicate — or worse, the
+    // original bubble never receives its `mid`, making it un-pinnable (#2845).
+    // PRIMARY: sendId correlation. FALLBACK: tail content match for paths
+    // that don't generate a sendId (split-pane, queued promotions).
+    const echoSendId = meta?.sendId as string | undefined
+    if (echoSendId && meta?.mid) {
+      const reconcileFloor = Math.max(0, msgs.length - 50)
+      for (let i = msgs.length - 1; i >= reconcileFloor; i--) {
+        const m = msgs[i]
+        if (m.role !== 'user') continue
+        if (m.meta?.steer) break
+        if (m.meta?.sendId === echoSendId) {
+          if (ts) m.ts = ts
+          m.meta = { ...(m.meta || {}), ...meta }
+          delete (m.meta as Record<string, unknown>).optimistic
+          return
+        }
+        break
+      }
+    } else if (meta?.mid) {
+      // Fallback: tail content match (pre-existing behavior).
+      const last = msgs[msgs.length - 1]
+      if (last?.role === 'user' && last.content === content && !last.meta?.mid) {
+        if (ts) last.ts = ts
+        if (meta) last.meta = { ...(last.meta || {}), ...meta }
+        return
+      }
     }
   }
   msgs.push(ensureMsgId({ role, content, cls: cls || '', ts, meta: effectiveMeta, kind }))
@@ -1712,6 +1736,13 @@ const chatSlice = createSlice({
       // and the card must survive a failed send. The send path dispatches
       // retireStatelessQuestion after the server confirms delivery.
       if (m.role === 'user' && m.meta?.steer) finalizeTrailingStreaming(state.messages)
+      // Non-steer user bubbles carry a `sendId` in meta (set by ChatPage at
+      // send time) that serves as both the optimistic marker and the correlation
+      // ID for reconciliation. The `optimistic` flag is kept as a simple boolean
+      // so the reconcile scan knows this bubble is pending confirmation (#2845).
+      if (m.role === 'user' && !m.meta?.steer && m.meta?.sendId) {
+        m.meta = { ...(m.meta || {}), optimistic: true }
+      }
       state.messages.push(ensureMsgId(m))
     },
     /** Optimistically append a message to a specific slot's store — global
@@ -1778,6 +1809,11 @@ const chatSlice = createSlice({
       // appendMessage (active-slot) path.
       if (message.role === 'user' && message.meta?.steer && message.meta?.optimistic) {
         finalizeTrailingStreaming(msgs)
+      }
+      // Mark non-steer user bubbles as optimistic so the sseChatMessage
+      // reconcile can distinguish them from channel-replayed messages (#2845).
+      if (message.role === 'user' && !message.meta?.steer && message.meta?.sendId) {
+        message.meta = { ...(message.meta || {}), optimistic: true }
       }
       msgs.push(ensureMsgId(message))
     },
@@ -2763,6 +2799,53 @@ const chatSlice = createSlice({
               if (m.meta) m.meta.resolved = 'rejected'
               else m.meta = { resolved: 'rejected' }
             }
+          }
+        }
+        // Reconcile the optimistic user bubble rather than pushing a duplicate
+        // when the server echoes the user frame. The bubble is NOT necessarily
+        // the last message: the agent can start streaming (thinking/tool/
+        // assistant frames) before the server echoes the user frame, so a
+        // tail-only check misses the bubble and the echo is pushed as a
+        // duplicate — or worse, the original bubble never receives its `mid`,
+        // making it un-pinnable (#2845).
+        //
+        // PRIMARY: match by `sendId` — a client-generated correlation ID
+        // stamped at send time into both the optimistic bubble and the POST
+        // body. The server preserves meta fields, so the echo carries the same
+        // sendId plus the server-minted `mid`. This is a cryptographic-strength
+        // identity match — distinct messages with identical text but different
+        // sendIds are never conflated.
+        //
+        // FALLBACK: for code paths that create optimistic bubbles without a
+        // sendId (split-pane sends, queued message promotions), fall back to
+        // the pre-existing tail-check: if the last user message matches
+        // content and has no mid yet, reconcile it. This preserves the
+        // original behavior for those paths.
+        const echoSendId = meta?.sendId as string | undefined
+        if (echoSendId && meta?.mid) {
+          const reconcileFloor = Math.max(0, state.messages.length - 50)
+          for (let i = state.messages.length - 1; i >= reconcileFloor; i--) {
+            const m = state.messages[i]
+            if (m.role !== 'user') continue
+            if (m.meta?.steer) break
+            if (m.meta?.sendId === echoSendId) {
+              if (ts) m.ts = ts
+              m.meta = { ...(m.meta || {}), ...meta }
+              delete (m.meta as Record<string, unknown>).optimistic
+              return
+            }
+            break
+          }
+        } else if (meta?.mid) {
+          // Fallback: no sendId on the echo — use tail content match (the
+          // pre-existing reconcile that worked when the echo arrived before
+          // any streaming). Only checks the LAST message (not a backward scan)
+          // to limit false-match risk to the original code's window.
+          const last = state.messages[state.messages.length - 1]
+          if (last?.role === 'user' && last.content === content && !last.meta?.mid) {
+            if (ts) last.ts = ts
+            if (meta) last.meta = { ...(last.meta || {}), ...meta }
+            return
           }
         }
       }

@@ -360,8 +360,8 @@ describe('chatSlice background-slot frames (applyNonActiveFrame)', () => {
   it('reconciles a background user echo rather than duplicating the optimistic bubble', () => {
     const store = makeStore()
     store.dispatch(setActiveSlot('front'))
-    store.dispatch(appendSlotMessage({ slot: 'back', message: { role: 'user', content: 'ping' } as ChatMessage }))
-    store.dispatch(sseChatMessage({ slot: 'back', role: 'user', content: 'ping', ts: '2026-01-01T00:00:00Z' }))
+    store.dispatch(appendSlotMessage({ slot: 'back', message: { role: 'user', content: 'ping', meta: { sendId: 's-bg-1' } } as ChatMessage }))
+    store.dispatch(sseChatMessage({ slot: 'back', role: 'user', content: 'ping', ts: '2026-01-01T00:00:00Z', meta: { mid: 'm-echo-1', sendId: 's-bg-1' } }))
     expect(chat(store).slotMessages.back).toHaveLength(1)
     expect(chat(store).slotMessages.back[0].ts).toBe('2026-01-01T00:00:00Z')
   })
