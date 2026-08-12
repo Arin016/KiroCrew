@@ -45,6 +45,16 @@ class PodError(RuntimeError):
     """A pod operation could not be completed (bad name, no worktree, mint failed…)."""
 
 
+class PodBackendAbsent(PodError):
+    """The pod service manager is provably not running on this host.
+
+    Raised only from branches where the backend is demonstrably absent (e.g.
+    Linux with no session bus socket and no DBUS_SESSION_BUS_ADDRESS). Callers
+    that need to distinguish 'backend absent, no pods possible' from 'backend
+    present but erroring' can catch this subclass specifically.
+    """
+
+
 def validate_name(name: str) -> str:
     if not name or not _NAME_RE.match(name):
         raise PodError(f"invalid pod name {name!r}")
@@ -342,7 +352,7 @@ def require_systemd() -> None:
     if not has_session_bus():
         uid = getattr(os, "getuid", lambda: -1)()
         user = os.environ.get("USER") or os.environ.get("LOGNAME") or str(uid)
-        raise PodError(
+        raise PodBackendAbsent(
             f"no `systemd --user` session bus for uid {uid} "
             f"(looked for {session_bus_socket()}).\n"
             "Pods are systemd --user units, so one is required.\n"

@@ -2788,32 +2788,62 @@ async def _worktree_remove(
     if _POD_AVAILABLE and cfg is None:
         return {"ok": False, "error": "cannot load pod configuration to verify pod state"}
     if _POD_AVAILABLE and cfg:
+        # Pre-gate: verify the pod backend is reachable. If absent
+        # (PodBackendAbsent), pods cannot be supervised — a systemd --user
+        # unit requires a reachable session bus for its lifecycle. Even if
+        # the socket were removed under a running pod, that pod is now
+        # uncontrollable and will terminate on its next watchdog cycle.
+        # As a defense-in-depth measure, we also probe the unit file directly.
         try:
-            loop = asyncio.get_running_loop()
-            active = await loop.run_in_executor(
-                subprocess_executor(), rt.active_names, cfg
-            )
-            if name in active:
-                r = await _pod_down(name)
-                if not r.get("ok"):
-                    return {"ok": False, "error": f"pod shutdown failed: {r.get('error')}"}
-                stopped_pod = True
-                try:
-                    active2 = await loop.run_in_executor(
-                        subprocess_executor(), rt.active_names, cfg
-                    )
-                    if name in active2:
-                        return {"ok": False, "error": "pod still active after shutdown"}
-                except Exception as exc:
+            rt.require_backend()
+        except rt.PodBackendAbsent:
+            # Defense-in-depth: attempt a direct unit-state query. If this
+            # somehow succeeds (bus re-appeared between require_backend and
+            # here), we fall through to the normal active-names path.
+            try:
+                loop = asyncio.get_running_loop()
+                unit_state = await loop.run_in_executor(
+                    subprocess_executor(), rt.unit_state, cfg, name
+                )
+                if unit_state[0] == "active":
                     return {
                         "ok": False,
-                        "error": f"cannot verify pod shutdown: {_redact(str(exc))}",
+                        "error": "pod backend reported absent but unit is active — refusing",
                     }
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error": f"cannot verify pod state: {_redact(str(exc))}",
-            }
+            except Exception:
+                pass  # unit_state also fails → backend truly gone
+            logger.debug(
+                "dev-fleet worktree_remove: pod backend absent; "
+                "skipping pod-state check for %r",
+                name,
+            )
+        else:
+            try:
+                loop = asyncio.get_running_loop()
+                active = await loop.run_in_executor(
+                    subprocess_executor(), rt.active_names, cfg
+                )
+                if name in active:
+                    r = await _pod_down(name)
+                    if not r.get("ok"):
+                        return {"ok": False, "error": f"pod shutdown failed: {r.get('error')}"}
+                    stopped_pod = True
+                    try:
+                        active2 = await loop.run_in_executor(
+                            subprocess_executor(), rt.active_names, cfg
+                        )
+                        if name in active2:
+                            return {"ok": False, "error": "pod still active after shutdown"}
+                    except Exception as exc:
+                        return {
+                            "ok": False,
+                            "error": f"cannot verify pod shutdown: {_redact(str(exc))}",
+                        }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"cannot verify pod state: {_redact(str(exc))}",
+                }
 
     if progress is not None:
         progress("removing")
@@ -2828,19 +2858,24 @@ async def _worktree_remove(
         # gateway running from deleted files, so re-verify inactivity now.
         if _POD_AVAILABLE and cfg:
             try:
-                loop = asyncio.get_running_loop()
-                active3 = await loop.run_in_executor(
-                    subprocess_executor(), rt.active_names, cfg
-                )
-                if name in active3:
-                    return {"ok": False, "error": (
-                        "pod became active again before removal — refusing"
-                    )}
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "error": f"cannot re-verify pod state before removal: {_redact(str(exc))}",
-                }
+                rt.require_backend()
+            except rt.PodBackendAbsent:
+                pass  # backend provably absent — no pods can exist
+            else:
+                try:
+                    loop = asyncio.get_running_loop()
+                    active3 = await loop.run_in_executor(
+                        subprocess_executor(), rt.active_names, cfg
+                    )
+                    if name in active3:
+                        return {"ok": False, "error": (
+                            "pod became active again before removal — refusing"
+                        )}
+                except Exception as exc:
+                    return {
+                        "ok": False,
+                        "error": f"cannot re-verify pod state before removal: {_redact(str(exc))}",
+                    }
         cmd = ["git", "-C", MAIN_REPO, "worktree", "remove", path]
         if force_use_git_force:
             cmd.append("--force")

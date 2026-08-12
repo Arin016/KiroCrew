@@ -286,6 +286,73 @@ async def test_remove_succeeds_when_oid_matches():
     assert result["ok"] is True
 
 
+# --- session bus graceful degradation ---
+@pytest.mark.asyncio
+async def test_remove_proceeds_when_session_bus_absent():
+    """When require_backend() raises PodBackendAbsent, removal proceeds."""
+    import kiro_crew.apps.builtins.dev_fleet.server as mod
+    from kiro_crew.pod.runtime import PodBackendAbsent
+
+    with patch.object(mod, "_find_worktree", new_callable=AsyncMock,
+                      return_value=({"path": "/fake/wt", "branch": "feat-x", "is_main": False}, None)), \
+         patch.object(mod, "_real_dirty", new_callable=AsyncMock, return_value=False), \
+         patch.object(mod, "_pr_status_cached", new_callable=AsyncMock, return_value={"state": "MERGED"}), \
+         patch.object(mod, "_own_commits_count", new_callable=AsyncMock, return_value=1), \
+         patch.object(mod, "_git", new_callable=AsyncMock, return_value="aaa1111"), \
+         patch.object(mod, "_fetch_pr_head_oid", new_callable=AsyncMock, return_value="aaa1111"), \
+         patch.object(mod, "_load_cfg", return_value=object()), \
+         patch.object(mod, "_POD_AVAILABLE", True), \
+         patch.object(mod.rt, "require_backend", side_effect=PodBackendAbsent("no session bus")), \
+         patch.object(mod, "_run_cmd", new_callable=AsyncMock, return_value=(0, "", "")), \
+         patch.object(mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"):
+        result = await mod._worktree_remove("feat-x", force=False)
+    assert result["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_remove_refuses_operational_pod_error():
+    """When require_backend() passes but active_names raises, removal is refused."""
+    import kiro_crew.apps.builtins.dev_fleet.server as mod
+
+    with patch.object(mod, "_find_worktree", new_callable=AsyncMock,
+                      return_value=({"path": "/fake/wt", "branch": "feat-x", "is_main": False}, None)), \
+         patch.object(mod, "_real_dirty", new_callable=AsyncMock, return_value=False), \
+         patch.object(mod, "_pr_status_cached", new_callable=AsyncMock, return_value={"state": "MERGED"}), \
+         patch.object(mod, "_own_commits_count", new_callable=AsyncMock, return_value=1), \
+         patch.object(mod, "_git", new_callable=AsyncMock, return_value="aaa1111"), \
+         patch.object(mod, "_fetch_pr_head_oid", new_callable=AsyncMock, return_value="aaa1111"), \
+         patch.object(mod, "_load_cfg", return_value=object()), \
+         patch.object(mod, "_POD_AVAILABLE", True), \
+         patch.object(mod.rt, "require_backend", return_value=None), \
+         patch.object(mod.rt, "active_names", side_effect=OSError("launchctl error")), \
+         patch.object(mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"):
+        result = await mod._worktree_remove("feat-x", force=False)
+    assert result["ok"] is False
+    assert "cannot verify pod state" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_remove_still_fails_on_non_pod_exceptions():
+    """Non-PodError exceptions (e.g. OSError, TimeoutError) still refuse removal."""
+    import kiro_crew.apps.builtins.dev_fleet.server as mod
+
+    with patch.object(mod, "_find_worktree", new_callable=AsyncMock,
+                      return_value=({"path": "/fake/wt", "branch": "feat-x", "is_main": False}, None)), \
+         patch.object(mod, "_real_dirty", new_callable=AsyncMock, return_value=False), \
+         patch.object(mod, "_pr_status_cached", new_callable=AsyncMock, return_value={"state": "MERGED"}), \
+         patch.object(mod, "_own_commits_count", new_callable=AsyncMock, return_value=1), \
+         patch.object(mod, "_git", new_callable=AsyncMock, return_value="aaa1111"), \
+         patch.object(mod, "_fetch_pr_head_oid", new_callable=AsyncMock, return_value="aaa1111"), \
+         patch.object(mod, "_load_cfg", return_value=object()), \
+         patch.object(mod, "_POD_AVAILABLE", True), \
+         patch.object(mod.rt, "require_backend", return_value=None), \
+         patch.object(mod.rt, "active_names", side_effect=OSError("disk on fire")), \
+         patch.object(mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"):
+        result = await mod._worktree_remove("feat-x", force=False)
+    assert result["ok"] is False
+    assert "cannot verify pod state" in result["error"]
+
+
 # --- _upstream_remote fallback + override ---
 @pytest.mark.asyncio
 async def test_upstream_remote_fallback_to_origin():
@@ -5510,6 +5577,7 @@ async def test_worktree_remove_refuses_when_pod_reactivates_before_mutation(rese
          patch.object(mod, "_git", new_callable=AsyncMock, return_value="a" * 40), \
          patch.object(mod, "_load_cfg", return_value=object()), \
          patch.object(mod, "_POD_AVAILABLE", True), \
+         patch.object(mod.rt, "require_backend", return_value=None), \
          patch.object(mod.rt, "active_names", side_effect=lambda cfg: next(active_calls)), \
          patch.object(mod, "_run_cmd", side_effect=fake_run_cmd):
         res = await mod._worktree_remove("wt-1", force=False)
