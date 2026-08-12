@@ -31,6 +31,7 @@ import { isScreenSnipSupported } from '../hooks/useScreenSnip'
 import { useImeGuard } from '../hooks/useImeGuard'
 import ContextBar, { contextTip, contextPctClamped, contextColor } from './ContextBar'
 import PasteHighlightLayer, { INPUT_TYPO } from './PasteHighlightLayer'
+import PasteHoverLayer, { type PasteHoverHandle } from './PasteHoverLayer'
 import FollowUpBar from './FollowUpBar'
 import { dispatchLightbox } from './MarkdownRenderer'
 import { IMG_EXT, buildFileLabels } from '../utils/fileTokens'
@@ -837,6 +838,9 @@ function ChatInput({
   // Backdrop mirror that paints chip backgrounds behind paste tokens; its scroll
   // is kept in lockstep with the textarea (see syncMirrorScroll on the textarea).
   const mirrorRef = useRef<HTMLDivElement>(null)
+  // Hover detection layer that shows paste previews on mouseover; scroll-synced
+  // identically to the backdrop mirror.
+  const hoverRef = useRef<PasteHoverHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // "+" drop-up menu (upload file / image + browse toggle).
   const [plusOpen, setPlusOpen] = useState(false)
@@ -2426,7 +2430,10 @@ function ChatInput({
           onSelect={handleSelectSnap}
           onInput={handleInput}
           onScroll={e => { if (mirrorRef.current) mirrorRef.current.scrollTop = e.currentTarget.scrollTop }}
+          onMouseMove={e => { if (pasteBlocks.length && hoverRef.current) hoverRef.current.handleMouseMove(e) }}
+          onMouseLeave={() => { if (hoverRef.current) hoverRef.current.handleMouseLeave() }}
         />
+        {pasteBlocks.length > 0 && <PasteHoverLayer ref={hoverRef} value={value} blocks={pasteBlocks} mirrorRef={mirrorRef} />}
         </div>
 
         {/* Bottom icon row */}
