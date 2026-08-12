@@ -1109,6 +1109,67 @@ def run_proxy(args: list[str]) -> None:
 
         repair_playwright_config(config_arg)
 
+    # Runtime compatibility probe: on Linux with CUPS <2.5, the default
+    # Chromium revision crashes at load time (hard ippValidateAttributes dep).
+    # Inject --executable-path pointing at a compatible older revision when:
+    #   (a) the user hasn't already specified --executable-path,
+    #   (b) the effective browser is Chromium (checked via CLI flags AND config).
+    # This is the sole compatibility seam — the config stays declarative
+    # (channel: chromium) and this per-spawn probe self-heals without persisting
+    # stale paths. (#2894)
+    if not any(a == "--executable-path" or a.startswith("--executable-path=")
+               for a in args):
+        _should_probe = True
+        # Skip when the CLI explicitly selects a non-Chromium browser or
+        # extension mode — injecting a Chromium binary into a Firefox/WebKit
+        # launch would crash. Recognizes both --flag value and --flag=value.
+        _cli_browser: str | None = None
+        for _i, _a in enumerate(args):
+            if _a == "--browser" and _i + 1 < len(args):
+                _cli_browser = args[_i + 1]
+            elif _a.startswith("--browser="):
+                _cli_browser = _a.split("=", 1)[1]
+            elif _a == "--executable-path" or _a.startswith("--executable-path="):
+                _should_probe = False
+            elif _a == "--extension":
+                _should_probe = False
+        if _cli_browser and _cli_browser not in ("chrome", "chromium"):
+            _should_probe = False
+        _has_cli_browser = _cli_browser is not None
+        # Check the config's browserName when no CLI --browser override is
+        # present. Guard: refuse sensitive paths before reading (mirrors the
+        # guard in repair_playwright_config above, but applied independently
+        # so a refused repair does not leak into this read path).
+        if _should_probe and config_arg and not _has_cli_browser:
+            try:
+                from kiro_crew.security import is_sensitive_path
+
+                if is_sensitive_path(config_arg):
+                    pass  # Skip config read; probe anyway (Chromium default).
+                else:
+                    _cfg = json.loads(
+                        open(config_arg, encoding="utf-8").read()
+                    )
+                    _engine = _cfg.get("browser", {}).get(
+                        "browserName", "chromium"
+                    )
+                    if _engine != "chromium":
+                        _should_probe = False
+            except Exception:
+                pass  # Unreadable config — probe anyway (fail-safe).
+        if _should_probe:
+            try:
+                # Circular import: browser.setup imports from THIS module at
+                # top level, so the import is deferred to call time (once per
+                # proxy spawn, not hot).
+                from kiro_crew.browser.setup import _find_compatible_chromium
+
+                compat = _find_compatible_chromium()
+                if compat:
+                    args = ["--executable-path", compat] + args
+            except Exception:
+                pass  # Probe failure is non-fatal; fall through to default.
+
     playwright_cmd = _resolve_playwright_cmd()
     if playwright_cmd is None:
         error_resp = {

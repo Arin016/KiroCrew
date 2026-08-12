@@ -777,6 +777,111 @@ def _playwright_config_locked(config_path: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def _find_compatible_chromium() -> str | None:
+    """Find a Chromium binary that can launch on this system's libcups.
+
+    Chromium revisions ≥1234 hard-depend (``U`` symbol) on
+    ``ippValidateAttributes``, a CUPS 2.5+ function absent from older distros
+    (e.g. AL2 ships CUPS 1.6.3). Older revisions use a weak (``w``) reference
+    that gracefully resolves to NULL. When the newest installed revision would
+    crash at load time, this function returns the path to the newest compatible
+    binary so it can be used as ``executablePath`` instead of the default
+    channel.
+
+    Returns ``None`` when no probe is needed (non-Linux, or the default binary
+    works) or when no compatible revision is found.
+    """
+    if platform.system() != "Linux":
+        return None
+
+    browsers_path = Path(
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+        or (Path.home() / ".cache" / "ms-playwright")
+    )
+    if not browsers_path.is_dir():
+        return None
+
+    # Collect installed chromium revisions, newest first.
+    revisions: list[tuple[int, Path]] = []
+    for entry in browsers_path.iterdir():
+        if not entry.is_dir() or not entry.name.startswith("chromium-"):
+            continue
+        try:
+            rev_num = int(entry.name.split("-", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        # Find the chrome binary in either chrome-linux64/ or chrome-linux/.
+        for sub in ("chrome-linux64", "chrome-linux"):
+            binary = entry / sub / "chrome"
+            if binary.is_file():
+                revisions.append((rev_num, binary))
+                break
+
+    if not revisions:
+        return None
+
+    revisions.sort(key=lambda x: x[0], reverse=True)
+
+    # Quick check: does the newest revision's binary need ippValidateAttributes
+    # as a hard (U) symbol? If weak (w) or absent, the default channel works.
+    newest_binary = revisions[0][1]
+    if not _chromium_needs_cups_symbol(newest_binary):
+        return None
+
+    # The default binary would crash. Find the newest revision with a weak or
+    # absent reference to the symbol.
+    for _rev, binary in revisions:
+        if not _chromium_needs_cups_symbol(binary):
+            logger.info(
+                "Default Chromium needs CUPS 2.5+ (ippValidateAttributes); "
+                "falling back to compatible binary: %s",
+                binary,
+            )
+            return str(binary)
+
+    # Every installed revision has the hard symbol — no compatible fallback.
+    return None
+
+
+def _chromium_needs_cups_symbol(binary: Path) -> bool:
+    """Return True when the binary has ippValidateAttributes as a hard (U) dep.
+
+    Uses ``nm -D`` to check the dynamic symbol table. A weak (``w``) reference
+    is fine — it resolves to NULL at runtime. An undefined (``U``) reference
+    crashes at load time on systems without CUPS 2.5+.
+
+    Resolves ``nm`` via :func:`platform_compat.trusted_system_bin` (fixed
+    system directories, never agent-writable PATH) so a planted shim cannot
+    run with gateway privileges.
+    """
+    nm_bin = platform_compat.trusted_system_bin("nm")
+    if nm_bin is None:
+        return False
+
+    try:
+        result = subprocess.run(
+            [nm_bin, "-D", str(binary)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    for line in result.stdout.splitlines():
+        if "ippValidateAttributes" in line:
+            # Format: "                 U ippValidateAttributes" or
+            #         "                 w ippValidateAttributes"
+            parts = line.split()
+            if len(parts) >= 2 and parts[-2] == "U":
+                return True
+            # Weak (w) or any other binding — safe.
+            return False
+
+    # Symbol not referenced at all — safe.
+    return False
+
+
 def generate_playwright_config(engine: str | None = None) -> Path:
     """Generate ``<config_dir>/playwright-config.json`` with absolute paths.
 
@@ -801,7 +906,9 @@ def generate_playwright_config(engine: str | None = None) -> Path:
         "args": [],
     }
     # ``channel`` selects a branded Chromium distribution and is only meaningful
-    # for the chromium engine; firefox/webkit reject it.
+    # for the chromium engine; firefox/webkit reject it. The per-spawn probe in
+    # ``run_proxy`` handles the CUPS compatibility fallback at launch time
+    # (self-healing, no stale-path risk), so the config stays declarative.
     if engine == "chromium":
         launch_options["channel"] = "chromium"
 

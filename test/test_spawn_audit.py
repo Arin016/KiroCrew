@@ -546,6 +546,10 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # cli.py::_ensure_node / env.py::_run below, which shell the same
         # node/ensure-node toolchain and are benign for the same reason.
         # ``_npx_cache_playwright_roots`` runs the fixed ``npm config get cache``.
+        # ``_chromium_needs_cups_symbol`` runs ``nm -D <binary>`` on a Playwright-
+        # managed Chromium binary to probe symbol binding — fixed argv, no agent
+        # input, read-only inspection of a local file.
+        "browser/setup.py::_chromium_needs_cups_symbol",
         "browser/setup.py::_npx_cache_playwright_roots",
         "browser/setup.py::_resolve_playwright_core_cli",
         "browser/setup.py::_run",
