@@ -4433,6 +4433,7 @@
         "view_details_for": "Ver detalles de {{name}}"
       },
       "featuredSpotlight": {
+        "collection": "COLECCIÓN",
         "enable": "Activar",
         "featured": "DESTACADO",
         "get": "Obtener",

@@ -4498,6 +4498,7 @@
         "view_details_for": "Показать сведения о {{name}}"
       },
       "featuredSpotlight": {
+        "collection": "ПОДБОРКА",
         "enable": "Включить",
         "featured": "РЕКОМЕНДУЕМОЕ",
         "get": "Получить",
