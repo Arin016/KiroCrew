@@ -734,6 +734,28 @@ on crash, and starts on boot. Implemented in `src/kiro_crew/service/`.
     the baked `Environment=` lines, so editing it and running `sudo systemctl
     restart kirocrew` changes a value (e.g. the port) without reinstalling.
     Uninstall removes the file and its `/etc/kirocrew` directory.
+  - **Credentials are deliberately NOT captured.** Both baked locations are
+    world-readable — the unit lives in root-owned `/etc/systemd/system` and the
+    override file is installed `0644` — so a model credential placed there
+    would be readable by every local user on the host. `service_environment()`
+    therefore carries only `KIROCREW_KIRO_BIN` and `KIROCREW_PORT`, and a test
+    pins the absence so a future "just propagate it" change fails.
+    Consequence: a `KIRO_API_KEY` exported in the installing shell does not
+    reach the service, the readiness probe (which forwards that variable from
+    the *gateway's own* environment) sees no credential, and the dashboard
+    reports a signed-out state on a host where `kiro-cli` itself is
+    authenticated. `install_service()` prints a warning naming the variable and
+    the remedy when it detects that case, and `~/.kiro/crew/.env` is the
+    supported home — `load_credentials()` reads every key from that file into
+    the gateway environment at boot and forces `0600` on it first. The warning
+    is diagnostic only: it is non-fatal by construction, since the unit is
+    already written and started by the time it runs. `kirocrew doctor` reports
+    the same condition next to its `kiro login` line — the one output where the
+    contradiction is visible, since that line runs `whoami` with the inherited
+    environment and reports signed in. Doctor's report is gated on a service
+    definition existing (`installed_unit_path()`): without one the gateway runs
+    in the foreground and inherits the invoking shell, so the credential does
+    reach it and a warning would be a false positive.
   - Boot survival via `WantedBy=multi-user.target` (no linger needed —
     that's a user-service concept; this is system-level).
   - Crash-loop safety: `StartLimitBurst=3 StartLimitIntervalSec=300`.
