@@ -7,6 +7,8 @@ import re as _re
 from dataclasses import dataclass, field
 from typing import Any
 
+from kiro_crew.constants import env_flag_enabled
+
 # ── ACP Event Kinds ──
 
 EVENT_TEXT_CHUNK = "text_chunk"
@@ -110,13 +112,45 @@ ACP_BACKENDS_KNOWN = frozenset(
     }
 )
 # What an operator may actually persist in ``agent.acp_backend``, which is a
-# narrower question than what the code understands. KAS is plumbed and tested but
-# cannot serve a session yet: production names an agent on every session, KAS
-# advertises only its own built-in modes, and Crew's agent reaches it through
-# ``_meta.kiro.customAgents`` on ``session/new`` — not wired up yet. Config
-# resolution degrades an unselectable value to the default so the refusal lands
-# at startup with a reason instead of on the operator's first message.
+# narrower question than what the code understands: the claude backend is a
+# dormant seam with no public registration glue, so it stays out, and KAS is
+# still under test.
+#
+# KAS's remaining gap is no longer the agent wiring — Crew now names AND defines
+# the configured agent on ``session/new`` (``acp.kas_agent``) — nor credentials,
+# which the host mediates over the ``_kiro/auth/getAccessToken`` callback rather
+# than requiring a token in KAS's own cache location (``acp.kas_auth``). What
+# keeps it out of this set is exposure alone: the backend has not been exercised
+# widely enough to offer to every install, so it stays behind
+# :data:`ENV_KAS_PREVIEW`.
+# Config resolution degrades an unselectable value to the default so the refusal
+# lands at startup with a reason instead of on the operator's first message.
 ACP_BACKENDS_SELECTABLE = frozenset({ACP_BACKEND_KIRO})
+
+#: Opt-in that adds KAS to the selectable set for a single process, so the
+#: backend can be exercised end to end while it stays hidden from ordinary
+#: installs. Read at call time, never persisted — there is deliberately no config
+#: key, because a config key IS the exposure this gate exists to avoid.
+ENV_KAS_PREVIEW = "KIROCREW_KAS_PREVIEW"
+
+
+def selectable_backends() -> frozenset[str]:
+    """Backends an operator may select in this process.
+
+    A function rather than a constant because the preview gate is an environment
+    variable: a module-level snapshot would bake in whatever was set at import
+    time, which for a long-lived gateway is the wrong answer and for tests is an
+    ordering dependency.
+
+    Gated on the shared ``env_flag_enabled`` predicate, never on "the variable is
+    non-empty": an operator who writes ``KIROCREW_KAS_PREVIEW=0`` is turning the
+    preview OFF, and admitting that value would launch an under-test backend — and
+    hand it an access token — with no positive opt-in.
+    """
+    if env_flag_enabled(ENV_KAS_PREVIEW):
+        return ACP_BACKENDS_SELECTABLE | {ACP_BACKEND_KAS}
+    return ACP_BACKENDS_SELECTABLE
+
 
 # ── Capability membership (harness-parity H6, H7) ──
 # Every capability a backend may claim is an OPT-IN set here, never a negation at
@@ -142,6 +176,19 @@ ACP_BACKENDS_STEER = frozenset({ACP_BACKEND_KIRO, ACP_BACKEND_KAS})
 # that never starts and leaves the agent process unconfined. Only kiro-cli
 # qualifies; a Node or Python harness does not, however it is spawned.
 ACP_BACKENDS_INTERNAL_SANDBOX = frozenset({ACP_BACKEND_KIRO})
+
+# Backends that obtain credentials by calling BACK into the host
+# (``_kiro/auth/getAccessToken``) instead of resolving their own. The answer is a
+# live access token, so this membership is what decides who may receive one — a
+# harness outside the set has its request treated as an unknown method. kiro-cli
+# resolves its own credentials and is not a member.
+ACP_BACKENDS_HOST_MEDIATED_AUTH = frozenset({ACP_BACKEND_KAS})
+
+# Backends with no ``--agent`` flag, which therefore need the agent DEFINITION
+# carried in ``session/new``. kiro-cli takes ``--agent`` and materializes the
+# agent pre-spawn, so it is not a member.
+ACP_BACKENDS_CLIENT_DEFINED_AGENT = frozenset({ACP_BACKEND_KAS})
+
 
 # ── Provider labels ──
 # The backend identity key persisted in the session map. It indexes three

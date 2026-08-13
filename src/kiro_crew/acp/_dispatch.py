@@ -65,6 +65,7 @@ def build_session_new_params(
     *,
     mcp_servers: list[dict[str, Any]] | None = None,
     claude_meta: bool = False,
+    kas_agent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the params for a ``session/new`` request.
 
@@ -72,6 +73,14 @@ def build_session_new_params(
     ``mcpServers`` field as malformed and exits cleanly (rc=0, no stderr) — so
     both backends must send it, even as an empty list. The ``claude_meta`` flag
     adds the SDK envelope the claude-agent-acp backend requires.
+
+    ``kas_agent`` carries a ClientCustomAgent definition for the KAS backend,
+    which has no ``--agent`` flag. It must be sent whenever a KAS session needs a
+    Kiro Crew agent: KAS binds ``modeId`` only to an agent already in its
+    registry and IGNORES an unresolvable one rather than rejecting it, so naming
+    the agent without also DEFINING it yields a fully successful ``session/new``
+    that quietly runs KAS's own default mode — with none of the agent's prompt,
+    tool grants or MCP servers in effect and every log line looking healthy.
     """
     params: dict[str, Any] = {
         "cwd": str(cwd),
@@ -79,6 +88,14 @@ def build_session_new_params(
     }
     if claude_meta:
         params["_meta"] = {"claudeCode": {"options": {}}}
+    elif kas_agent:
+        # Both keys in one namespace: the definition registers the agent and
+        # modeId selects it. Client-provided agents are the highest-precedence
+        # source in KAS's registry, above every file-based one, so nothing has to
+        # be written to disk and a stale file cannot shadow this.
+        params["_meta"] = {
+            "kiro": {"modeId": kas_agent["id"], "customAgents": [kas_agent]}
+        }
     return params
 
 

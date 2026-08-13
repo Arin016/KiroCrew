@@ -84,6 +84,90 @@ branch is unreachable in this build. Its binary-resolution + config-isolation
 details live in [`acp-client.md`](acp-client.md); do not re-add the registration
 glue or a provider selector (see the repo-root `CLAUDE.md`).
 
+**KAS backend authentication:** KAS launches with `--auth=acp-callback` and asks
+the host for an access token over ACP; `acp.kas_auth` answers by shelling out to
+kiro-cli's `chat _ get-kas-token`. Pointing KAS at a token file cannot work in
+general — credential resolution is stateful logic in kiro-cli (a cross-process
+refresh lock, a priority order across cached identities, OIDC refresh on expiry),
+and the default cache location holds only one of those identities, so on a host
+signed in another way KAS's own file provider correctly finds nothing. The refresh
+token never leaves kiro-cli; only short-lived access tokens pass through.
+
+Three details are load-bearing. `provider` must be forwarded when present or KAS
+infers enterprise status from `profileArn` presence and **fail-closes governance**
+for Builder ID and social sign-ins; `authMethod` selects the upstream `TokenType`
+header and is absent for those same identities, so it is omitted rather than sent
+empty. The reply uses `-32603`, not `-32601`: method-not-found would tell KAS the
+capability is absent and stop it asking again, turning a transient credential
+problem into a permanently unauthenticated session. And the callback is answered
+**on the runtime's reader loop**, not a session handle — it carries no `sessionId`
+and arrives *during* `session/new`, before any session queue exists, so deferring
+it deadlocks (KAS waits for the token, `create_session` waits for the id).
+
+**KAS backend agent selection:** KAS has no `--agent` flag, so the agent is named
+AND defined in `session/new`'s `_meta.kiro` — `modeId` selects, `customAgents`
+registers. Both are required, and omitting the definition fails **silently**: KAS
+binds `modeId` only to an agent already in its registry and ignores an
+unresolvable name rather than rejecting it, so `session/new` succeeds and the
+session runs KAS's own default mode with none of the agent's prompt, tool grants
+or MCP servers in effect. Measured against the KAS kiro-cli extracts: `modeId`
+alone returned `configOptions.currentValue == "vibe"`; with the definition it
+returned the requested agent.
+
+`acp.kas_agent` translates the on-disk config (kiro-cli's format) on the way out
+rather than migrating files — client-provided agents are the highest-precedence
+source in KAS's registry, above `~/.kiro/agents`, `.kiro/agents`, bundled and
+cloud profiles, so a stale file cannot shadow the live config. Two fields need
+real translation: `prompt` must be resolved content (KAS rejects a `file://` URI
+and makes resolution the client's job), and `tools` is `"*"`-or-list where
+kiro-cli splits the grant across `tools` and `allowedTools` — only `tools` maps,
+because `allowedTools` is an approval concern the host's own PreToolUse gate owns
+and forwarding it as tool ACCESS would widen real reach.
+
+Both KAS-specific behaviours reach the shared `AcpRuntime` as **capability
+membership**, never as a harness comparison on the shared path:
+`ACP_BACKENDS_HOST_MEDIATED_AUTH` decides who may be answered with a live access
+token, and `ACP_BACKENDS_CLIENT_DEFINED_AGENT` decides who needs the agent
+definition in `session/new`. Both are resolved once in `__init__` into a boolean,
+so the reader loop and `create_session` read a flag. A backend that never joins a
+set has no code path that reaches the behaviour — a stronger guarantee than a
+comparison evaluated per frame, and it keeps harness support additive
+(harness-parity H13).
+
+`resources` is deliberately **not** forwarded. KAS resolves those entries in its
+own process, so Kiro Crew's sensitive-path gate never sees the reads — an agent
+config carrying `resources: ["file://~/.aws/credentials"]` would put the file into
+model context. Validating them host-side would mean reimplementing KAS's resolver:
+an `AgentResource` is either a bare `file://`/`skill://` URI or a `knowledgeBase`
+object whose `include` carries glob patterns, and its schema states that scheme
+classification happens where the agent resolves them. A validator covering only
+the bare-URI form would read as a gate while the glob form walked through, so the
+capability is withheld until resources resolve through the sensitive-path check.
+A KAS agent losing its context files is a recoverable gap; a leaked credential is
+not.
+
+Every `file:` authority form is decided in one place (`_file_uri_to_path`), and a
+relative reference resolves against the **config's own directory** — never the
+gateway's working directory, which would inline an unrelated file into the system
+prompt. `.`/`..` are relative prefixes rather than hosts, `localhost` reads as an
+empty authority, a drive-shaped authority is a mis-parsed Windows drive, and any
+other authority stays a UNC host (dropping it would retarget the read at a
+same-named local path).
+
+Resolution is
+**fail-closed**: when the agent cannot be resolved, `create_session` raises BEFORE
+`session/new` rather than sending the request without a definition. That is
+deliberate — omitting the definition makes KAS fall back to its own default mode,
+which carries BROADER tool access than the configured agent, so "degrading
+politely" would be a silent privilege widening.
+
+Resolution is also delegated to `agent_discovery` in full — never a path this
+module builds, never a filename it compares. The declared `name` wins over the
+filename (that is what kiro-cli lists and accepts for `--agent`), and
+project-local wins over global. Three separate defects came from breaking that
+delegation three different ways, so the invariant is stated in the code rather
+than left implicit.
+
 **Key APIs:**
 - `start()` → `AcpClient.ensure_ready()` (spawns process, handshake, session/new)
 - `stream()` → maps events from `stream_events()`

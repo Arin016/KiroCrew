@@ -47,16 +47,23 @@ provider.
 
 | Value | Agent | Status |
 |-------|-------|--------|
-| `""` (default) | kiro-cli | the only supported value |
-| `kas` | kiro-agent (KAS) | plumbed, **not yet usable** |
+| `""` (default) | kiro-cli | the only selectable value |
+| `kas` | kiro-agent (KAS) | wired, **still under test** |
 
-**Leave this unset.** The KAS backend's spawn and session plumbing is in place,
-but Kiro Crew does not yet send your configured agent to KAS, so every session
-would fail to activate it. Setting `kas` is refused at startup with that reason
-rather than failing on your first message.
+**Leave this unset.** The KAS backend is now complete enough to run a session —
+your configured agent is sent to KAS on each new session (KAS has no equivalent of
+kiro-cli's `--agent` flag), and Kiro Crew answers KAS's token callback by asking
+kiro-cli, so any Kiro sign-in kiro-cli itself can use works here too. What keeps
+it unlisted is that it has not been exercised widely enough to offer, and it
+depends on kiro-cli for credentials as well as for the agent server. Setting `kas`
+degrades to the default with that reason in the log rather than failing on your
+first message.
 
-An unrecognized value logs a warning and falls back to the default backend, so a
-typo costs you a line in the log rather than a gateway that will not start.
+To exercise it deliberately, set `KIROCREW_KAS_PREVIEW=1` for that process — a
+per-process opt-in, never persisted, so nothing changes for an ordinary install.
+
+An unrecognized value degrades the same way, so a typo costs you a line in the
+log rather than a gateway that will not start.
 
 ## Key Settings
 
