@@ -180,6 +180,44 @@ Every PR body MUST contain these (fill-in template: `$SKILL_DIR/assets/pr-body-t
    - Embed with **commit-SHA-pinned** same-origin URLs: `![alt](https://github.com/<owner>/<repo>/raw/<sha>/temp-screenshots/<feature>/<name>.png)`. Branch-pinned URLs break when the branch is deleted on merge; external image hosts leak content and are camo-blocked for private repos. The SHA-pinned URL keeps resolving even after periodic cleanup removes the file from `main`'s tip (the blob stays reachable via the pinned historical commit).
    - After any amend that changes the images, re-pin the URLs to the new SHA.
    - Put the two or three most telling shots inline; fold full-page context into a `<details>` block.
+   - **No-visual-delta waiver** — when the PR has NO user-visible UI change, use
+     the `<!-- no-visual-delta -->` PR-body marker instead of screenshots. Both
+     lines are required together (a bare marker without the justification fails
+     the check):
+     ```markdown
+     <!-- no-visual-delta -->
+     **Why no screenshot:** <one-line reason>
+     ```
+     **The decision is about rendered delta, not file type.** The Screenshot
+     Evidence gate fires when the diff touches watched frontend paths (see
+     `screenshot-evidence.yml`'s path filter). The marker waives that gate
+     when the change has **no visible effect in the browser** despite touching
+     a watched path. Two cases:
+
+     **Use the marker when** the gate would fire but no pixel changes:
+     - Comment-only or type-annotation-only edits in `.tsx`/`.css` files
+     - Refactoring internals of a component with no rendered output change
+       (e.g. renaming a local variable, extracting a helper, fixing a string
+       builder that produces identical HTML)
+     - Non-rendering accessibility attributes (aria IDs, test-ids)
+     - Pure backend/CI/docs changes where the gate doesn't fire (the marker
+       is inert here — harmless to include but not required since the gate
+       won't block you)
+
+     **Do NOT use it — provide real screenshots instead — when** the change
+     has an actual rendered delta a user would see:
+     - New or modified components, panels, pages, modals, or toasts
+     - Layout, theme, spacing, or styling changes
+     - Changed i18n strings that appear in the rendered UI
+     - Any diff where a before/after screenshot would show a visible
+       difference
+
+     **When to decide:** Phase 1 step 5 (description reconciliation). Check
+     `git diff --name-only origin/<base>...HEAD` against the gate's watched
+     paths. If watched paths are touched, inspect each: does the change
+     produce a visible difference in the browser? If yes → screenshot. If
+     no → marker + justification explaining *why* no pixel changed. When in
+     doubt, screenshot — the marker is for clear-cut non-visual work.
 7. **Issue link — a real closing keyword, not a bare reference.** If the work resolves a tracked issue, the body should carry `Fixes #<n>` / `Closes #<n>` / `Resolves #<n>` (one trailer per issue, at the bottom). This is the ONLY thing that makes the host close the issue on merge: `Related: #<n>`, `Part of #<n>`, and a bare `#<n>` all render as links and close nothing. **Read it back rather than trusting the prose you just wrote** — the host resolves the link at PR-open/edit time and exposes it as a field: `gh pr view <n> --json closingIssuesReferences`. An empty list with an issue named in the body means the keyword is missing or malformed, and `pr_status.py` prints that as a `NOTICE:` line. If the PR deliberately closes nothing (a partial fix, a refactor with no filed issue), say so in one line at the start of a line — `no issue closed: <why>` — so a reader can tell an intentional omission from a forgotten trailer. **This is advisory, not a gate**: an issue-less PR is legitimate and readiness never blocks on it. It is worth doing anyway because nothing downstream reconciles a missing trailer — the work ships, the issue stays open, and the next person to read that issue plans against a body that no longer matches the code.
 
 Omit a section only when truly not applicable, and say so.
