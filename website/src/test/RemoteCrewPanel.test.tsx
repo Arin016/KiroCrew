@@ -381,6 +381,29 @@ describe('RemoteCrewPanel', () => {
     expect(screen.getByRole('button', { name: /Enable remote crew management/i })).toBeInTheDocument()
   })
 
+  it('does not flash the tabbed UI before showing the disabled state', async () => {
+    // Bug: the panel rendered the full form (tabs, crew list) during the initial
+    // query, then jittered to the "off" card once the 403 arrived. Fix: show a
+    // neutral loading card until the enabled/disabled state is determined.
+    let rejectInstances: (e: Error) => void = () => {}
+    vi.mocked(api.listInstances).mockReturnValue(
+      new Promise((_resolve, reject) => { rejectInstances = reject }) as ReturnType<typeof api.listInstances>,
+    )
+    vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [] })
+    renderWithProviders(<RemoteCrewPanel />)
+
+    // While loading: a spinner, no tabs, no form.
+    expect(screen.getByText(/Loading/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Your crews/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Set up a new one/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Enable remote crew management/i })).not.toBeInTheDocument()
+
+    // After the 403 resolves: transitions directly to the disabled card.
+    rejectInstances(new ApiError(403, 'instances feature is disabled'))
+    expect(await screen.findByText(/Remote crew management is off/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Your crews/i })).not.toBeInTheDocument()
+  })
+
   it('distinguishes cloud crews from hand-added machines, and shows an in-progress launch', async () => {
     vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [CLOUD_INSTANCE, MANUAL_INSTANCE] })
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [DONE_JOB, RUNNING_JOB] })

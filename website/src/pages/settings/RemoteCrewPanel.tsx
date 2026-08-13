@@ -777,6 +777,19 @@ export function RemoteCrewPanel() {
     if (next.size !== deletingTags.size) setDeletingTags(next)
   }, [instances, cloudTagByInstanceId, deletingTags])
 
+  // ── Initial load: don't render the full UI until we know whether the
+  //    feature is enabled. Without this the panel flashes the tabbed form
+  //    and then jitters to the "off" card once the 403 arrives. ──
+  if (instancesQuery.isLoading) {
+    return (
+      <Card>
+        <div className="flex items-center gap-2 text-muted text-sm py-2">
+          <RefreshCw className="lucide-inline animate-spin" /> {i18nT('pages.settings.instancesPanel.loading')}
+        </div>
+      </Card>
+    )
+  }
+
   // ── Disabled feature gate (mirrors InstancesPanel) ──
   if (disabled) {
     return (
