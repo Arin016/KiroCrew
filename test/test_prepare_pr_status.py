@@ -560,6 +560,200 @@ def test_same_number_in_different_repositories_stays_unconfirmed() -> None:
     assert "#7" in reason
 
 
+# --- explicit-trailer grammar (whole line + qualified forms) -------------------
+#
+# Positive and opposite-failure coverage for each accepted trailer form (bare,
+# owner/repo-qualified, full issue URL), whole-line anchoring, and qualifier
+# reconciliation against the PR's own repository identity.
+
+_PR_URL = "https://github.com/example/repo/pull/42"
+
+
+def test_prose_starting_with_a_closing_keyword_is_not_a_trailer() -> None:
+    """A sentence that merely starts with a closing keyword is prose."""
+    module = _load_script()
+    body = "Fixed #123 in an earlier release; this PR only adds tests."
+    reason = module.closing_link_reason(body, [{"number": 123}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+    assert "#123" in reason
+    # The notice must name the whole-line requirement, or the author sees a
+    # body that visibly contains the keyword and cannot tell what to change.
+    assert "alone on its line" in reason
+
+
+def test_trailer_with_terminal_punctuation_still_confirms() -> None:
+    """One trailing . ; or , is sentence habit, not prose."""
+    module = _load_script()
+    bodies = (
+        "Fixes #7.",
+        "Resolves: #7;",
+        "Fixes example/repo#7,",
+        "Fixes #7 .",
+    )
+    for body in bodies:
+        assert module.closing_link_reason(body, [{"number": 7}], _PR_URL) is None, body
+
+
+def test_punctuated_trailer_followed_by_prose_is_still_not_a_trailer() -> None:
+    module = _load_script()
+    body = "Fixes #7. This PR only adds tests."
+    reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_bare_trailer_line_with_trailing_prose_is_not_a_trailer() -> None:
+    module = _load_script()
+    body = "Fixes #7 and rewrites the parser."
+    reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_bare_trailer_with_trailing_whitespace_still_confirms() -> None:
+    module = _load_script()
+    assert module.closing_link_reason("Fixes #7 \t ", [{"number": 7}], _PR_URL) is None
+
+
+def test_crlf_bare_trailer_still_confirms() -> None:
+    module = _load_script()
+    body = "Fixes #7\r\nMore prose on the next line."
+    assert module.closing_link_reason(body, [{"number": 7}], _PR_URL) is None
+
+
+def test_keyword_and_reference_split_across_lines_is_not_a_trailer() -> None:
+    module = _load_script()
+    body = "Fixes\n#7"
+    reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_two_references_on_one_line_are_not_trailers() -> None:
+    """One trailer per issue, one issue per line."""
+    module = _load_script()
+    body = "Fixes #7, fixes #8"
+    reason = module.closing_link_reason(body, [{"number": 7}, {"number": 8}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_qualified_trailer_naming_this_repository_confirms() -> None:
+    module = _load_script()
+    body = "Fixes example/repo#7"
+    assert module.closing_link_reason(body, [{"number": 7}], _PR_URL) is None
+
+
+def test_qualified_trailer_comparison_is_case_insensitive() -> None:
+    module = _load_script()
+    body = "Fixes Example/Repo#7"
+    assert module.closing_link_reason(body, [{"number": 7}], _PR_URL) is None
+
+
+def test_qualified_trailer_for_another_repository_is_not_a_trailer() -> None:
+    module = _load_script()
+    body = "Fixes other/repo#7"
+    reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_qualified_trailer_without_repository_identity_is_not_accepted() -> None:
+    """No PR URL means a qualifier cannot be reconciled, so it stays prose."""
+    module = _load_script()
+    body = "Fixes example/repo#7"
+    reason = module.closing_link_reason(body, [{"number": 7}])
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_issue_url_trailer_naming_this_repository_confirms() -> None:
+    module = _load_script()
+    body = "Fixes https://github.com/example/repo/issues/7"
+    assert module.closing_link_reason(body, [{"number": 7}], _PR_URL) is None
+
+
+def test_issue_url_trailer_for_another_host_or_repository_is_not_a_trailer() -> None:
+    module = _load_script()
+    bodies = (
+        "Fixes https://ghe.example.com/example/repo/issues/7",
+        "Fixes https://github.com/other/repo/issues/7",
+    )
+    for body in bodies:
+        reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+        assert reason is not None, body
+        assert "no explicit closing trailer" in reason, body
+
+
+def test_issue_url_trailer_with_trailing_path_is_not_a_trailer() -> None:
+    module = _load_script()
+    body = "Fixes https://github.com/example/repo/issues/7/comments"
+    reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_issue_url_trailer_on_a_host_with_a_port_confirms() -> None:
+    """The URL host class and the PR-URL identity parse the same host token."""
+    module = _load_script()
+    ported_pr_url = "https://ghe.corp.example:8443/example/repo/pull/42"
+    body = "Fixes https://ghe.corp.example:8443/example/repo/issues/7"
+    assert module.closing_link_reason(body, [{"number": 7}], ported_pr_url) is None
+    # A trailer that drops the port names a different host token.
+    portless = "Fixes https://ghe.corp.example/example/repo/issues/7"
+    reason = module.closing_link_reason(portless, [{"number": 7}], ported_pr_url)
+    assert reason is not None
+    assert "no explicit closing trailer" in reason
+
+
+def test_malformed_number_in_accepted_qualified_trailer_reports_malformed() -> None:
+    """An accepted qualifier with an unusable number is malformed, not prose."""
+    module = _load_script()
+    bodies = (
+        "Fixes example/repo#0",
+        "Fixes https://github.com/example/repo/issues/0",
+    )
+    for body in bodies:
+        reason = module.closing_link_reason(body, [{"number": 7}], _PR_URL)
+        assert reason is not None, body
+        assert "malformed explicit closing trailer" in reason, body
+
+
+def test_qualified_attempt_with_no_resolution_is_reported_distinctly() -> None:
+    """A qualified or URL closing attempt still counts as keyword intent."""
+    module = _load_script()
+    bodies = (
+        "Fixes other/repo#999999",
+        "Fixes https://github.com/example/repo/issues/999999",
+    )
+    for body in bodies:
+        reason = module.closing_link_reason(body, [], _PR_URL)
+        assert reason is not None, body
+        assert "resolved no issue" in reason, body
+        assert "no closing keyword" not in reason, body
+
+
+def test_main_passes_the_pr_url_to_the_issue_link_check(capsys) -> None:
+    """The qualified form is silent only when main() forwards the PR's URL."""
+    module = _load_script()
+    checks = [
+        {"name": "PR Readiness", "status": "COMPLETED", "conclusion": "SUCCESS"},
+    ]
+    _install_fake_gh(
+        module,
+        _pr_payload(
+            checks,
+            body="Fixes example/repo#7",
+            closingIssuesReferences=[{"number": 7}],
+        ),
+    )
+    assert module.main(["pr_status.py", "42"]) == 0
+    out = capsys.readouterr().out
+    assert "closes on merge: #7" in out, out
+    assert "NOTICE:" not in out, out
+
+
 def test_opt_out_must_be_a_trailer_not_a_mention() -> None:
     """Prose that merely discusses the check must NOT read as a declaration.
 

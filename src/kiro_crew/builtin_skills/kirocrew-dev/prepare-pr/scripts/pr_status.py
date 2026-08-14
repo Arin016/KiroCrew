@@ -59,15 +59,53 @@ DEFAULT_READINESS_CONTEXT = "PR Readiness"
 # #n" and a bare "#n" render as links and close nothing, which is how finished
 # work merges while its issue stays open forever.
 _CLOSING_KEYWORD_PATTERN = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+# Reference shapes the host can resolve after a closing keyword: bare #n,
+# owner/repo#n, and the full issue URL. The shapes are permissive at match
+# time (exact owner/repo naming rules are the host's business); acceptance of
+# a qualified shape is a strict equality check against the PR's own
+# repository identity in _closing_trailer_numbers.
+_OWNER_REPO_PATTERN = r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+"
+_ISSUE_URL_PATTERN = (
+    r"https?://(?P<url_host>[A-Za-z0-9.-]+(?::\d+)?)/(?P<url_owner>[A-Za-z0-9-]+)"
+    r"/(?P<url_repo>[A-Za-z0-9_.-]+)/issues/(?P<url_number>\d+)"
+)
+# Loose intent classifier: a closing keyword followed by any resolvable
+# reference shape, anywhere in the visible prose. Used only to explain WHY
+# the host resolved nothing; whether a line is an accepted explicit trailer
+# is _CLOSING_TRAILER_RE's decision alone.
 _CLOSING_KW_RE = re.compile(
-    rf"\b{_CLOSING_KEYWORD_PATTERN}\s*:?\s+#\d+",
+    rf"\b{_CLOSING_KEYWORD_PATTERN}\s*:?\s+"
+    rf"(?:(?:{_OWNER_REPO_PATTERN})?#\d+|https?://\S+/issues/\d+)",
     re.IGNORECASE,
 )
-# A resolved closure without a matching line-anchored trailer may come from
-# prose or a manual link, so every host-resolved issue number needs human
-# confirmation unless it appears in one of these explicit trailers.
+# The complete accepted explicit-trailer grammar. A resolved closure without
+# a matching trailer may come from prose or a manual link, so every
+# host-resolved issue number needs human confirmation unless it appears in
+# one of these. A trailer must occupy an ENTIRE visible line: trailing
+# whitespace, one terminal punctuation mark (. ; ,), and a trailing HTML
+# comment (already masked to spaces by _visible_markdown_prose) are
+# tolerated. Keyword and reference must share that line ([ \t] between
+# tokens, never \s: a reference on the following line is prose, not a
+# trailer).
+#
+#   <keyword>[:] <reference>
+#
+#   keyword:    close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved
+#               (case-insensitive)
+#   reference:  #<n>                 -- the PR's own repository
+#               <owner>/<repo>#<n>   -- accepted only when it names the PR's
+#                                       own repository (case-insensitive)
+#               https://<host>/<owner>/<repo>/issues/<n>
+#                                    -- accepted only when host, owner, and
+#                                       repo all match the PR's own URL
+#
+# Whole-line anchoring is what rejects prose such as "Fixed #123 in an
+# earlier release; this PR only adds tests.": a sentence that merely starts
+# with a closing keyword is not a standalone trailer.
 _CLOSING_TRAILER_RE = re.compile(
-    rf"^{_CLOSING_KEYWORD_PATTERN}\s*:?\s+#(?P<number>\d+)\b",
+    rf"^{_CLOSING_KEYWORD_PATTERN}[ \t]*:?[ \t]+"
+    rf"(?:(?P<owner_repo>{_OWNER_REPO_PATTERN})?#(?P<number>\d+)|{_ISSUE_URL_PATTERN})"
+    rf"[ \t]*[.;,]?[ \t]*\r?$",
     re.IGNORECASE | re.MULTILINE,
 )
 # Any issue-ish reference at all, used to tell "forgot the verb" from
@@ -249,7 +287,66 @@ def _issue_number_sort_key(number):
     return (len(number), number)
 
 
-def closing_link_reason(body, closing_refs):
+# The PR's own URL is the host's statement of where the PR lives, so it is
+# the reconciliation target for qualified trailer forms. Owner and repository
+# names are compared case-insensitively (the host treats them that way); the
+# host part is a DNS name, also case-insensitive.
+_PR_URL_IDENTITY_RE = re.compile(
+    r"https?://(?P<host>[^/]+)/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/\d+"
+)
+
+
+def _repo_identity(pr_url):
+    """Return (host, owner, repo) lowercased from the PR's own URL, else None."""
+    match = _PR_URL_IDENTITY_RE.match(pr_url or "")
+    if not match:
+        return None
+    return (
+        match.group("host").lower(),
+        match.group("owner").lower(),
+        match.group("repo").lower(),
+    )
+
+
+def _closing_trailer_numbers(visible_body, identity):
+    """Collect issue numbers from accepted explicit closing trailers.
+
+    Returns ``(numbers, well_formed)``. A qualified trailer (owner/repo#n or
+    a full issue URL) is accepted only when it unambiguously names the PR's
+    own repository per ``identity``; a mismatched or unverifiable qualifier
+    means the line is NOT a trailer at all -- prose naming another
+    repository's issue is legitimate -- never a malformed one. An accepted
+    trailer whose number fails normalization marks the body malformed,
+    exactly like the bare form.
+    """
+    numbers = set()
+    well_formed = True
+    for match in _CLOSING_TRAILER_RE.finditer(visible_body):
+        raw_number = match.group("url_number")
+        if raw_number is not None:
+            url_identity = (
+                match.group("url_host").lower(),
+                match.group("url_owner").lower(),
+                match.group("url_repo").lower(),
+            )
+            if identity is None or url_identity != identity:
+                continue
+        else:
+            qualifier = match.group("owner_repo")
+            if qualifier is not None and (
+                identity is None or tuple(qualifier.lower().split("/", 1)) != identity[1:]
+            ):
+                continue
+            raw_number = match.group("number")
+        number = _normalize_issue_number(raw_number)
+        if number is None:
+            well_formed = False
+        else:
+            numbers.add(number)
+    return numbers, well_formed
+
+
+def closing_link_reason(body, closing_refs, pr_url=""):
     """Return an advisory issue-link reason, else None.
 
     ADVISORY ONLY — the caller prints this, it never changes the exit code. An
@@ -260,18 +357,18 @@ def closing_link_reason(body, closing_refs):
     ``closingIssuesReferences`` field), so it is the truth about what will
     actually close. The body regexes classify whether every resolved issue has
     an explicit trailer or whether any closure needs human confirmation.
+
+    ``pr_url`` is the PR's own URL. Qualified trailer forms (owner/repo#n and
+    full issue URLs) are accepted only when they name that same repository;
+    the complete accepted grammar is documented at _CLOSING_TRAILER_RE.
+    Without a URL, only bare '#<n>' trailers are accepted.
     """
     body = body or ""
     visible_body = _visible_markdown_prose(body)
     if closing_refs:
-        trailer_numbers = set()
-        trailers_well_formed = True
-        for match in _CLOSING_TRAILER_RE.finditer(visible_body):
-            number = _normalize_issue_number(match.group("number"))
-            if number is None:
-                trailers_well_formed = False
-            else:
-                trailer_numbers.add(number)
+        trailer_numbers, trailers_well_formed = _closing_trailer_numbers(
+            visible_body, _repo_identity(pr_url)
+        )
         resolved_numbers = []
         refs_well_formed = True
         for ref in closing_refs:
@@ -334,7 +431,7 @@ def closing_link_reason(body, closing_refs):
             "host will close an issue but the body has no explicit closing trailer"
             + missing_text
             + " (confirm every closure is intentional; add one 'Fixes #<n>' "
-            "trailer per issue)"
+            "trailer per issue, alone on its line)"
         )
     if _NO_ISSUE_RE.search(visible_body):
         return None
@@ -668,9 +765,9 @@ def detect_repo(pr_url=""):
     (markers invisible, gates vacuous). Falls back to the cwd's repo only when
     no URL is available.
     """
-    m = re.match(r"https?://[^/]+/([^/]+)/([^/]+)/pull/\d+", pr_url or "")
+    m = _PR_URL_IDENTITY_RE.match(pr_url or "")
     if m:
-        return "{}/{}".format(m.group(1), m.group(2))
+        return "{}/{}".format(m.group("owner"), m.group("repo"))
     rc, repo, _ = run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
     return repo.strip() if rc == 0 and "/" in repo else ""
 
@@ -1005,7 +1102,7 @@ def main(argv):
     # act on. So report the gap where the author will see it and let them
     # decide -- blocking a green PR on bookkeeping costs more than it saves,
     # and an issue-less PR is legitimate.
-    _closing = closing_link_reason(d.get("body"), _closes)
+    _closing = closing_link_reason(d.get("body"), _closes, d.get("url") or "")
     if _closing:
         print("  NOTICE: " + _closing)
 
