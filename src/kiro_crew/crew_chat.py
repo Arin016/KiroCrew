@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from kiro_crew.config.loader import KiroCrewConfig, resolve_agent_bindings
 from kiro_crew.config.paths import data_home
 from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
 from kiro_crew.dashboard.chat_utils import effective_session_key
@@ -993,6 +994,51 @@ class CrewOrchestrator:
         except Exception:
             logger.debug("crew: agent-cache warm failed", exc_info=True)
 
+    async def _dispatch_agent(self, slot: Any) -> str:
+        """The kiro-cli agent template this slot's crew dispatches as.
+
+        ``slot.agent`` names a KiroCrew CREW, but ``spawn(agent=)`` is validated
+        against the agent templates kiro-cli can load (``_validate_agent``), and
+        those are two namespaces, not one. They coincide for a crew whose
+        ``kiro_agent`` happens to be spelled like the crew itself — which is most
+        of them — so passing the crew name straight through worked by coincidence
+        until a crew disagreed with its template. ``default`` is exactly that
+        crew (it binds ``kirocrew``) and it is the one every session starts on, so
+        crew dispatch answered "Couldn't start that one" for an agent that exists.
+
+        A name that is NOT a configured crew is returned unchanged: it is then a
+        template or an app-materialized agent, and ``spawn()`` validates both
+        itself. Resolution deliberately does NOT pair with
+        ``_agent_prevalidated`` — mapping an alias proves the CREW exists, never
+        that its template does, so claiming prevalidation here would restore the
+        silent-fallback escalation ``_validate_agent`` refuses on purpose.
+
+        Loop-safe: an alias hit resolves from the config object alone, so the only
+        blocking step is loading the config, and that is awaited off-loop.
+        """
+        requested = str(getattr(slot, "agent", "") or "")
+        if not requested:
+            # An EMPTY name already means "use the default" everywhere below,
+            # and resolving it would name a template where none was asked for.
+            return ""
+        cfg = self._cfg
+        if cfg is None:
+            try:
+                cfg = await asyncio.to_thread(KiroCrewConfig.load)
+            except Exception:
+                logger.debug(
+                    "crew: config load failed; dispatching %r unresolved", requested, exc_info=True
+                )
+                return requested
+        if requested not in (getattr(cfg, "agents", None) or {}):
+            return requested
+        try:
+            resolved = str(resolve_agent_bindings(cfg, requested).kiro_agent or "")
+        except Exception:
+            logger.debug("crew: binding resolution failed for %r", requested, exc_info=True)
+            return requested
+        return resolved or requested
+
     async def _post_durable(self, slot: Any, content: str, kind: str = "crew") -> bool:
         """`_post`, then wait for the durable transcript row to actually land.
 
@@ -1390,6 +1436,10 @@ class CrewOrchestrator:
                 # leaked stored memory and lessons into every subagent it spawned.
                 no_reads = bool(getattr(slot, "blocks_reads", False))
                 await self._warm_agent_cache(slot)
+                # Resolved inside the barrier's try, so a failure reopens the
+                # entry like any other pre-spawn step rather than dispatching a
+                # name the validator will refuse.
+                dispatch_agent = await self._dispatch_agent(slot)
             except Exception:
                 e["state"] = prior_state or "pending"
                 e.pop("dispatch_id", None)
@@ -1414,7 +1464,7 @@ class CrewOrchestrator:
                 # subagent edits files, and without this it edited ANOTHER
                 # project's tree. Same value the warm above validated.
                 cwd=self._slot_cwd(slot),
-                agent=getattr(slot, "agent", "") or "",
+                agent=dispatch_agent,
                 keep=True,
                 _preassigned_id=dispatch_id,
                 include_memory=not no_reads,
@@ -1540,13 +1590,14 @@ class CrewOrchestrator:
         # id rather than a guess. Without this the continuation minted its id
         # inside the call, and a restart could neither adopt the started run nor
         # safely reopen the entry.
+        dispatch_agent = await self._dispatch_agent(slot)
         info = self._subagents.continue_conversation(
             t["topic_id"], e["text"] + _SUB_TASK_SUFFIX,
             # Same governance key as the spawn path: a continuation re-enters the
             # capability check, so keying it to the tab would let a resumed topic
             # run under a surface the linked session never granted.
             parent_session_key=effective_session_key(slot),
-            agent=getattr(slot, "agent", "") or "",
+            agent=dispatch_agent,
             # Same cwd as the spawn path. `spawn` resolves an empty cwd to the
             # pool project BEFORE validating the agent, so a project-local agent
             # was rejected here and the rejection fell through to a digest-only
@@ -1591,11 +1642,12 @@ class CrewOrchestrator:
                     raise
                 no_reads = bool(getattr(slot, "blocks_reads", False))
                 await self._warm_agent_cache(slot)
+                respawn_agent = await self._dispatch_agent(slot)
                 fresh = self._subagents.spawn(
                     seed + _SUB_TASK_SUFFIX,
                     parent_session_key=effective_session_key(slot),
                     cwd=self._slot_cwd(slot),
-                    agent=getattr(slot, "agent", "") or "", keep=True,
+                    agent=respawn_agent, keep=True,
                     _preassigned_id=respawn_id,
                     include_memory=not no_reads,
                     include_lessons=not no_reads,

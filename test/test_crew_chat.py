@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import kiro_crew.crew_chat as crew_mod
+from kiro_crew.config.loader import KiroCrewAgentConfig, KiroCrewConfig
 from kiro_crew.crew_chat import CrewOrchestrator, CrewStore
 
 
@@ -55,11 +56,44 @@ def _spawn_info(run_id: str, done: bool = False, error: str = "", result: str = 
     return info
 
 
-def _orch(state: MagicMock | None = None, subagents: MagicMock | None = None) -> CrewOrchestrator:
+def _orch(state: MagicMock | None = None, subagents: MagicMock | None = None,
+          cfg: object | None = None) -> CrewOrchestrator:
     state = state or MagicMock()
     subagents = subagents or MagicMock()
     sessions = MagicMock()
-    return CrewOrchestrator(state=state, sessions=sessions, subagents=subagents)
+    return CrewOrchestrator(state=state, sessions=sessions, subagents=subagents, cfg=cfg)
+
+
+def _cfg(**crews: str) -> KiroCrewConfig:
+    """A config whose crews bind the given kiro-cli agent templates.
+
+    Spelled as ``crew_name=template_name`` because that distinction is the whole
+    point: production passes a CREW name where ``spawn()`` wants a template, and
+    a fixture that spelled both the same would hide the bug the same way the
+    ``agent="kirocrew"`` default in :func:`_slot` did.
+    """
+    cfg = KiroCrewConfig()
+    cfg.agents = {name: KiroCrewAgentConfig(kiro_agent=tpl) for name, tpl in crews.items()}
+    cfg.default_agent = next(iter(crews), "")
+    return cfg
+
+
+@pytest.fixture(autouse=True)
+def _no_real_config_read(monkeypatch):  # type: ignore[no-untyped-def]
+    """Keep dispatch resolution off this machine's real ``config.json``.
+
+    ``_dispatch_agent`` loads the config when the orchestrator holds none, which
+    is every orchestrator :func:`_orch` builds without an explicit one. Reading
+    the developer's file would let their crew names decide an assertion. The stub
+    config has no crews, so every name passes through unresolved — the behaviour
+    tests that do not care about resolution already expect.
+    """
+    class _Stub:
+        @staticmethod
+        def load() -> KiroCrewConfig:
+            return KiroCrewConfig()
+
+    monkeypatch.setattr(crew_mod, "KiroCrewConfig", _Stub)
 
 
 def _slot_save(side_effect: BaseException | None = None):
@@ -2603,3 +2637,98 @@ class TestGptRoundSixteen:
             "ingest returned without forcing the slot to disk — the echoed user "
             "message and the acknowledgement were memory-only"
         )
+
+
+# ── crew name vs kiro-cli template ──
+
+
+class TestDispatchAgent:
+    """``slot.agent`` names a CREW; ``spawn(agent=)`` wants a kiro-cli template.
+
+    The two coincide for a crew spelled like the template it binds, which is most
+    of them — so crew dispatch passing the crew name through worked by
+    coincidence. ``default`` binds ``kirocrew``, and every session starts on
+    ``default``, so the one crew that exposes the confusion is the common case.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_crew_resolves_to_the_template_it_binds(self) -> None:
+        orch = _orch(cfg=_cfg(default="kirocrew"))
+        assert await orch._dispatch_agent(_slot(agent="default")) == "kirocrew"
+
+    @pytest.mark.asyncio
+    async def test_a_crew_spelled_like_its_template_round_trips(self) -> None:
+        # The coincidence that hid the bug must keep working.
+        orch = _orch(cfg=_cfg(**{"deep-diver": "deep-diver"}))
+        assert await orch._dispatch_agent(_slot(agent="deep-diver")) == "deep-diver"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_agent_stays_empty(self) -> None:
+        # Empty means "use the default" everywhere below. Naming a template here
+        # would dispatch one the caller never asked for.
+        orch = _orch(cfg=_cfg(default="kirocrew"))
+        assert await orch._dispatch_agent(_slot(agent="")) == ""
+
+    @pytest.mark.asyncio
+    async def test_a_name_that_is_not_a_crew_passes_through(self) -> None:
+        # Then it is a template or an app-materialized agent, both of which
+        # `spawn()` validates itself. Rewriting it to the default crew's template
+        # would silently run a different agent — the substitution `_validate_agent`
+        # refuses on purpose.
+        orch = _orch(cfg=_cfg(default="kirocrew"))
+        assert await orch._dispatch_agent(_slot(agent="some-app-agent")) == "some-app-agent"
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_config_dispatches_unresolved(self) -> None:
+        # Degrades to today's behaviour rather than inventing a template: the
+        # spawn may still be refused, but it is refused for the real reason.
+        class _Boom:
+            @staticmethod
+            def load() -> KiroCrewConfig:
+                raise RuntimeError("config unreadable")
+
+        orch = _orch()
+        with patch.object(crew_mod, "KiroCrewConfig", _Boom):
+            assert await orch._dispatch_agent(_slot(agent="default")) == "default"
+
+    @pytest.mark.asyncio
+    async def test_the_spawn_path_dispatches_the_template(self) -> None:
+        orch = _orch(cfg=_cfg(default="kirocrew"))
+        st = orch._store("s1")
+        e = st.add_msg("do the thing")
+        orch._subagents.spawn = MagicMock(return_value=_spawn_info("r1"))
+        await orch._apply(_slot(agent="default"), st,
+                          {"do": "spawn", "msg_id": e["msg_id"], "title": "t"})
+        kw = orch._subagents.spawn.call_args.kwargs
+        assert kw["agent"] == "kirocrew"
+        # Resolving an alias proves the CREW exists, never that its template
+        # does, so this path must still pay for on-loop validation.
+        assert not kw.get("_agent_prevalidated", False)
+
+    @pytest.mark.asyncio
+    async def test_the_continuation_path_dispatches_the_template(self) -> None:
+        orch = _orch(cfg=_cfg(default="kirocrew"))
+        st = orch._store("s1")
+        e = st.add_msg("follow up")
+        t = st.add_topic("t1", "r1", "the topic", e["msg_id"])
+        t["status"] = "idle"
+        orch._subagents.continue_conversation = MagicMock(
+            side_effect=lambda cid, task, **kw: _spawn_info(kw["_preassigned_id"]))
+        await orch._dispatch_continue(_slot(agent="default"), st, t, e)
+        assert orch._subagents.continue_conversation.call_args.kwargs["agent"] == "kirocrew"
+
+    @pytest.mark.asyncio
+    async def test_the_respawn_fallback_dispatches_the_template(self) -> None:
+        # conversation_gone respawns outright, and that spawn is validated the
+        # same way — a crew name there is refused exactly like the first one was.
+        orch = _orch(cfg=_cfg(default="kirocrew"))
+        st = orch._store("s1")
+        e = st.add_msg("do it")
+        t = st.add_topic("t1", "r1", "the topic", e["msg_id"])
+        t["status"] = "idle"
+        orch._subagents.continue_conversation = MagicMock(
+            return_value=_spawn_info("x", done=True, error="conversation_gone"))
+        orch._subagents.spawn = MagicMock(
+            side_effect=lambda task, **kw: _spawn_info(kw["_preassigned_id"]))
+        await orch._dispatch_continue(_slot(agent="default"), st, t, e)
+        assert orch._subagents.spawn.call_args.kwargs["agent"] == "kirocrew"
