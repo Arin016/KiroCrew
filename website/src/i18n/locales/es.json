@@ -8342,6 +8342,9 @@
       "moves_a_feature_branch_onto_the_latest_main_and": "mueve una rama de función al último main, y",
       "needs_provision": "Necesita aprovisionamiento",
       "no_candidates_found": "No se encontraron candidatos.",
+      "no_checkout_found": "No se encontró ningún checkout de Kiro Crew",
+      "no_checkout_found_env_example": "KIROCREW_DEVFLEET_REPO=/ruta/a/tu/checkout",
+      "no_checkout_found_help": "Dev Fleet gestiona los worktrees de git de un checkout de código de Kiro Crew. No se encontró ninguno en tu directorio de proyecto, en el checkout que sirve este panel ni en las ubicaciones de clonación habituales.",
       "no_commits_stale": "sin commits, obsoleto",
       "no_venv_ui_build_yet_provision_builds_this_workt": "Todavía no hay compilación de venv/UI — Aprovisionar compila este worktree para que pueda ejecutarse un pod",
       "no_worktrees_found": "No se encontraron worktrees",
@@ -8471,7 +8474,8 @@
       "keep_cutover": "Mantener el cambio",
       "cutover_staged_run_cmd_to_finish_or_cancel": "Cambio preparado: este worktree se activará la próxima vez que arranque el gateway. Ejecuta `{{cmd}}` para completarlo, o usa el menú de esta fila → Cancelar el cambio preparado para deshacerlo. Hasta entonces el gateway sigue ejecutando el checkout anterior.",
       "keeps_the_live_checkout_the_live_target_and_disc": "Mantiene el checkout activo como destino activo y descarta el cambio preparado hacia {{staged}} (no se reinicia nada)",
-      "restarting_completes_the_pending_cutover_boots": "Reiniciar completa el cambio pendiente: el gateway volverá con \"{{staged}}\", no con el checkout actual. El panel se desconectará brevemente y se reconectará automáticamente. Para deshacerlo, usa Cancelar el cambio preparado."
+      "restarting_completes_the_pending_cutover_boots": "Reiniciar completa el cambio pendiente: el gateway volverá con \"{{staged}}\", no con el checkout actual. El panel se desconectará brevemente y se reconectará automáticamente. Para deshacerlo, usa Cancelar el cambio preparado.",
+      "no_checkout_found_action": "Define la variable de entorno de abajo, o añade dev_fleet.repo_path al config.json de tu directorio de datos de Kiro Crew (~/.kiro/crew por defecto) para que persista, y reinicia la puerta de enlace."
     },
     "developer": {
       "previewSurfacesCard": {

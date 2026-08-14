@@ -8124,6 +8124,9 @@
       "moves_a_feature_branch_onto_the_latest_main_and": "将功能分支变基到最新的 main，而",
       "needs_provision": "需要预配",
       "no_candidates_found": "未找到候选项。",
+      "no_checkout_found": "未找到 Kiro Crew 检出目录",
+      "no_checkout_found_env_example": "KIROCREW_DEVFLEET_REPO=/检出目录/路径",
+      "no_checkout_found_help": "Dev Fleet 管理 Kiro Crew 源码检出目录里的 git worktree。项目目录、为此仪表板提供服务的检出目录以及常见克隆位置中都没有找到。",
       "no_commits_stale": "无提交，已过时",
       "no_venv_ui_build_yet_provision_builds_this_workt": "尚无 venv/UI 构建 — 预配会构建此工作树，让 pod 能够运行",
       "no_worktrees_found": "未找到工作树",
@@ -8253,7 +8256,8 @@
       "keep_cutover": "保留切换",
       "cutover_staged_run_cmd_to_finish_or_cancel": "切换已暂存：网关下次启动时此工作树将成为运行版本。运行 `{{cmd}}` 完成切换，或使用此行菜单 → 取消已暂存的切换来撤销。在此之前网关仍运行之前的检出。",
       "keeps_the_live_checkout_the_live_target_and_disc": "运行中的检出仍为运行版本，切换到 {{staged}} 的暂存操作将被丢弃（不会重启）",
-      "restarting_completes_the_pending_cutover_boots": "重启将完成待定的切换：网关将在“{{staged}}”上启动，而不是当前检出。仪表板会短暂断开并自动重连。如需撤销，请使用“取消已暂存的切换”。"
+      "restarting_completes_the_pending_cutover_boots": "重启将完成待定的切换：网关将在“{{staged}}”上启动，而不是当前检出。仪表板会短暂断开并自动重连。如需撤销，请使用“取消已暂存的切换”。",
+      "no_checkout_found_action": "请设置下方环境变量，或在 Kiro Crew 数据目录（默认为 ~/.kiro/crew）的 config.json 中添加 dev_fleet.repo_path 以长期生效，然后重启网关。"
     },
     "developer": {
       "previewSurfacesCard": {

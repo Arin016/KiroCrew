@@ -8342,6 +8342,9 @@
       "moves_a_feature_branch_onto_the_latest_main_and": "sposta un branch di funzionalità sull'ultimo main, e",
       "needs_provision": "Richiede il provisioning",
       "no_candidates_found": "Nessun candidato trovato.",
+      "no_checkout_found": "Nessun checkout di Kiro Crew trovato",
+      "no_checkout_found_env_example": "KIROCREW_DEVFLEET_REPO=/percorso/del/tuo/checkout",
+      "no_checkout_found_help": "Dev Fleet gestisce i worktree git di un checkout dei sorgenti di Kiro Crew. Non è stato trovato né nella directory del progetto, né nel checkout che serve questa dashboard, né nelle consuete posizioni di clonazione.",
       "no_commits_stale": "nessun commit, obsoleto",
       "no_venv_ui_build_yet_provision_builds_this_workt": "Nessuna build venv/UI — il provisioning compila questo worktree per poter avviare un pod",
       "no_worktrees_found": "Nessun worktree trovato",
@@ -8471,7 +8474,8 @@
       "keep_cutover": "Mantieni il passaggio",
       "cutover_staged_run_cmd_to_finish_or_cancel": "Passaggio preparato: questo worktree diventerà attivo al prossimo avvio del gateway. Esegui `{{cmd}}` per completarlo, oppure usa il menu di questa riga → Annulla il passaggio preparato per annullarlo. Fino ad allora il gateway continua a eseguire il checkout precedente.",
       "keeps_the_live_checkout_the_live_target_and_disc": "Mantiene il checkout attivo come destinazione attiva e scarta il passaggio preparato verso {{staged}} (non viene riavviato nulla)",
-      "restarting_completes_the_pending_cutover_boots": "Il riavvio completa il passaggio in sospeso: il gateway ripartirà su \"{{staged}}\", non sul checkout attuale. La dashboard si disconnetterà brevemente e si riconnetterà automaticamente. Per annullare, usa invece Annulla il passaggio preparato."
+      "restarting_completes_the_pending_cutover_boots": "Il riavvio completa il passaggio in sospeso: il gateway ripartirà su \"{{staged}}\", non sul checkout attuale. La dashboard si disconnetterà brevemente e si riconnetterà automaticamente. Per annullare, usa invece Annulla il passaggio preparato.",
+      "no_checkout_found_action": "Imposta la variabile d'ambiente qui sotto, oppure aggiungi dev_fleet.repo_path al config.json nella directory dati di Kiro Crew (~/.kiro/crew per impostazione predefinita) per renderla permanente, poi riavvia il gateway."
     },
     "developer": {
       "previewSurfacesCard": {
