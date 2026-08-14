@@ -112,6 +112,10 @@ weeks in the open.
   toggle, and the shared MCP gateway follows it.
 - **Connections** gained a provider registry, so an integration declares what it
   is asking for and its consent URL is validated before you are sent to it.
+- Pasting an OAuth return address for an approval that has already expired now
+  says so, instead of blaming the paste — a spent approval is told apart from a
+  failed delivery, so you know to start a fresh one rather than re-copy a dead
+  address.
 - Clicking **Connect** now asks for the provider's approval link instead of
   waiting for one, so the card offers it within seconds rather than only after
   some later chat happens to reach that server.
