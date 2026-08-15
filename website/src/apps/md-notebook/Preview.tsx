@@ -189,7 +189,17 @@ export function Preview({
   onDirtyEdit,
 }: PreviewProps) {
   const body = content.replace(FM_RE, '')
-  const lines = body.split('\n')
+  // `split('\n')` yields a trailing EMPTY segment whenever the body ends with a
+  // newline — the near-universal case for a file out of a git-backed vault — and
+  // for a body that is empty outright. That segment is not a line of content, so
+  // it is dropped here rather than at the append region alone: the render loop
+  // below keys blocks by index too, and leaving the phantom in would let the
+  // trailing append region and the phantom's own block both match `editRange`
+  // and mount two editors. Dropping it also puts `appendStart` AT the phantom's
+  // slot instead of one past it, which is what appended a spurious blank line
+  // (#3741). Exactly one segment goes, so a genuine trailing blank line stays.
+  const rawLines = body.split('\n')
+  const lines = rawLines[rawLines.length - 1] === '' ? rawLines.slice(0, -1) : rawLines
   const out: ReactNode[] = []
   let inCode = false
   let codeBuf: string[] = []
