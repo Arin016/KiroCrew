@@ -301,6 +301,115 @@ def test_verb_present_but_host_resolved_nothing_is_reported_distinctly() -> None
     assert "no closing keyword" not in reason
 
 
+# --- explicit closing-trailer grammar (#3450) --------------------------------
+#
+# A trailer must occupy the WHOLE visible line, and the accepted targets are
+# same-repo `#123`, qualified `owner/repo#123`, and a full issue URL. Each
+# accepted form gets a positive case AND its opposite-failure twin, because the
+# two mistakes this classifier can make are symmetric and both mislead: calling
+# prose a trailer tells the author to fix a number that is fine, and refusing a
+# qualified trailer tells them to add a keyword they already wrote.
+
+
+def test_prose_mentioning_a_past_close_is_not_a_trailer() -> None:
+    """The gap that motivated #3450.
+
+    ``Fixed #123 in an earlier release`` is a sentence, not a declaration. It
+    must be reported as the missing-verb (bare-reference) case, never as
+    "the keyword is fine, your number is wrong".
+    """
+    module = _load_script()
+    prose = "Fixed #123 in an earlier release; this PR only adds tests."
+    assert module._CLOSING_KW_RE.search(prose) is None
+    reason = module.closing_link_reason(prose, [])
+    assert reason is not None
+    assert "no closing keyword" in reason
+    assert "resolved no issue" not in reason
+    # Same shape mid-paragraph, and with the verb not at the start of the line.
+    for line in (
+        "This closes #7 only partially, so the issue stays open.",
+        "See the note above: resolves #7 was already done upstream.",
+    ):
+        assert module._CLOSING_KW_RE.search(line) is None, line
+
+
+def test_whole_line_trailer_forms_are_accepted() -> None:
+    """Everything that is still a trailer despite decoration.
+
+    Trailing whitespace, one sentence-ending punctuation mark, a CR from a CRLF
+    body, a list bullet, an indented line, a trailing HTML comment, and several
+    references on one line all leave the line a declaration.
+    """
+    module = _load_script()
+    accepted = (
+        "Fixes #123",
+        "fixes: #123",
+        "Closed #123.",
+        "Resolves #123   ",
+        "Fixes #123\r",
+        "- Fixes #123",
+        "  Fixes #123",
+        "Fixes #123 <!-- tracked -->",
+        "Fixes #123, closes #124",
+        "Fixes #123 and resolves #124",
+        "Body prose.\n\nFixes #123\n",
+    )
+    for body in accepted:
+        assert module._CLOSING_KW_RE.search(body) is not None, body
+        reason = module.closing_link_reason(body, [])
+        assert reason is not None and "resolved no issue" in reason, body
+
+
+def test_qualified_and_url_targets_are_recognised_as_trailers() -> None:
+    """GitHub resolves cross-repo and URL targets, so we must not call them
+    verb-less. The classifier is only reached when the host resolved nothing,
+    so accepting them needs no reconciliation against this repo's identity --
+    "the verb is fine, check the reference" is true either way.
+    """
+    module = _load_script()
+    for body in (
+        "Fixes owner/repo#123",
+        "Closes my-org/my.repo#123",
+        "Resolves https://github.com/owner/repo/issues/123",
+        "Fixes https://github.example.com/owner/repo/issues/123",
+    ):
+        assert module._CLOSING_KW_RE.search(body) is not None, body
+        reason = module.closing_link_reason(body, [])
+        assert reason is not None, body
+        assert "resolved no issue" in reason, body
+        assert "no closing keyword" not in reason, body
+
+
+def test_qualified_reference_without_a_verb_is_the_missing_keyword_case() -> None:
+    """The opposite-failure twin: a qualified ref or issue URL with no verb is
+    an issue reference, so it must report the missing keyword rather than
+    "no issue link at all"."""
+    module = _load_script()
+    for body in (
+        "Related: owner/repo#123",
+        "Context: https://github.com/owner/repo/issues/123",
+    ):
+        reason = module.closing_link_reason(body, [])
+        assert reason is not None, body
+        assert "no closing keyword" in reason, body
+
+
+def test_malformed_targets_are_not_trailers() -> None:
+    """Opposite-failure cases for the target grammar: no number, no verb,
+    a non-closing verb, and a pull-request URL are all rejected."""
+    module = _load_script()
+    for body in (
+        "Fixes #",
+        "Fixes issue 123",
+        "Fixes#123",
+        "Addresses #123",
+        "Part of #123",
+        "Fixes https://github.com/owner/repo/pull/123",
+        "Fixes owner#123",
+    ):
+        assert module._CLOSING_KW_RE.search(body) is None, body
+
+
 def test_no_reference_at_all_is_reported_with_the_opt_out_named() -> None:
     module = _load_script()
     reason = module.closing_link_reason("A pure refactor with no tracked issue.", [])
