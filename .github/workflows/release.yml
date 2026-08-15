@@ -110,30 +110,20 @@ jobs:
       - name: Install pinned test dependencies
         run: uv pip install --system -e ".[voice,desktop]" --group dev
 
-      - name: Enable unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-
-      - name: Verify namespace sandbox is available
-        run: unshare --mount --map-root-user true
-
       - name: Run release candidate tests
         run: |
-          # The sysctl above enables the namespace sandbox on this runner,
-          # so sandbox-dependent tests CAN run. However, several suites
-          # still fail on GHA runners for other reasons:
+          # Mirror ci.yml's BACKEND_DESELECTS. These suites need either a
+          # namespace sandbox (bwrap/unshare) or infrastructure (real git
+          # remotes) that GHA's standard ubuntu-latest does not provide.
+          # ci.yml routes them to a dedicated "namespace sandbox" job with
+          # sudo sysctl; here we simply skip them — merge-time CI already
+          # ran the full matrix on this exact SHA.
           #
-          # - test_ledger_sync_git: needs a real pushable git remote; the
-          #   sandboxed_spawn_argv wrapper returns 'push errored' on GHA.
-          #   ci.yml also deselects this (even in its namespace-sandbox job).
-          # - test_schedule_file: same sandboxed_spawn_argv issue.
-          # - auto_improvement tests: drive real git/pytest subprocesses
-          #   that assume a full dev environment.
-          # - test_script_hooks, test_cron_script: Linux namespace sandbox
-          #   tests that need bwrap or equivalent beyond sysctl.
-          #
-          # These all pass in ci.yml's dedicated namespace-sandbox job or
-          # locally; the exposure is limited to a tag on a commit that
-          # bypassed PR CI (merge-time ci.yml already validated this SHA).
+          # We do NOT enable sysctl here because doing so activates the
+          # sandbox for ALL tests, causing run_probe and other subprocess
+          # helpers to attempt nested sandboxing, which fails with a
+          # different set of errors. The standard shards in ci.yml also
+          # run without sysctl for the same reason.
           pytest -q -n auto --timeout=120 --no-cov \
             --deselect=test/test_script_hooks.py \
             --deselect=test/test_cron_script.py \
