@@ -3866,6 +3866,98 @@ class TestRunChatCompactDeferredWait:
             "window_tokens": 200_000,
         }
 
+    @staticmethod
+    def _compaction_notice(slot) -> str:
+        """The text of the compaction notice appended to the transcript."""
+        notices = [
+            m["content"]
+            for m in slot.messages
+            if m.get("meta", {}).get("kind") == "compaction" and "Compaction" in m.get("content", "")
+        ]
+        assert notices, "no compaction notice was appended"
+        return notices[-1]
+
+    async def _run_failed_compaction(self, tmp_path, monkeypatch, summary):
+        """Drive /compact to a `failed` result carrying *summary*."""
+        from kiro_crew.providers.base import EVENT_COMPLETE, LLMEvent
+
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+
+        client = self._make_mock_client([LLMEvent(kind=EVENT_COMPLETE)])
+        result = {"type": "failed"}
+        if summary is not None:
+            result["summary"] = summary
+        client.wait_for_compaction = AsyncMock(return_value=result)
+        client.context_window_tokens = MagicMock(return_value=200_000)
+        client.context_used_tokens = MagicMock(return_value=150_000)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_runner.is_claude_backend", lambda _provider: False
+        )
+
+        from kiro_crew.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "/compact")
+        return slot
+
+    @pytest.mark.asyncio
+    async def test_failed_compaction_surfaces_the_reason(self, tmp_path, monkeypatch):
+        """The provider's reason reaches the user instead of being discarded.
+
+        Without it, a /compact that failed because the conversation is too large
+        is indistinguishable from one that failed because the backend was
+        unreachable — and those two call for different next moves. Every other
+        surface (Slack/Telegram/Discord, and this dashboard's own auto-compact
+        notice) already says which.
+        """
+        slot = await self._run_failed_compaction(
+            tmp_path, monkeypatch, "context too large to summarize"
+        )
+        assert self._compaction_notice(slot) == (
+            "❌ Compaction failed: context too large to summarize"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_compaction_without_a_reason_keeps_the_bare_notice(
+        self, tmp_path, monkeypatch
+    ):
+        """No reason means no dangling colon — the old wording stands."""
+        slot = await self._run_failed_compaction(tmp_path, monkeypatch, None)
+        assert self._compaction_notice(slot) == "❌ Compaction failed."
+
+    @pytest.mark.asyncio
+    async def test_failed_compaction_blank_reason_keeps_the_bare_notice(
+        self, tmp_path, monkeypatch
+    ):
+        """A whitespace-only reason is treated as absent, not printed."""
+        slot = await self._run_failed_compaction(tmp_path, monkeypatch, "   ")
+        assert self._compaction_notice(slot) == "❌ Compaction failed."
+
+    @pytest.mark.asyncio
+    async def test_failed_compaction_reason_is_redacted(self, tmp_path, monkeypatch):
+        """A backend-echoed reason is not trusted to be credential-free.
+
+        Same redact pair as the sibling `completed` branch, which already treats
+        the provider's text as untrusted.
+        """
+        slot = await self._run_failed_compaction(
+            tmp_path, monkeypatch, "auth failed for AKIAIOSFODNN7EXAMPLE key"
+        )
+        notice = self._compaction_notice(slot)
+        assert "AKIAIOSFODNN7EXAMPLE" not in notice
+        assert "Compaction failed:" in notice
+
+    @pytest.mark.asyncio
+    async def test_failed_compaction_reason_is_length_capped(self, tmp_path, monkeypatch):
+        """A wall of provider text cannot scroll the transcript away."""
+        from kiro_crew.dashboard.chat_runner import _COMPACT_FAIL_REASON_MAX_CHARS
+
+        slot = await self._run_failed_compaction(tmp_path, monkeypatch, "x" * 5_000)
+        notice = self._compaction_notice(slot)
+        assert notice.endswith("…")
+        assert len(notice) < _COMPACT_FAIL_REASON_MAX_CHARS + 60
+
 
 class TestTokenPersistenceBackfill:
     """Regression tests for the late-backfill of slot.model before

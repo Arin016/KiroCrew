@@ -711,6 +711,12 @@ POISONED_SESSION_CYCLES = 2
 _POISON_CANARY_PROMPT = "Reply with the single word OK."
 _POISON_CANARY_TIMEOUT_SECS = 30.0
 
+# Cap the backend-echoed reason interpolated into the "Compaction failed"
+# notice. The notice is a one-line receipt in the transcript, so an unbounded
+# provider string (a stack trace, an echoed payload) would scroll the
+# conversation away instead of explaining it.
+_COMPACT_FAIL_REASON_MAX_CHARS = 300
+
 
 def _truncate_snapshot(content: str) -> str:
     """Cap content at _MAX_SNAPSHOT chars, appending a marker if truncated.
@@ -6564,7 +6570,30 @@ async def _run_chat(
                         else "✅ Conversation compacted."
                     )
                 elif compaction_result["type"] == "failed":
-                    msg = "❌ Compaction failed."
+                    # The provider ships the reason on `failed` too, and every
+                    # other surface already tells the user what it was — Slack,
+                    # Telegram, Discord, and this dashboard's own AUTO-compact
+                    # notice (see chat_utils._compaction_notice_text). Dropping
+                    # it here left the one path a user takes deliberately as the
+                    # only one that says nothing, so a `/compact` that fails
+                    # because the conversation is too large is indistinguishable
+                    # from one that failed because the backend was unreachable —
+                    # and the user's next move differs in those two cases.
+                    #
+                    # Redacted with the same pair as the completed branch above:
+                    # the text is backend-echoed, so it is not trusted to be
+                    # free of credentials or exfiltration URLs even though the
+                    # provider already redacts once at its own boundary.
+                    error, _ = redact_credentials(compaction_result.get("summary", ""))
+                    error, _ = redact_exfiltration_urls(error)
+                    error = error.strip()
+                    if len(error) > _COMPACT_FAIL_REASON_MAX_CHARS:
+                        # A notice is a one-line receipt, not a log: a provider
+                        # that echoes a wall of text (a stack trace, a dumped
+                        # payload) would otherwise push the whole transcript out
+                        # of the reader's view.
+                        error = error[:_COMPACT_FAIL_REASON_MAX_CHARS].rstrip() + "…"
+                    msg = f"❌ Compaction failed: {error}" if error else "❌ Compaction failed."
                 else:
                     msg = "⚠️ Compaction timed out."
                 _append_compaction_notice(state, slot, msg)
