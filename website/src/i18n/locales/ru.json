@@ -8846,6 +8846,7 @@
         "embedding_model_loading": "Загрузка модели эмбеддингов ({{name}})",
         "embeddings_initializing": "○ инициализация эмбеддингов",
         "embeddings_loading": "загрузка эмбеддингов",
+        "embeddings_count": "эмбеддинги ({{value}})",
         "entities": "сущностей",
         "esc": "Esc",
         "filter_by_namespace": "Фильтр по пространству имён",

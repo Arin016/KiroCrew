@@ -3054,6 +3054,7 @@
         "copied": "Copied!",
         "copy_content": "Copy Content",
         "embeddings_loading": "embeddings loading",
+        "embeddings_count": "embeddings ({{value}})",
         "graph_view": "Graph View",
         "list_view": "List View",
         "sources_tab": "Sources",

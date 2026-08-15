@@ -8626,6 +8626,7 @@
         "embedding_model_loading": "एम्बेडिंग मॉडल लोड हो रहा है ({{name}})",
         "embeddings_initializing": "○ एम्बेडिंग शुरू हो रही है",
         "embeddings_loading": "एम्बेडिंग लोड हो रही हैं",
+        "embeddings_count": "एम्बेडिंग ({{value}})",
         "entities": "एंटिटी",
         "esc": "Esc",
         "filter_by_namespace": "नेमस्पेस से फ़िल्टर करें",

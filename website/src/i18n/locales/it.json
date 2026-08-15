@@ -8736,6 +8736,7 @@
         "embedding_model_loading": "Caricamento del modello di embedding ({{name}})",
         "embeddings_initializing": "○ inizializzazione degli embedding",
         "embeddings_loading": "caricamento embedding",
+        "embeddings_count": "embedding ({{value}})",
         "entities": "entità",
         "esc": "Esc",
         "filter_by_namespace": "Filtra per namespace",

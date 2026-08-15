@@ -8626,6 +8626,7 @@
         "embedding_model_loading": "এমবেডিং মডেল লোড হচ্ছে ({{name}})",
         "embeddings_initializing": "○ এমবেডিং শুরু হচ্ছে",
         "embeddings_loading": "এমবেডিং লোড হচ্ছে",
+        "embeddings_count": "এমবেডিং ({{value}})",
         "entities": "এনটিটি",
         "esc": "Esc",
         "filter_by_namespace": "নেমস্পেস অনুযায়ী ফিল্টার",

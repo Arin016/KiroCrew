@@ -8516,6 +8516,7 @@
         "embedding_model_loading": "임베딩 모델 로드 중({{name}})",
         "embeddings_initializing": "○ 임베딩 초기화 중",
         "embeddings_loading": "임베딩 로드 중",
+        "embeddings_count": "임베딩({{value}})",
         "entities": "엔터티",
         "esc": "Esc",
         "filter_by_namespace": "네임스페이스로 필터링",

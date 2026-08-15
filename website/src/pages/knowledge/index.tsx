@@ -674,7 +674,7 @@ export default function KnowledgePage() {
           <span className="whitespace-nowrap">{stats.sources} {i18nT('pages.knowledge.index.sources')}</span>
           {stats.embeddings?.enabled ? (
             <span className={`whitespace-nowrap ${stats.embeddings.available ? 'text-ok' : 'text-warn'}`} title={stats.embeddings.available ? `${stats.embeddings.model} — ${stats.embeddings.embedded_items} embedded` : i18nT('pages.knowledge.index.embedding_model_loading', { name: stats.embeddings.model })}>
-              ● {stats.embeddings.available ? `embeddings (${stats.embeddings.embedded_items})` : i18nT('pages.knowledge.index.embeddings_loading')}
+              ● {stats.embeddings.available ? i18nT('pages.knowledge.index.embeddings_count', { value: stats.embeddings.embedded_items }) : i18nT('pages.knowledge.index.embeddings_loading')}
             </span>
           ) : (
             <span className="text-muted whitespace-nowrap" title={i18nT('pages.knowledge.index.embedding_model_is_downloading_in_the_background')}>{i18nT('pages.knowledge.index.embeddings_initializing')}</span>

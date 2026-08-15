@@ -8516,6 +8516,7 @@
         "embedding_model_loading": "正在加载嵌入模型（{{name}}）",
         "embeddings_initializing": "○ 嵌入初始化中",
         "embeddings_loading": "嵌入加载中",
+        "embeddings_count": "嵌入（{{value}}）",
         "entities": "实体",
         "esc": "Esc",
         "filter_by_namespace": "按命名空间筛选",

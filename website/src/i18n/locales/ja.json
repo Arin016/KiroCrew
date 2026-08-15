@@ -8516,6 +8516,7 @@
         "embedding_model_loading": "埋め込みモデルを読み込み中（{{name}}）",
         "embeddings_initializing": "○ 埋め込み初期化中",
         "embeddings_loading": "埋め込み読み込み中",
+        "embeddings_count": "埋め込み（{{value}}）",
         "entities": "エンティティ",
         "esc": "Esc",
         "filter_by_namespace": "ネームスペースでフィルタ",
