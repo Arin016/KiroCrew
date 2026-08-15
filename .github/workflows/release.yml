@@ -124,7 +124,7 @@ jobs:
           # helpers to attempt nested sandboxing, which fails with a
           # different set of errors. The standard shards in ci.yml also
           # run without sysctl for the same reason.
-          pytest -q -n auto --timeout=120 --no-cov \
+          pytest -q -n auto --dist loadfile --timeout=120 --no-cov \
             --deselect=test/test_script_hooks.py \
             --deselect=test/test_cron_script.py \
             --deselect=src/kiro_crew/apps/builtins/ops_mission_control/tests/test_ledger_sync_git.py \
