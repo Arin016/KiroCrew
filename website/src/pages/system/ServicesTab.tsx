@@ -177,7 +177,13 @@ export default function ServicesTab() {
             <span className="text-[12.5px] font-mono text-text-strong break-all">{d.cwd}</span>
           </div>
         )}
-        <div style={{ columns: 3 }} className="gap-6 max-[900px]:columns-2 max-[600px]:columns-1">
+        {/* `columns-3` as a CLASS, not `style={{ columns: 3 }}`. An inline style
+            outranks any stylesheet rule, so the two responsive overrides beside
+            it were dead: measured at a 390px viewport the container still
+            reported `column-count: 3` and each card got 119px, which is what
+            squeezed the value column to roughly 24px. As classes all three
+            participate in the cascade, so 390px resolves to one column. */}
+        <div className="columns-3 gap-6 max-[900px]:columns-2 max-[600px]:columns-1">
           {gatewaySections.map(sec => (
             <SectionBlock key={sec.title} section={sec} />
           ))}

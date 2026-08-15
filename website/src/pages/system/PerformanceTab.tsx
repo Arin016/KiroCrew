@@ -186,7 +186,10 @@ export default function PerformanceTab({ planeStateRef }: { planeStateRef: Mutab
           </div>
 
           {/* Stats grid */}
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 lg:grid-cols-3">
+          {/* Stats grid. Starts at one column: `grid-cols-2` with no narrow
+              override held two columns at 390px, leaving each value about 60px
+              and wrapping labels beside their own numbers. */}
+          <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-3">
             <ResourceStats d={d} resource={selected} />
           </div>
 
