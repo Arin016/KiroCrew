@@ -191,6 +191,7 @@ CRED_MICROSOFT_APP_ID = "MICROSOFT_APP_ID"
 CRED_MICROSOFT_APP_PASSWORD = "MICROSOFT_APP_PASSWORD"
 CRED_MICROSOFT_APP_TENANT_ID = "MICROSOFT_APP_TENANT_ID"
 CRED_WEIXIN_TOKEN = "WEIXIN_TOKEN"  # iLink bot credential from the Settings QR flow
+CRED_JIRA_API_TOKEN = "JIRA_API_TOKEN"  # Jira Cloud/Server API token (resolved from .env)
 # kiro-cli's OWN model credential. Unlike the gateway-owned channel tokens
 # above, its rightful consumer is the agent subprocess itself (and the whoami
 # identity probe), so it is deliberately NOT in sandbox._AGENT_DENIED_ENV_KEYS:
@@ -210,6 +211,7 @@ _CREDENTIAL_KEYS = (
     CRED_MICROSOFT_APP_PASSWORD,
     CRED_MICROSOFT_APP_TENANT_ID,
     CRED_WEIXIN_TOKEN,
+    CRED_JIRA_API_TOKEN,
     CRED_KIRO_API_KEY,
 )
 
@@ -2459,6 +2461,33 @@ def _tailscale_config_from(raw: object) -> TailscaleConfig:
 
 
 @dataclass
+class JiraAuthEntry:
+    """Connection metadata for one Jira instance (Cloud or Server/DC).
+
+    The API token is NOT stored here — it lives in the protected .env file
+    as JIRA_API_TOKEN (same isolation pattern as Slack/Discord/Telegram tokens).
+    This dataclass holds only non-sensitive connection metadata.
+    """
+
+    host: str = field(
+        default="",
+        metadata=_meta(
+            "Host",
+            "Jira instance hostname (e.g. 'myorg.atlassian.net' or "
+            "'jira.internal.corp:8443'). Must match the host in the issue URL.",
+        ),
+    )
+    email: str = field(
+        default="",
+        metadata=_meta(
+            "Email",
+            "Atlassian account email for Cloud instances (used in Basic auth "
+            "header). Leave empty for Server/DC instances that use a PAT.",
+        ),
+    )
+
+
+@dataclass
 class DashboardConfig:
     url: str = field(
         default="",
@@ -2875,6 +2904,18 @@ class DashboardConfig:
             "accepted without listing. Empty = Cloud-only (deny-by-default): a "
             "Jira issue URL is only recognized if its host matches an entry "
             "here. Suffixes and wildcards are not matched.",
+        ),
+    )
+    jira_auth: list[JiraAuthEntry] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Jira Authentication",
+            "Per-host credentials for the Jira REST API so the Issues panel "
+            "can fetch issue details inline. Each entry pairs a host with an "
+            "API token. Atlassian Cloud (*.atlassian.net) uses email + API "
+            "token (Basic auth); Jira Server/Data Center uses a Personal "
+            "Access Token (Bearer). When no entry matches the issue host, the "
+            "panel falls back to the link-out 'Open in Jira' behavior.",
         ),
     )
 
@@ -6348,6 +6389,14 @@ class KiroCrewConfig:
                 ),
                 gitlab_hosts=_coerce_gitlab_hosts(dashboard_data.get("gitlab_hosts")),
                 jira_hosts=_coerce_jira_hosts(dashboard_data.get("jira_hosts")),
+                jira_auth=[
+                    JiraAuthEntry(
+                        host=str(entry.get("host", "")),
+                        email=str(entry.get("email", "")),
+                    )
+                    for entry in (dashboard_data.get("jira_auth") or [])
+                    if isinstance(entry, dict) and entry.get("host")
+                ],
             ),
             tunnel=TunnelConfig(
                 enabled=bool(tunnel_data.get("enabled", False)),

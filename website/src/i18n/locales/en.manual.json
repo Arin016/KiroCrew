@@ -1449,8 +1449,11 @@
       "reaction_minus1": "Thumbs down",
       "reaction_plus1": "Thumbs up",
       "reaction_rocket": "Rocket",
-      "jira_open_in_browser": "Jira issue — open in browser to view details.",
-      "open_in_jira": "Open in Jira"
+      "open_in_jira": "Open in Jira",
+      "provider_github": "GitHub",
+      "provider_jira": "Jira",
+      "provider_gitlab": "GitLab",
+      "jira_no_credentials": "No Jira credentials configured for this host. Add a jira_auth entry to config.json and set JIRA_API_TOKEN in your .env file."
     },
     "jobForm": {
       "add": "Add",

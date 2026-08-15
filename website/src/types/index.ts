@@ -637,7 +637,7 @@ export interface IssueReactions {
 }
 
 export interface IssueSource {
-  provider: 'github' | 'gitlab'
+  provider: 'github' | 'gitlab' | 'jira'
   /** Always the validated request url, never the provider's echo of it. */
   url: string
   number: number
