@@ -210,6 +210,9 @@ _CREDENTIAL_KEYS = (
     CRED_KIRO_API_KEY,
 )
 
+# Keys from .env that were already warned about (fire once per gateway boot).
+_warned_env_keys: set[str] = set()
+
 DEFAULT_MODEL = "auto"
 DEFAULT_SESSION_TIMEOUT = 3600  # 60 min
 DEFAULT_MAX_PARALLEL_STEPS = (
@@ -6762,6 +6765,23 @@ class KiroCrewConfig:
                 if "=" in line:
                     k, v = line.split("=", 1)
                     creds[k.strip()] = v.strip()
+
+            # Warn once per boot about keys not in the recognised allowlist.
+            # These keys still propagate (operators use them for proxy/feature
+            # settings), but the warning makes the behavior visible rather than
+            # silently surprising.  The encrypted vault (PR 1+) will provide a
+            # proper agent-isolated path for secrets.
+            unknown = set(creds) - set(_CREDENTIAL_KEYS) - _warned_env_keys
+            if unknown:
+                _warned_env_keys.update(unknown)
+                for uk in sorted(unknown):
+                    logger.warning(
+                        "Unknown key %s in .env is not a recognised credential"
+                        " -- it will propagate to child processes but is NOT"
+                        " agent-isolated. Recognised keys: %s",
+                        uk,
+                        ", ".join(sorted(_CREDENTIAL_KEYS)),
+                    )
 
         for key in _CREDENTIAL_KEYS:
             val = os.environ.get(key)
