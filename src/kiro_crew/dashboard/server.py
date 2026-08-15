@@ -1368,9 +1368,7 @@ async def _start_unix_site(runner: web.AppRunner, port: int) -> Path | None:
         logger.info("dashboard internal API also listening on unix socket %s", path)
         return path
     except Exception as exc:
-        logger.warning(
-            "dashboard unix socket unavailable (%s); internal API stays TCP-only", exc
-        )
+        logger.warning("dashboard unix socket unavailable (%s); internal API stays TCP-only", exc)
         return None
 
 
@@ -2351,6 +2349,13 @@ async def start_dashboard(
         client_max_size=60 * 1024 * 1024
     )  # 60 MB: covers 50 MB upload + multipart overhead
     app["state"] = state
+    # Voice settings live in slack/handler's module state and are otherwise
+    # loaded only on the Slack startup path (set_orch_cfg) — without this a
+    # dashboard-only gateway (no Slack tokens) resets TTS to defaults on
+    # every restart (see load_voice_reply_config).
+    from kiro_crew.slack.handler import load_voice_reply_config
+
+    await asyncio.to_thread(load_voice_reply_config)
     # ── Tunnel teardown (FIRST cleanup hook, deliberately) ───────────────────
     # aiohttp dispatches ``on_cleanup`` in registration order and gateway
     # shutdown has a hard deadline, so this is registered ahead of every other
@@ -3306,6 +3311,13 @@ async def start_api_server(
         client_max_size=60 * 1024 * 1024
     )  # 60 MB: covers 50 MB upload + multipart overhead
     app["state"] = state
+    # Voice settings live in slack/handler's module state and are otherwise
+    # loaded only on the Slack startup path (set_orch_cfg) — without this a
+    # dashboard-only gateway (no Slack tokens) resets TTS to defaults on
+    # every restart (see load_voice_reply_config).
+    from kiro_crew.slack.handler import load_voice_reply_config
+
+    await asyncio.to_thread(load_voice_reply_config)
     from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
 
     app["kiro_prerequisite_service"] = await asyncio.to_thread(
