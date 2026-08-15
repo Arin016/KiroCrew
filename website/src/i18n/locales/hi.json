@@ -8565,6 +8565,7 @@
         "months_ago": "{{n}} माह पहले",
         "search_across_all_knowledge_filter_by_type_or_ex": "पूरे ज्ञान में खोजें, प्रकार से फ़िल्टर करें, या एंटिटी ग्राफ़ एक्सप्लोर करें",
         "supported_formats": "समर्थित फ़ॉर्मैट: {{formats}}",
+        "supported_formats_list": "Markdown, सादा टेक्स्ट, कोड फ़ाइलें (.py, .ts, .java, .go, .rs, आदि), HTML, JSON, YAML, CSV, DOCX, Org Mode (.org), PDF",
         "weeks_ago": "{{n}} सप्ताह पहले",
         "welcome_to_the_knowledge_library": "ज्ञान लाइब्रेरी में स्वागत है",
         "your_centralized_knowledge_base_with_entity_extr": "एंटिटी निकालने, ग्राफ़ रिश्तों और फ़ुल-टेक्स्ट खोज के साथ तुम्हारा केंद्रीकृत ज्ञान भंडार।"
@@ -8715,7 +8716,7 @@
         "starting": "शुरू हो रहा है...",
         "supported_file_found_one": "{{count}} समर्थित फ़ाइल मिली",
         "supported_file_found_other": "{{count}} समर्थित फ़ाइलें मिलीं",
-        "supports_markdown_plain_text_code_files_html_jso": "समर्थित: Markdown, सादा टेक्स्ट, कोड फ़ाइलें, HTML, JSON, YAML, CSV, DOCX, PDF. हर फ़ाइल अधिकतम 50 MB.",
+        "supports_markdown_plain_text_code_files_html_jso": "समर्थित: Markdown, सादा टेक्स्ट, कोड फ़ाइलें, HTML, JSON, YAML, CSV, DOCX, Org Mode, PDF. हर फ़ाइल अधिकतम 50 MB.",
         "sync": "सिंक करें",
         "sync_source": "स्रोत सिंक करें",
         "this_folder_will_be_watched_any_supported_files": "इस फ़ोल्डर पर नज़र रखी जाएगी। यहाँ जोड़ी गई कोई भी समर्थित फ़ाइल अगले स्कैन चक्र (~5 मिनट) में अपने-आप ले ली जाएगी।",

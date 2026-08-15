@@ -3080,6 +3080,7 @@
         "months_ago": "{{n}}mo ago",
         "search_across_all_knowledge_filter_by_type_or_ex": "Search across all knowledge, filter by type, or explore the entity graph",
         "supported_formats": "Supported formats: {{formats}}",
+        "supported_formats_list": "Markdown, Plain text, Code files (.py, .ts, .java, .go, .rs, etc.), HTML, JSON, YAML, CSV, DOCX, Org Mode (.org), PDF",
         "weeks_ago": "{{n}}w ago",
         "welcome_to_the_knowledge_library": "Welcome to the Knowledge Library",
         "your_centralized_knowledge_base_with_entity_extr": "Your centralized knowledge base with entity extraction, graph relationships, and full-text search."

@@ -8565,6 +8565,7 @@
         "months_ago": "vor {{n}} Mon.",
         "search_across_all_knowledge_filter_by_type_or_ex": "Durchsuche das gesamte Wissen, filtere nach Typ oder erkunde den Entitätsgraphen",
         "supported_formats": "Unterstützte Formate: {{formats}}",
+        "supported_formats_list": "Markdown, Klartext, Codedateien (.py, .ts, .java, .go, .rs usw.), HTML, JSON, YAML, CSV, DOCX, Org Mode (.org), PDF",
         "weeks_ago": "vor {{n}} Wo.",
         "welcome_to_the_knowledge_library": "Willkommen in der Wissensbibliothek",
         "your_centralized_knowledge_base_with_entity_extr": "Deine zentrale Wissensbasis mit Entitätsextraktion, Graphbeziehungen und Volltextsuche."
@@ -8715,7 +8716,7 @@
         "starting": "Wird gestartet...",
         "supported_file_found_one": "{{count}} unterstützte Datei gefunden",
         "supported_file_found_other": "{{count}} unterstützte Dateien gefunden",
-        "supports_markdown_plain_text_code_files_html_jso": "Unterstützt: Markdown, Klartext, Codedateien, HTML, JSON, YAML, CSV, DOCX, PDF. Max. 50 MB pro Datei.",
+        "supports_markdown_plain_text_code_files_html_jso": "Unterstützt: Markdown, Klartext, Codedateien, HTML, JSON, YAML, CSV, DOCX, Org Mode, PDF. Max. 50 MB pro Datei.",
         "sync": "Synchronisieren",
         "sync_source": "Quelle synchronisieren",
         "this_folder_will_be_watched_any_supported_files": "Dieser Ordner wird überwacht. Alle hier hinzugefügten unterstützten Dateien werden im nächsten Scan-Zyklus (~5 Min.) automatisch eingelesen.",

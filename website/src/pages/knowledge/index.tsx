@@ -258,7 +258,7 @@ export default function KnowledgePage() {
   // Falls back to a superset that includes .pdf if config hasn't loaded yet.
   const uploadAccept = (config?.supported_formats && config.supported_formats.length
     ? config.supported_formats
-    : ['.md', '.txt', '.py', '.java', '.ts', '.js', '.rs', '.go', '.html', '.htm',
+    : ['.md', '.txt', '.org', '.py', '.java', '.ts', '.js', '.rs', '.go', '.html', '.htm',
        '.csv', '.log', '.json', '.yaml', '.yml', '.sh', '.rb', '.c', '.cpp', '.h', '.docx', '.pdf']
   ).filter(Boolean).join(',')
   const acceptsNoExtension = config?.accepts_no_extension ?? true

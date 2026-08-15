@@ -8674,6 +8674,7 @@
         "months_ago": "{{n}}mês atrás",
         "search_across_all_knowledge_filter_by_type_or_ex": "Busque em todo o conhecimento, filtre por tipo ou explore o grafo de entidades",
         "supported_formats": "Formatos suportados: {{formats}}",
+        "supported_formats_list": "Markdown, texto simples, arquivos de código (.py, .ts, .java, .go, .rs, etc.), HTML, JSON, YAML, CSV, DOCX, Org Mode (.org), PDF",
         "weeks_ago": "{{n}}sem atrás",
         "welcome_to_the_knowledge_library": "Bem-vindo à Biblioteca de Conhecimento",
         "your_centralized_knowledge_base_with_entity_extr": "A sua base de conhecimento centralizada, com extração de entidades, relacionamentos em grafo e busca em texto completo."
@@ -8826,7 +8827,7 @@
         "supported_file_found_many": "{{count}} arquivos compatíveis encontrados",
         "supported_file_found_one": "{{count}} arquivo compatível encontrado",
         "supported_file_found_other": "{{count}} arquivos compatíveis encontrados",
-        "supports_markdown_plain_text_code_files_html_jso": "Compatível com: Markdown, texto simples, arquivos de código, HTML, JSON, YAML, CSV, DOCX, PDF. Máx. 50 MB por arquivo.",
+        "supports_markdown_plain_text_code_files_html_jso": "Compatível com: Markdown, texto simples, arquivos de código, HTML, JSON, YAML, CSV, DOCX, Org Mode, PDF. Máx. 50 MB por arquivo.",
         "sync": "Sincronizar",
         "sync_source": "Sincronizar fonte",
         "this_folder_will_be_watched_any_supported_files": "Esta pasta será monitorada. Qualquer arquivo compatível adicionado aqui será ingerido automaticamente no próximo ciclo de varredura (~5 min).",
