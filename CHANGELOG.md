@@ -4,6 +4,194 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-15
+
+The platform release: MCP servers that actually work the way you configured them,
+sub-agents that cannot eat the host, a CLI that launches in half a second,
+push-to-talk voice, message pinning, session summaries, WeChat as a full channel,
+and the external-access seam that lets a managed deployment lock down what code
+the agent can install and where it can provision infrastructure.
+
+### MCP servers: configured means working
+
+- **An MCP server that declares `env.PATH` no longer loses its inherited PATH.**
+  Naming one directory to add replaced the child's PATH instead of extending it.
+  The full effective PATH (spec entries first, deduped) now backs the probe,
+  command resolution, and the agent config, so "probes healthy" and "works in a
+  session" can no longer disagree.
+- **Every emitted MCP config surface goes through one env normalization point.**
+  The agent config, kiro-global entries, and the Claude Code `~/.mcp.json`
+  sidecar all expand a declared `env.PATH` the same way. The unsynchronized
+  second writer inside the sync is removed, and the discover→write sequence is
+  a single mutex-serialized entry point.
+- **The Online badge now means "tools usable", dated.** A probe whose
+  `initialize` succeeds but whose `tools/list` fails reports an error instead
+  of `ok` with an empty list; every probe result carries `probedAt`.
+- **Apply & Restart now really mounts a newly installed server, and says so
+  honestly when it cannot.** An edit that produces an empty discovery delta (a
+  `disabled: true` flip, a changed `env`) is still written out instead of being
+  skipped.
+- **MCP servers can predict which backends safely share a process.** Servers
+  that declare compatible lifecycles are grouped to cut resident memory.
+- **Tool Search deferral thresholds are configurable.** Tune how eagerly
+  low-frequency tools are deferred to keep the prompt lean.
+
+### Sub-agent memory ceiling and resource governance
+
+- **Aggregate memory ceiling across all concurrent agent spawns.** The cgroup
+  limit was per-spawn only (65% of RAM each), so many concurrent sub-agents
+  could collectively request several times host RAM. The gateway now caps
+  `kirocrew-agents.slice` at 80% of RAM plus an aggregate task ceiling.
+- **The session-start budget is configurable** — control how many tokens the
+  first turn spends before reaching tools.
+- **Per-agent LLM-turn stall windows and stall-aware telemetry** — detect a
+  stuck turn from outside the turn's read loop.
+- **Sub-agents can be steered mid-flight** (`spawn_steer`) and scoped to
+  exactly the context a task needs (`include_memory`, `include_lessons`,
+  `include_project` flags).
+
+### CLI startup 0.8 s faster, 58 MB lighter per MCP server
+
+- `cli.py` imported 132 subcommands at module scope — including the Slack
+  gateway and numpy — so every invocation and every long-lived MCP backend
+  paid ~1.3 s and ~112 MB. The four heavy import groups now execute inside the
+  one branch that needs them, cutting fresh startup to ~0.5 s / ~54 MB.
+
+### External-access seam
+
+- **A managed deployment can now withhold registries and cloud deployment.**
+  A new `external_access` platform slot adds `admits_registry(kind, name,
+  api_base)` and `admits_cloud_deployment(target)`. A refused registry is
+  never registered; a refused cloud deployment makes the deploy surface
+  report itself disabled. Both decisions are SEL-audited.
+- **Publishing to the public internet requires an explicit acknowledgment**, and
+  an operator can remove the path entirely via `capabilities.publish`.
+
+### Slack private channels + manifest scopes
+
+- **Private channels work out of the box.** The shipped app manifest adds
+  `groups:history`, `users:read`, and the `message.groups` event. **Existing
+  installs** must re-import the manifest and reinstall to pick up the new
+  scopes.
+
+### Voice, language, and channels
+
+- **Push-to-talk key** for voice input — hold to speak, release to send.
+- **WeChat (微信) is a full channel** — receive images, voice, and files.
+- **WeCom (企业微信) session-folder setting** renders like every other channel's.
+- **Telegram** gains a `/model` picker, `/yolo` toggle, and a Bot API command
+  menu.
+
+### Session summaries and pinning
+
+- **Session summary panel** in the chat side panel, plus a Settings toggle and
+  a guidance skill. Summaries can also be triggered on demand.
+- **Message-level pinning** — pin important turns so they survive scrollback.
+- **Context usage** surfaces as a percentage and k-token count in the header.
+
+### OAuth consent-endpoint keystone
+
+- **Operator keystone extension for OAuth consent-endpoint allowlist** —
+  restrict which external OAuth providers the agent may authorize with.
+- **Mint the OAuth approval URL on Connect** — the card offers authorization
+  within seconds rather than waiting for a later chat turn.
+- **Nightly account-free OAuth static-metadata conformance probe** ensures
+  declared providers stay healthy.
+
+### Builtin-skill sync provenance guard
+
+- **Gate builtin-skill sync destruction on tree-fingerprint provenance.**
+  A user-authored skill whose path collides with a builtin can no longer be
+  silently overwritten on upgrade. The sync checks a stored fingerprint before
+  any destructive operation. (#3433)
+
+### KAS (Kiro Agent Service) backend
+
+- **KAS enabled as a working chat backend** — map KAS session/update
+  discriminants to Crew displays, with native sub-agent progress and steering.
+
+### Dashboard
+
+- **Feature Previews page** — preview opt-ins moved from scattered toggles to
+  a dedicated Developer sub-page.
+- **Drag a folder onto another to nest it** in board view.
+- **Crew switcher** can be pinned open as a chip row with editable crew
+  settings and generated Kiro ghost avatars.
+- **File explorer** can open a file's location from the viewer.
+- **Configurable default shell** for the terminal panel.
+- **Right/bottom dock toggle** for the side panel.
+- **Sortable artifact list columns** with a detail-view copy action and
+  first-class image artifacts.
+- **Hover preview for collapsed paste tokens** in the composer.
+- **Keep on Top** toggle in the View menu (desktop).
+- **Resource health indicator** in the header capsule.
+- **Git panel** with repo status/log and auto-open when a project is set.
+- **Deep-link a notification** by timestamp on the notifications page.
+
+### Browser
+
+- **Browsing moved from MCP proxy to `playwright-cli`** — a standalone CLI
+  that installs without a preexisting Node toolchain and adapts to non-apt
+  Linux hosts and token-paste auth.
+
+### Performance
+
+- Pre-compress hashed assets for compressed serving.
+- Coalesce slot broadcasts so a burst of mutations emits one frame.
+- Animate the streaming shimmer on the compositor thread.
+- Pin llama.cpp threads and prioritize interactive embeds.
+- Skip MCP overlay rewrite when a stat-only fingerprint matches.
+- Trim redundant boot requests.
+- Memoize the persisted-message entry builder.
+- Build the lesson cosine scorer once per query, not per row.
+- Stem each distinct word once instead of once per lesson.
+- Throttle block parsing while a message streams.
+- Shard the frontend test suite across 4 runners.
+
+### Security
+
+- **Per-app WebSocket event scoping** for app tokens.
+- **Supply-chain attack detection Semgrep rules** in CI.
+- **Immutable digest promotion** for tested release artifacts.
+- **Scrub KIRO_API_KEY from the gateway environ** like every other credential.
+- **Drop `unsafe-eval` from published widget CSP.**
+- **Vet cron commands from imported archives.**
+- **Governance floor override** prevents an unsandboxed-exec opt-in from
+  lowering the security posture below the operator's floor.
+
+### Autonomy and agents
+
+- **Issue Radar Crews** — autonomous issue workers with a public claim ledger.
+- **Perpetual-agent foundations** — reachable wake budget and transient retry
+  for crons.
+- **Chat turn ceiling can be raised above 2 h** for unattended runs.
+- **Monitor loops accept a wall-clock runtime budget.**
+- **Cron consecutive_failures resets on success** (#3428).
+
+### Fixes (selected from ~350)
+
+- Computer-use spec emission gated on platform + keystone — no more 109 MB
+  backend per chat on Linux/Windows when the feature is off.
+- MCP gateway daemons no longer leak when their launcher dies.
+- Side-panel oversize refusal reports an accurate character target per script.
+- Skill browser no longer serves a different skill than the one you asked for.
+- Lesson dedup no longer silently deletes across embedding-model generations.
+- Semantic memory embeds at write time and ranks retrieval from stored vectors.
+- Markdown bold-wrapped URLs no longer swallow their closing delimiter.
+- CJK auto-link boundaries no longer swallow punctuation.
+- Channel binding preserved across context-overflow recycle.
+- Browser screenshots downscale on longest edge, not just width.
+- Windows desktop titlebar integrates properly.
+- Notifications page scrolls on mobile.
+- Touch devices get 40 px action targets.
+- Queued messages can be promoted with "run this next".
+
+Plus roughly 200 further fixes across the dashboard, chat, channels, MCP
+transport, packaging, and CI.
+
+<details>
+<summary>Detailed change notes (most recent additions)</summary>
+
 - **The Speech-to-Text settings page no longer offers to install Whisper when
   the provider is AWS Transcribe.** With `stt.provider = "transcribe"` the page
   showed an "Install Whisper" button (installing an engine Transcribe never
@@ -210,6 +398,8 @@ All notable changes to KiroCrew are documented in this file.
   fixed by upgrading alone**: Slack only grants new scopes on reinstall — update
   the app's manifest (or re-import it), then reinstall the app to the workspace
   and copy the new bot token. (#3206)
+
+</details>
 
 ## [0.2.0] — 2026-08-09
 
