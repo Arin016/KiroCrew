@@ -65,6 +65,8 @@ from kiro_crew.platform.governance import CU_MCP_SERVER, may_skip_gate_now
 from kiro_crew.sandbox import warm_backend
 from kiro_crew.sel import sel
 from kiro_crew.service import apparmor
+from kiro_crew.service import common as common_service
+from kiro_crew.service import controller as service_controller
 from kiro_crew.service import linux as service_linux
 from kiro_crew.session_pid_sig import signing_health
 from kiro_crew.transcribe import _find_whisper, ensure_ffmpeg_in_path
@@ -898,6 +900,44 @@ def _doctor_model_url_reachable(issues: list[str]) -> None:
         print("               keep retrying with backoff on every gateway boot.")
 
 
+def _doctor_headless_auth(issues: list[str]) -> None:
+    """Report an API-key credential the INSTALLED service cannot see.
+
+    This is the one place the contradiction is visible in a single output: the
+    ``kiro login`` line above runs ``whoami`` with the inherited environment and
+    reports signed in, while the dashboard's readiness gate reads the gateway's
+    own environment and reports signed out. Install-time is too early to be the
+    only report — the symptom surfaces when the service is ALREADY installed (a
+    key added to a shell profile afterwards, a host re-provisioned from a
+    snapshot, an operator who reaches the docs only after hitting the wall), and
+    none of those orderings run ``service install`` again.
+
+    Gated on a service definition existing, which is what makes the claim true
+    rather than merely plausible. Without one the gateway runs in the foreground
+    and inherits this very shell, so the credential DOES reach it and warning
+    here would be a false positive on a working host.
+
+    Best-effort like the probes around it: a failure to read the environment or
+    the unit path must not fail ``doctor``, whose job is to report.
+    """
+    try:
+        if service_controller.installed_unit_path() is None:
+            return
+        warning = common_service.headless_auth_warning()
+    except Exception:
+        return
+    if not warning:
+        return
+    print("  kiro key:    ⚠️  set here, but the installed service cannot see it")
+    for line in warning.splitlines():
+        print(f"{_INDENT}{line.strip()}" if line.strip() else "")
+    issues.append(
+        "KIRO_API_KEY is set in this shell but absent from the crew .env, so the "
+        "installed service starts without it and the dashboard reports a "
+        "signed-out state"
+    )
+
+
 def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False) -> None:
     """Verify KiroCrew setup — check dependencies, config, credentials, connectivity.
 
@@ -1011,6 +1051,7 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
                 print("  kiro login:  ⏹ not logged in (run: kiro-cli login)")
         except Exception:
             print("  kiro login:  ⚠️  could not check")
+        _doctor_headless_auth(issues)
     else:
         print("  kiro-cli:    ⏭  not found (the agent backend)")
         print("               Install kiro-cli per its docs, then: kiro-cli login")
