@@ -1,41 +1,60 @@
-## Problem
-<What is broken or missing — the concrete symptom, ideally what the user observes.>
+<!-- This template MUST mirror .github/PULL_REQUEST_TEMPLATE.md in the Kiro Crew
+     repo — that file is the single source of truth for required PR description
+     sections. The maintainer's auto-approval bot greps for these exact headings
+     (prefix-match); mismatched headings block workflow approval indefinitely.
+
+     When filling this in: replace the HTML comments with real content. Delete
+     any section that is genuinely N/A and say why in one line. -->
+
+## Problem / Motivation
+
+<!-- Bug fix: the concrete symptom — what is broken or missing, ideally what the
+     user observes.
+     New feature / enhancement: the gap, use case, or opportunity this addresses
+     — what a user cannot do (or does awkwardly) today. -->
 
 ## Why it matters
-<Impact on users if left unfixed: who is affected and how badly.>
 
-## Fix (symptoms → root cause → change)
-<Chain of thought: start from the observed symptom, trace to the underlying
-root cause, then to the specific change that addresses that cause. The reader
-should follow *why this change is the right one*, not just what changed.>
+<!-- Impact if this is left undone: for a fix, who is hit by the bug and how
+     badly; for a feature, the user/business value it unlocks. -->
+
+## What changed (motivation → approach → change)
+
+<!-- A short chain of thought so the reader sees *why this is the right change*,
+     not just what changed:
+     - Bug fix: observed symptom → underlying root cause → the specific change
+       that addresses that cause.
+     - New feature / enhancement: goal → the approach/design you chose (and why,
+       over the alternatives you considered) → what you actually built. -->
 
 ## Tests
-<Automated tests added/updated and the behavior each one locks in.>
+
+<!-- Automated tests added/updated and the behavior each one locks in. -->
 
 ## Manual verification
-<Manual steps performed or still required where unit tests are not enough
-(integration paths, UI, external services). State "N/A — unit coverage
-sufficient" only when genuinely true, with a one-line why.>
 
-## Screenshots
-<MANDATORY for user-visible UI changes; delete this section otherwise.
-Commit images to the PR branch under temp-screenshots/<feature>/ (a top-level,
-ephemeral, never-packaged dir — never under docs/ or src/kiro_crew/**) and embed
-with commit-SHA-pinned URLs so they survive branch deletion on merge and periodic cleanup:
-![alt](https://github.com/<owner>/<repo>/raw/<sha>/temp-screenshots/<feature>/<name>.png)
-Show each affected surface's meaningful variants; fold full-page context
-into a <details> block.>
+<!-- Manual steps performed or still required where unit tests fall short
+     (integration paths, UI, external services). State "N/A — unit coverage
+     sufficient" only when genuinely true, with a one-line why. -->
 
-## Issue link
-<One trailer per issue this PR resolves, and it MUST use a closing verb —
-"Fixes #<n>", "Closes #<n>", or "Resolves #<n>". A bare "#<n>" or "Related: #<n>"
-links the issue and closes NOTHING, so the work merges and the issue stays open
-forever. Confirm the host actually resolved it:
-  gh pr view <n> --json closingIssuesReferences
-If this PR deliberately resolves no tracked issue, delete the trailer below and
-declare that instead, as its own line starting at column 0, in the exact form
-item 7 of the PR description contract specifies. Replace this whole instruction
-block either way — leaving it in place is not a declaration, and the readiness
-gate does not accept it as one.>
+## Screenshots / video
 
-Fixes #<n>
+<!-- MANDATORY for any user-visible UI change; delete this section otherwise.
+     Commit media under temp-screenshots/<feature>/ and embed with
+     commit-SHA-pinned URLs. See the prepare-pr skill's "Screenshots" contract
+     for the full recipe. -->
+
+## Related Issues
+
+<!-- Link with a closing keyword — "Fixes #N", "Closes #N", or "Resolves #N".
+     A bare "#N" or "Related: #N" links but closes NOTHING on merge.
+     If no issue: delete this section and state "no linked issue: <why>" on its
+     own line instead. -->
+
+## Checklist
+
+- [ ] Single commit with a Conventional Commits title (`feat|fix|docs|refactor|perf|test|chore|ci|build|revert: ...`)
+- [ ] Existing tests pass and new tests added for new functionality
+- [ ] Self-review completed; code follows project style guidelines
+- [ ] Documentation updated (if applicable)
+- [ ] No secrets, credentials, or internal references in the diff
