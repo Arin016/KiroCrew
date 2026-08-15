@@ -58,13 +58,61 @@ DEFAULT_READINESS_CONTEXT = "PR Readiness"
 # A host closes an issue on merge ONLY for these verbs. "Related: #n", "Part of
 # #n" and a bare "#n" render as links and close nothing, which is how finished
 # work merges while its issue stays open forever.
+_CLOSING_VERB = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+# A repository slug, in GitHub's own charset. Deliberately narrow so a stray
+# path fragment cannot masquerade as a qualified reference.
+_REPO_SLUG = r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*"
+# The three reference targets the host actually resolves.
+_ISSUE_TARGET = (
+    r"(?:(?:" + _REPO_SLUG + r")?#\d+"
+    r"|https?://[A-Za-z0-9.-]+/" + _REPO_SLUG + r"/issues/\d+)"
+)
+_CLOSING_REF = _CLOSING_VERB + r"[ \t]*:?[ \t]+" + _ISSUE_TARGET
+# THE ACCEPTED EXPLICIT-TRAILER GRAMMAR, in full:
+#
+#   trailer := indent? bullet? ref (sep ref)* punct? html-comment?
+#   ref     := verb ':'? sp target
+#   verb    := close|closes|closed | fix|fixes|fixed | resolve|resolves|resolved
+#   target  := '#123' | 'owner/repo#123' | 'https://host/owner/repo/issues/123'
+#   sep     := ',' | ';' | 'and'
+#
+# Two properties are load-bearing.
+#
+# (1) The trailer must occupy the WHOLE visible line. An unanchored substring
+# match also accepted prose that merely MENTIONS a past close -- "Fixed #123 in
+# an earlier release; this PR only adds tests." -- and then told the author the
+# keyword was fine and the NUMBER was wrong, the one reading that is never true
+# for that line. A declaration is a trailer, not a mention. (Trailing
+# whitespace, one sentence-ending '.'/';', a CR from a CRLF body, and a trailing
+# HTML comment stay accepted, since none of them make the line prose.)
+#
+# (2) Qualified and URL targets are accepted. The host resolves them, so a body
+# carrying one is NOT a body that forgot the verb. No reconciliation against the
+# host's own repository identity is needed to accept them here: this classifier
+# is only ever reached when the host resolved NOTHING, and the message it
+# produces ("the verb is fine, check the reference") is correct whether the
+# reference names this repository or another one.
+#
+# Markdown code fences are NOT stripped -- a fenced line that is itself a bare
+# trailer still matches, which is why the notice text names that possibility
+# rather than claiming the number is wrong.
 _CLOSING_KW_RE = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#\d+",
-    re.IGNORECASE,
+    r"^[ \t]*(?:[-*+][ \t]+)?"
+    + _CLOSING_REF
+    + r"(?:(?:[ \t]*[,;][ \t]*|[ \t]+and[ \t]+)"
+    + _CLOSING_REF
+    + r")*[ \t]*[.;]?[ \t]*(?:<!--.*?-->[ \t]*)?\r?$",
+    re.IGNORECASE | re.MULTILINE,
 )
 # Any issue-ish reference at all, used to tell "forgot the verb" from
-# "genuinely closes nothing".
-_BARE_REF_RE = re.compile(r"(?<![\w/])#\d+\b")
+# "genuinely closes nothing". Mirrors the same three targets, so a qualified
+# ref or an issue URL written without a verb is reported as a missing keyword
+# rather than as a body with no issue link at all.
+_BARE_REF_RE = re.compile(
+    r"(?<![\w/])(?:" + _REPO_SLUG + r")?#\d+\b"
+    r"|https?://[A-Za-z0-9.-]+/" + _REPO_SLUG + r"/issues/\d+\b",
+    re.IGNORECASE,
+)
 # Explicit opt-out so an issue-less PR can say so once instead of being asked
 # every round. Anchored at column 0 and requires the colon, because an
 # UNANCHORED substring is satisfied by any prose that merely discusses this
@@ -89,7 +137,10 @@ def closing_link_reason(body, closing_refs):
     ``closing_refs`` is the host's OWN resolution of the body (the
     ``closingIssuesReferences`` field), so it is the truth about what will
     actually close. The body regexes only classify *why* it resolved to
-    nothing, which is what makes the message actionable.
+    nothing, which is what makes the message actionable. The accepted
+    explicit-trailer grammar is stated in full above ``_CLOSING_KW_RE``: a
+    whole visible line carrying one or more ``<verb> <target>`` references,
+    where a target may be ``#123``, ``owner/repo#123`` or an issue URL.
     """
     if closing_refs:
         return None
@@ -97,11 +148,13 @@ def closing_link_reason(body, closing_refs):
     if _NO_ISSUE_RE.search(body):
         return None
     if _CLOSING_KW_RE.search(body):
-        # Verb is present but the host resolved nothing: wrong repo prefix, a
-        # code fence, or an issue that is already closed/nonexistent.
+        # Verb and reference are both well-formed but the host resolved
+        # nothing: wrong repository, a code fence, or an issue that is already
+        # closed/nonexistent. Never report this as the missing-verb case.
         return (
             "body has a closing keyword but the host resolved no issue "
-            "(check the number and that it is not inside a code fence)"
+            "(check the repository and number, and that it is not inside a "
+            "code fence)"
         )
     if _BARE_REF_RE.search(body):
         return (
