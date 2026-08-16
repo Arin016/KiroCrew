@@ -8440,7 +8440,6 @@
       "current_step": "текущий шаг",
       "cutover_staged_run_the_restart_command_to_finish": "Cutover staged: this worktree becomes live when the gateway next starts. Run `{{cmd}}` to finish it — the gateway is still running the previous checkout until then.",
       "delete_anyway": "Всё равно удалить",
-      "dirty_unmerged": "Незафиксированные изменения — принудительное удаление невозможно",
       "design_docs": "Проектные документы:",
       "dev_fleet": "Флот разработки",
       "discovery_error": "Ошибка обнаружения",

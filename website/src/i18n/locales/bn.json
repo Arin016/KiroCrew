@@ -8220,7 +8220,6 @@
       "current_step": "বর্তমান ধাপ",
       "cutover_staged_run_the_restart_command_to_finish": "Cutover staged: this worktree becomes live when the gateway next starts. Run `{{cmd}}` to finish it — the gateway is still running the previous checkout until then.",
       "delete_anyway": "তবুও মুছে ফেলো",
-      "dirty_unmerged": "অকমিটেড পরিবর্তন — জোরপূর্বক মুছে ফেলা সম্ভব নয়",
       "design_docs": "ডিজাইন ডক:",
       "dev_fleet": "ডেভ ফ্লিট",
       "discovery_error": "ডিসকভারি ত্রুটি",

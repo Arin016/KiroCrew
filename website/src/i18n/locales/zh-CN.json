@@ -8110,7 +8110,6 @@
       "current_step": "当前步骤",
       "cutover_staged_run_the_restart_command_to_finish": "Cutover staged: this worktree becomes live when the gateway next starts. Run `{{cmd}}` to finish it — the gateway is still running the previous checkout until then.",
       "delete_anyway": "仍然删除",
-      "dirty_unmerged": "有未提交的更改 — 无法强制移除",
       "design_docs": "设计文档：",
       "dev_fleet": "开发机群",
       "discovery_error": "发现错误",

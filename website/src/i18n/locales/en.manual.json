@@ -2865,7 +2865,6 @@
       "conflicts_aborted": "Conflicts — aborted",
       "created_recently": "created recently",
       "delete_anyway": "Delete anyway",
-      "dirty_unmerged": "Uncommitted changes — cannot force remove",
       "empty_worktree_cannot_be_undone": "Empty worktree. Cannot be undone.",
       "every_git_worktree_of_the_main_checkout_pull_bui": "Every git worktree of the main checkout. Pull+Build syncs main; pods are isolated gateways booted from a worktree.",
       "expand": "Expand",

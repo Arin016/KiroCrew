@@ -8110,7 +8110,6 @@
       "current_step": "現在のステップ",
       "cutover_staged_run_the_restart_command_to_finish": "切り替えの準備が完了しました。次回ゲートウェイを起動すると、このワークツリーがライブになります。完了するには `{{cmd}}` を実行してください。それまでは、ゲートウェイは以前のチェックアウトで動作し続けます。",
       "delete_anyway": "とにかく削除",
-      "dirty_unmerged": "未コミットの変更あり — 強制削除不可",
       "design_docs": "デザインドキュメント:",
       "dev_fleet": "Dev Fleet",
       "discovery_error": "検出エラー",

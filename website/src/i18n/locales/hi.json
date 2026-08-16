@@ -8220,7 +8220,6 @@
       "current_step": "मौजूदा चरण",
       "cutover_staged_run_the_restart_command_to_finish": "Cutover staged: this worktree becomes live when the gateway next starts. Run `{{cmd}}` to finish it — the gateway is still running the previous checkout until then.",
       "delete_anyway": "फिर भी हटाएँ",
-      "dirty_unmerged": "अनकमिटेड परिवर्तन — बलपूर्वक हटाया नहीं जा सकता",
       "design_docs": "डिज़ाइन दस्तावेज़:",
       "dev_fleet": "डेव फ़्लीट",
       "discovery_error": "डिस्कवरी त्रुटि",

@@ -8220,7 +8220,6 @@
       "current_step": "aktueller Schritt",
       "cutover_staged_run_the_restart_command_to_finish": "Cutover staged: this worktree becomes live when the gateway next starts. Run `{{cmd}}` to finish it — the gateway is still running the previous checkout until then.",
       "delete_anyway": "Trotzdem löschen",
-      "dirty_unmerged": "Nicht commitete Änderungen — Erzwungenes Entfernen nicht möglich",
       "design_docs": "Design-Dokumente:",
       "dev_fleet": "Dev Fleet",
       "discovery_error": "Fehler bei der Erkennung",

@@ -8330,7 +8330,6 @@
       "current_step": "etapa atual",
       "cutover_staged_run_the_restart_command_to_finish": "Cutover staged: this worktree becomes live when the gateway next starts. Run `{{cmd}}` to finish it — the gateway is still running the previous checkout until then.",
       "delete_anyway": "Excluir mesmo assim",
-      "dirty_unmerged": "Alterações não confirmadas — não é possível forçar a remoção",
       "design_docs": "Documentos de design:",
       "dev_fleet": "Frota Dev",
       "discovery_error": "Erro de descoberta",

@@ -1650,26 +1650,25 @@ export default function DevFleetPage() {
           {pruneDialog.kept.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 10, letterSpacing: '0.08em', color: 'var(--muted)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)', paddingBottom: 3, marginBottom: 4 }}>{i18nT('pages.devFleetPage.kept')}</div>
-              <p style={{ fontSize: 11, color: 'var(--muted)', margin: '0 0 6px' }}>{i18nT('pages.devFleetPage.kept_force_hint')}</p>
+              {pruneDialog.kept.some((k) => !isGuarded(k.name) && !k.dirty && k.code !== 'dirty_check_failed') && <p style={{ fontSize: 11, color: 'var(--muted)', margin: '0 0 6px' }}>{i18nT('pages.devFleetPage.kept_force_hint')}</p>}
               {pruneDialog.kept.map((k) => {
                 const guarded = isGuarded(k.name)
-                // dirty+unmerged worktrees cannot be force-removed — the backend
-                // refuses force=True when dirty, so disable the checkbox to
-                // avoid a misleading interaction.
-                const dirtyUnmerged = !!k.dirty
-                const disabled = guarded || dirtyUnmerged
+                // Disable force-checkbox for worktrees the backend refuses
+                // force=True on: dirty=True (uncommitted changes) OR
+                // code=dirty_check_failed (git status failed / unverifiable).
+                const cannotForce = !!k.dirty || k.code === 'dirty_check_failed'
+                const disabled = guarded || cannotForce
                 const checked = pruneForceSelected.has(k.name)
                 return (
                   <label key={k.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1 }}>
                     {guarded
                       ? <span style={{ width: 13, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><ShieldAlert size={13} style={{ color: 'var(--muted)' }} /></span>
-                      : <Checkbox checked={checked} disabled={dirtyUnmerged} onChange={(e) => setPruneForceSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(k.name); else next.delete(k.name); return next })} aria-label={i18nT('pages.devFleetPage.force_remove', { name: k.name })} />
+                      : <Checkbox checked={checked} disabled={cannotForce} onChange={(e) => setPruneForceSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(k.name); else next.delete(k.name); return next })} aria-label={i18nT('pages.devFleetPage.force_remove', { name: k.name })} />
                     }
                     <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, color: checked ? 'var(--danger)' : guarded ? 'var(--muted)' : 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{k.name}</span>
-                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                      {guarded && <span style={{ fontSize: 10, color: 'var(--muted)' }}>{i18nT('pages.devFleetPage.protected_worktree')}</span>}
-                      {dirtyUnmerged && <span style={{ fontSize: 10, color: 'var(--muted)' }}>{i18nT('pages.devFleetPage.dirty_unmerged')}</span>}
-                      {!guarded && !dirtyUnmerged && pruneVerdictLabel(k.code)}
+                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }} title={pruneVerdictLabel(k.code)}>
+                      {guarded && i18nT('pages.devFleetPage.protected_worktree')}
+                      {!guarded && pruneVerdictLabel(k.code)}
                     </span>
                   </label>
                 )
