@@ -1984,7 +1984,8 @@ const chatSlice = createSlice({
     removeThinking(state) { state.messages = state.messages.filter(m => m.role !== 'thinking') },
     /** Mark optimistic bubbles older than OPTIMISTIC_TIMEOUT_MS as stale so the
      *  UI can show a "retry" affordance. Called periodically from useWebSocket's
-     *  heartbeat timer. Does not remove — the bubble stays in place. (#3898) */
+     *  client-side interval timer (10s). Does not remove — the bubble stays in
+     *  place. (#3898, #3973) */
     sweepStaleOptimistic(state) {
       const now = Date.now()
       const sweep = (msgs: ChatMessage[]) => {

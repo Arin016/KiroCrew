@@ -1179,10 +1179,6 @@ export function useWebSocket() {
             break
           }
           case 'heartbeat':
-            // Piggyback the optimistic-timeout sweep on the server heartbeat
-            // (~30s interval) so stale unconfirmed bubbles get marked without
-            // a dedicated client-side timer (#3898).
-            dispatch(sweepStaleOptimistic())
             break
           case 'context_usage':
             dispatch(sseContextUsage(data as { slot: string; pct: number; used_tokens?: number; window_tokens?: number; reset?: boolean }))
@@ -1523,6 +1519,16 @@ export function useWebSocket() {
       sendSlotFocusedImpl = () => {}
     }
   }, [connect, stopVoice, flushSlotActivity])
+
+  // Client-side optimistic-timeout sweep (#3973).  The server heartbeat only
+  // fires while the WebSocket is alive — but a dead connection is exactly the
+  // scenario where stale optimistic bubbles matter most.  This interval drives
+  // the sweep independently so the "message not confirmed" indicator appears
+  // even when the socket is down.
+  useEffect(() => {
+    const id = setInterval(() => dispatch(sweepStaleOptimistic()), 10_000)
+    return () => clearInterval(id)
+  }, [dispatch])
 
   /** Subscribe to log events — call with callback on mount, null on unmount. */
   const subscribeLogs = useCallback((cb: LogCallback) => {
