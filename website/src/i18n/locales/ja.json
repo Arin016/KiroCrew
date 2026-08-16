@@ -7648,6 +7648,7 @@
         "send": "送信",
         "send_enter": "送信 (Enter)",
         "steered_into_the_running_turn": "実行中のターンに追加しました",
+        "message_unconfirmed": "Message not confirmed — may not have been delivered",
         "pin_message": "メッセージをピン留め",
         "unpin_message": "メッセージのピン留めを解除"
       },
