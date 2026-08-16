@@ -6556,6 +6556,14 @@
       "refresh": "새로 고침",
       "title": "Git",
       "uncommitted": "커밋되지 않음 {{count}}개"
+    },
+    "skillsMultiSelect": {
+      "add_skill": "Add skill",
+      "remove_skill": "Remove {{name}}",
+      "filter_skills": "Filter skills...",
+      "no_matching_skills": "No matching skills",
+      "skills_hint": "Skills loaded when this hook matches — no command needed.",
+      "selected": "Selected"
     }
   },
   "hooks": {
@@ -8548,7 +8556,8 @@
       "timeout": "제한 시간",
       "total": "합계",
       "total_runs": "총 실행 횟수",
-      "user": "사용자"
+      "user": "사용자",
+      "matcher_mode": "Matcher mode"
     },
     "kiroCrewAgentsPage": {
       "a_unique_identifier_for_this_workspace_agents_re": "이 워크스페이스의 고유 식별자입니다. 에이전트는 이름으로 워크스페이스를 참조합니다.",

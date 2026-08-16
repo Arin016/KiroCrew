@@ -10,6 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "postinstall": "node scripts/patch-happy-dom-iframe.mjs",
     "clean": "rm -rf dist && rm -rf node_modules",
     "dev": "vite",
     "build": "tsc -b && node --max-old-space-size=6144 ./node_modules/vite/bin/vite.js build",

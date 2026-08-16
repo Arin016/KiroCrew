@@ -2210,16 +2210,26 @@ CRON_RESUME_SCHEMA = ToolSchema(
 
 # ── Tool Schemas (Hooks) ──
 
+
+def _validate_hook_has_action(args: dict) -> None:
+    """A hook must have either a command or skills — an empty hook is invalid."""
+    if not args.get("command") and not args.get("skills"):
+        raise ValidationError("command", "either command or skills must be provided")
+
+
 HOOK_CREATE_SCHEMA = ToolSchema(
     tool_name="hook_create",
     fields=[
         FieldSpec("name", str, required=True, max_len=200),
-        FieldSpec("command", str, required=True, max_len=2000),
+        FieldSpec("command", str, max_len=2000, default=""),
         FieldSpec("event", str, required=True, allowed=ALLOWED_HOOK_EVENTS),
         FieldSpec("matcher", str, max_len=500, default=""),  # optional: empty = match all
+        FieldSpec("matcher_mode", str, max_len=10, default="glob", allowed=frozenset({"glob", "regex", "contains"})),
+        FieldSpec("skills", list, default=[], item_type=str, item_max_len=100),
         FieldSpec("timeout", int, min_val=1, max_val=300, default=30),
         FieldSpec("enabled", bool, default=True),
     ],
+    custom_validator=_validate_hook_has_action,
 )
 
 HOOK_UPDATE_SCHEMA = ToolSchema(
@@ -2229,6 +2239,8 @@ HOOK_UPDATE_SCHEMA = ToolSchema(
         FieldSpec("command", str, max_len=2000),  # optional on update
         FieldSpec("event", str, allowed=ALLOWED_HOOK_EVENTS),
         FieldSpec("matcher", str, max_len=500),  # optional: empty = match all
+        FieldSpec("matcher_mode", str, max_len=10, allowed=frozenset({"glob", "regex", "contains"})),
+        FieldSpec("skills", list, item_type=str, item_max_len=100),
         FieldSpec("timeout", int, min_val=1, max_val=300),
         FieldSpec("enabled", bool),
     ],

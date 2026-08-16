@@ -6820,6 +6820,14 @@
       "refresh": "Обновить",
       "title": "Git",
       "uncommitted": "{{count}} незакоммичено"
+    },
+    "skillsMultiSelect": {
+      "add_skill": "Add skill",
+      "remove_skill": "Remove {{name}}",
+      "filter_skills": "Filter skills...",
+      "no_matching_skills": "No matching skills",
+      "skills_hint": "Skills loaded when this hook matches — no command needed.",
+      "selected": "Selected"
     }
   },
   "hooks": {
@@ -8878,7 +8886,8 @@
       "timeout": "Тайм-аут",
       "total": "Всего",
       "total_runs": "Всего запусков",
-      "user": "пользовательский"
+      "user": "пользовательский",
+      "matcher_mode": "Matcher mode"
     },
     "kiroCrewAgentsPage": {
       "a_unique_identifier_for_this_workspace_agents_re": "Уникальный идентификатор этой рабочей области. Агенты ссылаются на рабочие области по имени.",
