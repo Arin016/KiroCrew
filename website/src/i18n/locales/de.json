@@ -4548,15 +4548,13 @@
       "focus_popout": "Ausgekoppeltes Fenster fokussieren",
       "hide_terminal_panel": "Terminal-Panel ausblenden",
       "maximum_terminals": "Maximal {{n}} Terminals",
-      "move_to_side_panel": "In das Seitenpanel verschieben",
       "new_terminal": "Neues Terminal",
-      "open_a_chat_page_to_move_this_terminal_there": "Öffne eine Chat-Seite, um dieses Terminal dorthin zu verschieben",
       "pop_out_to_window": "In ein Fenster auskoppeln",
       "resize_terminal_panel": "Größe des Terminal-Panels ändern",
       "terminal": "Terminal",
       "terminal_is_in_its_own_window": "Das Terminal ist in einem eigenen Fenster",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "Panel nach rechts verschieben",
+      "move_panel_to_bottom": "Panel nach unten verschieben",
       "more_actions": "More actions"
     },
     "chatInput": {

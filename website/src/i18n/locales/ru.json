@@ -4694,15 +4694,13 @@
       "focus_popout": "Перейти к отдельному окну",
       "hide_terminal_panel": "Скрыть панель терминала",
       "maximum_terminals": "Не более {{n}} терминалов",
-      "move_to_side_panel": "Переместить в боковую панель",
       "new_terminal": "Новый терминал",
-      "open_a_chat_page_to_move_this_terminal_there": "Открой страницу чата, чтобы перенести терминал туда",
       "pop_out_to_window": "Открыть в отдельном окне",
       "resize_terminal_panel": "Изменить размер панели терминала",
       "terminal": "Терминал",
       "terminal_is_in_its_own_window": "Терминал открыт в отдельном окне",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "Переместить панель вправо",
+      "move_panel_to_bottom": "Переместить панель вниз",
       "more_actions": "More actions"
     },
     "chatInput": {

@@ -4477,13 +4477,11 @@
       "close_terminal": "ターミナルを閉じる",
       "hide_terminal_panel": "ターミナルパネルを非表示",
       "maximum_terminals": "最大 {{n}} 個のターミナル",
-      "move_to_side_panel": "サイドパネルに移動",
       "new_terminal": "新規ターミナル",
-      "open_a_chat_page_to_move_this_terminal_there": "チャットページを開いてこのターミナルを移動",
       "resize_terminal_panel": "ターミナルパネルをリサイズ",
       "terminal": "ターミナル",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "パネルを右に移動",
+      "move_panel_to_bottom": "パネルを下に移動",
       "more_actions": "More actions"
     },
     "chatInput": {

@@ -4548,15 +4548,13 @@
       "focus_popout": "পপআউটে ফোকাস করুন",
       "hide_terminal_panel": "টার্মিনাল প্যানেল লুকান",
       "maximum_terminals": "সর্বোচ্চ {{n}}টি টার্মিনাল",
-      "move_to_side_panel": "সাইড প্যানেলে সরান",
       "new_terminal": "নতুন টার্মিনাল",
-      "open_a_chat_page_to_move_this_terminal_there": "এই টার্মিনাল সেখানে সরাতে একটি চ্যাট পেজ খোলো",
       "pop_out_to_window": "উইন্ডোতে পপ আউট করুন",
       "resize_terminal_panel": "টার্মিনাল প্যানেলের আকার বদলান",
       "terminal": "টার্মিনাল",
       "terminal_is_in_its_own_window": "টার্মিনাল নিজস্ব উইন্ডোতে আছে",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "প্যানেল ডানদিকে সরান",
+      "move_panel_to_bottom": "প্যানেল নিচে সরান",
       "more_actions": "More actions"
     },
     "chatInput": {

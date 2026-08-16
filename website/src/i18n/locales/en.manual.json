@@ -1119,7 +1119,6 @@
     },
     "bottomTerminalPanel": {
       "maximum_terminals": "Maximum {{n}} terminals",
-      "open_a_chat_page_to_move_this_terminal_there": "Open a chat page to move this terminal there",
       "terminal": "Terminal"
     },
     "chatInput": {

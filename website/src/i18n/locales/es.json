@@ -4621,15 +4621,13 @@
       "focus_popout": "Enfocar la ventana emergente",
       "hide_terminal_panel": "Ocultar el panel de la terminal",
       "maximum_terminals": "Máximo {{n}} terminales",
-      "move_to_side_panel": "Mover al panel lateral",
       "new_terminal": "Nueva terminal",
-      "open_a_chat_page_to_move_this_terminal_there": "Abre una página de chat para mover este terminal allí",
       "pop_out_to_window": "Abrir en ventana",
       "resize_terminal_panel": "Redimensionar el panel de la terminal",
       "terminal": "Terminal",
       "terminal_is_in_its_own_window": "La terminal está en su propia ventana",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "Mover panel a la derecha",
+      "move_panel_to_bottom": "Mover panel abajo",
       "more_actions": "More actions"
     },
     "chatInput": {

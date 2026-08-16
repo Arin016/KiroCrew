@@ -4621,15 +4621,13 @@
       "focus_popout": "Metti a fuoco la finestra separata",
       "hide_terminal_panel": "Nascondi il pannello del terminale",
       "maximum_terminals": "Massimo {{n}} terminali",
-      "move_to_side_panel": "Sposta nel pannello laterale",
       "new_terminal": "Nuovo terminale",
-      "open_a_chat_page_to_move_this_terminal_there": "Apri una pagina di chat per spostare lì questo terminale",
       "pop_out_to_window": "Apri in una finestra",
       "resize_terminal_panel": "Ridimensiona il pannello del terminale",
       "terminal": "Terminale",
       "terminal_is_in_its_own_window": "Il terminale è in una finestra separata",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "Sposta pannello a destra",
+      "move_panel_to_bottom": "Sposta pannello in basso",
       "more_actions": "More actions"
     },
     "chatInput": {

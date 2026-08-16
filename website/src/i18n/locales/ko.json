@@ -4475,15 +4475,13 @@
       "focus_popout": "팝아웃 포커스",
       "hide_terminal_panel": "터미널 패널 숨기기",
       "maximum_terminals": "최대 터미널 {{n}}개",
-      "move_to_side_panel": "사이드 패널로 이동",
       "new_terminal": "새 터미널",
-      "open_a_chat_page_to_move_this_terminal_there": "채팅 페이지를 열어 이 터미널을 옮기세요",
       "pop_out_to_window": "별도 창으로 분리",
       "resize_terminal_panel": "터미널 패널 크기 조절",
       "terminal": "터미널",
       "terminal_is_in_its_own_window": "터미널이 별도 창에 있습니다",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "패널을 오른쪽으로 이동",
+      "move_panel_to_bottom": "패널을 아래로 이동",
       "more_actions": "More actions"
     },
     "chatInput": {

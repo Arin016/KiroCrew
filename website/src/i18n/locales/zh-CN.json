@@ -4475,15 +4475,13 @@
       "focus_popout": "聚焦弹出窗口",
       "hide_terminal_panel": "隐藏终端面板",
       "maximum_terminals": "最多 {{n}} 个终端",
-      "move_to_side_panel": "移至侧边面板",
       "new_terminal": "新建终端",
-      "open_a_chat_page_to_move_this_terminal_there": "打开一个聊天页面即可把此终端移到那里",
       "pop_out_to_window": "弹出到窗口",
       "resize_terminal_panel": "调整终端面板大小",
       "terminal": "终端",
       "terminal_is_in_its_own_window": "终端已在独立窗口中打开",
-      "move_panel_to_right": "Move panel to right",
-      "move_panel_to_bottom": "Move panel to bottom",
+      "move_panel_to_right": "将面板移至右侧",
+      "move_panel_to_bottom": "将面板移至底部",
       "more_actions": "More actions"
     },
     "chatInput": {
