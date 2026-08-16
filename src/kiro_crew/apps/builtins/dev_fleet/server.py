@@ -3663,6 +3663,11 @@ async def _prune_candidates() -> dict:
         if v["ok"]:
             candidates.append(row)
         else:
+            # Surface dirty flag so the frontend can pre-disable force-selection
+            # for dirty+unmerged worktrees (the backend refuses force=True on
+            # those anyway — exposing the flag avoids a misleading checkbox).
+            if v.get("dirty") is True:
+                row["dirty"] = True
             kept.append(row)
     return {"ok": True, "candidates": candidates, "kept": kept, "scanned": len(worktrees) - 1}
 

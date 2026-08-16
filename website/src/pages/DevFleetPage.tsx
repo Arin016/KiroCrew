@@ -669,7 +669,7 @@ export default function DevFleetPage() {
   // checkout, so the restart confirm must say so — that hazard does not
   // depend on whether the pointer-only cancel is available.
   const pendingStage = (fleet?.worktrees || []).find((x) => x.is_staged && !x.is_live) || null
-  const [pruneDialog, setPruneDialog] = useState<{ candidates: { name: string; code?: string }[]; kept: { name: string; code?: string }[]; scanned: number } | null>(null)
+  const [pruneDialog, setPruneDialog] = useState<{ candidates: { name: string; code?: string }[]; kept: { name: string; code?: string; dirty?: boolean }[]; scanned: number } | null>(null)
   const [pruneSelected, setPruneSelected] = useState<Set<string>>(new Set())
   const [pruneForceSelected, setPruneForceSelected] = useState<Set<string>>(new Set())
   const [pruneProgress, setPruneProgress] = useState<{ names: string[]; items: Record<string, { status: string; error?: string | null }>; done: number; total: number; running: boolean } | null>(null)
@@ -1650,16 +1650,27 @@ export default function DevFleetPage() {
           {pruneDialog.kept.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 10, letterSpacing: '0.08em', color: 'var(--muted)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)', paddingBottom: 3, marginBottom: 4 }}>{i18nT('pages.devFleetPage.kept')}</div>
+              <p style={{ fontSize: 11, color: 'var(--muted)', margin: '0 0 6px' }}>{i18nT('pages.devFleetPage.kept_force_hint')}</p>
               {pruneDialog.kept.map((k) => {
                 const guarded = isGuarded(k.name)
+                // dirty+unmerged worktrees cannot be force-removed — the backend
+                // refuses force=True when dirty, so disable the checkbox to
+                // avoid a misleading interaction.
+                const dirtyUnmerged = !!k.dirty
+                const disabled = guarded || dirtyUnmerged
+                const checked = pruneForceSelected.has(k.name)
                 return (
-                  <label key={k.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: guarded ? 'default' : 'pointer', opacity: guarded ? 0.6 : 1 }}>
+                  <label key={k.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1 }}>
                     {guarded
-                      ? <span title={i18nT('pages.devFleetPage.protected_worktree')} style={{ width: 13, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><ShieldAlert size={13} style={{ color: 'var(--muted)' }} /></span>
-                      : <Checkbox checked={pruneForceSelected.has(k.name)} onChange={(e) => setPruneForceSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(k.name); else next.delete(k.name); return next })} aria-label={i18nT('pages.devFleetPage.force_select', { name: k.name })} />
+                      ? <span style={{ width: 13, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><ShieldAlert size={13} style={{ color: 'var(--muted)' }} /></span>
+                      : <Checkbox checked={checked} disabled={dirtyUnmerged} onChange={(e) => setPruneForceSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(k.name); else next.delete(k.name); return next })} aria-label={i18nT('pages.devFleetPage.force_remove', { name: k.name })} />
                     }
-                    <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, color: guarded ? 'var(--muted)' : 'var(--danger)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{k.name}</span>
-                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{pruneVerdictLabel(k.code)}</span>
+                    <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, color: checked ? 'var(--danger)' : guarded ? 'var(--muted)' : 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{k.name}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      {guarded && <span style={{ fontSize: 10, color: 'var(--muted)' }}>{i18nT('pages.devFleetPage.protected_worktree')}</span>}
+                      {dirtyUnmerged && <span style={{ fontSize: 10, color: 'var(--muted)' }}>{i18nT('pages.devFleetPage.dirty_unmerged')}</span>}
+                      {!guarded && !dirtyUnmerged && pruneVerdictLabel(k.code)}
+                    </span>
                   </label>
                 )
               })}
