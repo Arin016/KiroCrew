@@ -111,6 +111,18 @@ if (typeof window !== 'undefined') {
     state = loadPersisted()
     emit()
   })
+
+  /* Invalidate the viewport-clamp cache on window resize so the panel shrinks
+   * when the browser window does — otherwise the panel stays oversized until
+   * the next store mutation. Only emits when the clamped dimensions actually
+   * change, so resize drags that don't shift the cap cause no re-render. */
+  window.addEventListener('resize', () => {
+    const h = clampToViewport(state.height, 'height')
+    const w = clampToViewport(state.width, 'width')
+    if (h === clampedState.height && w === clampedState.width) return
+    clampedSource = null
+    emit()
+  })
 }
 
 function set(next: BottomTerminalState) {
@@ -220,11 +232,12 @@ function subscribe(cb: () => void): () => void {
 }
 function getSnapshot(): BottomTerminalState { return state }
 
-/** Cached viewport-clamped view of state. Rebuilt only when the underlying
- *  state reference changes (via set()), so useSyncExternalStore's Object.is
- *  check works correctly without infinite re-render loops. */
+/** Cached viewport-clamped view of state. Rebuilt when the underlying state
+ *  reference changes (via set()) or the resize listener invalidates the cache.
+ *  useSyncExternalStore's Object.is check uses the cached reference to skip
+ *  re-renders when nothing changed. */
 let clampedState: BottomTerminalState = state
-let clampedSource: BottomTerminalState = state
+let clampedSource: BottomTerminalState | null = null
 function getViewportClampedSnapshot(): BottomTerminalState {
   if (clampedSource !== state) {
     clampedSource = state
