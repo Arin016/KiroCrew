@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { X } from 'lucide-react'
 import { Btn } from './ui'
 import { usePointerDrag } from '../hooks/usePointerDrag'
+import { useIsMobile } from '../hooks/useIsMobile'
 
 import { i18nT } from '../i18n/t'
 interface DetailPanelProps {
@@ -86,6 +87,9 @@ export default function DetailPanel({ title, icon, onClose, footer, headerAction
   // Outer wrapper ref, used to measure the panel's flex row (its parent) so the
   // width cap tracks the actual available room rather than the whole viewport.
   const wrapperRef = useRef<HTMLDivElement>(null)
+  // Narrow viewports drop the whole width contract (see the render below), so the
+  // panel becomes a drill-down rather than a side-by-side that cannot fit.
+  const isMobile = useIsMobile()
   // Measured width of the panel's flex row (its parent). A non-positive measure
   // means the row isn't laid out yet (initial mount, or jsdom) — return Infinity
   // so the row term drops out and the cap degrades to the viewport-only bound
@@ -177,10 +181,12 @@ export default function DetailPanel({ title, icon, onClose, footer, headerAction
 
   const body = (
     <>
-      {!embedded && (
+      {!embedded && !isMobile && (
         /* Drag-to-resize splitter: pointer-only affordance (no meaningful
             keyboard gesture for a 6px handle); role="separator" is the correct
-            ARIA role. */
+            ARIA role. Dropped while narrow: the panel owns the whole width there,
+            so there is nothing to resize it against, and a drag handle does
+            nothing on touch. */
         <div role="separator" aria-orientation="vertical" aria-label={i18nT('components.detailPanel.resize_panel')} className="absolute left-0 top-0 bottom-0 w-[6px] cursor-col-resize z-20 group/drag" style={{ touchAction: 'none' }} {...drag}>
           <div className="absolute left-0 top-0 bottom-0 w-[2px] transition-colors duration-200 bg-transparent group-hover/drag:bg-accent resize-accent" />
         </div>
@@ -215,7 +221,16 @@ export default function DetailPanel({ title, icon, onClose, footer, headerAction
 
   // Embedded: fill the parent (SidePanel tab body) — no resize handle, no left
   // border, no width animation. Only the header + content contribute.
-  if (embedded) {
+  //
+  // A narrow viewport takes the SAME path. It is already exactly the shape the
+  // narrow case needs -- full width, no divider, no width contract, and (through
+  // the `!embedded` gate in `body`) no resize handle -- so the panel becomes a
+  // drill-down by reusing a rendering that exists rather than by forking the
+  // width style. Setting `width: 100%` on the inner div instead would do nothing:
+  // its parent is the motion wrapper, `shrink-0` with an animated `width: 'auto'`,
+  // so a percentage resolves against a content-sized box. Measured in isolation at
+  // a 390px row: wrapper 42px, panel 42px -- narrower than before, not full width.
+  if (embedded || isMobile) {
     return (
       <div className="h-full w-full min-w-0 bg-bg flex flex-col overflow-hidden relative">
         {body}
