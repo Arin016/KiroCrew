@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1725,3 +1726,478 @@ class TestCatalogFailureNeverBreaksTheStore:
             await self._rows(monkeypatch)
         assert any("official catalog" in r.message for r in caplog.records)
         assert any(r.exc_info for r in caplog.records), "expected a traceback"
+
+
+class TestCommitRefDetection:
+    """``_is_commit_ref`` decides which git plumbing an entry's ref needs."""
+
+    def test_full_sha1_and_sha256_are_commit_refs(self):
+        assert registry._is_commit_ref("a" * 40)
+        assert registry._is_commit_ref("3942dd38797c376d6a890d0d7e6e6a17052f7d22")
+        assert registry._is_commit_ref("b" * 64)
+
+    def test_branch_and_tag_names_are_not(self):
+        assert not registry._is_commit_ref("main")
+        assert not registry._is_commit_ref("release")
+        assert not registry._is_commit_ref("v1.2.0")
+        assert not registry._is_commit_ref("")
+
+    def test_abbreviated_and_uppercase_are_not(self):
+        """A short sha would be ambiguous and uppercase is not git's on-disk
+        spelling, so both fall to the branch path rather than being treated as
+        a pin the checkout is then verified against."""
+        assert not registry._is_commit_ref("a" * 39)
+        assert not registry._is_commit_ref("A" * 40)
+
+
+def _scripted_git(monkeypatch, exit_for, stdout_for=None):
+    """Fake every git spawn, returning ``exit_for(argv)`` as the exit status.
+
+    Records the argv of each spawn in the returned list so a test can assert
+    which plumbing ran, not merely that the call succeeded. ``stdout_for``
+    optionally supplies a spawn's captured output, which is what carries a
+    ``git status --porcelain`` verdict.
+    """
+    spawned: list[list[str]] = []
+
+    class _Proc:
+        pid = 4242
+
+        def __init__(self, code, out=b""):
+            self.returncode = code
+            self._out = out
+
+        async def communicate(self):
+            return self._out, b""
+
+    async def _fake_spawn(*argv, **kwargs):
+        spawned.append(list(argv))
+        # `git init <path>` is what creates the checkout directory, so the fake
+        # has to create it too: the pinned path renames that directory into
+        # place, and a fake that skipped it would make every success path fail.
+        if list(argv)[:2] == ["git", "init"] and len(argv) >= 3:
+            Path(str(argv[-1])).mkdir(parents=True, exist_ok=True)
+        out = stdout_for(list(argv)) if stdout_for is not None else b""
+        return _Proc(exit_for(list(argv)), out)
+
+    monkeypatch.setattr(registry, "create_subprocess_limited", _fake_spawn)
+    monkeypatch.setattr(registry, "wrap_argv", lambda cmd, mode="": (cmd, None))
+    monkeypatch.setattr(registry, "cgroup_scope_argv", lambda cmd: cmd)
+    monkeypatch.setattr(registry, "is_clone_host_trusted", lambda url: True)
+    return spawned
+
+
+class TestCommitPinnedCheckout:
+    """A catalog entry pins a commit, which ``git clone --branch`` cannot take."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_pinned_install_fetches_the_commit(self, monkeypatch, tmp_path):
+        commit = "c" * 40
+        dest = tmp_path / "demoapp"
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is None
+        assert not any(cmd[:2] == ["git", "clone"] for cmd in spawned)
+        assert ["git", "fetch", "--depth", "1", "origin", commit] in spawned
+        # The tree is verified against the pin after the detach, on this path too.
+        assert spawned.index(["git", "checkout", "--detach", "FETCH_HEAD"]) < spawned.index(
+            ["git", "status", "--porcelain", "--untracked-files=no"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_branch_install_still_clones(self, monkeypatch, tmp_path):
+        """The seed and external indexes name branches; that path is unchanged."""
+        dest = tmp_path / "demoapp"
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", "main", dest, [])
+
+        assert err is None
+        assert spawned[0][:2] == ["git", "clone"]
+        assert "--branch" in spawned[0] and "main" in spawned[0]
+        assert not any("--detach" in cmd for cmd in spawned)
+
+    @pytest.mark.asyncio
+    async def test_wrong_commit_materialised_is_refused(self, monkeypatch, tmp_path):
+        """Nothing downstream re-checks which bytes arrived, and for a catalog
+        pin the document naming the commit is trusted only as far as TLS — so a
+        remote answering with a different object must not reach the build."""
+        dest = tmp_path / "demoapp"
+        dest.mkdir(parents=True)
+        _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: "d" * 40)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", "c" * 40, dest, [])
+
+        assert err is not None
+        assert err["error"] == "commit_pin_mismatch"
+        # The mismatch is caught in the staging directory, so the final path is
+        # never written to and the pre-existing directory survives untouched.
+        assert dest.is_dir()
+        assert list(tmp_path.glob("demoapp.partial-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_shallow_refusal_fails_closed(self, monkeypatch, tmp_path):
+        """A host that refuses a commit id in a want line must NOT be retried
+        without --depth: the commit is named by a document trusted only as far
+        as TLS, so a depth-less fetch would let it point at a repository whose
+        whole history is downloaded."""
+        commit = "e" * 40
+        dest = tmp_path / "demoapp"
+
+        def _exit_for(argv):
+            return 1 if argv[:4] == ["git", "fetch", "--depth", "1"] else 0
+
+        spawned = _scripted_git(monkeypatch, _exit_for)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is not None
+        assert err["error"] == "git_fetch_refused"
+        assert ["git", "fetch", "origin"] not in spawned
+        assert not any(cmd[:2] == ["git", "fetch"] and "--depth" not in cmd for cmd in spawned)
+        assert not any("checkout" in cmd for cmd in spawned)
+        assert not dest.exists()
+
+    @pytest.mark.asyncio
+    async def test_sha256_pin_initialises_a_sha256_repository(self, monkeypatch, tmp_path):
+        """`git init` defaults to sha1, which can neither hold nor fetch a
+        sha256 object id — and the pin's length is the only signal available
+        before the remote is contacted."""
+        commit = "a" * 64
+        dest = tmp_path / "demoapp"
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is None
+        init = next(cmd for cmd in spawned if cmd[:2] == ["git", "init"])
+        assert "--object-format=sha256" in init
+
+    @pytest.mark.asyncio
+    async def test_sha1_pin_does_not_force_an_object_format(self, monkeypatch, tmp_path):
+        commit = "b" * 40
+        dest = tmp_path / "demoapp"
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is None
+        init = next(cmd for cmd in spawned if cmd[:2] == ["git", "init"])
+        assert not any(a.startswith("--object-format") for a in init)
+
+    @pytest.mark.asyncio
+    async def test_spawn_failure_leaves_no_residue_at_dest(self, monkeypatch, tmp_path):
+        """The pinned path materialises in a sibling `.partial-` directory, so a
+        spawn error cannot leave a half-built checkout at the final path."""
+        commit = "9" * 40
+        dest = tmp_path / "demoapp"
+        _scripted_git(monkeypatch, lambda argv: 0)
+
+        async def _boom(*argv, **kwargs):
+            raise OSError("git not executable")
+
+        monkeypatch.setattr(registry, "create_subprocess_limited", _boom)
+
+        with pytest.raises(OSError):
+            await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert not dest.exists()
+        assert list(tmp_path.glob("demoapp.partial-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_cancellation_leaves_no_residue_at_dest(self, monkeypatch, tmp_path):
+        commit = "8" * 40
+        dest = tmp_path / "demoapp"
+        _scripted_git(monkeypatch, lambda argv: 0)
+
+        async def _cancel(*argv, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(registry, "create_subprocess_limited", _cancel)
+
+        with pytest.raises(asyncio.CancelledError):
+            await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert not dest.exists()
+        assert list(tmp_path.glob("demoapp.partial-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_a_pre_existing_directory_is_refused_not_deleted(self, monkeypatch, tmp_path):
+        """`rmtree` can only reach the staging directory this call created, so a
+        directory already at the final path is refused rather than destroyed."""
+        commit = "7" * 40
+        dest = tmp_path / "demoapp"
+        dest.mkdir(parents=True)
+        (dest / "user-file.txt").write_text("not ours", encoding="utf-8")
+        _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is not None
+        assert err["error"] == "checkout_rename_failed"
+        assert (dest / "user-file.txt").read_text(encoding="utf-8") == "not ours"
+        assert list(tmp_path.glob("demoapp.partial-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_verified_checkout_is_renamed_into_place(self, monkeypatch, tmp_path):
+        commit = "6" * 40
+        dest = tmp_path / "demoapp"
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is None
+        assert (dest / ".git").exists() or dest.is_dir()
+        # git ran against the staging directory, never against the final path.
+        assert any(any("partial-" in a for a in cmd) for cmd in spawned)
+        assert list(tmp_path.glob("demoapp.partial-*")) == []
+
+
+class TestCommitPinnedUpdate:
+    """An immutable pin has nothing to fast-forward."""
+
+    @pytest.mark.asyncio
+    async def test_already_at_the_pin_still_refetches_and_verifies(self, monkeypatch, tmp_path):
+        """HEAD naming the pin is not evidence the tree holds it.
+
+        There is deliberately no "already at the pin, nothing to do" shortcut:
+        it would return success on a checkout whose tree was never compared to
+        the commit, and provenance would then record a commit the build did not
+        come from.
+        """
+        commit = "f" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is None
+        assert ["git", "fetch", "--depth", "1", "origin", commit] in spawned
+        assert ["git", "status", "--porcelain", "--untracked-files=no"] in spawned
+
+    @pytest.mark.asyncio
+    async def test_dirty_reused_checkout_is_refused(self, monkeypatch, tmp_path):
+        """A tracked modification survives ``checkout --detach`` whenever the
+        file does not differ between the two commits, so the pin can be
+        satisfied by a tree that no longer describes the commit. Refuse rather
+        than build bytes provenance would misreport."""
+        commit = "f" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        spawned = _scripted_git(
+            monkeypatch,
+            lambda argv: 0,
+            lambda argv: b" M app.json\n" if argv[:2] == ["git", "status"] else b"",
+        )
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is not None and err["error"] == "worktree_dirty"
+        # Fails closed without destroying the user's checkout.
+        assert dest.is_dir()
+        assert not any(cmd[:2] == ["git", "clean"] for cmd in spawned)
+
+    @pytest.mark.asyncio
+    async def test_unreadable_worktree_state_is_refused(self, monkeypatch, tmp_path):
+        """An unverifiable tree is refused too — a `git status` that did not run
+        is not evidence of a clean one."""
+        commit = "f" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        _scripted_git(monkeypatch, lambda argv: 1 if argv[:2] == ["git", "status"] else 0)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: commit)
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", commit, dest, [])
+
+        assert err is not None and err["error"] == "worktree_unverifiable"
+        assert dest.is_dir()
+
+    @pytest.mark.asyncio
+    async def test_moving_to_a_new_pin_never_pulls(self, monkeypatch, tmp_path):
+        """``git pull --ff-only`` would refuse the detached HEAD a pin produces,
+        and a pin tracks no branch to fast-forward."""
+        wanted = "1" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        spawned = _scripted_git(monkeypatch, lambda argv: 0)
+
+        commits = iter(["2" * 40, wanted])
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: next(commits))
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", wanted, dest, [])
+
+        assert err is None
+        assert not any(cmd[:2] == ["git", "pull"] for cmd in spawned)
+        assert ["git", "fetch", "--depth", "1", "origin", wanted] in spawned
+        # The existing checkout is reused: no re-init, no second remote.
+        assert not any(cmd[:2] == ["git", "init"] for cmd in spawned)
+        assert not any(cmd[:3] == ["git", "remote", "add"] for cmd in spawned)
+
+    @pytest.mark.asyncio
+    async def test_failed_pin_fetch_keeps_the_existing_checkout(self, monkeypatch, tmp_path):
+        """Fail closed like the branch pull path: installing whatever the
+        checkout holds would record a source the code was never fetched from."""
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        _scripted_git(monkeypatch, lambda argv: 1)
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: "2" * 40)
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", "1" * 40, dest, [])
+
+        assert err is not None
+        assert err["error"] == "git_fetch_refused"
+        assert (dest / ".git").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_failed_checkout_rolls_back_to_the_entry_commit(self, monkeypatch, tmp_path):
+        """The fetch leg only adds objects; the checkout leg mutates the
+        worktree. A failure after it began must not leave a third state that no
+        provenance record can describe."""
+        entry, wanted = "2" * 40, "1" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+
+        def _exit_for(argv):
+            # Fetch succeeds, the checkout onto the new pin fails, the rollback
+            # checkout succeeds.
+            if argv[:3] == ["git", "checkout", "--detach"] and argv[-1] != entry:
+                return 1
+            return 0
+
+        spawned = _scripted_git(monkeypatch, _exit_for)
+        # Reads: entry commit, then the post-failure read (still the entry).
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: entry)
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", wanted, dest, [])
+
+        assert err is not None
+        assert err["error"] == "git_checkout_failed"
+        # HEAD was already back at the entry commit, so no rollback was needed.
+        assert ["git", "checkout", "--detach", entry] not in spawned
+        assert (dest / ".git").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_rollback_failure_is_reported_distinctly(self, monkeypatch, tmp_path):
+        """When the checkout left HEAD somewhere else AND the rollback fails,
+        the caller must learn the checkout is at neither commit."""
+        entry, wanted, stray = "2" * 40, "1" * 40, "3" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        _scripted_git(monkeypatch, lambda argv: 1 if argv[:2] == ["git", "checkout"] else 0)
+
+        commits = iter([entry, stray])
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: next(commits))
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        err = await registry._git_clone_or_pull("https://example.com/demo.git", wanted, dest, [])
+
+        assert err is not None
+        assert err["error"] == "pin_update_rollback_failed"
+
+    @pytest.mark.asyncio
+    async def test_cancellation_also_rolls_back(self, monkeypatch, tmp_path):
+        """The rollback must be reached from EVERY exit route of the checkout
+        leg. A cancellation lands mid-checkout exactly as a nonzero exit does,
+        so a rollback wired only to the `return` route leaves the worktree in a
+        third state that no provenance record can describe."""
+        entry, wanted, stray = "2" * 40, "1" * 40, "3" * 40
+        dest = tmp_path / "demoapp"
+        (dest / ".git").mkdir(parents=True)
+        spawned: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+            pid = 4242
+
+            async def communicate(self):
+                return b"", b""
+
+        async def _spawn(*argv, **kwargs):
+            spawned.append(list(argv))
+            if list(argv)[:2] == ["git", "fetch"]:
+                raise asyncio.CancelledError()
+            return _Proc()
+
+        monkeypatch.setattr(registry, "create_subprocess_limited", _spawn)
+        monkeypatch.setattr(registry, "wrap_argv", lambda cmd, mode="": (cmd, None))
+        monkeypatch.setattr(registry, "cgroup_scope_argv", lambda cmd: cmd)
+        monkeypatch.setattr(registry, "is_clone_host_trusted", lambda url: True)
+
+        commits = iter([entry, stray])
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: next(commits))
+
+        async def _fake_origin(path):
+            return "https://example.com/demo.git"
+
+        monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
+
+        with pytest.raises(asyncio.CancelledError):
+            await registry._git_clone_or_pull("https://example.com/demo.git", wanted, dest, [])
+
+        assert ["git", "checkout", "--detach", entry] in spawned
+
+
+class TestCloneRefMatches:
+    """Reuse of a persisted clone has to work for both kinds of ref."""
+
+    @pytest.mark.asyncio
+    async def test_commit_ref_compares_resolved_head(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(registry, "_resolved_clone_commit", lambda root: "a" * 40)
+        assert await registry._clone_ref_matches(tmp_path, "a" * 40)
+        assert not await registry._clone_ref_matches(tmp_path, "b" * 40)
+
+    @pytest.mark.asyncio
+    async def test_branch_ref_delegates_to_the_branch_reader(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(registry, "_read_clone_branch", lambda d: "main")
+        assert await registry._clone_ref_matches(tmp_path, "main")
+        assert not await registry._clone_ref_matches(tmp_path, "release")
+
+    @pytest.mark.asyncio
+    async def test_empty_ref_fails_closed(self, tmp_path):
+        assert not await registry._clone_ref_matches(tmp_path, "")

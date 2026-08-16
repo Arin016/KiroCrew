@@ -76,6 +76,10 @@ SOURCE_REGISTRY_PREFIX = "registry:"
 # A git object name: sha1 (40 hex) or sha256 (64 hex) repository format.
 _COMMIT_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
+# Length of a sha256 object name, which needs a repository created in that
+# format — `git init` defaults to sha1.
+_SHA256_HEX_LEN = 64
+
 
 class StreamingLogLines(list):
     """Drop-in replacement for ``list[str]`` that also pushes to an asyncio.Queue.
@@ -720,7 +724,7 @@ async def _fetch_app_manifest(
             local_manifest is not None
             and local_manifest.is_file()
             and await _clone_origin_matches(clone_dir, git_url)
-            and await _clone_branch_matches(clone_dir, branch)
+            and await _clone_ref_matches(clone_dir, branch)
         ):
             try:
                 content = await asyncio.to_thread(local_manifest.read_text, "utf-8")
@@ -760,35 +764,58 @@ async def _fetch_app_manifest(
         else:
             clone_env = anonymous_git_env()
             sandbox_mode = "strict"
-        clone_cmd = [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            branch,
-            "--single-branch",
-            git_url,
-            tmp_root,
-        ]
-        sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode=sandbox_mode)
-        sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)  # cgroup DoS ceiling
-        proc = await create_subprocess_limited(
-            *sandboxed_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=clone_env,
-            start_new_session=platform_compat.IS_POSIX,
-            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
-        )
-        _, stderr = await _communicate_with_timeout(proc, timeout=_CLONE_TIMEOUT)
-        if proc.returncode != 0:
-            logger.debug(
-                "manifest clone failed for %s: %s",
+        if _is_commit_ref(branch):
+            # A commit-pinned entry cannot be cloned with ``--branch``; build the
+            # throwaway checkout the same way the install path does, so admission
+            # reads the manifest of exactly the pinned commit.
+            clone_log: list[str] = []
+            reason = await _fetch_commit_into(
                 git_url,
-                stderr.decode(errors="replace").strip(),
+                branch,
+                Path(tmp_root),
+                clone_log,
+                sandbox_mode=sandbox_mode,
+                clone_env=clone_env,
             )
-            return None
+            if reason:
+                logger.debug(
+                    "manifest checkout of %s at %s failed (%s): %s",
+                    git_url,
+                    branch[:12],
+                    reason,
+                    "; ".join(clone_log),
+                )
+                return None
+        else:
+            clone_cmd = [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                branch,
+                "--single-branch",
+                git_url,
+                tmp_root,
+            ]
+            sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode=sandbox_mode)
+            sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)  # cgroup DoS ceiling
+            proc = await create_subprocess_limited(
+                *sandboxed_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=clone_env,
+                start_new_session=platform_compat.IS_POSIX,
+                creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
+            )
+            _, stderr = await _communicate_with_timeout(proc, timeout=_CLONE_TIMEOUT)
+            if proc.returncode != 0:
+                logger.debug(
+                    "manifest clone failed for %s: %s",
+                    git_url,
+                    stderr.decode(errors="replace").strip(),
+                )
+                return None
         manifest_dir = _contained_join(Path(tmp_root), subdirectory)
         if manifest_dir is None:
             # Untrusted index subdirectory escaped the clone root (absolute,
@@ -2313,6 +2340,22 @@ async def _clone_branch_matches(dest: Path, branch: str) -> bool:
     return clone_branch == branch
 
 
+async def _clone_ref_matches(dest: Path, ref: str) -> bool:
+    """Whether *dest* already has *ref* materialised, for either kind of ref.
+
+    A branch name is compared against ``.git/HEAD``'s symbolic ref; a commit id
+    is compared against the resolved HEAD commit, because a pinned checkout is
+    detached and :func:`_clone_branch_matches` fails closed on detached HEAD.
+    Without this split a commit-pinned clone could never be reused, so every
+    manifest read would pay for a throwaway clone.
+    """
+    if not ref:
+        return False
+    if _is_commit_ref(ref):
+        return await asyncio.to_thread(_resolved_clone_commit, dest) == ref
+    return await _clone_branch_matches(dest, ref)
+
+
 # ---------------------------------------------------------------------------
 # Git clone + build support for App Store installs
 # ---------------------------------------------------------------------------
@@ -2344,6 +2387,188 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
 
 
+def _is_commit_ref(ref: str) -> bool:
+    """Whether *ref* names an immutable commit rather than a branch or a tag.
+
+    The published catalog pins every entry to a full commit id; the bundled seed
+    and external registry indexes name mutable branches. The two need different
+    git plumbing, because ``git clone --branch`` resolves its argument against
+    the remote's advertised refs only — a commit id has to be asked for by name.
+    """
+    return bool(_COMMIT_SHA_RE.match(ref))
+
+
+async def _run_sandboxed_git(
+    argv: list[str],
+    *,
+    sandbox_mode: str,
+    clone_env: dict[str, str],
+    timeout: float,
+    cwd: Path | None = None,
+) -> tuple[int | None, str]:
+    """Run one git command under the OS sandbox and the cgroup ceiling.
+
+    Returns ``(exit_status, combined_output)``. The status is None when the
+    command timed out, in which case the process group has already been killed.
+
+    Layering matches every other git spawn in this module: ``wrap_argv`` applies
+    the OS sandbox and ``cgroup_scope_argv`` wraps that, so the DoS ceiling is
+    outermost and never stands in for the sandbox on an agent-influenced spawn.
+    A cancellation kills the process group before propagating, so a cancelled
+    install leaves no git process writing into a half-built checkout.
+    """
+    sandboxed_cmd, _cleanup = wrap_argv(argv, mode=sandbox_mode)
+    sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)
+    proc = await create_subprocess_limited(
+        *sandboxed_cmd,
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=platform_compat.IS_POSIX,
+        creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
+        env=clone_env,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        await _kill_process_group(proc)
+        return None, ""
+    except asyncio.CancelledError:
+        await _kill_process_group(proc)
+        raise
+    return proc.returncode, stdout.decode(errors="replace").strip()
+
+
+async def _fetch_commit_into(
+    git_url: str,
+    commit: str,
+    dest: Path,
+    log_lines: list[str],
+    *,
+    sandbox_mode: str,
+    clone_env: dict[str, str],
+    already_initialised: bool = False,
+) -> str:
+    """Materialise exactly *commit* of *git_url* at *dest*.
+
+    Returns ``""`` on success, or a short machine-readable failure reason.
+
+    ``git clone --branch`` cannot take a commit id, so the checkout is built a
+    step at a time: init, name the remote, fetch that one commit, detach onto
+    it. The fetch stays depth-bounded and fails closed when the host refuses a
+    commit id in a want line (``uploadpack.allowReachableSHA1InWant``): the
+    commit is named by a document trusted only as far as TLS, so retrying
+    without ``--depth`` would let it point at a repository whose whole history
+    is downloaded.
+
+    The materialised HEAD is verified against *commit* before success is
+    reported. Nothing downstream re-checks which bytes arrived, and for a
+    catalog-supplied pin the document naming the commit is trusted only as far
+    as TLS, so a remote answering with a different object must not reach the
+    build step.
+
+    *dest* is left in place on failure — the caller owns its lifecycle, since a
+    pre-existing checkout must not be destroyed by a transient fetch error.
+    """
+    if not already_initialised:
+        init_cmd = ["git", "init", "--quiet"]
+        if len(commit) == _SHA256_HEX_LEN:
+            # `git init` creates a sha1 repository, which can neither hold nor
+            # fetch a sha256 object id. The pin's own length is the only signal
+            # available here, since the remote has not been contacted yet.
+            init_cmd.append("--object-format=sha256")
+        init_cmd.append(str(dest))
+        status, output = await _run_sandboxed_git(
+            init_cmd,
+            sandbox_mode=sandbox_mode,
+            clone_env=clone_env,
+            timeout=_CLONE_TIMEOUT,
+        )
+        if status != 0:
+            log_lines.append(f"git init failed at {dest}: {output}")
+            return "git_init_failed"
+        status, output = await _run_sandboxed_git(
+            ["git", "remote", "add", "origin", git_url],
+            sandbox_mode=sandbox_mode,
+            clone_env=clone_env,
+            timeout=_CLONE_TIMEOUT,
+            cwd=dest,
+        )
+        if status != 0:
+            log_lines.append(f"git remote add failed for {git_url}: {output}")
+            return "git_remote_add_failed"
+
+    status, output = await _run_sandboxed_git(
+        ["git", "fetch", "--depth", "1", "origin", commit],
+        sandbox_mode=sandbox_mode,
+        clone_env=clone_env,
+        timeout=_CLONE_TIMEOUT,
+        cwd=dest,
+    )
+    if status is None:
+        log_lines.append(f"git fetch of {commit[:12]} timed out")
+        return "git_fetch_timed_out"
+    if status != 0:
+        # Fail closed rather than retrying without --depth. The commit id comes
+        # from a document trusted only as far as TLS, and a depth-less fetch
+        # would let it name a repository whose entire history is downloaded —
+        # every other clone in this module is depth-bounded for that reason.
+        log_lines.append(
+            f"git fetch of {commit[:12]} from {git_url} was refused ({output}); "
+            "the host must allow a commit id in a want line "
+            "(uploadpack.allowReachableSHA1InWant)"
+        )
+        return "git_fetch_refused"
+
+    status, output = await _run_sandboxed_git(
+        ["git", "checkout", "--detach", "FETCH_HEAD"],
+        sandbox_mode=sandbox_mode,
+        clone_env=clone_env,
+        timeout=_CLONE_TIMEOUT,
+        cwd=dest,
+    )
+    if status != 0:
+        log_lines.append(f"git checkout of {commit[:12]} failed: {output}")
+        return "git_checkout_failed"
+
+    materialised = await asyncio.to_thread(_resolved_clone_commit, dest)
+    if materialised != commit:
+        log_lines.append(
+            f"Refusing {git_url}: asked for commit {commit[:12]} but the checkout "
+            f"holds {materialised[:12] or 'an unreadable HEAD'}"
+        )
+        return "commit_pin_mismatch"
+
+    # HEAD naming the pin does not mean the tree holds it. A reused checkout can
+    # carry tracked modifications, and `checkout --detach` keeps them whenever
+    # the file does not differ between the two commits — so the pin can be
+    # satisfied by a HEAD that no longer describes the bytes about to be built,
+    # while provenance records the commit. Both invariants are verified here, at
+    # the one point where a pinned checkout becomes usable, so no caller can
+    # reach a build with a tree it never checked.
+    status, output = await _run_sandboxed_git(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        sandbox_mode=sandbox_mode,
+        clone_env=clone_env,
+        timeout=_CLONE_TIMEOUT,
+        cwd=dest,
+    )
+    if status != 0:
+        log_lines.append(
+            f"Refusing {git_url}: the checkout at {dest} could not be compared "
+            f"against {commit[:12]} ({output or 'git status failed'})"
+        )
+        return "worktree_unverifiable"
+    if output:
+        log_lines.append(
+            f"Refusing {git_url}: the checkout at {dest} holds local changes that "
+            f"commit {commit[:12]} does not describe ({output.splitlines()[0]}); "
+            "remove it and retry the install"
+        )
+        return "worktree_dirty"
+    return ""
+
+
 async def _git_clone_or_pull(
     git_url: str,
     branch: str,
@@ -2354,6 +2579,13 @@ async def _git_clone_or_pull(
     pending_cleanup: list[Path] | None = None,
 ) -> dict[str, Any] | None:
     """Clone *git_url* into *dest*, or fast-forward it if already present.
+
+    *branch* is a ref of either kind. A branch or tag name takes the shallow
+    ``git clone --branch`` path and fast-forwards on later installs. A full
+    commit id (as the published catalog pins) takes the init/fetch/detach path
+    in :func:`_fetch_commit_into` instead, because ``--branch`` resolves only
+    against advertised refs, and later installs re-fetch that exact commit
+    rather than fast-forwarding a branch that a pin does not track.
 
     Returns None on success, or a ``{"ok": False, ...}`` error dict on failure.
 
@@ -2466,6 +2698,77 @@ async def _git_clone_or_pull(
         # byte-identical to git_url: a mismatched checkout was moved aside and
         # never reused, so the fetch source and the provenance record are the
         # same URL by construction.)
+        if _is_commit_ref(branch):
+            # An immutable pin has nothing to fast-forward: the commit is fetched
+            # and detached onto unconditionally, even when HEAD already names it.
+            # ``git pull --ff-only`` would refuse the resulting detached HEAD
+            # anyway. There is deliberately no "already at the pin, nothing to
+            # do" shortcut: HEAD naming the commit says nothing about what the
+            # tree holds, and skipping the fetch would skip the verification that
+            # the tree matches too. Re-fetching an object that is already present
+            # is close to free. Failure leaves the existing checkout alone and
+            # fails closed, matching the branch path below — installing whatever
+            # the checkout happens to hold would record a source the code was
+            # never fetched from.
+            current = await asyncio.to_thread(_resolved_clone_commit, dest)
+            log_lines.append(f"Fetching {git_url} at {branch[:12]}...")
+
+            async def _restore_entry_commit() -> bool:
+                """Put HEAD back on the commit the checkout held on entry.
+
+                Returns False when the rollback itself failed, i.e. the checkout
+                is at neither commit. One rollback site, reached from EVERY exit
+                route of the fetch/checkout legs — a returned reason, a raised
+                exception and a cancellation — because a rollback that covers
+                only the routes that `return` leaves the others free to strand
+                the worktree in a third state.
+                """
+                if not current:
+                    return True
+                landed = await asyncio.to_thread(_resolved_clone_commit, dest)
+                if landed == current:
+                    return True
+                rb_status, rb_output = await _run_sandboxed_git(
+                    ["git", "checkout", "--detach", current],
+                    sandbox_mode=sandbox_mode,
+                    clone_env=clone_env,
+                    timeout=_CLONE_TIMEOUT,
+                    cwd=dest,
+                )
+                if rb_status != 0:
+                    log_lines.append(
+                        f"Rollback to {current[:12]} failed ({rb_output}); the checkout at "
+                        f"{dest} is at neither commit — remove it and retry the install"
+                    )
+                    return False
+                log_lines.append(f"Rolled the checkout back to {current[:12]}")
+                return True
+
+            try:
+                reason = await _fetch_commit_into(
+                    git_url,
+                    branch,
+                    dest,
+                    log_lines,
+                    sandbox_mode=sandbox_mode,
+                    clone_env=clone_env,
+                    already_initialised=True,
+                )
+            except BaseException:
+                # A cancellation or a spawn error can land mid-checkout just as a
+                # nonzero exit can, so it takes the same rollback before the
+                # exception continues on its way.
+                await _restore_entry_commit()
+                raise
+            if reason:
+                if not await _restore_entry_commit():
+                    return {
+                        "ok": False,
+                        "name": dest.name,
+                        "error": "pin_update_rollback_failed",
+                    }
+                return {"ok": False, "name": dest.name, "error": reason}
+            return None
         log_lines.append(f"Updating {git_url} (branch: {branch})...")
         # Route through wrap_argv (OS sandbox) THEN cgroup_scope_argv, matching
         # the fresh-clone path below — the cgroup DoS ceiling is the outermost
@@ -2506,22 +2809,8 @@ async def _git_clone_or_pull(
             }
         return None
 
-    # Fresh clone.
-    log_lines.append(f"Cloning {git_url} (branch: {branch})...")
+    # Fresh checkout.
     dest.parent.mkdir(parents=True, exist_ok=True)
-    clone_cmd = [
-        "git",
-        "clone",
-        "--depth",
-        "1",
-        "--branch",
-        branch,
-        "--single-branch",
-        git_url,
-        str(dest),
-    ]
-    sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode=sandbox_mode)
-    sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)  # cgroup DoS ceiling
 
     # If we moved aside a stale clone for re-clone, wrap the entire spawn+wait
     # in try/finally so that ANY failure path (spawn exception, cancellation,
@@ -2529,6 +2818,61 @@ async def _git_clone_or_pull(
     # must never disappear permanently due to a transient clone failure.
     clone_succeeded = False
     try:
+        if _is_commit_ref(branch):
+            # The pinned path never materialises into *dest*: it builds the
+            # checkout in a private sibling directory and renames it into place
+            # only once the commit is verified. That makes a whole class of
+            # failures unreachable rather than individually handled — a refused
+            # fetch, a spawn error, a cancellation and a wrong commit all leave
+            # *dest* untouched, and cleanup can only ever remove a directory
+            # this call created. The name reuses the ``.partial-`` prefix the
+            # stale-checkout sweep already reaps, so a residue left by a failed
+            # rmtree is collected rather than kept forever.
+            staging = dest.with_name(f"{dest.name}.partial-{uuid.uuid4().hex[:8]}")
+            log_lines.append(f"Cloning {git_url} at {branch[:12]}...")
+            try:
+                reason = await _fetch_commit_into(
+                    git_url,
+                    branch,
+                    staging,
+                    log_lines,
+                    sandbox_mode=sandbox_mode,
+                    clone_env=clone_env,
+                )
+            except BaseException:
+                await asyncio.to_thread(shutil.rmtree, staging, True)
+                raise
+            if reason:
+                await asyncio.to_thread(shutil.rmtree, staging, True)
+                return {"ok": False, "name": dest.name, "error": reason}
+            try:
+                await asyncio.to_thread(staging.rename, dest)
+            except OSError as exc:
+                # A non-empty *dest* makes the rename fail, which is the correct
+                # outcome: something not created by this call occupies the path,
+                # so refuse rather than delete it.
+                await asyncio.to_thread(shutil.rmtree, staging, True)
+                log_lines.append(
+                    f"Could not move the verified checkout into place at {dest}: {exc}"
+                )
+                return {"ok": False, "name": dest.name, "error": "checkout_rename_failed"}
+            clone_succeeded = True
+            return None
+
+        log_lines.append(f"Cloning {git_url} (branch: {branch})...")
+        clone_cmd = [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            branch,
+            "--single-branch",
+            git_url,
+            str(dest),
+        ]
+        sandboxed_cmd, _cleanup = wrap_argv(clone_cmd, mode=sandbox_mode)
+        sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)  # cgroup DoS ceiling
         proc = await create_subprocess_limited(
             *sandboxed_cmd,
             stdout=asyncio.subprocess.PIPE,
