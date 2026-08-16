@@ -32,6 +32,7 @@ import ReviewButton from './ReviewButton'
 import PrActionsBar from './PrActionsBar'
 import PrRunActions from './PrRunActions'
 import { useIssueRadar } from '../context'
+import { useCollapsingHeader } from '../lib/useCollapsingHeader'
 import { relativeTimeOrDate, asArray, detailPollMs } from '../lib/format'
 import {
   issueRadarApi,
@@ -697,20 +698,57 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
   // from a cross-reference starts from a placeholder row.
   const actionPull: PullRequest = { ...pull, title: detail?.title ?? pull.title, body }
 
+  // The header is standing furniture (it sits outside the scroller), so while
+  // narrow it hands its height back once the reader has scrolled past it.
+  const { collapsed, onScroll } = useCollapsingHeader()
+  const title = detail?.title ?? pull.title
+
   return (
     <article className="h-full flex flex-col">
       {/* ── Header (does not scroll) ── */}
-      <header className="px-6 pt-5 pb-4 border-b border-border">
+      <header className={`px-6 border-b border-border transition-[padding] duration-200 ease-out motion-reduce:transition-none ${collapsed ? 'pt-2.5 pb-2 sm:pt-5 sm:pb-4' : 'pt-5 pb-4'}`}>
         {/* Stacked while narrow, for the same reason as the issue pane: the
             actions are a fixed cluster, and beside the title they left it too
             little width to hold a normal title in a few lines. */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-start gap-3">
           <div className="flex-1 min-w-0">
             {awaitingFirstPaint ? <HeaderSkeleton /> : (<>
-            <h1 className="text-[27px] font-bold leading-tight text-text-strong break-words">
-              {detail?.title ?? pull.title}
-            </h1>
-            <div className="flex items-center gap-2 mt-3 flex-wrap text-[12.5px] text-muted">
+            {/* Two stacked title representations rather than one that resizes —
+                see IssueDetail's header for why (`line-clamp` cannot be
+                interpolated) and useCollapsingHeader for why the breakpoint,
+                not a viewport query, owns the axis. */}
+            <div
+              className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${collapsed
+                ? 'grid-rows-[0fr] sm:grid-rows-[1fr]'
+                : 'grid-rows-[1fr]'}`}
+            >
+              <div
+                className={`min-h-0 overflow-hidden transition-opacity duration-150 motion-reduce:transition-none ${collapsed
+                  ? 'opacity-0 sm:opacity-100'
+                  : 'opacity-100'}`}
+              >
+                <h1 className="text-[27px] font-bold leading-tight text-text-strong break-words">
+                  {title}
+                </h1>
+              </div>
+            </div>
+            <div
+              aria-hidden="true"
+              className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${collapsed
+                ? 'grid-rows-[1fr] sm:grid-rows-[0fr]'
+                : 'grid-rows-[0fr]'}`}
+            >
+              <div
+                className={`min-h-0 overflow-hidden transition-opacity duration-150 motion-reduce:transition-none ${collapsed
+                  ? 'opacity-100 sm:opacity-0'
+                  : 'opacity-0'}`}
+              >
+                <div className="text-[15px] font-bold leading-tight text-text-strong truncate" title={title}>
+                  {title}
+                </div>
+              </div>
+            </div>
+            <div className={`flex items-center gap-2 flex-wrap text-[12.5px] text-muted transition-[margin] duration-200 ease-out motion-reduce:transition-none ${collapsed ? 'mt-1.5 sm:mt-3' : 'mt-3'}`}>
               <StatePill state={state} draft={draft} merged={merged} />
               <span className="inline-flex items-center gap-1">
                 <button
@@ -725,10 +763,15 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
                   #{pull.number}
                 </a>
               </span>
-              <MemberBadge role={authorRole} assoc={association} />
-              <span>
-                {author ? <span className="text-text font-medium">{author}</span> : 'someone'} {i18nT('apps.issueRadar.components.prDetail.opened')}{' '}
-                {createdAt ? <RelTime iso={createdAt} /> : ''}
+              {/* Identity and authorship drop out of the compact bar: the
+                  opening comment card repeats both immediately below. `contents`
+                  keeps these direct flex children while expanded. */}
+              <span className={collapsed ? 'hidden sm:contents' : 'contents'}>
+                <MemberBadge role={authorRole} assoc={association} />
+                <span>
+                  {author ? <span className="text-text font-medium">{author}</span> : 'someone'} {i18nT('apps.issueRadar.components.prDetail.opened')}{' '}
+                  {createdAt ? <RelTime iso={createdAt} /> : ''}
+                </span>
               </span>
             </div>
             </>)}
@@ -769,7 +812,10 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
         {/* Stacked while narrow: side by side, the 236px sidebar took the
             width out of the column holding the summary, description, files and
             timeline, leaving it unreadable on a phone. */}
-        <div className="flex flex-col sm:flex-row gap-6 px-6 py-5 h-full sm:items-stretch overflow-y-auto sm:overflow-visible">
+        <div
+          onScroll={onScroll}
+          className="flex flex-col sm:flex-row gap-6 px-6 py-5 h-full sm:items-stretch overflow-y-auto sm:overflow-visible"
+        >
           {/* Scroll ownership is transferred WHOLE at the breakpoint. Keeping an
               unconditional flex-1 + overflow-y-auto here would clamp this column
               to the space a shrink-0 metadata block left over and then hide the

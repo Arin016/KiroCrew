@@ -40,6 +40,7 @@ import LabelPicker from './LabelPicker'
 import MemberBadge from './MemberBadge'
 import InvestigateButton from './InvestigateButton'
 import { useIssueRadar } from '../context'
+import { useCollapsingHeader } from '../lib/useCollapsingHeader'
 import { relativeTimeOrDate, hexToRgba, asArray, detailPollMs } from '../lib/format'
 import {
   issueRadarApi,
@@ -720,20 +721,77 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
   // detail cache updates). Kept to labels that still exist on the repo.
   const suggestions = asArray<SuggestedLabel>(aiQuery.data?.suggested_labels).filter((s) => !currentNames.includes(s.name))
 
+  // The header is standing furniture (it sits outside the scroller), so while
+  // narrow it hands its height back once the reader has scrolled past it.
+  const { collapsed, onScroll } = useCollapsingHeader()
+  const title = detail?.title ?? issue.title
+
   return (
     <article className="h-full flex flex-col">
       {/* ── Header (does not scroll) ── */}
-      <header className="px-6 pt-5 pb-4 border-b border-border">
+      <header className={`px-6 border-b border-border transition-[padding] duration-200 ease-out motion-reduce:transition-none ${collapsed ? 'pt-2.5 pb-2 sm:pt-5 sm:pb-4' : 'pt-5 pb-4'}`}>
         {/* Stacked while narrow: the actions are ~150px of fixed width, and
             holding them beside the title left it ~120px on a phone, which wrapped
             a normal issue title onto six lines. Label above content, not beside. */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-start gap-3">
           <div className="flex-1 min-w-0">
             {awaitingFirstPaint ? <HeaderSkeleton /> : (<>
-            <h1 className="text-[27px] font-bold leading-tight text-text-strong break-words">
-              {detail?.title ?? issue.title}
-            </h1>
-            <div className="flex items-center gap-2 mt-3 flex-wrap text-[12.5px] text-muted">
+            {/* The title is TWO stacked representations, not one that resizes.
+                `line-clamp` cannot be interpolated — there is no CSS that eases
+                four lines into one — so a single element could only ever snap.
+                Swapping between a full-size title and a one-line echo turns that
+                into a crossfade, and the height is carried by the `1fr`↔`0fr`
+                grid-track transition (Chrome 107+, Firefox 66+, Safari 16+),
+                which is the cross-browser way to ease to a content height
+                without measuring it in JS.
+
+                The two tracks move in lockstep, so the pair's height is a linear
+                interpolation between the two end states rather than a bump: at
+                the halfway point it is half of each, not the sum of both.
+
+                Every compact class carries an `sm:` reset. The scroll signal
+                already only reaches this pane in the stacked layout, and pinning
+                the reset to the same breakpoint the layout uses means a resize
+                cannot strand a compacted header on a desktop. */}
+            <div
+              className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${collapsed
+                ? 'grid-rows-[0fr] sm:grid-rows-[1fr]'
+                : 'grid-rows-[1fr]'}`}
+            >
+              <div
+                className={`min-h-0 overflow-hidden transition-opacity duration-150 motion-reduce:transition-none ${collapsed
+                  ? 'opacity-0 sm:opacity-100'
+                  : 'opacity-100'}`}
+              >
+                {/* The only real heading, and it stays in the DOM in both
+                    states so assistive tech always reads the full title — the
+                    collapse is a zero height, never `display:none`. */}
+                <h1 className="text-[27px] font-bold leading-tight text-text-strong break-words">
+                  {title}
+                </h1>
+              </div>
+            </div>
+            <div
+              aria-hidden="true"
+              className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${collapsed
+                ? 'grid-rows-[1fr] sm:grid-rows-[0fr]'
+                : 'grid-rows-[0fr]'}`}
+            >
+              <div
+                className={`min-h-0 overflow-hidden transition-opacity duration-150 motion-reduce:transition-none ${collapsed
+                  ? 'opacity-100 sm:opacity-0'
+                  : 'opacity-0'}`}
+              >
+                {/* Decorative echo of the heading above, hidden from the
+                    accessibility tree so the title is not announced twice.
+                    `truncate` gives the single line that `line-clamp-1` used to,
+                    without the un-animatable clamp. */}
+                <div className="text-[15px] font-bold leading-tight text-text-strong truncate" title={title}>
+                  {title}
+                </div>
+              </div>
+            </div>
+            <div className={`flex items-center gap-2 flex-wrap text-[12.5px] text-muted transition-[margin] duration-200 ease-out motion-reduce:transition-none ${collapsed ? 'mt-1.5 sm:mt-3' : 'mt-3'}`}>
               <StatePill state={state} reason={stateReason} />
               {/* Copy-link + issue number, sitting right after the state pill.
                   The copy button writes the URL to the clipboard; the #number
@@ -757,12 +815,27 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
                   #{issue.number}
                 </a>
               </span>
-              <MemberBadge role={authorRole} assoc={association} />
-              <span>
-                {author ? <span className="text-text font-medium">{author}</span> : 'someone'} {i18nT('apps.issueRadar.components.issueDetail.opened')}{' '}
-                {createdAt ? <RelTime iso={createdAt} /> : ''}
-              </span>
+              {/* Lock state stands with the state pill, not with the metadata
+                  below. It is pane state that appears NOWHERE else: CommentCard
+                  takes author/when/assoc/role/body/reactions and carries no
+                  lock, so collapsing it would leave a locked issue with no lock
+                  indicator anywhere once scrolled. */}
               {locked && <span className="inline-flex items-center gap-1 text-warn"><Lock size={12} /> {i18nT('apps.issueRadar.components.issueDetail.locked')}</span>}
+              {/* Identity and authorship are the compact bar's cheapest cut:
+                  the opening comment card repeats both a few pixels below, and
+                  it is the first thing in the scroll area. These leave the flow
+                  at once rather than animating — they are two chips on a
+                  wrapping row, and giving them their own animated track would
+                  mean splitting this row in two on the DESKTOP layout as well.
+                  `contents` keeps them direct flex children while expanded, so
+                  that layout is byte-for-byte what it was. */}
+              <span className={collapsed ? 'hidden sm:contents' : 'contents'}>
+                <MemberBadge role={authorRole} assoc={association} />
+                <span>
+                  {author ? <span className="text-text font-medium">{author}</span> : 'someone'} {i18nT('apps.issueRadar.components.issueDetail.opened')}{' '}
+                  {createdAt ? <RelTime iso={createdAt} /> : ''}
+                </span>
+              </span>
             </div>
             </>)}
           </div>
@@ -804,7 +877,14 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
             out of the column holding the summary, description and timeline: at
             390px that column measured 34px and clipped its text to two or three
             characters a line. The metadata reads fine full-width underneath. */}
-        <div className="flex flex-col sm:flex-row gap-6 px-6 py-5 h-full sm:items-stretch overflow-y-auto sm:overflow-visible">
+        {/* This wrapper is also the element the header collapse listens to. It
+            only scrolls in the stacked layout (`sm:overflow-visible` hands
+            scrolling to the two columns above the breakpoint), so the signal is
+            self-gating — see useCollapsingHeader. */}
+        <div
+          onScroll={onScroll}
+          className="flex flex-col sm:flex-row gap-6 px-6 py-5 h-full sm:items-stretch overflow-y-auto sm:overflow-visible"
+        >
           {/* Main column — AI summary, the pinned description, linked refs,
               then the activity timeline (newest-first). */}
           {/* Scroll ownership is transferred WHOLE at the breakpoint. Keeping an
