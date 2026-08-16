@@ -2283,6 +2283,59 @@ def _adf_to_plain_text(node: Any, *, _depth: int = 0) -> str:
     return text
 
 
+def _jira_linked_changes(fields: dict[str, Any], base_url: str) -> list[dict[str, Any]]:
+    """Parse Jira issuelinks into the linkedChanges format.
+
+    Jira issue links have an inward and outward side.  Each link object
+    contains either an ``inwardIssue`` or ``outwardIssue`` (never both).
+    We normalise both directions into a flat list with the relationship
+    type visible to the user.
+    """
+    raw_links = _as_list(fields.get("issuelinks"))
+    changes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for link in raw_links:
+        if not isinstance(link, dict):
+            continue
+        link_type = _as_dict(link.get("type"))
+        # Determine direction and extract the linked issue object
+        if isinstance(link.get("outwardIssue"), dict):
+            linked_issue = link["outwardIssue"]
+            relation = str(link_type.get("outward") or "")
+        elif isinstance(link.get("inwardIssue"), dict):
+            linked_issue = link["inwardIssue"]
+            relation = str(link_type.get("inward") or "")
+        else:
+            continue
+        issue_key = str(linked_issue.get("key") or "")
+        if not issue_key or issue_key in seen:
+            continue
+        seen.add(issue_key)
+        # Derive browse URL from base_url
+        url = f"{base_url}/browse/{issue_key}"
+        # Extract state from statusCategory
+        status_obj = _as_dict(linked_issue.get("fields", {}).get("status") if isinstance(linked_issue.get("fields"), dict) else {})
+        status_cat = _as_dict(status_obj.get("statusCategory"))
+        cat_key = str(status_cat.get("key") or "").lower()
+        state = "closed" if cat_key == "done" else "open"
+        # Extract issue number (numeric portion after the dash)
+        parts = issue_key.rsplit("-", 1)
+        number = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0
+        # Summary for title
+        linked_fields = linked_issue.get("fields") if isinstance(linked_issue.get("fields"), dict) else {}
+        title = str(linked_fields.get("summary") or "") if isinstance(linked_fields, dict) else ""
+        changes.append({
+            "provider": "jira",
+            "url": url,
+            "number": number,
+            "title": title or issue_key,
+            "state": state,
+            "relation": relation,
+            "issueKey": issue_key,
+        })
+    return changes
+
+
 async def _fetch_jira_issue(ref: SourceRef) -> dict[str, Any]:
     """Fetch a Jira issue via the REST API using configured credentials.
 
@@ -2314,7 +2367,8 @@ async def _fetch_jira_issue(ref: SourceRef) -> dict[str, Any]:
     issue_url = (
         f"{base_url}/rest/api/{api_version}/issue/{issue_key}"
         f"?fields=summary,status,issuetype,assignee,description,labels,"
-        f"comment,priority,reporter,created,updated,resolution,resolutiondate"
+        f"comment,priority,reporter,created,updated,resolution,resolutiondate,"
+        f"issuelinks"
     )
 
     # Build auth header
@@ -2485,7 +2539,7 @@ async def _fetch_jira_issue(ref: SourceRef) -> dict[str, Any]:
         "locked": False,  # Jira has no issue locking concept
         "reactions": None,  # Jira has no reactions
         "comments": comments,
-        "linkedChanges": [],  # Could add linked issues later
+        "linkedChanges": _jira_linked_changes(fields, base_url),
         "partialSections": partial_sections,
     }
 

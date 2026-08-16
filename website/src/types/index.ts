@@ -626,8 +626,13 @@ export interface IssueComment {
 }
 
 /** A pull request / merge request the provider reports as linked to the issue. */
+/** A linked change: a pull request (GitHub/GitLab) or a linked issue (Jira). */
 export interface IssueLinkedChange {
-  provider: 'github' | 'gitlab'; url: string; number: number; title: string; state: string
+  provider: 'github' | 'gitlab' | 'jira'; url: string; number: number; title: string; state: string
+  /** Jira link relationship label (e.g. "blocks", "is blocked by"). */
+  relation?: string
+  /** Full Jira issue key (e.g. "PROJ-123"). */
+  issueKey?: string
 }
 
 /** Reaction tallies. Null on providers (or issues) that report none. */

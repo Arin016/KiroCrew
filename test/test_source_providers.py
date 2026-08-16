@@ -7388,3 +7388,152 @@ def test_parse_jira_self_hosted_url(monkeypatch) -> None:
     assert ref.host == "jira.internal.corp"
     assert ref.repo == "TEAM"
     assert ref.number == 99
+
+
+# --- Jira linked issues (issue #2584) ---
+
+
+class TestJiraLinkedChanges:
+    """Tests for _jira_linked_changes parsing."""
+
+    def test_outward_link_parsed(self) -> None:
+        """An outward issue link is parsed with the correct relation label."""
+        fields = {
+            "issuelinks": [
+                {
+                    "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                    "outwardIssue": {
+                        "key": "PROJ-456",
+                        "fields": {
+                            "summary": "Blocked task",
+                            "status": {"statusCategory": {"key": "new"}},
+                        },
+                    },
+                }
+            ]
+        }
+        result = source._jira_linked_changes(fields, "https://acme.atlassian.net")
+        assert len(result) == 1
+        assert result[0]["provider"] == "jira"
+        assert result[0]["url"] == "https://acme.atlassian.net/browse/PROJ-456"
+        assert result[0]["number"] == 456
+        assert result[0]["title"] == "Blocked task"
+        assert result[0]["state"] == "open"
+        assert result[0]["relation"] == "blocks"
+        assert result[0]["issueKey"] == "PROJ-456"
+
+    def test_inward_link_parsed(self) -> None:
+        """An inward issue link is parsed with the inward relation label."""
+        fields = {
+            "issuelinks": [
+                {
+                    "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                    "inwardIssue": {
+                        "key": "TEAM-10",
+                        "fields": {
+                            "summary": "Upstream dep",
+                            "status": {"statusCategory": {"key": "indeterminate"}},
+                        },
+                    },
+                }
+            ]
+        }
+        result = source._jira_linked_changes(fields, "https://jira.corp/jira")
+        assert len(result) == 1
+        assert result[0]["relation"] == "is blocked by"
+        assert result[0]["url"] == "https://jira.corp/jira/browse/TEAM-10"
+        assert result[0]["state"] == "open"
+        assert result[0]["issueKey"] == "TEAM-10"
+
+    def test_done_status_maps_to_closed(self) -> None:
+        """A linked issue with statusCategory 'done' maps to state 'closed'."""
+        fields = {
+            "issuelinks": [
+                {
+                    "type": {"name": "Relates", "inward": "relates to", "outward": "relates to"},
+                    "outwardIssue": {
+                        "key": "FIX-7",
+                        "fields": {
+                            "summary": "Done fix",
+                            "status": {"statusCategory": {"key": "done"}},
+                        },
+                    },
+                }
+            ]
+        }
+        result = source._jira_linked_changes(fields, "https://acme.atlassian.net")
+        assert result[0]["state"] == "closed"
+
+    def test_duplicate_keys_deduped(self) -> None:
+        """Duplicate issue keys are folded."""
+        link = {
+            "type": {"name": "Relates", "inward": "relates to", "outward": "relates to"},
+            "outwardIssue": {
+                "key": "DUP-1",
+                "fields": {"summary": "Dup", "status": {"statusCategory": {"key": "new"}}},
+            },
+        }
+        fields = {"issuelinks": [link, link]}
+        result = source._jira_linked_changes(fields, "https://acme.atlassian.net")
+        assert len(result) == 1
+
+    def test_empty_issuelinks(self) -> None:
+        """Empty or missing issuelinks returns an empty list."""
+        assert source._jira_linked_changes({}, "https://x") == []
+        assert source._jira_linked_changes({"issuelinks": []}, "https://x") == []
+
+    def test_malformed_link_skipped(self) -> None:
+        """A link with neither inwardIssue nor outwardIssue is skipped."""
+        fields = {
+            "issuelinks": [
+                {"type": {"name": "Bad", "inward": "x", "outward": "y"}},
+                "not a dict",
+                None,
+            ]
+        }
+        result = source._jira_linked_changes(fields, "https://acme.atlassian.net")
+        assert result == []
+
+    def test_missing_summary_uses_key_as_title(self) -> None:
+        """When summary is missing, the issue key is used as the title."""
+        fields = {
+            "issuelinks": [
+                {
+                    "type": {"name": "Rel", "inward": "r", "outward": "r"},
+                    "outwardIssue": {
+                        "key": "NO-SUM-1",
+                        "fields": {"status": {"statusCategory": {"key": "new"}}},
+                    },
+                }
+            ]
+        }
+        result = source._jira_linked_changes(fields, "https://acme.atlassian.net")
+        assert result[0]["title"] == "NO-SUM-1"
+
+    def test_multiple_links(self) -> None:
+        """Multiple links are all returned in order."""
+        fields = {
+            "issuelinks": [
+                {
+                    "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                    "outwardIssue": {
+                        "key": "A-1",
+                        "fields": {"summary": "First", "status": {"statusCategory": {"key": "new"}}},
+                    },
+                },
+                {
+                    "type": {"name": "Duplicates", "inward": "is duplicated by", "outward": "duplicates"},
+                    "inwardIssue": {
+                        "key": "B-2",
+                        "fields": {"summary": "Second", "status": {"statusCategory": {"key": "done"}}},
+                    },
+                },
+            ]
+        }
+        result = source._jira_linked_changes(fields, "https://x.atlassian.net")
+        assert len(result) == 2
+        assert result[0]["issueKey"] == "A-1"
+        assert result[0]["relation"] == "blocks"
+        assert result[1]["issueKey"] == "B-2"
+        assert result[1]["relation"] == "is duplicated by"
+        assert result[1]["state"] == "closed"
