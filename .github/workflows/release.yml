@@ -143,8 +143,6 @@ jobs:
             --deselect=test/test_slack_gateway_more_coverage.py::TestAutoMigrateMemory::test_missing_store_is_a_no_op \
             --deselect=src/kiro_crew/apps/builtins/ops_mission_control/tests/test_ledger_sync_git.py \
             --deselect=src/kiro_crew/apps/builtins/ops_mission_control/tests/test_schedule_file.py \
-            --deselect=test/test_mcp_sync_agent.py::TestOffloadedSyncHoldsTheConfigLock::test_every_offloaded_sync_is_under_the_config_lock \
-            --deselect=test/test_mochi_routes.py::TestSettingsAndDisplayWritesAreOffloaded::test_no_bare_blocking_write_on_an_async_route \
             --deselect=src/kiro_crew/apps/builtins/auto_improvement/tests/test_dogfood_learnings.py \
             --deselect=src/kiro_crew/apps/builtins/auto_improvement/tests/test_pr_watchers.py \
             --deselect=src/kiro_crew/apps/builtins/auto_improvement/tests/test_lint_findings.py \
