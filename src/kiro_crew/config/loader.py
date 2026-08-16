@@ -216,6 +216,12 @@ _CREDENTIAL_KEYS = (
     CRED_KIRO_API_KEY,
 )
 
+# Per-host Jira tokens use a hex-encoded host suffix: JIRA_TOKEN_<HEX>.
+# Only hex chars are valid — restricting the pattern prevents forged key names
+# injected via multiline env values from reaching the eval-based value reader
+# in the Docker entrypoint.
+_JIRA_TOKEN_RE = _re.compile(r"^JIRA_TOKEN_[0-9A-Fa-f]+$")
+
 # Keys from .env that were already warned about (fire once per gateway boot).
 _warned_env_keys: set[str] = set()
 
@@ -6944,7 +6950,9 @@ class KiroCrewConfig:
         for k, v in creds.items():
             if not v:
                 continue
-            if scrubbed and k in _CREDENTIAL_KEYS:
+            if scrubbed and (
+                k in _CREDENTIAL_KEYS or _JIRA_TOKEN_RE.match(k)
+            ):
                 continue
             os.environ.setdefault(k, v)
 

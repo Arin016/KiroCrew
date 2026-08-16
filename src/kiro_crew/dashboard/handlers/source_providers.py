@@ -2208,14 +2208,19 @@ def _get_jira_auth(host: str) -> tuple[str, str] | None:
     The token comes from the protected .env file (JIRA_API_TOKEN env var),
     following the same credential isolation pattern as Slack/Discord/Telegram
     tokens — never stored in the agent-readable config.json.
+
+    Raises ValueError on config load failures so callers can distinguish
+    "config is broken" from "no credentials configured" (None).
     """
     try:
         cfg = KiroCrewConfig.load()
         entries = cfg.dashboard.jira_auth
         # Token is resolved from .env / environment, not config.json
         creds = cfg.load_credentials()
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ValueError(
+            f"jira_config_error: Could not load Jira configuration: {exc}"
+        ) from exc
     normalized = host.lower().removesuffix(":443")
     for entry in entries:
         entry_host = entry.host.strip().lower().removesuffix(":443")
@@ -2347,10 +2352,12 @@ async def _fetch_jira_issue(ref: SourceRef) -> dict[str, Any]:
     # the event loop. Same discipline as _load_provider_hosts in this file.
     auth_pair = await asyncio.to_thread(_get_jira_auth, ref.host)
     if auth_pair is None:
+        host_key = ref.host.lower().removesuffix(":443").encode().hex().upper()
         raise ValueError(
             "jira_no_credentials: No Jira credentials configured for "
             f"{ref.host}. Add a jira_auth entry to config.json and set "
-            "JIRA_API_TOKEN in your .env file."
+            f"JIRA_API_TOKEN (or JIRA_TOKEN_{host_key} for multi-host) "
+            "in your .env file."
         )
     email, token = auth_pair
     is_cloud = _jira_is_cloud(ref.host)
@@ -2926,7 +2933,12 @@ async def api_issue_source(request: web.Request) -> web.Response:
         raise
     except ValueError as exc:
         msg = str(exc)
-        code = "jira_no_credentials" if msg.startswith("jira_no_credentials:") else "invalid_request"
+        if msg.startswith("jira_no_credentials:"):
+            code = "jira_no_credentials"
+        elif msg.startswith("jira_config_error:"):
+            code = "jira_config_error"
+        else:
+            code = "invalid_request"
         _audit_source_api(request, "source.issue.read", "failed", code)
         return web.json_response({"error": msg, "code": code}, status=400)
     except SourceProviderError as exc:
