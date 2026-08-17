@@ -22,6 +22,7 @@ import { queryClient } from './queryClient'
 import { getStoredConsent } from '../utils/themeConsent'
 import { recordError, parseErrorCode, requestPath } from '../utils/errorReport'
 import { i18nT } from '../i18n/t'
+import { normalizeInstalledApp, normalizeInstalledApps } from '../components/appstore/types'
 import { TAB_ID } from './tabId'
 
 /**
@@ -2298,8 +2299,13 @@ export const api = {
   channelClearContext: (id: string, scope: 'all' | 'agent', agentId?: string) => post('/api/channels/' + encodeURIComponent(id) + '/clear-context', scope === 'agent' ? { scope, agent_id: agentId } : { scope }).then(j),
 
   // --- Apps ---
-  listApps: () => fetch('/api/apps').then(j),
-  getApp: (name: string) => fetch('/api/apps/' + encodeURIComponent(name)).then(j),
+  // Installed-app payloads are normalized HERE rather than in a queryFn. The
+  // registry feed has one consumer, so `AppsPage` can narrow it at its own
+  // `useQuery`; `/api/apps` has four (the Apps page, the left rail, the command
+  // palette, the migration check), and normalizing per consumer is how the
+  // fourth one gets forgotten. This is the boundary all four share.
+  listApps: () => fetch('/api/apps').then(j).then(normalizeInstalledApps),
+  getApp: (name: string) => fetch('/api/apps/' + encodeURIComponent(name)).then(j).then(normalizeInstalledApp),
   getAppManifest: (name: string) => fetch('/api/apps/' + encodeURIComponent(name) + '/manifest').then(j),
   installApp: (source: string) => post('/api/apps/install', { source }).then(j),
   enableApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/enable').then(j),
