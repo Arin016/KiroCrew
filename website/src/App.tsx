@@ -1998,6 +1998,23 @@ export default function App() {
                 </button>)
               }
             }
+            // Mobile: show metrics as a passive readout (not a button) when the
+            // capsule is expanded and data is available. No independent toggle —
+            // visibility is tied to the capsule expand/collapse state.
+            if (isMobile && sysMetrics) {
+              const m = sysMetrics
+              const memPct = m.memTotal > 0 ? m.memUsed / m.memTotal : 0
+              const dskUsed = m.diskTotal - m.diskFree
+              const dskPct = m.diskTotal > 0 ? dskUsed / m.diskTotal : 0
+              const cpuValid = typeof m.cpuPct === 'number' && Number.isFinite(m.cpuPct)
+              const memValid = m.memTotal > 0
+              const dskValid = m.diskTotal > 0
+              segments.push(<span key="metrics-mobile" className={`${seg} gap-2 text-[11px] font-mono tabular-nums`} aria-label={i18nT('app.system_metrics')}>
+                <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'}>{i18nT('app.cpu')} {cpuValid ? fmtPercent(m.cpuPct / 100) : '\u2014'}</span>
+                <span className={memValid ? metricColor(memPct) : 'text-muted'}>{i18nT('app.mem')} {memValid ? fmtPercent(memPct) : '\u2014'}</span>
+                <span className={dskValid ? metricColor(dskPct) : 'text-muted'}>{i18nT('app.dsk')} {dskValid ? fmtPercent(dskPct) : '\u2014'}</span>
+              </span>)
+            }
             // Usage segment — Kiro credit plan from KiroCrew's own usage
             // cache. Spinner while the cache warms; hidden when unavailable.
             if (kiroUsage !== 'none') {
