@@ -4,6 +4,27 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **A delivered message no longer warns that it may not have been delivered.**
+  Every message typed in the dashboard composer grew a "Message not confirmed —
+  may not have been delivered" warning 30 seconds after it was sent, for the rest
+  of the turn, while the agent was visibly answering it. The indicator's
+  "delivered" signal was a `chat_message` echo of the user row — but that echo is
+  suppressed for dashboard sends by design (`DashboardState.append` defaults
+  `broadcast_user=False` precisely BECAUSE the composer already rendered the
+  bubble; only a row replayed from a channel transcript opts in). So the
+  pending-confirmation flag survived every composer send, the 30s sweep flagged
+  all of them, and the flag cleared only as a side effect of the end-of-turn
+  transcript refresh. Both composer surfaces now confirm from the send's own HTTP
+  response, which is the actual delivery receipt: an accepted immediate dispatch
+  retires the pending state and keeps the correlation id so a later echo still
+  reconciles in place instead of pushing a duplicate bubble. A `queued`
+  acceptance is deliberately NOT a receipt for that bubble -- the busy branch
+  queues only a non-empty message yet answers `{ok, queued}` either way, and when
+  it does queue, its own `queue_push` card owns the message, so cancelling it
+  leaves the bubble behind. The genuine failure paths are untouched -- a rejected
+  response, a transport error and the 10s client-side abort all leave the bubble
+  unconfirmed, which is what the indicator exists to say.
+
 - **Video and audio files now play inline in the file viewer.** Opening
   `.mp4`, `.webm`, `.mp3`, `.wav` and friends previously fell through to the
   code renderer, which displayed the binary as mojibake. A new

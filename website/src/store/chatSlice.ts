@@ -93,6 +93,11 @@ function isRedeliveredMessage(
   return false
 }
 
+/** Tail window (rows) for a backward `sendId` scan. Shared by the echo
+ *  reconcile and the response-confirm path so the two cannot drift into
+ *  disagreeing about which bubbles are still addressable by their send id. */
+const RECONCILE_WINDOW = 50
+
 /** Reconcile a server echo (carrying both `sendId` and `mid`) against the
  *  optimistic user bubble that was appended client-side at send time.
  *
@@ -113,7 +118,7 @@ function reconcileOptimisticEcho(
   meta: Record<string, unknown>,
   ts?: string,
 ): boolean {
-  const reconcileFloor = Math.max(0, msgs.length - 50)
+  const reconcileFloor = Math.max(0, msgs.length - RECONCILE_WINDOW)
   for (let i = msgs.length - 1; i >= reconcileFloor; i--) {
     const m = msgs[i]
     if (m.role !== 'user') continue
@@ -2093,6 +2098,47 @@ const chatSlice = createSlice({
       sweep(state.messages)
       for (const msgs of Object.values(state.slotMessages)) sweep(msgs)
     },
+    /** Retire a bubble's "pending confirmation" state once the send's own HTTP
+     *  response accepted it (`ok` or `queued`).
+     *
+     *  This is the PRIMARY confirmation path, not a fallback. The `chat_message`
+     *  echo that `reconcileOptimisticEcho` waits for is only broadcast for rows
+     *  the composer did NOT render — a message typed in a channel and replayed
+     *  into the slot (`channel_slots`, the sole `broadcast_user=True` caller).
+     *  `DashboardState.append` suppresses it for every dashboard send by design,
+     *  precisely BECAUSE the composer already rendered the bubble, so waiting on
+     *  it left every composer bubble optimistic forever and the 30s sweep flagged
+     *  all of them (#4131).
+     *
+     *  Clears only the pending-confirmation flags and deliberately KEEPS
+     *  `sendId`: a channel-linked slot can still deliver a later echo, and
+     *  `reconcileOptimisticEcho` needs that id to update this row in place
+     *  instead of pushing a duplicate bubble.
+     *
+     *  Scans BOTH arrays rather than resolving the slot's own: `appendMessage`
+     *  pushes into the active `messages` while `appendSlotMessage` may have used
+     *  `slotMessages[slot]`, and the user can switch sessions while the POST is
+     *  in flight. `sendId` is unique per send, so scanning both cannot mis-hit. */
+    confirmOptimisticSend(state, action: PayloadAction<{ slot: string; sendId: string }>) {
+      const { slot, sendId } = action.payload
+      if (isUnsafeKey(slot)) return
+      const confirm = (msgs: ChatMessage[] | undefined): boolean => {
+        if (!msgs) return false
+        const floor = Math.max(0, msgs.length - RECONCILE_WINDOW)
+        for (let i = msgs.length - 1; i >= floor; i--) {
+          const m = msgs[i]
+          if (m.role !== 'user' || m.meta?.sendId !== sendId) continue
+          const meta = { ...(m.meta || {}) }
+          delete meta.optimistic
+          delete meta.optimisticTs
+          delete meta.stale
+          m.meta = meta
+          return true
+        }
+        return false
+      }
+      if (!confirm(state.messages)) confirm(state.slotMessages[safeKey(slot)])
+    },
     removeByApprovalId(state, action: PayloadAction<string>) { state.messages = state.messages.filter(m => m.meta?.approval_id !== action.payload) },
     resolveByApprovalId(state, action: PayloadAction<{ id: string; decision?: string }>) {
       const decision = action.payload.decision || 'approved'
@@ -3617,7 +3663,7 @@ const chatSlice = createSlice({
 
 export const {
   setActiveSlot, clearSlotState, setPendingInput, setAgentSwitchNotice, setQuestionCard, retireStatelessQuestion, clearQuestionCard, setQuestionDraft, resolveQuestionCard, setFollowupCard, clearFollowupCard, dismissFollowupItem, setFolderSuggestion, clearFolderSuggestion, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, sweepStaleOptimistic, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages,
+  removeThinking, sweepStaleOptimistic, confirmOptimisticSend, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityPanel, openActivityToTool, clearFocusToolCallId, requestSlotReveal, clearSlotReveal, clearSubagentsForSnapshot, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentQueued,
   sseSubagentBatchUpdate, sseSubagentBatchChunks, selectSubagent, clearTerminalSubagents,

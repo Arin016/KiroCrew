@@ -24,10 +24,11 @@ import {
   selectSubagent,
   setActiveSlot, truncateAfterIndex, replaceMessages,
   requestStop, pendingQuestionFor, captureStatelessCard, clearFollowupCard, dismissFollowupItem, clearFolderSuggestion,
-  retireStatelessQuestion, capturePendingAskId,
+  retireStatelessQuestion, capturePendingAskId, confirmOptimisticSend,
   requestSlotReveal,
   mcpAppKey,
 } from '../store/chatSlice'
+import { confirmedDelivered } from '../utils/sendDelivery'
 import { addNotification, removeNotificationByTs } from '../store/notificationsSlice'
 import { onTerminalReady, sendToTerminalSession } from '../utils/terminalRegistry'
 import { interceptSlashCommand, isInterceptedSlashCommand } from './chat/ChatInput'
@@ -4062,6 +4063,26 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             message: { role: 'user', content: displayTxt, cls: '', ts: new Date().toISOString(), meta: metaPayload },
           }))
         }
+      }
+      if (slot && confirmedDelivered(body)) {
+        // The response IS the delivery receipt (#4131). The server accepted the
+        // message and appended (or queued) the row, so the optimistic bubble is
+        // confirmed and must stop being a candidate for the 30s "may not have
+        // been delivered" sweep. Nothing else can retire it on this surface: the
+        // `chat_message` user echo `reconcileOptimisticEcho` waits for is
+        // suppressed for every dashboard send by design (`DashboardState.append`
+        // defaults `broadcast_user=False` precisely because the composer already
+        // rendered this bubble), so before this the flag survived the whole turn
+        // and only vanished when `chat_done`'s refresh rebuilt the transcript
+        // from disk.
+        //
+        // Addressed to the SENDING slot for the same reason as the steer-echo
+        // append above. Harmless when the busy rule appended no bubble — no row
+        // carries this `sendId`, so it is a no-op. Deliberately NOT dispatched on
+        // a rejected response, a queued acceptance, or the abort-timeout path:
+        // there delivery of THIS row is unknown, which is what the indicator
+        // exists to say (see `confirmedDelivered`).
+        dispatch(confirmOptimisticSend({ slot, sendId }))
       }
       if (body.ok && !body.queued && cardAtSend && slot === entrySendSlot) {
         // Immediate dispatch confirmed (`ok`): the message consumed the slot's

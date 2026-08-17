@@ -45,6 +45,8 @@ import reducer, {
   selectSlotPendingApproval,
   selectComposerBusy,
   sweepStaleOptimistic,
+  confirmOptimisticSend,
+  OPTIMISTIC_TIMEOUT_MS,
 } from '../store/chatSlice'
 import './mockApiClient'
 
@@ -1082,6 +1084,81 @@ describe('sseChatMessage — pipelined sends reconcile (#3898)', () => {
     state = reducer(state, { type: 'chat/sweepStaleOptimistic' })
 
     expect(state.messages[0].meta?.stale).toBeUndefined()
+    expect(state.messages[0].meta?.optimistic).toBe(true)
+  })
+})
+
+/* #4131: the ONLY confirmation the dashboard composer ever receives is its own
+ * HTTP response. `DashboardState.append` suppresses the `chat_message` user echo
+ * for every dashboard send by design (`broadcast_user=False`, because the
+ * composer already rendered the bubble), so a surface that waits for the echo
+ * waits forever and the 30s sweep flags every message the user sends. */
+describe('confirmOptimisticSend — the send response retires the pending state', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+  const withSlot = { ...initial, activeSlot: 'slot-1' }
+
+  it('clears the flags so a later sweep cannot flag an aged-out bubble', () => {
+    let state = reducer(withSlot, appendMessage({
+      role: 'user', content: 'ship it', cls: '', ts: '2026-08-16T10:00:00.000Z',
+      // Backdated past the timeout: without the confirm below, the next sweep
+      // would mark this stale and render "may not have been delivered".
+      meta: { sendId: 's-confirm-1', optimistic: true, optimisticTs: Date.now() - (OPTIMISTIC_TIMEOUT_MS + 5_000) },
+    }))
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-confirm-1' }))
+    state = reducer(state, sweepStaleOptimistic())
+
+    expect(state.messages[0].meta?.optimistic).toBeUndefined()
+    expect(state.messages[0].meta?.optimisticTs).toBeUndefined()
+    expect(state.messages[0].meta?.stale).toBeUndefined()
+    // sendId SURVIVES: a channel-linked slot can still deliver a late echo, and
+    // reconcileOptimisticEcho needs the id to update this row in place rather
+    // than push a duplicate bubble.
+    expect(state.messages[0].meta?.sendId).toBe('s-confirm-1')
+  })
+
+  it('un-warns a bubble the sweep already flagged (slow response, not a lost one)', () => {
+    let state = reducer(withSlot, appendMessage({
+      role: 'user', content: 'slow ack', cls: '', ts: '2026-08-16T10:00:00.000Z',
+      meta: { sendId: 's-confirm-2', optimistic: true, optimisticTs: Date.now() - (OPTIMISTIC_TIMEOUT_MS + 5_000) },
+    }))
+    state = reducer(state, sweepStaleOptimistic())
+    expect(state.messages[0].meta?.stale).toBe(true)
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-confirm-2' }))
+
+    expect(state.messages[0].meta?.stale).toBeUndefined()
+    expect(state.messages[0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('confirms only the matching send, leaving a sibling in-flight bubble pending', () => {
+    let state = reducer(withSlot, appendMessage({ role: 'user', content: 'first', cls: '', ts: '2026-08-16T10:00:00.000Z', meta: { sendId: 's-a' } }))
+    state = reducer(state, appendMessage({ role: 'user', content: 'second', cls: '', ts: '2026-08-16T10:00:01.000Z', meta: { sendId: 's-b' } }))
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-b' }))
+
+    expect(state.messages[0].meta?.optimistic).toBe(true)   // 's-a' still in flight
+    expect(state.messages[1].meta?.optimistic).toBeUndefined()
+  })
+
+  it('confirms a background slot bubble in slotMessages (split-view pane)', () => {
+    let state = reducer(withSlot, appendSlotMessage({
+      slot: 'pane-9',
+      message: { role: 'user', content: 'pane send', cls: '', ts: '2026-08-16T10:00:00.000Z', meta: { sendId: 's-pane' } } as ChatMessage,
+    }))
+    expect(state.slotMessages['pane-9'][0].meta?.optimistic).toBe(true)
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'pane-9', sendId: 's-pane' }))
+
+    expect(state.slotMessages['pane-9'][0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('is a no-op for an unknown sendId (a busy-slot send appended no bubble)', () => {
+    let state = reducer(withSlot, appendMessage({ role: 'user', content: 'mine', cls: '', ts: '2026-08-16T10:00:00.000Z', meta: { sendId: 's-mine' } }))
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-someone-else' }))
+
+    expect(state.messages).toHaveLength(1)
     expect(state.messages[0].meta?.optimistic).toBe(true)
   })
 })
