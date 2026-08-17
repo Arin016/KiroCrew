@@ -912,6 +912,10 @@ function ChatInput({
   // Hover detection layer that shows paste previews on mouseover; scroll-synced
   // identically to the backdrop mirror.
   const hoverRef = useRef<PasteHoverHandle>(null)
+  // Id of the open paste-preview tooltip (or null). Wired to the textarea's
+  // aria-describedby so keyboard/screen-reader users get the preview announced
+  // when the caret enters a token — the AT half of the paste-preview a11y fix.
+  const [pastePreviewPanelId, setPastePreviewPanelId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // "+" drop-up menu (upload file / image + browse toggle).
   const [plusOpen, setPlusOpen] = useState(false)
@@ -2040,6 +2044,9 @@ function ChatInput({
     if (!ta) return
     const ss = ta.selectionStart ?? 0
     const se = ta.selectionEnd ?? 0
+    // Keyboard/AT peek: a collapsed caret landing inside a token opens the
+    // preview (the handle no-ops for a non-collapsed selection).
+    hoverRef.current?.handleCaret(ss, se)
     // Collapsed caret inside a token is handled by the click expander — skip.
     if (ss === se) return
     const ranges = findTokenRanges(ta.value, pasteBlocks)
@@ -2481,6 +2488,7 @@ function ChatInput({
           ref={inputRef}
           aria-label={i18nT('components.chatInput.message_input')}
           data-composer-input=""
+          aria-describedby={pastePreviewPanelId ?? undefined}
           data-composer-typo
           className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[50vh] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
@@ -2516,6 +2524,7 @@ function ChatInput({
           onCut={handleCut}
           onClick={handleTextareaClick}
           onFocus={prefetchSkills}
+          onBlur={() => { if (hoverRef.current) hoverRef.current.handleMouseLeave() }}
           onMouseUp={handleSelectSnap}
           onSelect={handleSelectSnap}
           onInput={handleInput}
@@ -2523,7 +2532,7 @@ function ChatInput({
           onMouseMove={e => { if (pasteBlocks.length && hoverRef.current) hoverRef.current.handleMouseMove(e) }}
           onMouseLeave={() => { if (hoverRef.current) hoverRef.current.handleMouseLeave() }}
         />
-        {pasteBlocks.length > 0 && <PasteHoverLayer ref={hoverRef} value={value} blocks={pasteBlocks} mirrorRef={mirrorRef} />}
+        {pasteBlocks.length > 0 && <PasteHoverLayer ref={hoverRef} value={value} blocks={pasteBlocks} mirrorRef={mirrorRef} onActivePanelChange={setPastePreviewPanelId} />}
         </div>
 
         {/* Bottom icon row */}
