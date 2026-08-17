@@ -32,6 +32,9 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 // real dashboard serves from outside the SPA bundle (a local copy 404s it and
 // renders a broken brand mark in every frame).
 import { serveDist } from './lib/serve-dist.mjs'
+// Same reason as the server: the ~25 boot endpoints every gateway-free harness
+// needs live in one place, with `extra` for the per-harness ones.
+import { stubDashboardApi, json, logPageProblems } from './lib/stub-dashboard-api.mjs'
 
 const OUT = process.argv[2] || '/tmp/capabilities-pane-inset'
 // Viewport width: 390 (a phone) by default; pass a second argument to measure
@@ -75,9 +78,6 @@ const AGENTS = [
   { name: 'code-reviewer', description: 'Reviews changes against the repo conventions', source: 'builtin', model: 'auto', mcp_servers: [], filename: 'code-reviewer.json', skills: [] },
 ]
 
-const json = (route, body) =>
-  route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
-
 const { srv, base } = await serveDist()
 const browser = await chromium.launch()
 const context = await browser.newContext({
@@ -91,47 +91,35 @@ const context = await browser.newContext({
 })
 const page = await context.newPage()
 
-await page.routeWebSocket(/\/api\/ws/, () => {})
-
-await page.route('**/api/**', async route => {
-  const path = new URL(route.request().url()).pathname
-
-  if (path === '/api/skills') return json(route, SKILLS)
-  if (path === '/api/steering') return json(route, STEERING)
-  if (path === '/api/hooks') return json(route, HOOKS)
-  if (path === '/api/prompts') return json(route, PROMPTS)
-  if (path === '/api/mcp') return json(route, MCP)
-  if (path === '/api/workspaces') return json(route, WORKSPACES)
-  if (path === '/api/agents/installed') return json(route, AGENTS)
-  if (path === '/api/config/default-agent') return json(route, { default_agent: 'kirocrew' })
-  if (path === '/api/models') return json(route, [{ model_name: 'auto', description: 'Let Kiro choose' }])
-  // The app shell mounts behind this gate and reads status.operation.status — a
-  // generic object stub crashes it, blanking the whole page.
-  if (path === '/api/kiro-prerequisite') {
-    return json(route, {
-      platform: 'linux', installed: true, authenticated: true, ready: true,
-      initial_setup_complete: true, can_auto_install: false, can_login: false,
-      repair_required: false, docs_url: '', setup_allowed: false,
-      operation: { kind: '', status: 'idle', message: '', detail: '', url: '', error: '' },
-    })
-  }
-  if (path === '/api/status') return json(route, { sessions: 1, crons: 0, lessons: 0, subagents: 0, uptime: 120, version: 'dev' })
-  if (path === '/api/notifications') return json(route, { notifications: [], unread: 0 })
-  if (path === '/api/auth/me') return json(route, { user: 'owner', app: '' })
-  if (path === '/api/theme/boot') return json(route, { mode: 'dark', theme: '' })
-  if (path === '/api/dashboard/branding') return json(route, { bot_name: 'Kiro', avatar: '' })
-  if (path.startsWith('/api/instances')) return json(route, { instances: [], active: '' })
-  const objectish = /(config|tips|voice|autonudge|branding|status|usage|probe|scopes|active)/.test(path)
-  return json(route, objectish ? {} : [])
+// Boot fixtures (prerequisite gate, status, notifications, auth, branding,
+// instances, websocket swallow, localStorage) come from the shared lib rather
+// than a local copy: it is consulted after `extra`, so only the endpoints this
+// harness actually cares about live here. It also gets the two-word `bot_name`
+// right, which a hand-rolled copy does not.
+await stubDashboardApi(page, {
+  // `extra` must report that it HANDLED the route: the lib awaits the return
+  // value, and `json()`'s promise resolves to undefined, so returning it alone
+  // reads as unhandled and the lib fulfils a second time ("Route is already
+  // handled!"). Hence the sibling harnesses' `return json(...), true` shape.
+  extra: (path, route) => {
+    if (path === '/api/skills') return json(route, SKILLS), true
+    if (path === '/api/steering') return json(route, STEERING), true
+    if (path === '/api/hooks') return json(route, HOOKS), true
+    if (path === '/api/prompts') return json(route, PROMPTS), true
+    if (path === '/api/mcp') return json(route, MCP), true
+    if (path === '/api/workspaces') return json(route, WORKSPACES), true
+    if (path === '/api/agents/installed') return json(route, AGENTS), true
+    if (path === '/api/config/default-agent') {
+      return json(route, { default_agent: 'kirocrew' }), true
+    }
+    if (path === '/api/models') {
+      return json(route, [{ model_name: 'auto', description: 'Let Kiro choose' }]), true
+    }
+    return false
+  },
 })
 
-page.on('pageerror', err => console.log('PAGEERROR:', String(err).slice(0, 300)))
-
-await page.addInitScript(() => {
-  localStorage.clear()
-  localStorage.setItem('mc-theme', 'dark')
-  localStorage.setItem('mc-onboarded', '1')
-})
+logPageProblems(page)
 
 /**
  * Distance from the tab strip's bottom border to the top of the pane's content.
