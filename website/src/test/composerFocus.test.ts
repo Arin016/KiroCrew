@@ -153,6 +153,101 @@ describe('how the composer is found', () => {
   })
 })
 
+describe('split view: the lookup is scoped to the pane holding focus', () => {
+  // The session grid mounts one composer PER pane, so a document-global
+  // first-match lookup would always land on the first pane regardless of
+  // where the user is working. These lock the active-pane scoping and the
+  // document-wide fallback that keeps single-pane behaviour unchanged.
+  const buildPane = () => {
+    const pane = document.createElement('div')
+    pane.setAttribute('data-chat-pane', '')
+    const ta = document.createElement('textarea')
+    ta.setAttribute('data-composer-input', '')
+    pane.appendChild(ta)
+    document.body.appendChild(pane)
+    return { pane, ta }
+  }
+
+  let first: ReturnType<typeof buildPane>
+  let second: ReturnType<typeof buildPane>
+
+  beforeEach(() => {
+    // The suite-level fixture composer sits OUTSIDE any pane; remove it so
+    // these tests exercise the grid shape alone.
+    composer.remove()
+    first = buildPane()
+    second = buildPane()
+  })
+  afterEach(() => {
+    first.pane.remove()
+    second.pane.remove()
+  })
+
+  it('resolves the SECOND pane composer when focus is inside the second pane', () => {
+    second.ta.focus()
+    expect(queryComposer()).toBe(second.ta)
+    expect(queryComposer()).not.toBe(first.ta)
+  })
+
+  it('resolves via any focused element inside the pane, not only the composer itself', () => {
+    // A shortcut can fire while a header button or picker inside the pane
+    // holds focus — the pane boundary, not the focused element type, decides.
+    const btn = document.createElement('button')
+    second.pane.appendChild(btn)
+    btn.focus()
+    expect(queryComposer()).toBe(second.ta)
+  })
+
+  it('falls back to first-in-document-order when focus is outside every pane', () => {
+    // Focus on <body>: no pane context, so the document-wide fallback applies
+    // — identical to the pre-split behaviour.
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    expect(queryComposer()).toBe(first.ta)
+  })
+
+  it('falls back document-wide when the active pane has no composer', () => {
+    second.ta.remove()
+    const btn = document.createElement('button')
+    second.pane.appendChild(btn)
+    btn.focus()
+    expect(queryComposer()).toBe(first.ta)
+  })
+
+  it('resolves the grid-focused pane when focus sits in a portal outside every pane', () => {
+    // The pane's pickers render through createPortal under document.body, so
+    // their focused input has NO pane ancestor. The grid marks its focused
+    // pane with data-chat-pane="focused"; that marker must win over the
+    // document-order fallback, or Alt+Enter from pane 2's picker would send
+    // the caret to pane 1.
+    second.pane.setAttribute('data-chat-pane', 'focused')
+    const portalInput = document.createElement('input')
+    document.body.appendChild(portalInput)
+    portalInput.focus()
+    expect(queryComposer()).toBe(second.ta)
+    portalInput.remove()
+  })
+
+  it('activeElement pane ancestry outranks the grid-focused marker', () => {
+    // Clicking INTO pane 1 while the grid still marks pane 2 as focused: the
+    // element the user is actually in wins.
+    first.pane.setAttribute('data-chat-pane', '')
+    second.pane.setAttribute('data-chat-pane', 'focused')
+    first.ta.focus()
+    expect(queryComposer()).toBe(first.ta)
+  })
+
+  it('focusComposer moves the caret to the active pane composer, not the first pane', async () => {
+    // The end-to-end behavioural claim from the issue: Alt+Enter (and every
+    // focus-the-composer path) acts on the pane the user is working in.
+    const btn = document.createElement('button')
+    second.pane.appendChild(btn)
+    btn.focus()
+    focusComposer()
+    await flushFrame()
+    expect(document.activeElement).toBe(second.ta)
+  })
+})
+
 describe('no site queries the translated label (class ratchet)', () => {
   // The nine hand-rolled `textarea[aria-label="Message input"]` queries this
   // module replaced all no-opped outside English, and the compiler cannot flag

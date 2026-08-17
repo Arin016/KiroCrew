@@ -200,3 +200,63 @@ describe('ChatPane agent switch — failures reach the shared notice', () => {
     expect(store.getState().chat.agentSwitchNotice).toBeNull()
   })
 })
+
+/* Producer side of the split-view focus contract: `queryComposer()` scopes its
+ * lookup to the `[data-chat-pane]` ancestor of the focused element, falling
+ * back to the pane marked `data-chat-pane="focused"` when focus sits in a
+ * portal (the pane's own pickers render under document.body). The REAL pane
+ * wrapper must carry the attribute — with value "focused" exactly when the
+ * grid marks the pane focused — and contain the pane's composer. Losing
+ * either would not fail any focus test that mounts fake panes; it would only
+ * silently degrade split-view shortcuts back to first-pane-wins in
+ * production. */
+describe('ChatPane pane boundary — data-chat-pane contract', () => {
+  it('the pane wrapper carries data-chat-pane and contains the pane composer', async () => {
+    const { container } = renderPane('pane-focus')
+    const pane = container.querySelector('[data-chat-pane]')
+    expect(pane).not.toBeNull()
+    const composer = await screen.findAllByRole('textbox')
+    expect(pane!.contains(composer[0])).toBe(true)
+    expect(pane!.querySelector('textarea[data-composer-input]')).not.toBeNull()
+  })
+
+  it('the wrapper marks the grid-focused pane with the "focused" value', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const store = makeStore('pane-marked')
+    const { container } = render(
+      <Provider store={store}>
+        <QueryClientProvider client={qc}>
+          <ThemeProvider>
+            <MemoryRouter>
+              <ChatPane slotKey="pane-marked" focused />
+            </MemoryRouter>
+          </ThemeProvider>
+        </QueryClientProvider>
+      </Provider>,
+    )
+    expect(container.querySelector('[data-chat-pane="focused"]')).not.toBeNull()
+  })
+
+  it('keyboard focus into the pane claims grid focus, not just mousedown', async () => {
+    // Tab into a pane (no mousedown) must move the grid's focused marker,
+    // or the "focused" fallback would name a pane the user already left and
+    // route Alt+Enter from a portaled picker to the wrong session.
+    const onFocus = vi.fn()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const store = makeStore('pane-kbd')
+    render(
+      <Provider store={store}>
+        <QueryClientProvider client={qc}>
+          <ThemeProvider>
+            <MemoryRouter>
+              <ChatPane slotKey="pane-kbd" onFocus={onFocus} />
+            </MemoryRouter>
+          </ThemeProvider>
+        </QueryClientProvider>
+      </Provider>,
+    )
+    const box = (await screen.findAllByRole('textbox'))[0]
+    box.focus()
+    expect(onFocus).toHaveBeenCalled()
+  })
+})
