@@ -829,12 +829,22 @@ export default function SchedulePage() {
                     {j.is_running
                       ? <span title={i18nT('pages.schedulePage.cancel_running_execution')}><Btn danger onClick={() => cancelRun(j.id)} disabled={cancelling.has(j.id)}>{cancelling.has(j.id) ? '...' : i18nT('pages.schedulePage.cancel')}</Btn></span>
                       : <span title={j.enabled ? i18nT('pages.schedulePage.run_now_2') : i18nT('pages.schedulePage.resume_to_run')}><Btn onClick={() => runNow(j.id)} disabled={!j.enabled || running.has(j.id)}>{running.has(j.id) ? '...' : i18nT('pages.schedulePage.run')}</Btn></span>}
+                    {/* The armed state must explain itself IN THE LABEL: the
+                        `title` tooltip below is hover-only, so on touch it does
+                        not exist, and a bare "Confirm" gives a phone user no
+                        statement of what the second tap will destroy (#4120).
+                        The tooltip stays as a redundant pointer affordance.
+                        The visible text is also the accessible name — no
+                        aria-label, which would override the label a sighted
+                        user reads and break WCAG 2.5.3 (Label in Name); the
+                        row context names the job. Same convention as
+                        ChatInput's Continue/Send buttons. */}
                     <Btn
                       danger
                       disabled={deletingId === j.id}
                       title={confirmDeleteId === j.id ? i18nT('pages.schedulePage.click_again_to_confirm') : i18nT('pages.schedulePage.delete_job')}
                       onClick={() => confirmDeleteId === j.id ? deleteJob(j.id) : armDelete(j.id)}
-                    >{deletingId === j.id ? '...' : confirmDeleteId === j.id ? i18nT('pages.schedulePage.confirm') : i18nT('pages.schedulePage.delete')}</Btn>
+                    >{deletingId === j.id ? '...' : confirmDeleteId === j.id ? i18nT('pages.schedulePage.confirm_delete_job') : i18nT('pages.schedulePage.delete')}</Btn>
                     <CronRowActions
                       job={j}
                       folders={cronFolders}

@@ -9918,7 +9918,7 @@
       "click_again_to_confirm": "पुष्टि के लिए फिर क्लिक करें",
       "collapse": "समेटें",
       "command_shell": "कमांड · शेल",
-      "confirm": "पुष्टि करें",
+      "confirm_delete_job": "हटाएँ?",
       "continue_session": "सेशन जारी रखें",
       "create_your_first_job": "अपना पहला जॉब बनाएँ",
       "cronFolders": {

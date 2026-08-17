@@ -9918,7 +9918,7 @@
       "click_again_to_confirm": "Zum Bestätigen erneut klicken",
       "collapse": "Einklappen",
       "command_shell": "Befehl · Shell",
-      "confirm": "Bestätigen",
+      "confirm_delete_job": "Löschen?",
       "continue_session": "Sitzung fortsetzen",
       "create_your_first_job": "Erstellen Sie Ihren ersten Job",
       "cronFolders": {

@@ -9803,7 +9803,7 @@
       "click_again_to_confirm": "再次点击以确认",
       "collapse": "折叠",
       "command_shell": "命令 · shell",
-      "confirm": "确认",
+      "confirm_delete_job": "删除？",
       "continue_session": "继续会话",
       "create_your_first_job": "创建你的第一个任务",
       "cronFolders": {

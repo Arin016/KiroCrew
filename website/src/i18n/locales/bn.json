@@ -9918,7 +9918,7 @@
       "click_again_to_confirm": "নিশ্চিত করতে আবার ক্লিক করো",
       "collapse": "সংকুচিত করো",
       "command_shell": "কমান্ড · shell",
-      "confirm": "নিশ্চিত করো",
+      "confirm_delete_job": "মুছবেন?",
       "continue_session": "সেশন চালিয়ে যাও",
       "create_your_first_job": "আপনার প্রথম জব তৈরি করুন",
       "cronFolders": {

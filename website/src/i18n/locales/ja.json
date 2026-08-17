@@ -9803,7 +9803,7 @@
       "click_again_to_confirm": "もう一度クリックして確認",
       "collapse": "折りたたむ",
       "command_shell": "コマンド · シェル",
-      "confirm": "確認",
+      "confirm_delete_job": "削除？",
       "continue_session": "セッションを続行",
       "create_your_first_job": "最初のジョブを作成",
       "cronFolders": {

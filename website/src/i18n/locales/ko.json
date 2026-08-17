@@ -9800,7 +9800,7 @@
       "click_again_to_confirm": "다시 클릭하여 확인",
       "collapse": "접기",
       "command_shell": "command · shell",
-      "confirm": "확인",
+      "confirm_delete_job": "삭제?",
       "continue_session": "세션 계속하기",
       "create_your_first_job": "첫 작업 만들기",
       "cronFolders": {

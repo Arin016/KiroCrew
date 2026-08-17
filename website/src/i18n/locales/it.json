@@ -10033,7 +10033,7 @@
       "click_again_to_confirm": "Clicca di nuovo per confermare",
       "collapse": "Comprimi",
       "command_shell": "comando · shell",
-      "confirm": "Conferma",
+      "confirm_delete_job": "Eliminare?",
       "continue_session": "Continua la sessione",
       "create_your_first_job": "Crea il tuo primo job",
       "cronFolders": {

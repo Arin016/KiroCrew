@@ -3704,7 +3704,7 @@
       "changes_only_how_the_calendar_grid_is_displayed": "Changes only how the calendar grid is displayed — does not change when any job actually fires.",
       "click_again_to_confirm": "Click again to confirm",
       "collapse": "Collapse",
-      "confirm": "Confirm",
+      "confirm_delete_job": "Delete?",
       "continue_session": "Continue session",
       "d_ago": "{{n}}d ago",
       "delete_2": "Delete {{n}}",

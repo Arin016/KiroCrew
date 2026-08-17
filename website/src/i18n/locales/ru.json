@@ -10148,7 +10148,7 @@
       "click_again_to_confirm": "Нажми ещё раз для подтверждения",
       "collapse": "Свернуть",
       "command_shell": "команда · shell",
-      "confirm": "Подтвердить",
+      "confirm_delete_job": "Удалить?",
       "continue_session": "Продолжить сессию",
       "create_your_first_job": "Создайте первую задачу",
       "cronFolders": {
