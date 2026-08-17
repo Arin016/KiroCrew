@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import tarfile
 from pathlib import Path
@@ -825,3 +826,168 @@ class TestConcurrentSnapshot:
         tarballs = list(out.glob("kirocrew-snapshot-*.tar.gz"))
         assert len(tarballs) == 2
         assert tarballs[0].name != tarballs[1].name
+
+
+# ── Issue 2844: presence-driven restore + complete rollback set ─────────────
+
+
+def _extract_snap(tarball: Path, extract_dir: Path) -> Path:
+    """Extract a tarball with the identity filter and return the snap dir."""
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(str(tarball)) as tar:
+        tar.extractall(extract_dir, filter=lambda t, _d="": t)
+    return next(d for d in extract_dir.iterdir() if d.name.startswith("kirocrew-snapshot-"))
+
+
+def _retar(snap: Path, out_tar: Path) -> Path:
+    """Re-package a (possibly modified) snap dir into a fresh tarball."""
+    with tarfile.open(str(out_tar), "w:gz") as tar:
+        tar.add(str(snap), arcname=snap.name)
+    return out_tar
+
+
+class TestPresenceDrivenReplace:
+    """Regression coverage for #2844 mode 1: an archive missing a component's
+    core file must leave the live file untouched, not moved aside and
+    reported as replaced."""
+
+    def test_missing_core_file_leaves_live_file_untouched(self, env, capsys, monkeypatch):
+        _, _, tarball, tmp_path = env
+        extract = tmp_path / "extract_missing_crons"
+        snap = _extract_snap(tarball, extract)
+        (snap / "crons.json").unlink()
+        archive = _retar(snap, tmp_path / "missing_crons.tar.gz")
+
+        dst = tmp_path / "dst_missing_crons"
+        _setup_fake_kirocrew(dst)
+        original_crons = (dst / "crons.json").read_text(encoding="utf-8")
+        monkeypatch.setenv("KIROCREW_HOME", str(dst))
+
+        ret = restore_main([str(archive), "--mode", "replace", "--force"])
+        out = capsys.readouterr().out
+
+        assert ret == 0
+        # The live file is untouched -- still present, original content, never
+        # relocated into pre-restore-*/ leaving nothing behind.
+        assert (dst / "crons.json").is_file()
+        assert (dst / "crons.json").read_text(encoding="utf-8") == original_crons
+        # Reporting is honest: crons is not claimed as replaced.
+        assert "not in archive" in out
+        assert "crons" in out
+
+
+class TestPresenceDrivenTrees:
+    """Regression coverage for #2844 mode 2: a tree the archive doesn't carry
+    must be reported as kept, never a bare success; a NEW-format archive
+    (empty staged dir) still replaces -- and empties -- the destination."""
+
+    def test_old_format_archive_missing_tree_keeps_destination(self, env, capsys, monkeypatch):
+        _, _, tarball, tmp_path = env
+        extract = tmp_path / "extract_missing_pm"
+        snap = _extract_snap(tarball, extract)
+        # Simulate an archive predating unconditional empty-dir staging: the
+        # plan_memory entry is entirely absent, not merely empty.
+        shutil.rmtree(str(snap / "plan_memory"))
+        archive = _retar(snap, tmp_path / "missing_plan_memory.tar.gz")
+
+        dst = tmp_path / "dst_missing_pm"
+        _setup_fake_kirocrew(dst)
+        monkeypatch.setenv("KIROCREW_HOME", str(dst))
+
+        ret = restore_main([str(archive), "--mode", "replace", "--force"])
+        out = capsys.readouterr().out
+
+        assert ret == 0
+        # Destination plan_memory is untouched -- kept, not silently dropped.
+        assert (dst / "plan_memory/plan1.json").is_file()
+        assert "not in archive" in out
+        assert "plan_memory" in out
+
+    def test_new_format_empty_archive_tree_replaces_destination(self, tmp_path, monkeypatch):
+        # A source lacking plan_memory/ at snapshot time still yields a
+        # NEW-format archive with an empty staged plan_memory/ dir.
+        src = tmp_path / "src_no_pm"
+        _setup_fake_kirocrew(src)
+        shutil.rmtree(str(src / "plan_memory"))
+        out_dir = tmp_path / "out_no_pm"
+        monkeypatch.setenv("KIROCREW_HOME", str(src))
+        tarball = _make_snapshot(src, out_dir)
+
+        dst = tmp_path / "dst_no_pm"
+        _setup_fake_kirocrew(dst)
+        assert (dst / "plan_memory/plan1.json").is_file()
+        monkeypatch.setenv("KIROCREW_HOME", str(dst))
+
+        ret = restore_main([str(tarball), "--mode", "replace", "--force"])
+
+        assert ret == 0
+        # The destination tree was replaced -- and emptied, since the
+        # archive's staged plan_memory/ was present but had no files.
+        assert (dst / "plan_memory").is_dir()
+        assert not any((dst / "plan_memory").iterdir())
+
+
+class TestCompleteRollbackBeforeSwap:
+    """Regression coverage for #2844 mode 3: the rollback set for every
+    selected component must be complete BEFORE the first swap, so a failure
+    partway through never leaves a partial backup."""
+
+    def test_rollback_set_complete_before_failure_mid_swap(self, env, monkeypatch):
+        _, _, tarball, tmp_path = env
+        dst = tmp_path / "dst_mid_swap_failure"
+        _setup_fake_kirocrew(dst)
+        (dst / "workspace/local_only.md").write_text("local-only-file")
+        monkeypatch.setenv("KIROCREW_HOME", str(dst))
+
+        from kiro_crew import snapshot as snapshot_module
+
+        original_swap = snapshot_module._swap_component_files
+        calls = {"n": 0}
+
+        def _flaky_swap(mc, snap, component):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("simulated failure mid-swap")
+            return original_swap(mc, snap, component)
+
+        monkeypatch.setattr(snapshot_module, "_swap_component_files", _flaky_swap)
+
+        with pytest.raises(RuntimeError, match="simulated failure mid-swap"):
+            restore_main([str(tarball), "--mode", "replace", "--force"])
+
+        backups = [d for d in dst.iterdir() if d.is_dir() and d.name.startswith("pre-restore-")]
+        assert backups, "rollback dir must exist even though the restore raised"
+        backup = backups[0]
+
+        # Every selected component's core files were backed up BEFORE the
+        # swap that failed on the second component -- not just the first.
+        assert (backup / "memory.db").is_file()
+        assert (backup / "crons.json").is_file()
+        assert (backup / "config.json").is_file()
+        assert (backup / "notifications.jsonl").is_file()
+        assert (backup / "telemetry_salt").is_file()
+        # Trees are backed up too, even though they are swapped after the
+        # file components and were never reached this run.
+        assert (backup / "workspace/local_only.md").is_file()
+        assert (backup / "plan_memory/plan1.json").is_file()
+        assert (backup / "skills/my-skill/SKILL.md").is_file()
+
+
+class TestSnapshotStagesTreeDirs:
+    """Regression coverage for #2844 item 4: component tree dirs are staged
+    in the archive even when the source home lacks them, so a future restore
+    can distinguish "not captured" (dir absent) from "captured, empty"."""
+
+    def test_stages_empty_tree_dirs_when_source_absent(self, tmp_path, monkeypatch):
+        src = tmp_path / "src_bare"
+        src.mkdir()
+        (src / "crons.json").write_text('{"version": 2, "jobs": []}')
+        out_dir = tmp_path / "out_bare"
+        monkeypatch.setenv("KIROCREW_HOME", str(src))
+        tarball = _make_snapshot(src, out_dir)
+
+        extract = tmp_path / "extract_bare"
+        snap = _extract_snap(tarball, extract)
+        for dirname in ("workspace", "plan_memory", "skills"):
+            assert (snap / dirname).is_dir(), f"{dirname} dir missing from archive"
+            assert not any((snap / dirname).iterdir()), f"{dirname} should be empty"

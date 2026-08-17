@@ -530,75 +530,199 @@ def _merge_notifications(src_path: Path, dst_path: Path) -> None:
     print(f"  Notifications imported: {imported}")
 
 
-def _backup_and_copy(mc: Path, backup: Path, snap: Path, component: str) -> None:
+def _backup_component_files(mc: Path, backup: Path, component: str) -> None:
+    """Copy (never move) a live component's core files into the rollback dir.
+
+    Non-destructive and independent of archive presence: this runs in the
+    backup phase, before any swap, so pre-restore-<ts>/ always ends up with a
+    complete copy of every SELECTED component's live state -- not only the
+    files this particular archive happens to replace. A failure partway
+    through the later swap phase therefore never leaves a partial rollback
+    set behind.
+    """
     for f in CORE_FILES.get(component, ()):
-        if (mc / f).is_file():
-            if os.path.islink(mc / f):
-                print(f"⚠️  Skipping symlinked core file during backup: {mc / f}")
-                continue
-            shutil.move(str(mc / f), str(backup / f))
-        if (snap / f).is_file():
-            if os.path.islink(snap / f):
-                print(f"⚠️  Skipping symlinked file from snapshot: {snap / f}")
-                continue
-            shutil.copy2(str(snap / f), str(mc / f))
-            if component == "security":
-                # restrict_to_owner (fail-loud), NOT chmod_safe (swallows OSError):
-                # security files include sel_hmac.key. Mirrors the create path's
-                # deliberate fail-loud lockdown — better to abort than silently
-                # land a restored secret group/world-readable. POSIX applies
-                # chmod 0o600; Windows applies an owner-only DACL via icacls.
-                # Unlink the freshly
-                # copied file on failure so the "abort" the comment promises
-                # actually removes the exposed artifact — otherwise the
-                # restored secret would sit under the destination-inherited
-                # DACL after the OSError propagates out of _do_replace.
-                try:
-                    platform_compat.restrict_to_owner(str(mc / f))
-                except OSError:
-                    (mc / f).unlink(missing_ok=True)
-                    raise
+        src = mc / f
+        if not src.is_file():
+            continue
+        if os.path.islink(src):
+            print(f"⚠️  Skipping symlinked core file during backup: {src}")
+            continue
+        shutil.copy2(str(src), str(backup / f))
+
+
+def _swap_component_files(mc: Path, snap: Path, component: str) -> tuple[list[str], list[str]]:
+    """Presence-driven swap of one component's core files.
+
+    A file the archive doesn't carry is left exactly as it was -- never moved
+    aside and never treated as replaced. Returns ``(replaced, kept)`` file
+    names so the caller can report honestly instead of an unqualified
+    checkmark.
+    """
+    replaced: list[str] = []
+    kept: list[str] = []
+    for f in CORE_FILES.get(component, ()):
+        dst = mc / f
+        repl = snap / f
+        if dst.is_file() and os.path.islink(dst):
+            print(f"⚠️  Skipping symlinked core file during restore: {dst}")
+            kept.append(f)
+            continue
+        if not repl.is_file():
+            if dst.is_file():
+                kept.append(f)
+            continue
+        if os.path.islink(repl):
+            print(f"⚠️  Skipping symlinked file from snapshot: {repl}")
+            if dst.is_file():
+                kept.append(f)
+            continue
+        if dst.is_file():
+            dst.unlink()
+        shutil.copy2(str(repl), str(dst))
+        if component == "security":
+            # restrict_to_owner (fail-loud), NOT chmod_safe (swallows OSError):
+            # security files include sel_hmac.key. Mirrors the create path's
+            # deliberate fail-loud lockdown — better to abort than silently
+            # land a restored secret group/world-readable. POSIX applies
+            # chmod 0o600; Windows applies an owner-only DACL via icacls.
+            # Unlink the freshly
+            # copied file on failure so the "abort" the comment promises
+            # actually removes the exposed artifact — otherwise the
+            # restored secret would sit under the destination-inherited
+            # DACL after the OSError propagates out of _do_replace.
+            try:
+                platform_compat.restrict_to_owner(str(dst))
+            except OSError:
+                dst.unlink(missing_ok=True)
+                raise
+        replaced.append(f)
+    return replaced, kept
+
+
+def _backup_tree(mc: Path, backup: Path, dirname: str) -> None:
+    """Copy (never move) a live component tree into the rollback dir, if present."""
+    d = mc / dirname
+    if d.is_dir():
+        _copytree_safe(d, backup / dirname, dirs_exist_ok=True)
+
+
+def _swap_tree(mc: Path, snap: Path, dirname: str) -> bool:
+    """Presence-driven tree swap. Returns True if the destination was replaced.
+
+    An archive that never staged this tree (an old-format archive predating
+    ``snapshot_main``'s unconditional empty-dir staging) leaves the
+    destination untouched and returns False, so the caller reports it as kept
+    rather than a silent no-op success. A NEW-format archive always stages
+    the dir (empty if the source was absent at snapshot time), so this
+    replaces -- and empties -- the destination in that case.
+    """
+    sd = snap / dirname
+    if not sd.is_dir():
+        return False
+    d = mc / dirname
+    if d.is_dir():
+        shutil.rmtree(str(d))
+    _copytree_safe(sd, d)
+    return True
+
+
+def _report_file_component(
+    name: str, replaced: list[str], kept: list[str], skipped: list[str]
+) -> None:
+    """Print one file-component's honest replace-mode status line.
+
+    Appends ``name`` to ``skipped`` when the archive carried none of the
+    component's files, so the caller can name every skipped component in the
+    final summary instead of an unqualified success.
+    """
+    if kept and not replaced:
+        print(f"  ⏭️  {name}: not in archive — existing state kept ({', '.join(kept)})")
+        skipped.append(name)
+    elif kept:
+        print(f"  ✅ {name} (kept, not in archive: {', '.join(kept)})")
+    else:
+        print(f"  ✅ {name}")
 
 
 def _do_replace(snap: Path, mc: Path, components: list[str] | None) -> None:
+    """Replace mode: swap in the archive's copy of every SELECTED component
+    the archive actually contains.
+
+    Ordering: the full rollback set for every selected component -- files and
+    trees alike -- is copied into pre-restore-<ts>/ FIRST, before any live
+    file or tree is touched. Only once that complete backup exists are the
+    presence-driven swaps performed, so a failure partway through the swaps
+    always leaves a COMPLETE rollback set, never a partial one.
+
+    Presence-driven: a selected component the archive doesn't carry (a file
+    or a tree) is left untouched -- never moved aside, never checkmarked as
+    replaced. It is reported as "kept" instead. That is not a failure:
+    restore_main still returns 0 for a partial archive. Only an unexpected
+    exception (an I/O error, or a security-file permission-lockdown failure)
+    yields a non-zero exit from this function.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = mc / f"pre-restore-{ts}"
     backup.mkdir(exist_ok=True)
     print("🔄 Replace mode — backing up current state...")
 
-    for comp in ("memory", "crons", "config", "notifications", "security"):
-        if _want(components, comp):
-            _backup_and_copy(mc, backup, snap, comp)
-            print(f"  ✅ {comp}")
+    file_components = [
+        c
+        for c in ("memory", "crons", "config", "notifications", "security")
+        if _want(components, c)
+    ]
+    want_workspace = _want(components, "workspace")
+    want_skills = _want(components, "skills")
 
-    if _want(components, "workspace"):
+    # Phase 1: build the complete rollback set before any mutation.
+    for comp in file_components:
+        _backup_component_files(mc, backup, comp)
+    if want_workspace:
         for dirname in ("workspace", "plan_memory"):
-            d = mc / dirname
-            if d.is_dir():
-                _copytree_safe(d, backup / dirname, dirs_exist_ok=True)
-            sd = snap / dirname
-            if sd.is_dir():
-                if d.is_dir():
-                    shutil.rmtree(str(d))
-                _copytree_safe(sd, d)
-        print("  ✅ workspace")
+            _backup_tree(mc, backup, dirname)
+    if want_skills:
+        _backup_tree(mc, backup, "skills")
 
-    if _want(components, "skills"):
-        sk = mc / "skills"
-        if sk.is_dir():
-            _copytree_safe(sk, backup / "skills", dirs_exist_ok=True)
-        snap_sk = snap / "skills"
-        if snap_sk.is_dir():
-            if sk.is_dir():
-                shutil.rmtree(str(sk))
-            _copytree_safe(snap_sk, sk)
-        print("  ✅ skills")
+    # Phase 2: presence-driven swaps, honestly reported.
+    skipped: list[str] = []
+    for comp in file_components:
+        replaced, kept = _swap_component_files(mc, snap, comp)
+        _report_file_component(comp, replaced, kept, skipped)
+
+    if want_workspace:
+        tree_replaced = []
+        tree_kept = []
+        for dirname in ("workspace", "plan_memory"):
+            if _swap_tree(mc, snap, dirname):
+                tree_replaced.append(dirname)
+            else:
+                tree_kept.append(dirname)
+        if tree_kept and not tree_replaced:
+            kept_str = ", ".join(tree_kept)
+            print(f"  ⏭️  workspace: not in archive — existing state kept ({kept_str})")
+            skipped.append("workspace")
+        elif tree_kept:
+            print(f"  ✅ workspace (kept, not in archive: {', '.join(tree_kept)})")
+        else:
+            print("  ✅ workspace")
+
+    if want_skills:
+        if _swap_tree(mc, snap, "skills"):
+            print("  ✅ skills")
+        else:
+            print("  ⏭️  skills: not in archive — existing state kept")
+            skipped.append("skills")
 
     try:
         backup.rmdir()
     except OSError:
         print(f"  Previous state saved to: {backup}/")
-    print("✅ Replace complete.")
+
+    if skipped:
+        skipped_str = ", ".join(skipped)
+        print(f"⚠️  Replace complete — not in archive, existing state kept: {skipped_str}")
+    else:
+        print("✅ Replace complete.")
 
 
 def _do_merge(snap: Path, mc: Path, components: list[str] | None) -> None:
