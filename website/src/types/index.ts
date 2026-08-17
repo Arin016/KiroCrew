@@ -753,6 +753,7 @@ export interface ToolActivity {
   input?: string        // tool input (commands, file content, etc.)
   output?: string       // tool output (stdout, results, etc.)
   ts: number
+  execution_started_at?: number // when execution began (after approval); survives remount
   auto?: boolean        // auto-approved tool call
   approval_id?: string  // pending approval ID
   approval_type?: string // 'chat' or 'spawn'

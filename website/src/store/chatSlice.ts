@@ -2756,6 +2756,8 @@ const chatSlice = createSlice({
           if (action.payload.input_preview) existing.input = action.payload.input_preview
           if (action.payload.kind) existing.kind = action.payload.kind
           if (action.payload.is_shell !== undefined) existing.is_shell = action.payload.is_shell
+          // Update ts for recency sorting but NEVER overwrite executionStartedAt
+          // — the elapsed timer must reflect real wall time since the tool began.
           existing.ts = Date.now()
           return
         }
@@ -2772,9 +2774,25 @@ const chatSlice = createSlice({
         const id = action.payload.approval_id
         const entry = log.find(e => e.type === 'approval' && e.approval_id === id)
         if (entry) entry.type = 'approval_resolved'
-        // Also mark the permission message as resolved so ApprovalBar hides it
-        const msg = state.messages.findLast(m => m.role === 'permission' && (m.meta as Record<string,unknown>)?.approval_id === id)
+        // Resolve against the OWNING slot's message array — active slot uses
+        // state.messages, a background slot its slotMessages entry. Reading only
+        // state.messages would miss a background-slot approval, so its tool
+        // timer would never get the post-approval anchor and would inflate by
+        // the whole approval wait after switching back to that slot.
+        const msgs = action.payload.slot !== state.activeSlot
+          ? (state.slotMessages[safeKey(action.payload.slot)] ?? [])
+          : state.messages
+        const msg = msgs.findLast(m => m.role === 'permission' && (m.meta as Record<string,unknown>)?.approval_id === id)
         if (msg && !(msg.meta as Record<string,unknown>).resolved) (msg.meta as Record<string,unknown>).resolved = 'approved'
+        // Stamp execution_started_at on the EXACT tool entry linked to this
+        // approval via the permission message's tool_call_id. This persists in
+        // Redux and survives component remounts, preventing the elapsed timer
+        // from inflating by the approval wait time.
+        const tcid = (msg?.meta as Record<string, unknown>)?.tool_call_id as string | undefined
+        if (tcid) {
+          const toolEntry = log.findLast(e => e.type === 'tool' && e.tool_call_id === tcid)
+          if (toolEntry && !toolEntry.execution_started_at) toolEntry.execution_started_at = Date.now()
+        }
         return
       }
       const entry: ToolActivity = { type: action.payload.kind, text: action.payload.text, ts: Date.now() }
