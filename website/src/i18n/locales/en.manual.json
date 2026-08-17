@@ -3006,6 +3006,7 @@
     "devFleetPage": {
       "applies_the_last_pull_build_the_dashboard_will_b": "Applies the last Pull+Build. The dashboard will briefly disconnect and reconnect on its own.",
       "building": "Building…",
+      "build_finished_restarting_gateway": "Build finished — restarting the gateway…",
       "built": "built",
       "built_and_ready_spin_up_a_pod_from_the_row_menu": "Built and ready — spin up a pod from the row menu to QA this branch",
       "built_but_pods_cannot_run_on_this_host_preview_i": "Built — but pods cannot run on this host; preview it with ./dev-backend.sh instead",
@@ -3071,7 +3072,7 @@
       "pull_build_2": "Pull+Build",
       "pull_build_failed_to_start": "Pull+Build failed to start",
       "pulls_main_and_rebuilds_6_min_does_not_restart": "Pulls main and rebuilds (~6 min). Does NOT restart.",
-      "pulls_main_rebuilds_then_restarts_automatically": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically.",
+      "pulls_main_rebuilds_then_restarts_keep_page_open": "Pulls main, rebuilds (~6 min), then restarts the gateway automatically. Keep this page open until the build finishes.",
       "qa_pod_is_running_but_failing_its_health_check": "QA pod is running but failing its health check",
       "qa_pod_is_running_click_open_to_use_it": "QA pod is running — click Open to use it",
       "qa_video": "QA + video",

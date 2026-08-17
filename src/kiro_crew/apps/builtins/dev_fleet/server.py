@@ -4919,15 +4919,34 @@ async def _restart_gateway() -> dict:
         status = await _live_user_unit_status()
         if _foreground_eligible(status):
             fg = _foreground_backend()
-            if fg is not None and await fg.status() == gateway_service.STATUS_OK:
-                start_id = await _gateway_start_id()
-                ok, err = await fg.restart_detached()
-                if not ok:
-                    return {"ok": False, "error": _redact(err)}
-                _MAKE_LIVE_COMMITTED = True
-                return {"ok": True, "start_id": start_id}
+            if fg is not None:
+                fg_status = await fg.status()
+                if fg_status == gateway_service.STATUS_OK:
+                    start_id = await _gateway_start_id()
+                    ok, err = await fg.restart_detached()
+                    if not ok:
+                        return {"ok": False, "error": _redact(err)}
+                    _MAKE_LIVE_COMMITTED = True
+                    return {"ok": True, "start_id": start_id}
+                # Foreground eligible but confined/broken — surface the
+                # foreground's own refusal reason plus the manual remedy.
+                return {
+                    "ok": False,
+                    "error": (
+                        f"foreground gateway cannot restart ({fg_status})"
+                        f" — run `{_manual_restart_command()}` to apply the build"
+                    ),
+                }
 
-    return {"ok": False, "error": "gateway is not running as a user service"}
+        # Neither the service backend nor the foreground fallback can drive the
+        # restart — surface the specific reason plus the manual remedy.
+        return {
+            "ok": False,
+            "error": (
+                f"{_make_live_status_error(status)}"
+                f" — run `{_manual_restart_command()}` to apply the build"
+            ),
+        }
 
 
 @_audited("dev_fleet_restart_gateway")
