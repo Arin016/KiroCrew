@@ -60,7 +60,7 @@ remote Gateway over an SSH tunnel. See the
 [desktop app guide](docs/build/desktop-app.md).
 
 - **macOS** (one universal DMG, Apple Silicon + Intel): [Stable](https://download.crew.kiro.dev/desktop/stable/latest/KiroCrew.dmg) | [Insider](https://download.crew.kiro.dev/desktop/insider/latest/KiroCrew.dmg) | [Nightly](https://download.crew.kiro.dev/desktop/nightly/latest/KiroCrew.dmg)
-- **Windows**: no desktop build yet, so run the Gateway from a [source install](#build-from-source) and open the dashboard in your browser
+- **Windows x64** (signed NSIS installer): [Nightly](https://download.crew.kiro.dev/desktop/nightly/latest/KiroCrew-Setup.exe) — Insider publishes from its next release, Stable is not wired yet, and SmartScreen still prompts on first download until the signature accrues reputation; see the [Windows guide](docs/guides/windows-install.md#what-smartscreen-still-shows)
 
 **On Linux, start with the one-line install** — it is the smoothest path, works
 on every distro and both architectures, and puts `kirocrew` on your `PATH`,

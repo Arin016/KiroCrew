@@ -5,7 +5,7 @@ The cross-platform process / signal / file-lock / metrics behavior is routed
 through `kiro_crew.platform_compat`, so macOS + Linux behavior is unchanged and
 the same code path also runs on Windows.
 
-## Desktop installer (preview, CI-built)
+## Desktop installer (preview)
 
 CI's Windows lane (`build-windows.yml`) also builds a Windows desktop app: an
 NSIS `KiroCrew Setup <version>.exe` with the backend bundled (no separate Python
@@ -15,22 +15,29 @@ build — the installer compresses its own already-signed executable — so that
 needs AWS credentials the shared build workflow deliberately does not hold.
 Current status:
 
-- **CI artifact only** — produced on nightly/release runs and the manual
-  `workflow_dispatch` probe; not yet published to the download CDN (that is
-  the upcoming `publish-windows.yml` lane).
-- **Signing wired but not yet active** — the AWS Signer path is in place and
-  skips cleanly until the signing profiles are provisioned, so today's
-  installers are still unsigned and SmartScreen shows an "unrecognized app"
-  interstitial (More info > Run anyway).
-- **No auto-update yet** — win32 remains outside `SUPPORTED_PLATFORMS` in
-  `auto-update.js`. The NSIS target removes the *packaging* blocker
-  (electron-updater's win32 path is `NsisUpdater`, and it has no
-  Squirrel.Windows support at all), but two prerequisites remain: a published
-  `latest.yml` feed alongside `latest-mac.yml`/`latest-linux.yml`, and active
-  signing — `NsisUpdater` verifies Authenticode fail-closed, so an unsigned
-  installer makes every update fail rather than merely warn. Tracked in
-  [issue #598](https://github.com/kirodotdev/KiroCrew/issues/598); until then,
-  installs update by running a newer Setup.exe.
+- **Published to the download CDN** — `publish-windows.yml` uploads the signed
+  installer and its `.blockmap` to an immutable versioned key and refreshes a
+  `latest/` alias plus the `latest.yml` update feed. The lane runs on the
+  **nightly and insider** channels; nightly is live, and insider publishes from
+  its next release because the lane landed after the most recent one. Stable has
+  no Windows installer at all, because stable republishes a promotion bundle that
+  carries no Windows role
+  ([issue #4181](https://github.com/kirodotdev/KiroCrew/issues/4181)).
+  - Nightly: <https://download.crew.kiro.dev/desktop/nightly/latest/KiroCrew-Setup.exe>
+- **Authenticode signed** — every installer is signed through AWS Signer with an
+  `Amazon Web Services, Inc.` certificate, and the publish lane refuses to
+  publish one whose signer is not that publisher or which carries no RFC3161
+  timestamp. **Expect a SmartScreen prompt anyway** — see
+  [What SmartScreen still shows](#what-smartscreen-still-shows) below, because
+  signing does not remove it.
+- **Auto-updates on nightly and insider** — `win32` is in
+  `SUPPORTED_PLATFORMS`, `NsisUpdater` reads `latest.yml`, and the install is
+  silent (`/S`) so an update needs no click-through. `NsisUpdater` verifies the
+  download's Authenticode signature **fail-closed** against the `publisherName`
+  pinned in `website/electron/package.json`, which is why an unsigned installer
+  would make every update fail rather than merely warn. On a channel with no
+  Windows lane the updater reports itself unavailable instead of checking a feed
+  that was never written.
 - **Assisted installer, per user by default** — `nsis.oneClick` is false and
   `perMachine` is false, so the installer offers an install-mode page whose
   default is a per-user install into a directory named from the product name,
@@ -48,6 +55,46 @@ Current status:
   controls remain on the right.
 
 The source install below remains the fully supported path.
+
+### What SmartScreen still shows
+
+**A signed installer still triggers SmartScreen on first download.** This is the
+single most likely reason to think the signing is broken when it is not, so it is
+worth stating plainly: Microsoft
+[documents](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)
+that a valid OV **or** EV certificate produces a warning "until reputation
+accumulates", and that EV certificates no longer bypass SmartScreen the way they
+did years ago. The only distribution path that is never warned about is the
+Microsoft Store, which re-signs with a Microsoft certificate.
+
+What signing does buy, on the same page:
+
+- **The verified publisher name is displayed** rather than an unknown-publisher
+  block, so a user can check that the installer really came from
+  `Amazon Web Services, Inc.` before continuing.
+- **Reputation can carry across versions.** SmartScreen weighs two signals, the
+  publisher certificate and the file hash, and reputation "cannot transfer from
+  previous versions unless both were signed using the same publisher identity".
+  Every release is signed with one identity, so a new nightly inherits the
+  certificate's standing instead of starting from zero. An unsigned build would
+  have to rebuild reputation on every single update, which nightly's daily new
+  hash would never manage.
+- **Windows 11 Smart App Control blocks unsigned executables outright** rather
+  than warning, and it applies to all executables, not only downloaded ones. That
+  is a hard failure signing avoids.
+
+Expect the prompt to fade rather than disappear on a date: Microsoft publishes no
+threshold, and says only that it "can take several weeks and hundreds of clean
+installs from a wide audience". There is no way to submit a file for consumer
+reputation review; it accrues from download volume. Enterprise administrators
+have two levers users do not: distribution from a Trusted Intranet location, and
+file submission through the
+[Microsoft Security Intelligence portal](https://www.microsoft.com/en-us/wdsi/filesubmission).
+
+One caveat worth tracking rather than discovering: the signing certificate
+auto-rotates annually, and Microsoft advises using "a consistent signing
+identity" because changing the certificate affects the publisher trust signal.
+Whether a rotation resets accumulated publisher reputation is not documented.
 
 ## Prerequisites
 

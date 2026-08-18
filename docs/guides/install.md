@@ -331,8 +331,12 @@ excludes Ubuntu 20.04, Debian 11 and Amazon Linux 2 — on those, use the
 [one-line install](#a-one-line-install-fastest) instead.
 
 Prebuilt downloads for the release channels are linked from the
-[README](../../README.md#app-downloads). Windows has no desktop build yet:
-run the gateway from a source install and open the dashboard in a browser.
+[README](../../README.md#app-downloads). Windows ships a signed NSIS installer on
+nightly today, with insider following from its next release and stable not wired
+yet, and SmartScreen still prompts on first download until the signature accrues
+reputation — see the
+[Windows guide](windows-install.md#what-smartscreen-still-shows). The native
+source install remains the fully supported Windows path.
 
 See [desktop-app.md](../build/desktop-app.md) for the full pipeline (frontend,
 PBS provisioning, pip install, pruning, electron-builder) and how the app
