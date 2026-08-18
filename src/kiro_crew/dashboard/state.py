@@ -95,6 +95,22 @@ _CHANNEL_LABELS = {
 }
 
 
+def _safe_folder_tree(folders: object) -> list[dict[str, Any]]:
+    """Well-formed folder entries safe to ship on the slots broadcast frame.
+
+    ``load_folders`` does a bare ``json.loads`` with no shape validation, so a
+    corrupt ``folders.json`` can leave ``_folders`` as a non-list (``list()``
+    would then raise ``TypeError`` on the broadcast hot path) or a list holding
+    non-dicts / dicts without an ``id`` (which the client's grouping keys on).
+    Keep only dict entries carrying a string ``id`` so a corrupt store degrades
+    to a smaller/empty tree rather than crashing every slot push. A non-list
+    (including ``None`` from an unset/partially-constructed state) yields ``[]``.
+    """
+    if not isinstance(folders, list):
+        return []
+    return [f for f in folders if isinstance(f, dict) and isinstance(f.get("id"), str)]
+
+
 def _split_namespaced_channel_id(channel_id: str | None) -> tuple[str, str] | None:
     """Return ``(channel_type, target)`` for a ``<type>:<target>`` id."""
     if not channel_id:
@@ -5707,6 +5723,17 @@ class DashboardState:
         # ['dashboardConfig'] query only when the GitLab-hosts allowlist actually
         # changed -- an event-driven refresh that replaces a constant 30s poll
         # (which multiplied audit-log writes across every same-key observer).
+        #
+        # Piggyback the folder tree (the in-memory ``_folders`` list, WITHOUT the
+        # per-folder ``history_count`` that ``GET /api/chat/folders`` computes via
+        # a synchronous session scan) so the sidebar can group sessions correctly
+        # on the FIRST paint. Sessions arrive on this WS frame the instant the
+        # socket connects; folders otherwise arrive only via a separate HTTP GET,
+        # so the sidebar would render every session ungrouped (Unfiled bucket)
+        # until that GET resolved, then visibly re-shuffle them into folders. The
+        # HTTP query still runs to backfill ``history_count``; grouping no longer
+        # waits on it. Slicing to the fields the client's grouping needs keeps
+        # this hot-path frame small and never touches the filesystem.
         self._broadcast(
             {
                 "_type": "slots",
@@ -5715,6 +5742,23 @@ class DashboardState:
                 "slots": json.dumps(slots_data),
                 "channelTrusted": ch_trusted,
                 "gitlabHostsGeneration": gitlab_hosts_generation(),
+                # getattr, not self._folders: this read path runs on EVERY slots
+                # push, including on a __new__-built DashboardState that seeded only
+                # the push essentials and never ran __init__ (several endpoint
+                # suites build their fixture that way). _folders is an __init__-only
+                # assignment, so a bare attribute access would AttributeError there
+                # — the exact break test_push_slots_update_survives_a_partially_
+                # constructed_state pins against. An absent/None folder store is an
+                # empty tree.
+                #
+                # Coerce to well-formed dict entries rather than `list(_folders)`:
+                # load_folders() does a bare json.loads with no shape check, so a
+                # corrupt folders.json can leave _folders as a non-list (crashing
+                # list() with TypeError on this hot path) or a list of non-dicts /
+                # dicts without an "id" (which the client's grouping keys on). Filter
+                # to dict entries carrying a string "id" so a corrupt store degrades
+                # to a smaller/empty tree instead of crashing the broadcast.
+                "folders": _safe_folder_tree(getattr(self, "_folders", None)),
             }
         )
         owner_ws_clients = getattr(self, "_owner_ws_clients", None)
@@ -5840,6 +5884,13 @@ class DashboardState:
                         # so anything not named here is silently dropped. The client
                         # invalidates its cached dashboard config when this changes.
                         "gitlabHostsGeneration": note.get("gitlabHostsGeneration"),
+                        # Folder tree (no history_count) so the sidebar groups
+                        # sessions on first paint without waiting for the separate
+                        # GET /api/chat/folders. Only the dashboard-user frame
+                        # (default_msg) carries it; app-token frames are rebuilt in
+                        # the scope chokepoint and deliberately omit it (apps do not
+                        # render the chat folder tree).
+                        "folders": note.get("folders"),
                     }
                 )
             elif msg_type == "slot_title":
