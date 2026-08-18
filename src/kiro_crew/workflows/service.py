@@ -49,7 +49,8 @@ agents. Reply with ONLY the Python module (no prose, no code fence). It MUST be:
       return <json-serializable result>
 
 Rules (the sandbox REJECTS violations): no imports; no open/eval/exec/__import__;
-no dunder access; no time/random/uuid (use ctx.now / ctx.args). Use ONLY the ctx
+no dunder access; no .format/.format_map (use an f-string); no time/random/uuid
+(use ctx.now / ctx.args). Use ONLY the ctx
 surface: await ctx.agent(prompt, schema=?, label=?, phase=?), await ctx.parallel([..]),
 await ctx.pipeline(items, *stages), ctx.phase(t), ctx.log(m),
 ctx.nudge(idle_secs=?, message=?), ctx.budget, ctx.args. Nothing else exists on
