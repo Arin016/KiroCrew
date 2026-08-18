@@ -4510,6 +4510,23 @@ _WRITE_PROTECTED_HOME_PATHS: list[str] = [
     for prefix in _CREW_HOME_PREFIXES
 ]
 _WRITE_PROTECTED_HOME_PATHS += [
+    # The MCP target table (mcp_gateway/target_table.py). WRITE-protected rather
+    # than sensitive for the same reason as the browse launch config: it holds no
+    # secret and the broker must READ it before every backend spawn, so
+    # classifying it sensitive would break routing. But it is an INPUT TO A
+    # SECURITY DECISION -- it maps a stubbed server name to the command the
+    # broker execs, and the broker does not run under the agent's sandbox, so an
+    # agent that could rewrite this file would get an arbitrary command executed
+    # unconfined at the next spawn. The reader's owner/mode checks only refuse
+    # OTHER accounts; they cannot refuse a same-uid write, which is what this
+    # gate is for. Kiro Crew publishes the file directly via atomic_write and
+    # does NOT route through this gate, so its own writes still work.
+    # Paired with the same leaf in _WRITE_PROTECTED_BASH_LEAVES -- protected on
+    # one path only is not protected.
+    f"{prefix}/mcp-gateway/targets.json"
+    for prefix in _CREW_HOME_PREFIXES
+]
+_WRITE_PROTECTED_HOME_PATHS += [
     # The Ops Mission Control incident INDEX, for the same reason as the schedule above and
     # with the same read/write asymmetry: every teammate's instance reads it constantly (it is
     # the claim ledger and the board), so classifying it sensitive would break the app, but it
@@ -4646,6 +4663,13 @@ _WRITE_PROTECTED_BASH_LEAVES: tuple[str, ...] = (
     "apps/ops-mission-control/data/rotation.yaml",
     "apps/ops-mission-control/data/incidents/index.json",
     "connections-tool-aliases.json",
+    # The MCP target table, paired with the same leaf in
+    # _WRITE_PROTECTED_HOME_PATHS so the file-edit and shell paths agree -- a
+    # leaf on only one of the two is reachable through the other. Anchored, not
+    # bare-token, for the same reason the browse launch config below is: what the
+    # entry removes is the DURABLE form, silently rewriting the table the broker
+    # execs from until the next publish re-converges it.
+    "mcp-gateway/targets.json",
     # The browse launch config (browser_cli/launch.py), paired with the same leaf
     # in _WRITE_PROTECTED_HOME_PATHS so the file-edit and shell paths agree — a
     # leaf on only one of the two is reachable through the other.

@@ -4,6 +4,25 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Toggling one MCP server's stub no longer restarts the whole broker.** The
+  switch on Developer -> MCP Management froze the page for seconds to tens of
+  seconds, with every other switch disabled, because the apply tore the daemon
+  down and respawned it -- draining every pooled backend and every in-flight
+  call for a one-bit change, and buying nothing, since an open session's MCP
+  toolset is fixed when the session starts. The daemon had to be respawned only
+  because it read a stubbed server's real launch command out of its own
+  environment, which a live process cannot change. That mapping is now published
+  beside the gateway socket as an owner-only `targets.json` whenever it is built,
+  so an apply is a rewrite plus one atomic file write and the broker keeps
+  serving. Because a published table can never be older than the environment of
+  a daemon that could read it, the daemon needs no freshness arithmetic; it
+  reloads the table off the event loop immediately before spawning a backend, so
+  a backend is always spawned from the mapping on disk at that moment. Precedence
+  is per table, not per key, so unstubbing takes effect; a missing, untrusted or
+  unparseable table falls back to the spawn environment exactly as before, and a
+  publish that does not land fails closed rather than serving stale routing.
+  (#4317)
+
 - **xlsx files now render inline in the file viewer** instead of a
   download-only card. A new `GET /api/file-sheet` endpoint parses OOXML
   workbooks server-side with openpyxl (read-only, worker thread, ZIP

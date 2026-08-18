@@ -162,6 +162,10 @@ from kiro_crew.mcp_gateway.rewriter import (
     resolve_overlay_dir,
     rewrite_agents,
 )
+from kiro_crew.mcp_gateway.target_table import (
+    default_target_table_path,
+    write_target_table,
+)
 from kiro_crew.memory import MemoryStore
 from kiro_crew.messaging import registry
 from kiro_crew.messaging.identity import publish_turn_identity
@@ -6220,6 +6224,79 @@ class GatewayOrchestrator:
     # ------------------------------------------------------------------
     # MCP Gateway
     # ------------------------------------------------------------------
+    def _mcp_socket_path(self) -> Path:
+        """Where the broker's socket lives, per config."""
+        cfg_gw = self._cfg.mcp_gateway
+        return Path(cfg_gw.socket_path) if cfg_gw.socket_path else default_socket_path()
+
+    async def _rewrite_mcp_overlay(self) -> dict[str, str] | None:
+        """Re-emit the agent overlay and publish the target table.
+
+        Separate from starting the broker because they answer different
+        questions: the overlay and the table describe the stub set as it is
+        now, while the daemon is a process that serves whatever they say. While
+        these were one call, the only way to get a fresh rewrite was to respawn
+        the daemon -- so changing one server's stub bit drained every pooled
+        backend to re-read a file the daemon can simply re-read in place.
+
+        The table is published on EVERY build of the mapping, including the one
+        that precedes a broker start. That is what makes a published table
+        authoritative with no freshness arithmetic: it cannot be older than the
+        environment of any daemon that could read it, so the daemon needs no
+        generation, clock or process-start comparison to decide whether its copy
+        is current -- and none of those can be skewed by a clock step, a VM
+        restore, or a supervisor respawn.
+
+        Returns the target mapping, or ``None`` when the rewrite failed or the
+        publish did not land. Both mean the daemon would serve routing this call
+        did not intend, so the caller must neither start a broker on it nor
+        report the change as applied.
+        """
+        cfg_gw = self._cfg.mcp_gateway
+        socket_path = self._mcp_socket_path()
+        loop = asyncio.get_running_loop()
+        try:
+            # rewrite_agents() walks ~/.kiro/agents, parses every JSON spec and
+            # rewrites the overlay — pure-sync file I/O.  Offload to the bounded
+            # maintenance pool so it can't block the event loop when triggered
+            # post-startup.
+            _rewrite_result, target_env = await loop.run_in_executor(
+                maintenance_executor(),
+                functools.partial(
+                    rewrite_agents,
+                    source_dir=kiro_agents_dir(),
+                    overlay_dir=resolve_overlay_dir(cfg_gw.overlay_dir),
+                    socket_path=socket_path,
+                    work_dir=_session_work_dir(None),
+                    sandbox_mode=self._cfg.agent.sandbox,
+                    approval_mode=self._cfg.agent.approval_mode,
+                    stub_servers=frozenset(cfg_gw.stub_servers),
+                    pooling_enabled=cfg_gw.enabled,
+                ),
+            )
+        except Exception:
+            logger.exception("mcp-gateway rewriter failed — falling back")
+            return None
+        # Offloaded for the same reason as the rewrite above. One bounded
+        # small-file write beside a full agent-spec walk.
+        published = await loop.run_in_executor(
+            maintenance_executor(),
+            functools.partial(
+                write_target_table,
+                default_target_table_path(socket_path),
+                target_env,
+            ),
+        )
+        if not published:
+            # write_target_table has already logged the IO error. Fail closed:
+            # a daemon reads the table as authoritative, so serving on an
+            # unpublished or half-written one would route from a stub set nobody
+            # asked for.
+            logger.warning(
+                "mcp-gateway: target table not published; routing is unchanged"
+            )
+            return None
+        return target_env
 
     async def _init_mcp_gateway(self) -> None:
         """Start the MCP gateway sidecar and populate the agent-JSON overlay.
@@ -6243,33 +6320,10 @@ class GatewayOrchestrator:
         if not is_gateway_supported():
             return
 
-        overlay_dir = resolve_overlay_dir(cfg_gw.overlay_dir)
-        socket_path = Path(cfg_gw.socket_path) if cfg_gw.socket_path else default_socket_path()
-        agents_source_dir = kiro_agents_dir()
-        workspace_default = _session_work_dir(None)
-
-        try:
-            # rewrite_agents() walks ~/.kiro/agents, parses every JSON spec and
-            # rewrites the overlay — pure-sync file I/O.  Offload to the bounded
-            # maintenance pool so it can't block the event loop when triggered
-            # post-startup.
-            _rewrite_result, target_env = await asyncio.get_running_loop().run_in_executor(
-                maintenance_executor(),
-                functools.partial(
-                    rewrite_agents,
-                    source_dir=agents_source_dir,
-                    overlay_dir=overlay_dir,
-                    socket_path=socket_path,
-                    work_dir=workspace_default,
-                    sandbox_mode=self._cfg.agent.sandbox,
-                    approval_mode=self._cfg.agent.approval_mode,
-                    stub_servers=frozenset(cfg_gw.stub_servers),
-                    pooling_enabled=cfg_gw.enabled,
-                ),
-            )
-        except Exception:
-            logger.exception("mcp-gateway rewriter failed — falling back")
+        target_env = await self._rewrite_mcp_overlay()
+        if target_env is None:
             return
+        socket_path = self._mcp_socket_path()
 
         manager = GatewayManager(
             GatewaySpec(
@@ -6354,8 +6408,13 @@ class GatewayOrchestrator:
         * nothing stubbed -> something stubbed: START. There is no manager yet, so
           a restart-only path would leave the operator's first stubbed server
           inert until they happened to touch another switch.
-        * stubbed -> stubbed: RESTART, so the rewriter re-runs with the new set and
-          the daemon re-spawns with updated ``MC_MCP_TARGET_*`` env.
+        * stubbed -> stubbed: REPUBLISH. The rewriter re-runs and the target
+          table is written; the daemon reloads that table before its next
+          backend spawn, so the new stub set goes live without touching the
+          process. This used to be a full respawn, which drained every pooled
+          backend and every in-flight call to change one server's bit -- and
+          bought nothing, since an open session's MCP toolset is fixed at
+          ``session/new`` and cannot pick up a new stub set either way.
         * something stubbed -> nothing stubbed: STOP, because an empty stub set
           means there is nothing for a broker to serve.
         """
@@ -6363,10 +6422,16 @@ class GatewayOrchestrator:
 
         self._cfg = KiroCrewConfig.load()
         want_broker = bool(self._cfg.mcp_gateway.stub_servers)
-        if self._mcp_gateway_manager is not None:
+        applied = True
+        if not want_broker:
             await self._stop_mcp_broker()
-        if want_broker:
+        elif self._mcp_gateway_manager is None:
             await self._init_mcp_gateway()
+        else:
+            # A rewrite or publish that failed leaves the previous routing in
+            # place, so it is not applied — reporting otherwise would draw a
+            # live-looking switch over a change the broker never saw.
+            applied = await self._rewrite_mcp_overlay() is not None
         if self.dashboard_state is not None:
             self.dashboard_state._mcp_gateway_manager = self._mcp_gateway_manager
         # The overlay and socket paths are resolved during config load and then
@@ -6377,7 +6442,8 @@ class GatewayOrchestrator:
         if self.sessions is not None:
             await self.sessions.refresh_defaults()
         return {
-            "applied": (self._mcp_gateway_manager is not None) == want_broker,
+            "applied": applied
+            and (self._mcp_gateway_manager is not None) == want_broker,
             "stub_servers": sorted(self._cfg.mcp_gateway.stub_servers),
         }
 

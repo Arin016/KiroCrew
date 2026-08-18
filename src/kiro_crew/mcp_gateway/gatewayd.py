@@ -39,7 +39,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Awaitable, Callable, Iterator, Optional
 
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.config.loader import config_dir as _config_dir
@@ -75,6 +75,12 @@ from kiro_crew.mcp_gateway.rewriter import (
 from kiro_crew.mcp_gateway.shutdown_budget import DRAIN_SECS, POOL_SHUTDOWN_SECS
 from kiro_crew.mcp_gateway.spill import cleanup_old_spill_files
 from kiro_crew.mcp_gateway.stub import fallback_counts as stub_fallback_counts
+from kiro_crew.mcp_gateway.target_table import (
+    TargetTableCache,
+    TargetTableReader,
+    default_target_table_path,
+    lookup_target,
+)
 from kiro_crew.metrics.provider import get_recorder
 from kiro_crew.peer_resolve import resolve_peer_identity
 from kiro_crew.platform_compat import IS_WINDOWS
@@ -202,10 +208,10 @@ _DEFAULT_SOCKET_NAME = "mcp-gateway.sock"
 
 #: A ``target_resolver`` takes a :class:`PoolKey` and returns the
 #: ``(command, args, env, work_dir)`` tuple used to spawn the backend, or
-#: ``None`` if the server is unknown. The default resolver looks up
-#: ``KIROCREW_MCP_TARGET_<SERVER>`` env vars (accepts legacy ``MC_MCP_TARGET_<SERVER>``
-#: for backward compatibility; matches the Rust PoC and existing
-#: rewriter wiring); tests inject their own resolver to avoid env-coupling.
+#: ``None`` if the server is unknown. The default reads the published target
+#: table and falls back to ``KIROCREW_MCP_TARGET_<SERVER>`` env vars (accepts
+#: legacy ``MC_MCP_TARGET_<SERVER>`` for backward compatibility); tests inject
+#: their own resolver to avoid coupling to either.
 TargetResolver = Callable[
     [PoolKey],
     Optional[tuple[str, list[str], dict[str, str], str]],
@@ -213,6 +219,15 @@ TargetResolver = Callable[
 
 
 # --- Public API -------------------------------------------------------------
+
+
+def default_target_cache(socket_path: Path) -> TargetTableCache:
+    """The daemon's own target-table cache for ``socket_path``.
+
+    Named and separate from the serve loop so what the daemon reads is reachable
+    from a test without booting one.
+    """
+    return TargetTableCache(TargetTableReader(default_target_table_path(socket_path)))
 
 
 def _default_cli_socket_path() -> Path:
@@ -272,9 +287,11 @@ async def run_gatewayd(
             ``_SHUTDOWN_DRAIN_SECS`` to finish, then everything cancels,
             the pool shuts down, and the socket is unlinked.
         target_resolver: Callable mapping :class:`PoolKey` to the spawn
-            4-tuple ``(command, args, env, work_dir)``. Pass ``None`` to
-            use the default :func:`env_target_resolver`. Tests supply a
-            custom resolver to avoid coupling to environment variables.
+            4-tuple ``(command, args, env, work_dir)``. Pass ``None`` to use
+            the default built by :func:`make_target_table_resolver`, which
+            reads the target table published beside the socket and falls back
+            to :func:`env_target_resolver`. Tests supply a custom resolver to
+            avoid coupling to either source.
         prewarm_count: Number of hottest observed PoolKeys to spawn at
             startup before the first stub connects, closing the
             cold-after-restart / cold-after-idle new-chat latency gap. The
@@ -325,7 +342,22 @@ async def run_gatewayd(
         return
     await transport.remove_stale(socket_path)
 
-    resolver = target_resolver if target_resolver is not None else env_target_resolver
+    # The default answers from the target table when one has been published
+    # since this daemon started, and from this process's environment otherwise,
+    # so the stub set can change under a serving daemon without a respawn. An
+    # explicit resolver (tests, embedders) still wins, and then no table is
+    # read at all.
+    target_cache: Optional[TargetTableCache] = None
+    refresh_targets: Optional[Callable[[], Awaitable[None]]] = None
+    if target_resolver is not None:
+        resolver = target_resolver
+    else:
+        target_cache = default_target_cache(socket_path)
+        resolver = make_target_table_resolver(target_cache)
+
+        async def refresh_targets() -> None:  # noqa: F811 — the wired form
+            """Reload the table off the loop, for the pre-rejection re-check."""
+            await asyncio.to_thread(target_cache.refresh)  # type: ignore[union-attr]
     # Shared circuit breaker keyed by server name: a server
     # that crash-loops on spawn trips OPEN and get_or_create rejects further
     # spawns so the stub falls back to per-session exec instead of churning.
@@ -379,7 +411,10 @@ async def run_gatewayd(
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         try:
-            await _handle_connection(reader, writer, pool, resolver, socket_path, hot_keys)
+            await _handle_connection(
+                reader, writer, pool, resolver, socket_path, hot_keys,
+                refresh_targets=refresh_targets,
+            )
         except asyncio.CancelledError:
             # Normal on shutdown — propagate for the gather() below.
             raise
@@ -1221,31 +1256,63 @@ def env_target_resolver(pool_key: PoolKey) -> Optional[tuple[str, list[str], dic
     spawn tuple, or ``None`` if no mapping is set.
 
     Wire format: ``KIROCREW_MCP_TARGET_SLACK_MCP="slack-mcp --stdio"``.
-    The server name is upper-cased with ``-`` replaced by ``_``. Env is
-    inherited from the gateway process with ``KIROCREW_CHANNEL_ID``
-    overlaid when the pool key carries one — this keeps cron / send_message
-    fallbacks pointed at the correct channel on a per-pool-key basis.
+    The server name is upper-cased with ``-`` replaced by ``_``.
+
+    This is the FALLBACK source. The published target table
+    (:mod:`kiro_crew.mcp_gateway.target_table`) is consulted first when one
+    exists, because the environment is fixed at spawn and cannot describe a
+    stub set that changed since. The environment stays as the floor: it is
+    always present, so a missing or untrustworthy table degrades to exactly
+    the behaviour of a daemon that has only ever read its own env.
 
     Defense-in-depth: env is scrubbed through
     :func:`kiro_crew.mcp_gateway.manager._scrub_sensitive_env` so even if
     the gateway process somehow inherited credential vars, backends won't.
     """
-    base = "KIROCREW_MCP_TARGET_" + pool_key.server_name.upper().replace("-", "_")
-    # Accept the legacy MC_MCP_TARGET_ prefix for overlays/daemons written by
-    # older versions that haven't been regenerated (#928).
-    legacy_base = "MC_MCP_TARGET_" + pool_key.server_name.upper().replace("-", "_")
-    # Prefer the args-disambiguated entry (written by
-    # rewriter._collect_target_env) so two agents that share a server name but
-    # declare different --target-args each spawn their OWN backend command,
-    # instead of resolving to whichever agent sorted first alphabetically. Fall
-    # back to the bare server-name entry for older overlays predating the
-    # disambiguated keys.
-    spec = (
-        os.environ.get(base + "__" + pool_key.command_args_hash)
-        or os.environ.get(base)
-        or os.environ.get(legacy_base + "__" + pool_key.command_args_hash)
-        or os.environ.get(legacy_base)
+    spec = lookup_target(
+        os.environ, pool_key.server_name, pool_key.command_args_hash
     )
+    if not spec:
+        return None
+    return _spawn_tuple(spec, pool_key)
+
+
+def make_target_table_resolver(cache: TargetTableCache) -> TargetResolver:
+    """A resolver that prefers the loaded target table over the env.
+
+    Precedence is per table, not per key: a table that loaded answers on its
+    own, so a server the operator just unstubbed stops resolving even though
+    the daemon's environment still names it. Only when there is no trustworthy
+    table at all does this fall through to the environment.
+
+    Reads only memory. The filesystem side is the refresh task's job, because
+    this runs inside a backend spawn on the event loop.
+    """
+
+    def _resolve(
+        pool_key: PoolKey,
+    ) -> Optional[tuple[str, list[str], dict[str, str], str]]:
+        targets = cache.current()
+        if targets is None:
+            return env_target_resolver(pool_key)
+        spec = lookup_target(
+            targets, pool_key.server_name, pool_key.command_args_hash
+        )
+        if not spec:
+            return None
+        return _spawn_tuple(spec, pool_key)
+
+    return _resolve
+
+
+def _spawn_tuple(
+    spec: str, pool_key: PoolKey
+) -> Optional[tuple[str, list[str], dict[str, str], str]]:
+    """Turn a target spec into the ``(command, args, env, work_dir)`` tuple.
+
+    Shared by both sources so the environment a backend is spawned with cannot
+    depend on which one resolved it.
+    """
     if not spec:
         return None
     parts = shlex.split(spec)
@@ -1875,6 +1942,7 @@ async def _handle_connection(
     resolver: TargetResolver,
     socket_path: Path,
     hot_keys: Optional[HotKeyStore] = None,
+    refresh_targets: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> None:
     """Process one stub connection end-to-end.
 
@@ -2357,6 +2425,7 @@ async def _handle_connection(
                         backend, _was_spawned = await _acquire_backend(
                             pool, pool_key, resolver,
                             exclusive_stub_uuid=exclusive_stub_uuid,
+                            refresh_targets=refresh_targets,
                         )
                         # acquire-only duration, captured before the attach_stub
                         # + create_task overhead so the metric stays true to name.
@@ -2457,6 +2526,7 @@ async def _handle_connection(
                     backend, _lazy_was_spawned = await _acquire_backend(
                         pool, pool_key, resolver,
                         exclusive_stub_uuid=exclusive_stub_uuid,
+                        refresh_targets=refresh_targets,
                     )
                     # acquire/spawn-only duration, captured before the attach +
                     # create_task overhead.
@@ -2655,6 +2725,7 @@ async def _acquire_backend(
     resolver: TargetResolver,
     *,
     exclusive_stub_uuid: str = "",
+    refresh_targets: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> tuple[Backend, bool]:
     """Return ``(backend, was_spawned)`` for ``pool_key`` — spawning one via
     the resolver if absent.
@@ -2670,9 +2741,26 @@ async def _acquire_backend(
     when the connection ends. ``was_spawned`` is then always ``True``, because a
     private backend has nothing to reuse by construction.
 
+    ``refresh_targets`` reloads the published target mapping, and is awaited
+    BEFORE resolving -- not only when the first lookup misses. A spawn is the
+    only consumer of the mapping and is already an expensive operation (it forks
+    a process), so paying one off-loop stat here buys an exact answer: the
+    mapping a backend is spawned from is the one on disk at that moment.
+
+    Refreshing only on a miss would leave a stale SUCCESS unfixed -- a server
+    whose target command changed would keep resolving to the previous command
+    for as long as the cached copy survived, because a successful lookup never
+    triggered the reload. And an unknown target must be exact for a different
+    reason: the stub treats it as TERMINAL and deliberately does not fall back
+    to a per-session exec, so that a genuinely broken backend cannot crash-loop
+    per session. A server stubbed moments ago would otherwise be reported
+    unknown and lost for the whole life of the session that asked for it.
+
     Raises :class:`_TargetUnknown` when the resolver has no mapping for the
     server (a clean rejection, not a crash).
     """
+    if refresh_targets is not None:
+        await refresh_targets()
     target = resolver(pool_key)
     if target is None:
         raise _TargetUnknown(

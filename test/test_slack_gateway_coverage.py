@@ -990,29 +990,31 @@ class TestStopAndApplyMcpBroker:
         assert out == {"applied": False, "stub_servers": ["alpha", "beta"]}
 
     @pytest.mark.asyncio
-    async def test_apply_stub_restarts_the_broker_and_republishes_it(self):
+    async def test_apply_stub_republishes_without_touching_the_broker(self):
         orch = _make_orchestrator()
-        old = MagicMock()
-        old.shutdown = AsyncMock()
-        orch._mcp_gateway_manager = old
+        serving = MagicMock()
+        serving.shutdown = AsyncMock()
+        orch._mcp_gateway_manager = serving
         ds = _mock_dashboard_state()
         orch.dashboard_state = ds
 
-        new = MagicMock()
+        async def _fake_init() -> None:  # pragma: no cover - must not run
+            raise AssertionError("a serving broker must not be restarted")
 
-        async def _fake_init() -> None:
-            orch._mcp_gateway_manager = new
+        async def _fake_rewrite() -> dict[str, str]:
+            return {"KIROCREW_MCP_TARGET_ALPHA": "alpha"}
 
         orch._init_mcp_gateway = _fake_init
+        orch._rewrite_mcp_overlay = _fake_rewrite
 
         cfg = KiroCrewConfig()
         cfg.mcp_gateway.stub_servers = ["alpha"]
         with patch.object(KiroCrewConfig, "load", return_value=cfg):
             out = await orch._apply_mcp_stub()
 
-        old.shutdown.assert_awaited_once()
+        serving.shutdown.assert_not_awaited()
         assert out == {"applied": True, "stub_servers": ["alpha"]}
-        assert ds._mcp_gateway_manager is new
+        assert ds._mcp_gateway_manager is serving
 
     def test_wire_dashboard_is_a_noop_without_dashboard_state(self):
         orch = _make_orchestrator()
