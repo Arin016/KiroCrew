@@ -1023,48 +1023,53 @@ async def _run_sync(mod, locked):
 
 
 @pytest.mark.asyncio
-async def test_sync_refuses_entirely_when_a_console_script_is_locked():
-    """Nothing may run — not even fetch/merge.
+async def test_sync_substitutes_a_dependency_only_install_when_a_script_is_locked():
+    """The sync proceeds; only the editable reinstall is swapped out.
 
-    pip cannot replace the locked binary, and merging anyway is not a safe
-    consolation prize: a revision that adds a dependency would land with that
-    dependency absent, the run would report success, and the next restart would
-    fail to import it. Leaving the checkout on a revision whose dependencies are
-    satisfied is the only outcome that cannot brick the gateway.
+    pip cannot replace the locked wrapper, but it does not have to. An editable
+    install serves source straight from ``src``, so the merge alone makes the new
+    revision live; the only thing the reinstall was still buying is a dependency
+    the revision added, and installing a dependency never touches the project's
+    own console script. Refusing the whole sync instead left the single-checkout
+    Windows layout — the ordinary one — with no working Pull+build at all.
     """
     import kiro_crew.apps.builtins.dev_fleet.server as mod
+    from kiro_crew.apps.builtins.dev_fleet import dep_sync
 
     result, script = await _run_sync(mod, [r"C:\repo\.venv\Scripts\kirocrew.exe"])
 
-    assert result["ok"] is False
-    # No run was started at all, so fetch/merge never happened.
-    assert script is None
-    err = result["error"]
-    assert "kirocrew.exe" in err          # names the blocker
-    assert "pip install -e" in err        # and the remedy
-    assert "Stop the gateway" in err
+    assert result["ok"] is True
+    # A run was started, so fetch and merge do happen.
+    assert script is not None
+    # Steps are JSON-embedded in the generated script, so quotes arrive escaped;
+    # comparing against a de-escaped copy keeps these assertions independent of
+    # how many encoding layers the script generator happens to use.
+    flat = script.replace("\\", "")
+    assert dep_sync.__name__ in flat
+    assert '"-e"' not in flat
+    # ORDER MATTERS: the dependency sync must precede the merge, so a failure
+    # leaves HEAD on a revision whose dependencies are satisfied instead of
+    # advancing the checkout and only then discovering it cannot start.
+    assert flat.index(dep_sync.__name__) < flat.index('"merge"')
 
 
 @pytest.mark.asyncio
-async def test_refusal_remedy_is_cwd_independent_and_quoted():
-    """The suggested command must not depend on where it is pasted.
+async def test_sync_keeps_the_editable_reinstall_when_nothing_is_locked():
+    """A venv this gateway is NOT served by must still get the real reinstall.
 
-    `-e .` resolves against the terminal's cwd, and this project is normally
-    checked out as several worktrees at once — so the same line copied from a
-    feature worktree would install THAT tree into the primary venv and repoint
-    its editable install away from the primary checkout. Both paths are also
-    quoted, because a Windows home directory routinely contains a space.
+    The substitution is a concession to a lock, not an improvement to prefer: it
+    cannot refresh a console script, so anywhere pip can do the whole job, it
+    should.
     """
     import kiro_crew.apps.builtins.dev_fleet.server as mod
+    from kiro_crew.apps.builtins.dev_fleet import dep_sync
 
-    result, _ = await _run_sync(mod, [r"C:\repo\.venv\Scripts\kirocrew.exe"])
-    err = result["error"]
+    result, script = await _run_sync(mod, [])
 
-    # The install target is named explicitly, never left to the shell's cwd —
-    # including in the prose, so the message never shows the misleading form.
-    assert "pip install -e ." not in err
-    assert f'pip install -e "{_SYNC_REPO}"' in err
-    assert f'git -C "{_SYNC_REPO}"' in err
+    assert result["ok"] is True
+    flat = script.replace("\\", "")
+    assert '"-e"' in flat
+    assert dep_sync.__name__ not in flat
 
 
 @pytest.mark.asyncio

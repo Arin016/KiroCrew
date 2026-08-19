@@ -51,7 +51,7 @@ from typing import Any, Callable
 from aiohttp import web
 
 from kiro_crew import frontend, hooks, platform_compat
-from kiro_crew.apps.builtins.dev_fleet import gateway_service
+from kiro_crew.apps.builtins.dev_fleet import dep_sync, gateway_service
 from kiro_crew.apps.proxy_auth import raw_request_target
 from kiro_crew.env import find_node_tool, node_bin_dirs
 from kiro_crew.executors import subprocess_executor
@@ -3595,51 +3595,76 @@ async def _sync_start_locked() -> dict:
             "service environment; that one does need a restart, because a "
             "running process cannot see a new environment variable."
         )}
+    # A locked console script does not have to mean the sync cannot happen.
+    #
+    # pip cannot replace a running executable on Windows, and its uninstall is
+    # not atomic: it renames the dist-info aside and deletes the editable `.pth`
+    # before it reaches the locked script, rolling back neither. So
+    # `pip install -e .` must not run against a venv serving this gateway.
+    #
+    # It does not have to run at all, though. An editable install needs no
+    # reinstall for a source change -- `src` is already on `sys.path`, so merged
+    # code is live the moment the merge lands. The only thing the reinstall was
+    # still buying is a dependency a new revision added, and installing a
+    # dependency never touches the project's own console script. A
+    # dependency-only sync therefore keeps the guarantee that motivated the
+    # refusal -- never leave a revision on disk whose dependencies are missing --
+    # without asking pip to do the one thing it cannot do here.
+    #
+    # The substitute step runs with THIS backend's interpreter for the same
+    # reason the build+stage step does: the logic is revision-independent, so
+    # resolving it from the target would make the step's very EXISTENCE
+    # contingent on the pulled revision carrying dep_sync.
+    fetch_step = ([git_bin, "fetch", remote, BASE_BRANCH], "standard",
+                  _build_env(with_credentials=True), "Pull")
+    merge_step = ([git_bin, "merge", "--ff-only", f"{remote}/{BASE_BRANCH}"], "strict",
+                  _build_env(), "Pull")
     if locked_scripts:
-        # Refuse the WHOLE sync rather than omitting just the reinstall.
-        #
-        # pip cannot replace a running executable on Windows, and its uninstall
-        # is not atomic: it renames the dist-info aside and deletes the editable
-        # `.pth` before it reaches the locked script, rolling back neither. That
-        # alone argues for not starting pip.
-        #
-        # But merging without installing is not a safe consolation prize. A
-        # revision that adds a dependency would land on disk with that dependency
-        # absent, the run would exit 0, and the UI would offer "restart gateway
-        # to apply" — so the next restart imports the new code, fails on the
-        # missing import, and the gateway does not come back. Any newly spawned
-        # subprocess hits the same gap even without a restart. That is the same
-        # unstartable-gateway outcome this guard exists to prevent, just later
-        # and with a success report in front of it.
-        #
-        # The checkout is therefore left at a revision whose dependencies are
-        # satisfied, and the remedy names itself.
-        return {"ok": False, "error": (
-            "refusing to sync: cannot reinstall into the venv this gateway runs "
-            f"from. {', '.join(locked_scripts)} is locked by a running process, so "
-            "a reinstall cannot replace it — and pip's uninstall is not "
-            "atomic, so attempting it would strip the editable install on the way "
-            "out and leave the venv unable to import the package at all. Pulling "
-            "without installing is refused too: a revision whose new dependencies "
-            "are missing crashes the gateway on its next restart. Stop the gateway "
-            "and sync from a terminal instead: "
-            # Every path is absolute and quoted. `-e .` would resolve against the
-            # terminal's cwd, and this project's normal working state is several
-            # worktrees side by side — so a command copied out of a feature
-            # worktree would install THAT checkout into the primary venv and
-            # repoint its editable install at the wrong tree. `git -C` already
-            # pins the pull, which makes an unpinned `.` actively misleading:
-            # the line reads as if it were cwd-independent. Quoting covers the
-            # spaces that are normal in a Windows home directory.
-            f'git -C "{repo}" pull --ff-only '
-            f'&& "{target_py}" -m pip install -e "{repo}"'
-        )}
-    raw_steps: list[tuple[list[str], str, dict, str]] = [
-        ([git_bin, "fetch", remote, BASE_BRANCH], "standard",
-         _build_env(with_credentials=True), "Pull"),
-        ([git_bin, "merge", "--ff-only", f"{remote}/{BASE_BRANCH}"], "strict", _build_env(), "Pull"),
-        ([str(target_py), "-m", "pip", "install", "-e", "."], "strict", _build_env(), "pip install"),
-    ]
+        logger.info(
+            "dev-fleet: %s locked by a running process; substituting a "
+            "dependency-only sync for the editable reinstall",
+            ", ".join(locked_scripts),
+        )
+        # The revision the venv was installed from is resolved HERE, before any
+        # step runs, because this is the last point at which HEAD still describes
+        # it -- and dep_sync needs those declarations to tell an extra the operator
+        # uses from one they do not. `git_bin` is handed over rather than
+        # re-resolved from PATH so the child spawns the same vetted binary.
+        installed_rev = await _git(repo, "rev-parse", "HEAD")
+        if installed_rev is None:
+            return {"ok": False, "error": (
+                "refusing to sync: cannot resolve the current revision, so the "
+                "extras this venv was installed from cannot be determined"
+            )}
+        # Dependencies are installed BEFORE the merge, and dep_sync reads the
+        # incoming declarations out of the fetched ref with `git show` rather than
+        # from the working tree. A failure therefore leaves HEAD where it was, on a
+        # revision whose dependencies are satisfied; the reverse order would
+        # advance the checkout and only then discover it cannot be started.
+        # Installing for a revision that then fails to merge just leaves an unused
+        # package behind, which is the cheaper of the two mistakes.
+        # The merge consumes the ref dep_sync PINNED, not `<remote>/<base>`: a
+        # concurrent fetch can advance the remote-tracking ref between the
+        # dependency install and this merge, which would install for one revision
+        # and merge another -- the missing-dependency outcome the step exists to
+        # prevent. dep_sync is the only writer of that ref.
+        steps = [
+            fetch_step,
+            ([
+                sys.executable, "-m", dep_sync.__name__, str(repo), str(target_py),
+                str(git_bin), installed_rev.strip(), f"{remote}/{BASE_BRANCH}",
+            ], "strict", _build_env(), "pip install"),
+            ([git_bin, "merge", "--ff-only", dep_sync.PIN_REF], "strict",
+             _build_env(), "Pull"),
+        ]
+    else:
+        steps = [
+            fetch_step,
+            merge_step,
+            ([str(target_py), "-m", "pip", "install", "-e", "."], "strict",
+             _build_env(), "pip install"),
+        ]
+    raw_steps: list[tuple[list[str], str, dict, str]] = steps
     # The whole FRONTEND half of the sync is skipped on an edition checkout.
     #
     # The build runs under _build_env(), whose allowlist (_SAFE_ENV_KEYS) drops
