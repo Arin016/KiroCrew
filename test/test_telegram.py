@@ -10,6 +10,7 @@ turn + callback routing (transport_dispatch.py).
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -215,7 +216,10 @@ class _Ev:
 
 
 class FakeProvider:
-    supports_steer = True
+    # ``cwd`` is part of the real provider interface: the dispatcher authorizes
+    # the renderer's outbound-upload root from it, so a double without it fails
+    # every turn on an AttributeError rather than on anything under test.
+    supports_steer, cwd = True, os.getcwd()
 
     def __init__(self, reply: str = "Answer", models: list | None = None) -> None:
         self._reply = reply

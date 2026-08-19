@@ -33,8 +33,15 @@ class TestCapabilityFlag:
     def test_files_inbound_enabled(self):
         assert TELEGRAM_CAPABILITIES.files_inbound is True
 
-    def test_files_outbound_still_disabled(self):
-        assert TELEGRAM_CAPABILITIES.files_outbound is False
+    def test_files_outbound_enabled(self):
+        # Backed by sendPhoto multipart: the renderer extracts a sealed segment's
+        # local rasters and posts each through client.send_photo. Assert the verb
+        # exists too -- the flag alone is what `_uploads_enabled` reads, so a
+        # declaration without an implementation would be a silent drop.
+        from kiro_crew.telegram.client import TelegramClient
+
+        assert TELEGRAM_CAPABILITIES.files_outbound is True
+        assert hasattr(TelegramClient, "send_photo")
 
 
 # ── Client _dispatch extracts attachments from Telegram updates ────────────────

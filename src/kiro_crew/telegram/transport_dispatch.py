@@ -375,6 +375,7 @@ class TelegramDispatcher:
             TELEGRAM_CAPABILITIES,
             session_key=session_key,
             message_thread_id=int(thread) if thread else None,
+            uploads_allowed=not self._uploads_restricted(session_key),
         )
         # Same gate as Discord, for the same reason: Telegram also runs its own
         # copy of the turn loop rather than going through ``drive_turn``, so a
@@ -425,6 +426,10 @@ class TelegramDispatcher:
                 model=self._model_pref.get(route) or None,
             )
             _acquired = True
+            # The approved upload root is the acquired provider's OWN cwd, read
+            # here rather than anywhere a reply could influence it. Until this
+            # lands the renderer's root is empty, which disables uploads.
+            renderer.authorize_upload_root(provider.cwd)
             if is_new:
                 await self.sessions.set_channel(session_key, channel_id)
             # Bind this chat as the session's outbound mirror so a turn the user
@@ -1375,6 +1380,40 @@ class TelegramDispatcher:
     def _authorized(self, user_id: int) -> bool:
         # Deny-by-default (callbacks bypass transport.receive, so re-check here).
         return bool(user_id) and bool(self._allowed) and user_id in self._allowed
+
+    def _uploads_restricted(self, session_key: str) -> bool:
+        """True when this session must not ship local file bytes to Telegram.
+
+        Discord's twin (``discord/transport_dispatch._uploads_restricted``) probes
+        a resumed ``dashboard:`` slot's incognito/temporary mode, because a Discord
+        conversation can be BOUND to one, and a session the user expected to leave
+        no trace must not post its local files into a channel others can read.
+
+        Telegram cannot resolve that mode: it has no session-resume path and no
+        ``dashboard_state`` handle to read a slot from, so the probe Discord runs
+        has nothing here to run against. Rather than copy a branch that cannot
+        execute, this refuses to guess -- a ``dashboard:`` key is denied outright,
+        which is STRICTER than Discord (it denies a non-restricted dashboard
+        session too) and is the safe direction for a mode we cannot read. Every
+        key this dispatcher builds is ``telegram:``- or ``unified:``-scoped
+        (``build_dm_session_key``), so nothing legitimate is denied today; the
+        branch exists so whatever binds Telegram to a dashboard session later is
+        fail-closed instead of silently allowed.
+
+        Hoisting the incognito probe into a channel-neutral gate is deferred to
+        #4919; when it lands it REPLACES this predicate rather than sitting beside
+        it. The denial is SEL-audited so the ceiling is observable.
+        """
+        if not session_key.startswith("dashboard:"):
+            return False
+        sel().log_api_access(
+            caller=session_key,
+            operation="telegram_dispatch.upload_files",
+            outcome="denied",
+            source="telegram",
+            error="restricted_session",
+        )
+        return True
 
     def _resolve_agent(self) -> str:
         return self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCREW_AGENT

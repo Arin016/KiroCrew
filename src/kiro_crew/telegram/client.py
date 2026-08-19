@@ -25,7 +25,9 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
+from kiro_crew.messaging.display_safety import redact_for_display
 from kiro_crew.metrics.provider import get_recorder
+from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,37 @@ _ALBUM_MAX_MEMBERS = 10
 _ALBUM_MAX_GROUPS = 64
 # Safe chunk boundary (leave room for markdown overhead).
 TELEGRAM_CHUNK_LIMIT = 4000
+
+#: Bot API ceiling for a ``sendPhoto`` upload. Handed to outbound extraction as
+#: its per-file bound, so an oversize image is refused THERE -- keeping its
+#: markdown in the reply text with a reason -- rather than being cut out of the
+#: text and then rejected by Telegram, which is a file the user can neither see
+#: nor find. Bots may push 50 MB through ``sendDocument``; that path is not
+#: wired yet (v1 is raster-images-only), so the photo ceiling is the real one.
+TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+
+#: Caption length for a media message. Far below the 4096 text cap, and Telegram
+#: rejects the whole upload when it is exceeded rather than truncating.
+TELEGRAM_CAPTION_MAX = 1024
+
+#: References considered per sealed segment. Telegram uploads one photo per call,
+#: so there is no per-message attachment cap to mirror; this bounds how many
+#: pictures one answer can post before the rest are refused WITH a reason.
+TELEGRAM_MAX_FILES_PER_MESSAGE = 10
+
+#: Aggregate byte budget for one sealed segment. Not a Bot API limit (each photo
+#: is its own request) -- it is the MEMORY bound, because extraction holds every
+#: file's bytes at once and 10 x 10 MiB would be 100 MiB resident per seal.
+TELEGRAM_MAX_TOTAL_UPLOAD_BYTES = 25 * 1024 * 1024
+
+#: Extension per sniffed raster type, for the synthetic upload filename.
+_MIME_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+}
 
 #: sendRichMessage markdown payload limit (Bot API 10.1 Rich Messages). Far
 #: larger than sendMessage's 4096. The rich path carries the segment's raw
@@ -79,6 +112,21 @@ _TG_HTML_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)[^>]*>")
 #: Longest HTML entity we expect ("&blockquote;"-class names are not used by the
 #: renderer, but stay generous so a cut never lands inside "&amp;"/"&#1234;").
 _MAX_ENTITY_LEN = 12
+
+
+def _safe_caption(alt: str) -> str:
+    """Redact an alt-derived photo caption, then truncate.
+
+    Redaction FIRST: truncating first could cut a secret in half and let the
+    surviving prefix through, and the two operations do not commute. The display
+    form is what is scanned because the caption reaches the reader with markdown
+    emphasis collapsed, so a credential written ``AKIA*IDENT*IFIER`` is separated
+    to a raw byte scan and contiguous to the person reading it.
+    """
+    out, _ = redact_for_display(
+        alt, lambda s: redact_credentials(redact_exfiltration_urls(s)[0])[0]
+    )
+    return out[:TELEGRAM_CAPTION_MAX]
 
 
 def _cut_points(text: str) -> list[tuple[int, int, int]]:
@@ -417,6 +465,73 @@ class TelegramClient:
             params.pop("parse_mode", None)
             result = await self._api("sendMessage", params)
         return result.get("message_id") if result else None
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        data: bytes,
+        mime: str,
+        *,
+        caption: str = "",
+        message_thread_id: int | None = None,
+    ) -> int | None:
+        """Upload one raster as a photo (``sendPhoto``). Returns the message_id.
+
+        Takes BYTES, never a path. The bytes have already cleared the outbound
+        extraction gates (denylist, symlink refusal, descriptor-pinned read,
+        magic-byte sniff) against one inode, and re-opening the path here would
+        resolve the name a second time -- anything able to write that directory
+        in between could substitute what gets sent.
+
+        Multipart rather than JSON because that is the only way to hand the Bot
+        API bytes it does not already hold: a JSON ``photo`` field must be a URL
+        or an existing ``file_id``. Everything else about the call -- the shared
+        session, the proxy, the 429 back-off, the duration metric, the token-free
+        error logging -- rides the same :meth:`_api` path as every other method.
+
+        The filename is SYNTHESIZED from the sniffed ``mime``, not carried over
+        from the source path. Telegram re-encodes a photo and serves it under its
+        own file id, so the original name buys the reader nothing -- while putting
+        an agent-influenced string into a ``Content-Disposition`` header. A name
+        derived from the type that was already proven by magic bytes cannot carry
+        anything untrusted at all, which is cheaper than sanitizing one.
+
+        ``caption`` is the reply's markdown alt text: untrusted text heading for
+        the wire, so it is redacted HERE rather than trusted from the caller --
+        this method is the one boundary every upload path crosses. Redaction runs
+        on the DISPLAY form, because Telegram collapses formatting for the reader
+        and a credential split by emphasis markers is invisible to a raw scan.
+        It is then truncated to :data:`TELEGRAM_CAPTION_MAX` (Telegram rejects
+        the whole call above it) and sent as plaintext: a stray ``<`` under
+        ``parse_mode=HTML`` would 400 the upload for no gain.
+
+        Returns None on failure so the caller can report the file as undelivered
+        rather than dropping it silently.
+        """
+        filename = f"image.{_MIME_EXT.get(mime, 'bin')}"
+        safe_caption = _safe_caption(caption)
+
+        def _form() -> aiohttp.FormData:
+            # A factory, not a value: aiohttp consumes a FormData on write, and
+            # reusing one for _api's 429 retry raises "Form data has been
+            # processed already" -- which would turn a routine rate limit into a
+            # lost upload.
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            if message_thread_id is not None:
+                form.add_field("message_thread_id", str(message_thread_id))
+            if safe_caption:
+                form.add_field("caption", safe_caption)
+            form.add_field(
+                "photo",
+                data,
+                filename=filename,
+                content_type="application/octet-stream",
+            )
+            return form
+
+        result = await self._api("sendPhoto", {}, timeout=120, form=_form)
+        return result.get("message_id") if isinstance(result, dict) else None
 
     async def send_rich_message(
         self,
@@ -1080,6 +1195,7 @@ class TelegramClient:
         *,
         record: bool = True,
         err_out: dict | None = None,
+        form: Callable[[], Any] | None = None,
     ) -> Any:
         """Call a Bot API method. Returns the 'result' field or None on error.
 
@@ -1093,6 +1209,12 @@ class TelegramClient:
         PERMANENT failure (the method does not exist on this server) apart from
         a transient one (rate limit, network), so they can stop re-probing an
         unsupported method without disabling it on a blip.
+
+        ``form``, when supplied, builds a multipart body used INSTEAD of the JSON
+        ``params`` -- the only shape that can carry bytes the Bot API does not
+        already hold (see :meth:`send_photo`). It is a factory rather than a
+        value because aiohttp consumes a ``FormData`` on write, so the 429 retry
+        above needs a fresh one.
         """
         session = await self._ensure_session()
 
@@ -1111,7 +1233,8 @@ class TelegramClient:
             try:
                 async with session.post(
                     url,
-                    json=params,
+                    json=None if form is not None else params,
+                    data=form() if form is not None else None,
                     proxy=self._proxy,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as resp:

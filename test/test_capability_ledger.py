@@ -126,11 +126,14 @@ class TestCorrectedDeclarations:
         # answer for one of them.
         from kiro_crew.discord.transport import DISCORD_CAPABILITIES
         from kiro_crew.slack.transport import SLACK_CAPABILITIES
+        from kiro_crew.telegram.transport import TELEGRAM_CAPABILITIES
 
         assert DISCORD_CAPABILITIES.files_inbound is True
         assert DISCORD_CAPABILITIES.files_outbound is True
         assert SLACK_CAPABILITIES.files_inbound is True
         assert SLACK_CAPABILITIES.files_outbound is True
+        assert TELEGRAM_CAPABILITIES.files_inbound is True
+        assert TELEGRAM_CAPABILITIES.files_outbound is True
 
     def test_max_buttons_declares_totals_the_renderers_ship(self) -> None:
         # The field is TOTAL choices, not a per-row layout number. The old

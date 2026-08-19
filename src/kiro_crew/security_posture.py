@@ -551,6 +551,21 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "contiguously -- it is re-scanned here, on the form that actually leaves.",
     ),
     (
+        "Telegram transformed image text",
+        "telegram/renderer.py",
+        "Image-markup removal can join previously separated text into a credential; "
+        "the transformed body is re-scanned before Telegram receives it, on its "
+        "display form, because the reader sees markdown emphasis collapsed.",
+    ),
+    (
+        "Telegram photo caption",
+        "telegram/client.py",
+        "The caption on an uploaded photo, from its markdown alt text. Extraction "
+        "unescapes that text before the wire, reassembling a backslash-escaped "
+        "credential the TurnDriver's stream scan never saw contiguously -- it is "
+        "re-scanned here, before truncation can split a secret and pass a prefix.",
+    ),
+    (
         "Telegram failure reason",
         "telegram/transport_dispatch.py",
         "The bounded failure reason a permanent AcpError surfaces in the chat "

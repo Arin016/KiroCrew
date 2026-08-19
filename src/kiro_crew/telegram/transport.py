@@ -72,7 +72,13 @@ TELEGRAM_CAPABILITIES = TransportCapabilities(
     edit=True,
     reactions=True,  # setMessageReaction — used for the steer-ack receipt
     files_inbound=True,  # photos/documents ingested via telegram/attachments.py
-    files_outbound=False,
+    # Sealed-segment image upload: the renderer extracts local rasters out of a
+    # semantic seal and posts each through client.send_photo (sendPhoto
+    # multipart). The renderer READS this flag in ``_uploads_enabled`` before it
+    # extracts anything, so the flag is the switch rather than a description of
+    # one -- declaring it False makes Telegram keep printing the markdown path,
+    # which is the honest degradation.
+    files_outbound=True,
     rich_blocks=False,
     threads=True,
     max_message_chars=TELEGRAM_CHUNK_LIMIT,

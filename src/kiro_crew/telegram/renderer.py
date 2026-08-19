@@ -26,14 +26,32 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
 import time
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 from kiro_crew.constants import OPTIONS_RE_TRAILER, split_trailing_protocol_suffix
+from kiro_crew.messaging.display_safety import redact_for_display
+from kiro_crew.messaging.outbound_files import (
+    ExtractLimits,
+    OutboundFile,
+    Rejection,
+    extract_local_refs_off_loop,
+    hide_local_refs,
+    protected_ref_spans,
+)
 from kiro_crew.messaging.renderer import Renderer, apply_options_cap
 from kiro_crew.messaging.transport import TransportCapabilities
-from kiro_crew.telegram.client import TELEGRAM_RICH_MAX_CHARS
+from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.sel import sel
+from kiro_crew.telegram.client import (
+    TELEGRAM_MAX_FILES_PER_MESSAGE,
+    TELEGRAM_MAX_TOTAL_UPLOAD_BYTES,
+    TELEGRAM_PHOTO_MAX_BYTES,
+    TELEGRAM_RICH_MAX_CHARS,
+)
 
 if TYPE_CHECKING:
     from kiro_crew.telegram.client import TelegramClient
@@ -59,6 +77,38 @@ _EDIT_THROTTLE_S = 1.0
 
 # Interactive approval wait; deny-by-default when it elapses with no press.
 _APPROVAL_TIMEOUT_S = 300.0
+
+# Channel ceilings handed to outbound extraction. A file Telegram would reject is
+# refused THERE, while its markdown is still in the text and can carry a reason --
+# refusing after the markup was cut out is a picture the user can neither see nor
+# find. Deliberately separate symbols from image_artifacts' identically-shaped
+# budgets, so retuning one resource cannot silently retune the other.
+_UPLOAD_LIMITS = ExtractLimits(
+    max_files=TELEGRAM_MAX_FILES_PER_MESSAGE,
+    max_total_bytes=TELEGRAM_MAX_TOTAL_UPLOAD_BYTES,
+    max_file_bytes=TELEGRAM_PHOTO_MAX_BYTES,
+)
+
+# Refusal lines shown before the rest collapse into one "…and N more".
+_MAX_REJECTION_LINES = 3
+
+
+def _redact_all(text: str) -> str:
+    text, _ = redact_exfiltration_urls(text)
+    return redact_credentials(text)[0]
+
+
+def _redact_transformed(text: str) -> str:
+    """Re-scan text whose image markup was just removed.
+
+    Cutting a span out JOINS the characters that surrounded it, so two halves of
+    a credential the upstream stream scan saw as separated can become contiguous
+    here. Scanned on the display form because Telegram collapses markdown for the
+    reader, which hides a split the raw bytes still show.
+    """
+    text, _ = redact_for_display(text, _redact_all)
+    return text
+
 
 # Fallback placeholder for a turn that failed without a user-safe reason. The
 # retry wording is only correct for transient failures; a permanent failure
@@ -103,7 +153,7 @@ _STEER_MARKER_RE = re.compile(r"\[STEERING\b[^\]]*\]", re.IGNORECASE)
 _STEER_SUMMARY_RE = re.compile(r"\[STEERING\s+steer-[0-9a-f]+\s*:\s*([^\]]*)\]", re.IGNORECASE)
 
 
-def _strip_steering(text: str) -> str:
+def _strip_steering(text: str, *, keep_edges: bool = False) -> str:
     """Remove kiro-cli's inline ``[STEERING …]`` steer-ack marker from output.
 
     Also strips an UNCLOSED trailing ``[STEERING …`` (still streaming, no closing
@@ -111,11 +161,14 @@ def _strip_steering(text: str) -> str:
     and then vanishes when ``on_done`` finally strips the completed marker — a
     jarring show-then-vanish. Stripping the partial marker keeps the draft in
     sync with the final message.
+
+    ``keep_edges`` skips the trailing ``strip()`` -- see ``_strip_hr`` for why the
+    outbound-extraction path must not lose leading whitespace.
     """
     cleaned = _STEER_MARKER_RE.sub("", text)  # complete markers anywhere
     cleaned = re.sub(r"\[STEERING\b[^\]]*$", "", cleaned)  # unclosed, still streaming
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)  # collapse gaps left behind
-    return cleaned.strip()
+    return cleaned if keep_edges else cleaned.strip()
 
 
 def _neutralize_md(raw: str) -> str:
@@ -126,13 +179,18 @@ def _neutralize_md(raw: str) -> str:
     return re.sub(r"[*_`\[\]()]", "", t)
 
 
-def _strip_hr(text: str) -> str:
+def _strip_hr(text: str, *, keep_edges: bool = False) -> str:
     """Drop Markdown horizontal rules (``---`` / ``***`` / ``___`` on their own
     line) — they render as literal dashes on Telegram and just add noise.
     Fenced code blocks are stashed first so a standalone ``---`` INSIDE a code
     block (e.g. a YAML document separator) is never touched. An unclosed fence
     mid-stream isn't stashed, but live frames are throttled previews — the
-    final seal sees the closed fence and preserves its content."""
+    final seal sees the closed fence and preserves its content.
+
+    ``keep_edges`` skips the trailing ``strip()``. Display paths want it (a bubble
+    should not open with blank lines), but outbound image extraction MUST NOT:
+    four leading spaces are what mark an image reference as a code literal, so
+    classifying stripped text would upload a picture the author only displayed."""
     stash: list[str] = []
 
     def _keep(fragment: str) -> str:
@@ -145,7 +203,7 @@ def _strip_hr(text: str) -> str:
     out = re.sub(r"(?m)^[ ]{0,3}([-*_])\1{2,}[ \t]*$", "", text)
     out = re.sub(r"\n{3,}", "\n\n", out)
     out = re.sub(r"\x00H(\d+)\x00", lambda m: stash[int(m.group(1))], out)
-    return out.strip()
+    return out if keep_edges else out.strip()
 
 
 def build_inline_keyboard(options: list[str]) -> dict | None:
@@ -627,6 +685,79 @@ def _split_markdown_table_aware(text: str, rendered_limit: int, rich_limit: int)
     return [c for c in out if c.strip()]
 
 
+def _utf16_len(text: str) -> int:
+    """Length in UTF-16 code units, which is what Telegram's cap counts.
+
+    An astral code point (emoji, CJK extensions) is one ``len()`` but TWO units,
+    so a code-point budget lets an emoji-dense payload build a message Telegram
+    rejects. Note the channel-wide mismatch this does NOT fix: every other limit
+    in this client still budgets code points (see ``truncate_html_safe``), which
+    predates this helper and is tracked separately. The recovery path is scoped
+    here because its consequence is LOST DATA -- the rejected chunk is the only
+    remaining copy of a reference -- rather than a clipped display frame.
+    """
+    return len(text) + sum(1 for ch in text if ord(ch) > 0xFFFF)
+
+
+def _utf16_cut(text: str, limit: int) -> int:
+    """Longest code-point prefix length whose UTF-16 length fits ``limit``.
+
+    Indexing a ``str`` cannot split a surrogate pair (Python stores code points),
+    so the returned prefix is always well-formed.
+    """
+    used = 0
+    for index, ch in enumerate(text):
+        used += 2 if ord(ch) > 0xFFFF else 1
+        if used > limit:
+            return index
+    return len(text)
+
+
+def _cap_chunks(text: str, limit: int) -> list[str]:
+    """Split ``text`` into messages of at most ``limit`` UTF-16 units, losing nothing.
+
+    For the failed-upload recovery post, whose text is a reconstructed list of
+    image references rather than authored prose. Extraction already removed those
+    references from the answer, so this post is their ONLY remaining copy: a slice
+    to one message drops every reference past the cap, and a chunk OVER Telegram's
+    cap is rejected with ``send_message`` returning None rather than raising --
+    the same loss from the opposite direction, which is why the budget is measured
+    in the units the platform enforces.
+
+    Packs whole lines while they fit, so a reference stays intact when it can, and
+    hard-cuts only a line that exceeds the cap by itself (a long alt text). The
+    newline BETWEEN packed references is consumed by the message boundary that
+    replaces it; every character of every reference survives.
+
+    Deliberately not the shared markdown splitter: there is no authored structure
+    to preserve here, and its documented fence-scaffolding allowance can return a
+    chunk longer than the limit it was given -- which is the defect this prevents.
+    """
+    # Floor of 2: one astral code point costs 2 units, so a 1-unit budget could
+    # never emit it and the hard-cut loop below would not advance.
+    limit = max(2, limit)
+    out: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while _utf16_len(line) > limit:
+            if current:
+                out.append(current)
+                current = ""
+            cut = _utf16_cut(line, limit)
+            out.append(line[:cut])
+            line = line[cut:]
+        candidate = f"{current}\n{line}" if current else line
+        if _utf16_len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            out.append(current)
+        current = line
+    if current:
+        out.append(current)
+    return out
+
+
 def _strip_md(text: str) -> str:
     """Flatten Markdown to clean plaintext for the streaming typewriter frames
     (and as the safe fallback if an HTML final edit is ever rejected) -- avoids
@@ -692,6 +823,8 @@ class TelegramRenderer(Renderer):
         *,
         session_key: str = "",
         message_thread_id: int | None = None,
+        uploads_allowed: bool = True,
+        upload_root: str = "",
     ) -> None:
         super().__init__(capabilities)
         self._client = client
@@ -702,6 +835,14 @@ class TelegramRenderer(Renderer):
         self._thread_id = message_thread_id
         self._session_key = session_key
         self._buf: list[str] = []
+        # Outbound image upload. ``_upload_root`` is the acquired provider's own
+        # cwd (authorized post-acquire, never model output); a relative or empty
+        # root disables uploads outright. ``_segment_uploads_safe`` is cleared
+        # when a length rotation cut the segment in a way that could change
+        # whether a retained reference is literal -- see _rotate_on_length.
+        self._upload_root = upload_root if os.path.isabs(upload_root) else ""
+        self._uploads_allowed = uploads_allowed
+        self._segment_uploads_safe = True
         self._last_tool = ""
         # Transient tool-activity footer ("🔧 {tool}…") shown ONLY on live
         # streaming frames — never stored in _buf, so seals/finals stay clean.
@@ -815,6 +956,10 @@ class TelegramRenderer(Renderer):
         self._seal_count += 1
         self._pending_chip = chip or ""
         self._buf = []
+        # A new segment starts here, so an unsafe cut in the previous one stops
+        # counting against it. The flag is segment-scoped, not rotation-scoped:
+        # once cleared it stays cleared through the segment's own final seal.
+        self._segment_uploads_safe = True
         if sealed:
             self._open_new_message()
 
@@ -851,7 +996,12 @@ class TelegramRenderer(Renderer):
         Table-bearing segments budget against the RICH cap instead: they seal
         through sendRichMessage, so holding the whole table in one segment is
         what keeps it one rich message rather than a rich head followed by
-        header-less pipe-text continuations."""
+        header-less pipe-text continuations.
+
+        A segment carrying a local image reference is cut BEFORE that reference
+        and the remainder is kept as the live tail, so the reference reaches the
+        semantic seal (the only place that may extract) with its source context
+        intact. Splitter output is never an extraction input."""
         limit = self._limit()
         rendered_cap = self._rendered_limit()
         raw = "".join(self._buf)
@@ -862,6 +1012,18 @@ class TelegramRenderer(Renderer):
             if _rendered_len(raw) <= rendered_cap:
                 return
         raw, protocol_suffix = split_trailing_protocol_suffix(raw)
+        held_tail: str | None = None
+        if self._uploads_enabled() and self._segment_uploads_safe:
+            spans = await asyncio.to_thread(protected_ref_spans, raw)
+            if spans:
+                # spans is sorted, so spans[0] is the earliest complete or
+                # still-arriving reference. At offset 0 the whole buffer is that
+                # span: there is nothing ahead of it to seal, so keep streaming.
+                hold_at = spans[0][0]
+                if hold_at == 0:
+                    self._buf = [raw + protocol_suffix]
+                    return
+                raw, held_tail = raw[:hold_at], raw[hold_at:]
         if _has_table(raw):
             # Table segments seal through sendRichMessage, whose payload budget
             # is far larger than the HTML render cap, so they are budgeted
@@ -871,6 +1033,10 @@ class TelegramRenderer(Renderer):
             # overflow the HTML budget fit ONE rich message and never split.
             rich_cap = self._rich_limit()
             if len(raw) <= rich_cap:
+                if held_tail is not None:
+                    # Held for a reference, and what is left fits: nothing seals,
+                    # so put the buffer back whole rather than dropping the tail.
+                    self._buf = [raw + held_tail + protocol_suffix]
                 return
             # The buffer's final line may still be STREAMING: its next token
             # can arrive after this rotation. A partial row that has not yet
@@ -898,15 +1064,37 @@ class TelegramRenderer(Renderer):
         # wrong for the tail we keep streaming into: every later token would land
         # after that closer, rendering outside <pre>, and the model's real closing
         # fence would then show up literally. Drop it from the retained tail.
-        if chunks and raw.count("```") % 2 == 1:
+        # Skipped when a reference was held: every chunk here is sealed and the
+        # retained tail is the held remainder, which the splitter never touched.
+        if held_tail is None and chunks and raw.count("```") % 2 == 1:
             tail = chunks[-1].rstrip()
             if tail.endswith("```"):
                 chunks[-1] = tail[:-3].rstrip("\n")
-        for ch in chunks[:-1]:
+        if held_tail is not None:
+            sealed, tail_text = chunks, held_tail
+        else:
+            sealed, tail_text = chunks[:-1], (chunks[-1] if chunks else "")
+        if held_tail is None and sealed and self._uploads_enabled() and self._segment_uploads_safe:
+            # A cut can change whether a LATER reference in the retained tail is
+            # a literal: an inline-code run whose opener rotated away leaves its
+            # contents looking like live markup. Probe it with a synthetic
+            # reference plus the prefix's backtick runs at the cut point and
+            # require that EXACT offset to survive as a protected span -- a
+            # different reference surviving would mask the sentinel going
+            # literal. A line longer than the whole budget cannot be cut cleanly
+            # at all. Either way uploads stop for the rest of the segment, which
+            # keeps the markup visible instead of guessing.
+            probe_at = len(prefix := raw.removesuffix(tail_text))
+            probe = prefix + "![x](/tmp/x.png)" + " ".join(re.findall(r"`+", prefix)) + tail_text
+            spans = await asyncio.to_thread(protected_ref_spans, probe)
+            lost = raw.endswith(tail_text) and probe_at not in dict(spans)
+            if lost or any(len(line) > limit for line in raw.splitlines(True)):
+                self._segment_uploads_safe = False
+        for ch in sealed:
             self._buf = [ch]
-            await self._seal_current()
+            await self._seal_current(extract_uploads=False)
             self._open_new_message()
-        self._buf = [(chunks[-1] if chunks else "") + protocol_suffix]
+        self._buf = [tail_text + protocol_suffix]
 
     def _open_new_message(self) -> None:
         """Next render creates a fresh message instead of editing the old one."""
@@ -917,6 +1105,15 @@ class TelegramRenderer(Renderer):
         """Current segment's markdown source (chip already seeded into _buf),
         with the steer marker and horizontal-rule noise stripped."""
         return _strip_hr(_strip_steering("".join(self._buf)))
+
+    def _segment_source(self) -> str:
+        """``_segment_text`` without the edge trim -- the extraction input.
+
+        Classification depends on leading whitespace (four spaces mark an indented
+        code block), so the trimmed display form is the wrong text to hand the
+        extractor: it turns a displayed literal into a live reference.
+        """
+        return _strip_hr(_strip_steering("".join(self._buf), keep_edges=True), keep_edges=True)
 
     async def _stream_live(self, *, force: bool = False) -> None:
         """Throttled in-place edit of the current segment (plaintext, so partial
@@ -931,6 +1128,12 @@ class TelegramRenderer(Renderer):
         # partial) from live frames — it is an internal directive, extracted
         # into the inline keyboard at finalization.
         seg, _ = _extract_options(self._segment_text())
+        if self._uploads_enabled() and self._segment_uploads_safe:
+            # The seal will replace this markup with the picture itself, so a
+            # live frame must not flash the path first. Off-loop because it walks
+            # fence spans; re-redacted because cutting a span joins what
+            # surrounded it and can reassemble a split credential.
+            seg = _redact_transformed(await asyncio.to_thread(hide_local_refs, seg))
         body = _strip_md(seg)
         footer = f"🔧 {self._tool}…" if self._tool else ""
         if footer:
@@ -951,6 +1154,157 @@ class TelegramRenderer(Renderer):
                 self._stream_mid = mid
         else:
             await self._client.edit_message(self._chat_id, self._stream_mid, text)
+
+    def authorize_upload_root(self, root: str) -> None:
+        """Authorize the provider's resolved cwd; invalid roots disable uploads."""
+        self._upload_root = root if os.path.isabs(root) else ""
+
+    def _uploads_enabled(self) -> bool:
+        """Require transport capability, an unrestricted session, and a trusted root."""
+        return (
+            bool(self.capabilities.files_outbound)
+            and self._uploads_allowed
+            and bool(self._upload_root)
+        )
+
+    async def _extract_uploads(self, text: str) -> tuple[str, list[OutboundFile]]:
+        """Extract each sealed segment once, off-loop and fail-soft."""
+        try:
+            result = await extract_local_refs_off_loop(
+                text, within_root=self._upload_root, limits=_UPLOAD_LIMITS
+            )
+        except Exception:
+            logger.warning("telegram: outbound file extraction failed", exc_info=True)
+            return text, []
+        if result.rejections:
+            sel().log_api_access(
+                caller=self._session_key or "telegram",
+                operation="telegram_renderer.upload_files",
+                outcome="denied",
+                source="telegram",
+                resources=f"{len(result.rejections)} rejection(s)",
+                error=",".join(sorted({item.reason for item in result.rejections})),
+            )
+        body = result.rewritten_text.strip()
+        if not body and not result.files:
+            body = text
+        if result.rejections:
+            body = self._append_rejections(body, result.rejections)
+        body = _redact_transformed(body)
+        if result.files:
+            sel().log_api_access(
+                caller=self._session_key or "telegram",
+                operation="telegram_renderer.upload_files",
+                outcome="allowed",
+                source="telegram",
+                resources=f"{len(result.files)} file(s)",
+            )
+        return body, result.files
+
+    def _append_rejections(self, body: str, rejections: list[Rejection]) -> str:
+        """Append refusal reasons only when the answer budget permits."""
+        for rejection in rejections:
+            logger.info("telegram: local image not uploaded (%s)", rejection.reason)
+        lines = [f"⚠️ {rejection}" for rejection in rejections[:_MAX_REJECTION_LINES]]
+        if len(rejections) > _MAX_REJECTION_LINES:
+            lines.append(f"⚠️ …and {len(rejections) - _MAX_REJECTION_LINES} more")
+        note = "\n".join(lines)
+        if len(body) + len(note) + 2 > self._limit():
+            return body
+        return f"{body}\n\n{note}"
+
+    async def _deliver(self, what: str, op: Awaitable[Any]) -> Any:
+        """Run ONE delivery operation in isolation. Returns None on ANY failure.
+
+        THE OUTBOUND FAILURE INVARIANT, which every send on this path routes
+        through: no single delivery operation's failure -- whether it RETURNS
+        None/False or RAISES -- may cascade into the loss of a sibling delivery.
+        Every extracted reference reaches the channel as a photo, as recovered
+        markup, or at minimum as a logged loss; none disappears silently, and
+        none is skipped because a different operation failed.
+
+        Both failure shapes collapse to one falsey answer here because the client
+        reports them interchangeably and the caller cannot tell them apart:
+        ``_api`` returns None for an API-level error, but RAISES on a non-JSON
+        body -- a proxy's HTML error page makes ``resp.json`` throw a ValueError
+        that ``_api``'s ``(ClientError, TimeoutError)`` clause does not catch. A
+        caller handling only None therefore still loses the siblings behind that
+        raise, which is the defect this seam closes. Widening ``_api``'s clause
+        would change every Telegram call site's semantics, so the isolation lives
+        in this path rather than in the shared client.
+        """
+        try:
+            return await op
+        except Exception:
+            logger.warning("telegram: %s failed", what, exc_info=True)
+            return None
+
+    async def _upload_photos(self, files: list[OutboundFile]) -> None:
+        """Post each extracted raster, then surface whatever did not arrive.
+
+        One ``sendPhoto`` per file rather than a media group: a group shares a
+        single caption, so every alt text but one would be silently discarded,
+        and a group fails as a unit. Every send goes through :meth:`_deliver`, so
+        one photo's failure -- returned OR raised -- cannot abandon the files
+        behind it, and this method NEVER raises: it is also called from a
+        ``finally``, where a raise would replace the text path's own exception.
+
+        A file that did not arrive is REPORTED, never dropped: extraction already
+        cut its markdown out of the sealed text, so silence would leave a reply
+        referring to a picture with neither the picture nor its path. The failed
+        references are re-posted as their original markup -- redacted first, since
+        the join that removal caused can reassemble a credential -- across as many
+        messages as it takes, because this post is their only remaining copy and
+        capping it to one message would drop the references past that cap.
+        """
+        undelivered: list[OutboundFile] = []
+        for outbound in files:
+            sent = await self._deliver(
+                "a photo upload",
+                self._client.send_photo(
+                    self._chat_id,
+                    outbound.data,
+                    outbound.mime,
+                    caption=outbound.alt,
+                    message_thread_id=self._thread_id,
+                ),
+            )
+            if sent is None:
+                undelivered.append(outbound)
+        if not undelivered:
+            return
+        logger.warning(
+            "telegram: %d of %d photo(s) did not arrive; re-posting their markup",
+            len(undelivered),
+            len(files),
+        )
+        # Rebuilt from the extractor's own fields rather than sliced out of the
+        # segment source: the offsets that produced these files were computed
+        # before the rewrite, so indexing the source again would need them
+        # re-derived against text that no longer contains the markup.
+        # Redaction runs on the whole recovery BEFORE it is split, so a credential
+        # spanning what becomes a chunk boundary is still scanned contiguously.
+        # Composition is guarded separately from the sends so that this method
+        # stays total: a failure to BUILD the fallback is itself a logged loss.
+        try:
+            chunks = _cap_chunks(
+                _redact_transformed(
+                    "\n".join(f"![{item.alt}]({item.path})" for item in undelivered)
+                ),
+                self._limit(),
+            )
+        except Exception:
+            logger.warning("telegram: could not compose the markup fallback", exc_info=True)
+            return
+        for chunk in chunks:
+            # Per chunk, not per loop: a rejected OR raising chunk k must not
+            # abandon k+1..N, which are the only remaining copies of their own
+            # references. Both shapes are one falsey answer, so both just log.
+            send = self._client.send_message(
+                self._chat_id, chunk, message_thread_id=self._thread_id
+            )
+            if await self._deliver("a recovery chunk", send) is None:
+                logger.warning("telegram: a recovery chunk did not land; its refs are lost")
 
     async def _seal_without_rich(self, text: str) -> tuple[str, str]:
         """HTML for a seal that cannot use Rich Messages, plus the tail segment.
@@ -986,13 +1340,58 @@ class TelegramRenderer(Renderer):
                     html_text = _md_to_telegram_html(text)
         return html_text, text
 
-    async def _seal_current(self, *, keyboard: dict | None = None) -> None:
+    async def _seal_current(
+        self, *, keyboard: dict | None = None, extract_uploads: bool = True
+    ) -> None:
+        """Seal the current segment, uploading any local images it referenced.
+
+        Only SEMANTIC seals may extract. Length rotations pass
+        ``extract_uploads=False`` and seal their splitter-produced chunks
+        verbatim, because a chunk boundary can land inside markup or strip the
+        context that made a reference literal. Extraction runs on the segment's
+        BYTE-FAITHFUL source -- ``_seal_segment_text`` strips before it renders,
+        and leading indentation is exactly what marks a reference as a code
+        literal, so classifying stripped text would upload a picture the author
+        only displayed.
+
+        Text first, then the photos: the prose is the answer and the pictures
+        illustrate it, so that is the order they should appear in. They are
+        SIBLINGS, not a sequence -- see :meth:`_deliver` for the invariant.
+        """
+        source = self._segment_source()
+        files: list[OutboundFile] = []
+        if extract_uploads and source and self._uploads_enabled() and self._segment_uploads_safe:
+            body, files = await self._extract_uploads(source)
+            self._buf = [body]
+        try:
+            await self._seal_segment_text(keyboard=keyboard, image_only=bool(files))
+        finally:
+            # ``finally``, not ``except``: extraction has already cut the markup
+            # out of the sealed text, so these photos are their references' only
+            # remaining copy and a text-path raise must not skip them -- while the
+            # text exception still propagates to the caller unchanged. Safe in a
+            # finally because ``_upload_photos`` is total, so it cannot replace
+            # the in-flight exception with one of its own.
+            if files:
+                await self._upload_photos(files)
+
+    async def _seal_segment_text(
+        self, *, keyboard: dict | None = None, image_only: bool = False
+    ) -> None:
         """Finalize the current segment: replace its live plaintext with the
         formatted HTML (and optional keyboard). Edits the streamed message in
         place, or sends one if the segment never streamed (e.g. throttled out).
         Empty segments are skipped so a bare steer doesn't post a blank bubble."""
         text = self._segment_text().strip()
         if not text:
+            if image_only and keyboard is None:
+                # The pictures ARE the reply, so no "…" bubble is posted. A live
+                # frame may still be showing the pre-extraction text, though, and
+                # leaving it would strand the markup the upload replaces.
+                if self._stream_mid is not None:
+                    await self._client.delete_message(self._chat_id, self._stream_mid)
+                    self._stream_mid = None
+                return
             if keyboard is None:
                 return
             text = "…"
