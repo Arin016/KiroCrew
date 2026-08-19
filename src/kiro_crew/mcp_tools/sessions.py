@@ -23,9 +23,11 @@ from typing import Any
 from kiro_crew import mcp_core
 from kiro_crew.history import ConversationLog
 from kiro_crew.validation import (
+    CREATE_SESSION_SCHEMA,
     GET_CHAT_SESSION_SCHEMA,
     LIST_SESSIONS_SCHEMA,
     SEARCH_CHAT_HISTORY_SCHEMA,
+    SEND_TO_SESSION_SCHEMA,
     validate_tool_args,
 )
 
@@ -106,6 +108,100 @@ def schemas() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["session_key"],
+            },
+        },
+        {
+            "name": "create_session",
+            "description": (
+                "Open a NEW dashboard chat session and optionally give it its "
+                "first instruction. Use when work deserves its own thread rather "
+                "than another turn in this one: a task that will run long, needs "
+                "its own project directory, or should be worked in parallel with "
+                "what you are doing now. The new session appears in the user's "
+                "dashboard exactly as one they opened themselves, and they can "
+                "take it over at any time.\n\n"
+                "This SPENDS the user's credits: passing `goal` starts a turn "
+                "immediately, and that agent runs on its own from then on. Prefer "
+                "spawn_run for work you need the ANSWER to (a sub-agent reports "
+                "back to you and ends); create a session for work that should "
+                "outlive this conversation and stay visible to the user.\n\n"
+                "Omit `agent` to bind the default. `project` sets the session's "
+                "working directory, which is what makes file work land in the "
+                "right tree. Returns the new session key so you can read it back "
+                "later with get_chat_session."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Short human-readable title, as the user will see it in "
+                            "their session list."
+                        ),
+                    },
+                    "goal": {
+                        "type": "string",
+                        "description": (
+                            "First instruction to send. Omit to open the session "
+                            "without starting a turn -- nothing is spent until "
+                            "someone sends a message."
+                        ),
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": ("Agent/crew to bind. Omit for the default agent."),
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model override. Omit to inherit.",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": ("Absolute path to the session's project directory."),
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+        {
+            "name": "send_to_session",
+            "description": (
+                "Send a message into an EXISTING dashboard session, to move work "
+                "along that has stopped for a reason you can supply. The intended "
+                "use is a session stalled on a missing FACT -- a path, a version, "
+                "an answer you already hold -- where handing it over lets the "
+                "agent continue.\n\n"
+                "This starts a turn in that session and spends the user's credits, "
+                "and the message arrives as if the user sent it. `reason` is "
+                "REQUIRED and recorded in the audit log, because an action taken "
+                "on someone else's session has to be answerable for afterwards.\n\n"
+                "It REFUSES a session that is waiting on an approval: a message "
+                "cannot answer an approval, and the decision belongs to the user. "
+                "It also refuses private sessions and your own session. To ask the "
+                "user something, use send_message; to run work yourself, use "
+                "spawn_run; to open new work, use create_session."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_key": {
+                        "type": "string",
+                        "description": ("Target session key, as list_sessions reports it."),
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "What to send. Supply the fact; do not decide.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Why this intervention is warranted. Recorded in the "
+                            "audit log and shown to the user."
+                        ),
+                    },
+                },
+                "required": ["session_key", "message", "reason"],
             },
         },
         {
@@ -426,8 +522,288 @@ def list_sessions(name: str, args: dict[str, Any]) -> str:
     return output
 
 
+def _slot_rows(caller: str) -> list[dict[str, Any]] | None:
+    """Every live slot as ``GET /api/chat/slots`` serializes it, or None.
+
+    This endpoint, not ``/api/chat/slots/{slot}``, is the one that carries the
+    fields these tools gate on. The detail route builds its own body
+    (``key``/``title``/``running``/``queue``/``total`` plus pagination) and has
+    neither ``pending_approval`` nor ``memory_mode``, so guards written against
+    it read missing keys and pass. The list route is ``serialize_slots`` over
+    ``_ChatSlot.to_dict()``, which has all of them, and it does not touch the
+    transcript -- the detail route reads the FULL chained history through a
+    regex redaction pass, which is both wasteful as an existence probe and slow
+    enough on a large session to time out and report a false not-found.
+
+    Typed as Any at the boundary because this path answers with a JSON ARRAY
+    while ``_get`` is annotated for the dict case.
+    """
+    raw: Any = mcp_core._get("/api/chat/slots", session_key=caller)
+    if isinstance(raw, list):
+        return [row for row in raw if isinstance(row, dict)]
+    # A dict here is an error envelope, never a slot list.
+    return None
+
+
+def _find_slot(rows: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
+    return next((row for row in rows if str(row.get("key") or "") == target), None)
+
+
+def create_session(name: str, args: dict[str, Any]) -> str:
+    """Open a new dashboard chat session, optionally seeding its first turn.
+
+    Governed by ``capabilities.spawn``: what this does, in the sense policy cares
+    about, is start a turn that spends the user's credits and runs an agent.
+
+    Three writes, ordered so a failure cannot leave a session running work in the
+    wrong place -- create the slot, set the project directory, then send the goal.
+    Sending first would let the turn begin in the wrong tree, which no later
+    correction undoes.
+
+    The goal is sent with ``?ws=1``. Without it ``/api/chat`` answers with an SSE
+    STREAM for an idle slot (its JSON early-returns are the busy branches), so a
+    successful delivery came back unparseable and was reported as a failure while
+    a merely-queued one reported success -- the receipt inverted on the exact path
+    this tool exists for.
+    """
+    args = validate_tool_args(args, CREATE_SESSION_SCHEMA)
+    title = str(args.get("title") or "").strip()
+    goal = str(args.get("goal") or "").strip()
+    agent = str(args.get("agent") or "").strip()
+    model = str(args.get("model") or "").strip()
+    project = str(args.get("project") or "").strip()
+
+    # STRICT resolution (no /proc ancestor walk): this tool acts on state outside
+    # the caller, and a subagent lives under its parent slot's process tree, so a
+    # lenient walk would vet governance against the parent's surface and audit the
+    # action under the parent's key. Same rule control.py states for autonudge_stop.
+    caller = mcp_core._resolve_session_key_strict()
+    if not caller:
+        return (
+            "Refused: cannot identify the calling session, so this action could "
+            "not be attributed or governed."
+        )
+
+    from kiro_crew.subagent import _vet_spawn_governance
+
+    denied = _vet_spawn_governance(caller, agent, app=mcp_core._governance_app())
+    if denied:
+        mcp_core.sel().log_tool_invocation(
+            session_key=caller,
+            source="mcp",
+            tool_name="create_session",
+            outcome="denied",
+            metadata={"denial": denied, "agent": agent or "default"},
+        )
+        return f"Refused: {denied}"
+
+    body: dict[str, Any] = {"title": title}
+    if agent:
+        body["agent"] = agent
+    if model:
+        body["model"] = model
+    created = mcp_core._post("/api/chat/slots", body)
+    slot = ""
+    if isinstance(created, dict):
+        slot = str(created.get("key") or created.get("slot") or "")
+    if not slot:
+        # The endpoint answers with actionable bodies (409 memory_mode mismatch,
+        # 400 crew_unsupported_slot, 404 slot_not_found, 400 folder_not_found);
+        # reporting a generic failure mis-describes every one of them.
+        detail = ""
+        if isinstance(created, dict) and created.get("error"):
+            detail = f": {created['error']}"
+        mcp_core.sel().log_tool_invocation(
+            session_key=caller,
+            source="mcp",
+            tool_name="create_session",
+            outcome="error",
+            metadata={"stage": "create", "error": detail[2:] or "no session key returned"},
+        )
+        return f"Could not create the session{detail or ': the gateway returned no session key'}."
+
+    # Reported, not raised: the session EXISTS from here on, so an exception would
+    # tell the caller it does not and a silent success would misdescribe it.
+    project_note = ""
+    if project:
+        # The handler reads body["project"]. Sending any other key means it reads
+        # "" and CLEARS the directory while answering 200.
+        resp = mcp_core._post(f"/api/chat/slots/{slot}/project", {"project": project})
+        if isinstance(resp, dict) and resp.get("error"):
+            project_note = (
+                f"\n\nThe project directory was NOT set ({resp['error']}), "
+                "so this session works from the default directory."
+            )
+
+    goal_note = "\n\nNothing is running yet -- it has no instruction."
+    if goal:
+        sent = mcp_core._post("/api/chat?ws=1", {"message": goal, "slot": slot})
+        if isinstance(sent, dict) and sent.get("error"):
+            goal_note = (
+                f"\n\nThe session was created but the first instruction was NOT "
+                f"delivered ({sent['error']}). Nothing is running yet."
+            )
+        elif isinstance(sent, dict) and sent.get("queued"):
+            goal_note = "\n\nThe instruction is queued behind a turn already in flight."
+        else:
+            goal_note = "\n\nIts first turn is running now."
+
+    mcp_core.sel().log_tool_invocation(
+        session_key=caller,
+        source="mcp",
+        tool_name="create_session",
+        outcome="success",
+        metadata={
+            "slot": slot,
+            "agent": agent or "default",
+            "seeded": bool(goal),
+            "project_set": bool(project and not project_note),
+        },
+    )
+    lines = [f"\U0001f195 Opened session **{title or slot}**  \u00b7  `{slot}`"]
+    if agent:
+        lines.append(f"_agent={agent}_")
+    if project and not project_note:
+        lines.append(f"_project={project}_")
+    return mcp_core._redact_history_output("\n".join(lines) + project_note + goal_note)
+
+
+def send_to_session(name: str, args: dict[str, Any]) -> str:
+    """Deliver a message into another live session.
+
+    Governed by ``capabilities.spawn``, as ``create_session`` is, and for the same
+    reason: it starts a turn.
+
+    Every refusal is decided from ONE read of ``GET /api/chat/slots`` and the
+    message is posted to the canonical ``key`` that read returned, not to the
+    caller's string. Checking one endpoint and acting on another let the two
+    disagree: the detail route resolves ``state._slots.get(name)`` raw while
+    ``/api/chat`` goes through ``get_or_create_slot``, which normalizes the name
+    and MINTS a slot when it is absent -- so "an absent session is refused rather
+    than created" rested on the two resolutions happening to agree.
+
+    Guards fail CLOSED on a missing field: a response shape that stops carrying
+    ``pending_approval`` must refuse, not silently permit.
+    """
+    args = validate_tool_args(args, SEND_TO_SESSION_SCHEMA)
+    target = str(args.get("session_key") or "").strip()
+    message = str(args.get("message") or "").strip()
+    reason = str(args.get("reason") or "").strip()
+
+    caller = mcp_core._resolve_session_key_strict()
+
+    def _deny(outcome: str, text: str, denial: str = "") -> str:
+        mcp_core.sel().log_tool_invocation(
+            session_key=caller,
+            source="mcp",
+            tool_name="send_to_session",
+            outcome=outcome,
+            # caller_reason is the agent's justification; denial is why policy or
+            # a guard refused. One field cannot mean both.
+            metadata={"target": target, "caller_reason": reason, "denial": denial or outcome},
+        )
+        return f"Refused: {text}"
+
+    if not caller:
+        return (
+            "Refused: cannot identify the calling session, so this action could "
+            "not be attributed or governed."
+        )
+    if not message:
+        return _deny("invalid", "the message is empty.")
+
+    from kiro_crew.subagent import _vet_spawn_governance
+
+    denied = _vet_spawn_governance(caller, "", app=mcp_core._governance_app())
+    if denied:
+        return _deny("denied", denied, denial=denied)
+
+    rows = _slot_rows(caller)
+    if rows is None:
+        return _deny("unreadable", "could not read the session list, so nothing was sent.")
+    row = _find_slot(rows, target)
+    if row is None:
+        return _deny("not_found", f"no live session {target!r}. Check the slot keys in the board.")
+
+    # Compared on the key the LIST reports, so the guard cannot be defeated by a
+    # differently-shaped identifier. dashboard_slot_key owns the session-key ->
+    # slot-name mapping: a "dashboard:" prefix strip gets it wrong for a
+    # channel-born conversation, whose session key is the channel's own even
+    # while its tab is open.
+    from kiro_crew.dashboard.chat_utils import dashboard_slot_key
+
+    if dashboard_slot_key(caller) == str(row.get("key") or ""):
+        return _deny(
+            "self_target",
+            "that is this session. Use monitor_start to re-prompt yourself on an interval.",
+        )
+    if "memory_mode" not in row:
+        return _deny("shape", "cannot tell whether that session is private, so nothing was sent.")
+    if mcp_core._history_is_incognito(row):
+        return _deny("private", "that session is private.")
+    if "pending_approval" not in row:
+        return _deny(
+            "shape", "cannot tell whether that session owes an approval, so nothing was sent."
+        )
+    if row.get("pending_approval"):
+        return _deny(
+            "awaiting_approval",
+            "that session is waiting on an approval, which only the user can "
+            "answer. Tell the user what it needs instead.",
+        )
+
+    # Audited BEFORE the send, synchronously: log_tool_invocation enqueues by
+    # default and returns success even when the record cannot be written, so a
+    # post-hoc record does not gate anything. critical=True writes through and
+    # re-raises, which is what makes the audit a precondition of the action
+    # rather than a description of it.
+    mcp_core.sel().log_tool_invocation(
+        session_key=caller,
+        source="mcp",
+        tool_name="send_to_session",
+        outcome="invoked",
+        metadata={"target": row.get("key"), "caller_reason": reason},
+        critical=True,
+    )
+
+    sent = mcp_core._post("/api/chat?ws=1", {"message": message, "slot": row.get("key")})
+    if isinstance(sent, dict) and sent.get("error"):
+        mcp_core.sel().log_tool_invocation(
+            session_key=caller,
+            source="mcp",
+            tool_name="send_to_session",
+            outcome="error",
+            metadata={
+                "target": row.get("key"),
+                "caller_reason": reason,
+                "error": str(sent["error"]),
+            },
+        )
+        return f"Could not deliver it: {sent['error']}"
+
+    queued = bool(isinstance(sent, dict) and sent.get("queued"))
+    mcp_core.sel().log_tool_invocation(
+        session_key=caller,
+        source="mcp",
+        tool_name="send_to_session",
+        outcome="success",
+        metadata={"target": row.get("key"), "caller_reason": reason, "queued": queued},
+    )
+    title = str(row.get("title") or target)
+    outcome = (
+        "It is queued behind the turn already in flight, and will be read when that turn ends."
+        if queued
+        else "Its turn is running now."
+    )
+    return mcp_core._redact_history_output(
+        f"\u2192 Sent to **{title}**  \u00b7  `{row.get('key')}`\n_reason: {reason}_\n\n{outcome}"
+    )
+
+
 HANDLERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     "search_chat_history": search_chat_history,
     "get_chat_session": get_chat_session,
     "list_sessions": list_sessions,
+    "create_session": create_session,
+    "send_to_session": send_to_session,
 }

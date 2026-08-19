@@ -2421,6 +2421,26 @@ LIST_SESSIONS_SCHEMA = ToolSchema(
     ],
 )
 
+SEND_TO_SESSION_SCHEMA = ToolSchema(
+    tool_name="send_to_session",
+    fields=[
+        FieldSpec("session_key", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("message", str, required=True, max_len=MAX_MEDIUM_STRING),
+        FieldSpec("reason", str, required=True, max_len=MAX_SHORT_STRING),
+    ],
+)
+
+CREATE_SESSION_SCHEMA = ToolSchema(
+    tool_name="create_session",
+    fields=[
+        FieldSpec("title", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("goal", str, required=False, max_len=MAX_MEDIUM_STRING),
+        FieldSpec("agent", str, required=False, max_len=MAX_SHORT_STRING),
+        FieldSpec("model", str, required=False, max_len=MAX_SHORT_STRING),
+        FieldSpec("project", str, required=False, max_len=MAX_SHORT_STRING),
+    ],
+)
+
 # ── Schema Registry ──
 
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
@@ -2452,6 +2472,8 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "search_chat_history": SEARCH_CHAT_HISTORY_SCHEMA,
     "get_chat_session": GET_CHAT_SESSION_SCHEMA,
     "list_sessions": LIST_SESSIONS_SCHEMA,
+    "create_session": CREATE_SESSION_SCHEMA,
+    "send_to_session": SEND_TO_SESSION_SCHEMA,
     "set_project": SET_PROJECT_SCHEMA,
     "suggest_followup": SUGGEST_FOLLOWUP_SCHEMA,
     "artifact_save": ARTIFACT_SAVE_SCHEMA,
