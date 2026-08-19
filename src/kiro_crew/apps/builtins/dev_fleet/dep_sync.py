@@ -57,6 +57,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+# A real TOML parser is preferred for reading pyproject declarations: three
+# review rounds produced escalating spellings the line scanner misread (inline
+# tables, header comments, multiline-string contents), which is the sign the
+# scanner is the wrong tool for the primary path. `tomllib` is stdlib only from
+# 3.11 (PEP 680) and this project supports 3.10, so the import is guarded --
+# same ladder as `onboarding_import.py` -- and the hardened line scanner stays
+# as the 3.10-without-tomli fallback.
+try:
+    import tomllib as _toml  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    try:
+        import tomli as _toml  # type: ignore[no-redef,import-not-found]
+    except ModuleNotFoundError:
+        _toml = None  # type: ignore[assignment]
+
 #: Characters that terminate the distribution name at the head of a PEP 508
 #: requirement (version specifier, extras bracket, marker separator, or the
 #: whitespace some declarations put before the specifier).
@@ -73,10 +88,15 @@ _PROJECT = "kirocrew"
 
 #: ``requires-python`` lower bounds. Only the floor is enforced: it is the bound
 #: a revision raises when it starts using newer syntax, and the one whose breach
-#: makes the merged tree unimportable under this interpreter. Upper bounds and
-#: exclusions are left to pip on the next real reinstall rather than
-#: reimplemented here without a PEP 440 parser.
-_PY_FLOOR = re.compile(r">=?\s*(\d+)\.(\d+)")
+#: makes the merged tree unimportable under this interpreter. A compatible
+#: release ``~=X.Y`` declares the same floor as ``>=X.Y`` (its upper bound is
+#: someone else's problem, like every other upper bound here), and the equality
+#: pins ``==X.Y.*`` and ``===X.Y.Z`` declare their named version as the floor
+#: the same way -- their upper side is an upper bound like any other. A third
+#: component tightens the floor to the micro release, and a bare ``>`` excludes
+#: the named version itself. Upper bounds and exclusions are left to pip on the
+#: next real reinstall rather than reimplemented here without a PEP 440 parser.
+_PY_FLOOR = re.compile(r"(===|==|>=?|~=)\s*(\d+)\.(\d+)(?:\.(\d+))?")
 
 
 #: A plain PEP 508 distribution name -- letters, digits, and the separators PEP
@@ -267,9 +287,8 @@ def dependency_authority_moved(repo: Path, git_bin: Path, rev: str) -> str | Non
     pyproject = show(repo, git_bin, rev, "pyproject.toml")
     if pyproject is None:
         return "the incoming revision has no pyproject.toml to check"
-    project = _section(pyproject, "project")
-    dynamic = re.search(r"^\s*dynamic\s*=\s*\[([^\]]*)\]", project, re.M)
-    declared_dynamic = dynamic.group(1) if dynamic else ""
+    project = _section(pyproject, "project") or ""
+    declared_dynamic = _declared_dynamic(project)
     for field in ("dependencies", "optional-dependencies"):
         if f'"{field}"' not in declared_dynamic and f"'{field}'" not in declared_dynamic:
             return (
@@ -319,23 +338,28 @@ def requires_python_at(repo: Path, git_bin: Path, rev: str) -> str | None:
     return match.group(1) if match else None
 
 
-def interpreter_version(target_py: Path) -> tuple[int, int] | None:
-    """``(major, minor)`` of *target_py*, or ``None`` if it cannot be asked."""
+def interpreter_version(target_py: Path) -> tuple[int, int, int] | None:
+    """``(major, minor, micro)`` of *target_py*, or ``None`` if it cannot be asked.
+
+    The micro component matters: a ``requires-python`` floor can name one
+    (``>=3.10.5``), and reporting only the minor would make a 3.10.0 interpreter
+    indistinguishable from a 3.10.5 one at exactly the boundary being checked.
+    """
     proc = subprocess.run(
-        [str(target_py), "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+        [str(target_py), "-c", "import sys;print('%d.%d.%d' % sys.version_info[:3])"],
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
         return None
     try:
-        major, minor = proc.stdout.strip().split(".")
-        return int(major), int(minor)
+        major, minor, micro = proc.stdout.strip().split(".")
+        return int(major), int(minor), int(micro)
     except ValueError:
         return None
 
 
-def python_floor_breach(spec: str, version: tuple[int, int]) -> str | None:
+def python_floor_breach(spec: str, version: tuple[int, ...]) -> str | None:
     """The highest ``requires-python`` floor *version* fails, if it fails one.
 
     ``pip install -e .`` doubles as this project's interpreter gate: a revision
@@ -343,13 +367,21 @@ def python_floor_breach(spec: str, version: tuple[int, int]) -> str | None:
     than installed. A dependency-only sync spawns no such check, so the gate has
     to be applied here or a merged revision becomes unimportable under the
     interpreter that has to import it.
+
+    Compared at three components, with an absent micro reading as ``.0`` on both
+    sides, so ``>=3.10.5`` refuses a 3.10.0 interpreter instead of being
+    truncated to its minor. A bare ``>`` excludes the named version itself.
     """
-    breached: tuple[int, int] | None = None
-    for major, minor in _PY_FLOOR.findall(spec):
-        floor = (int(major), int(minor))
-        if version < floor and (breached is None or floor > breached):
+    v = (tuple(version) + (0, 0, 0))[:3]
+    breached: tuple[int, int, int] | None = None
+    breached_text: str | None = None
+    for op, major, minor, micro in _PY_FLOOR.findall(spec):
+        floor = (int(major), int(minor), int(micro) if micro else 0)
+        fails = v <= floor if op == ">" else v < floor
+        if fails and (breached is None or floor > breached):
             breached = floor
-    return f"{breached[0]}.{breached[1]}" if breached else None
+            breached_text = f"{major}.{minor}" + (f".{micro}" if micro else "")
+    return breached_text
 
 
 def installed_names(target_py: Path) -> set[str]:
@@ -387,6 +419,17 @@ def active_extras(extras: dict[str, list[str]], present: set[str]) -> list[str]:
     return sorted(active)
 
 
+#: What :func:`console_script_target_at` returns when the authoritative
+#: declaration EXISTS and omits the script: the entry point is removed as of that
+#: revision. Distinct from ``None``, which means the declarations could not be
+#: read at all -- collapsing the two would let a removal merge silently, leaving
+#: the locked wrapper dispatching to a target the revision may have deleted. A
+#: truthy string that is never a valid ``module:attr`` (it contains spaces), so
+#: the mismatch comparison in ``main`` treats a removal like any other
+#: disagreement between the declaration and the installed wrapper.
+SCRIPT_REMOVED = "removed by the incoming revision"
+
+
 def console_script_target_at(repo: Path, git_bin: Path, rev: str, script: str) -> str | None:
     """The ``module:attr`` *script* is declared to dispatch to as of *rev*.
 
@@ -395,17 +438,78 @@ def console_script_target_at(repo: Path, git_bin: Path, rev: str, script: str) -
     dynamic but NOT ``scripts``, so setuptools builds the wrapper from the
     pyproject table and ignores setup.cfg's copy. Reading only setup.cfg would
     miss a repoint made in the file that actually decides it.
+
+    setup.cfg is consulted only when setuptools itself would read it: when there
+    is no ``[project]`` table at all (pre-PEP 621 metadata), or when ``scripts``
+    is declared dynamic. A ``[project]`` table that neither names ``scripts``
+    (as a ``[project.scripts]`` table, an inline table, or dotted keys -- any
+    spelling TOML allows counts) nor declares it dynamic makes the field
+    statically absent: setuptools builds no wrapper from setup.cfg's copy
+    (verified empirically against setuptools 80.9), so the entry point has been
+    REMOVED as of *rev* -- reported as :data:`SCRIPT_REMOVED`, not read out of
+    setup.cfg's stale copy, which would report an agreement that no longer
+    holds. The same removal answer covers a table that exists but omits
+    *script*. An omission in setup.cfg itself (when it IS the authority) stays
+    ``None`` rather than a removal: setup.py can also declare entry points and
+    cannot be read here, so that omission is missing evidence, not a known
+    removal. Read with the real TOML parser when the interpreter provides one
+    (tomllib on 3.11+, tomli when importable); the hardened line scanner is the
+    fallback for 3.10 without tomli and for text the parser rejects. Successive
+    reviews produced one scanner-missed spelling per round (inline tables,
+    header comments, multiline-string contents), which is the signal the
+    scanner cannot be the primary path.
     """
     pyproject = show(repo, git_bin, rev, "pyproject.toml")
-    if pyproject is not None:
+
+    # Primary path: a real TOML parser, when the interpreter provides one. The
+    # scanner below exists only for 3.10 without tomli (and unparseable text);
+    # it cannot be made spelling-complete, which successive review rounds
+    # demonstrated one spelling at a time.
+    parsed = _toml_load(pyproject) if pyproject is not None else None
+    if parsed is not None:
+        project_tbl = parsed.get("project")
+        if isinstance(project_tbl, dict):
+            scripts_tbl = project_tbl.get("scripts")
+            if isinstance(scripts_tbl, dict):
+                target = scripts_tbl.get(script)
+                return target if isinstance(target, str) else SCRIPT_REMOVED
+            dynamic_val = project_tbl.get("dynamic")
+            dynamic_list = dynamic_val if isinstance(dynamic_val, list) else []
+            if "scripts" not in dynamic_list:
+                return SCRIPT_REMOVED
+        return _setup_cfg_script_target(repo, git_bin, rev, script)
+
+    scripts = _section(pyproject, "project.scripts") if pyproject is not None else None
+    if scripts is None and pyproject is not None:
+        scripts = _inline_scripts(pyproject)
+    if scripts is not None:
+        key = rf"(?:{re.escape(script)}|\"{re.escape(script)}\"|'{re.escape(script)}')"
         match = re.search(
-            rf"^\s*{re.escape(script)}\s*=\s*[\"']([^\"']+)[\"']",
-            _section(pyproject, "project.scripts"),
+            rf"^\s*{key}\s*=\s*[\"']([^\"']+)[\"']",
+            scripts,
             re.M,
         )
-        if match:
-            return match.group(1)
+        return match.group(1) if match else SCRIPT_REMOVED
 
+    if pyproject is not None:
+        # No scripts declaration anywhere in pyproject. setup.cfg's copy governs
+        # only when setuptools would actually read it: either there is no
+        # ``[project]`` table at all (pre-PEP 621 metadata), or ``scripts`` is
+        # declared dynamic. A ``[project]`` table that neither names ``scripts``
+        # nor declares it dynamic makes the field statically absent -- setuptools
+        # builds no wrapper and ignores setup.cfg's copy (verified empirically
+        # against setuptools 80.9) -- so the entry point is removed as of *rev*
+        # and setup.cfg's agreement is stale.
+        project = _section(pyproject, "project")
+        if project is not None:
+            declared_dynamic = _declared_dynamic(project)
+            if '"scripts"' not in declared_dynamic and "'scripts'" not in declared_dynamic:
+                return SCRIPT_REMOVED
+    return _setup_cfg_script_target(repo, git_bin, rev, script)
+
+
+def _setup_cfg_script_target(repo: Path, git_bin: Path, rev: str, script: str) -> str | None:
+    """setup.cfg's declared target for *script* at *rev*, or ``None``."""
     cfg_text = show(repo, git_bin, rev, "setup.cfg")
     if cfg_text is None:
         return None
@@ -419,23 +523,124 @@ def console_script_target_at(repo: Path, git_bin: Path, rev: str, script: str) -
     return None
 
 
-def _section(toml_text: str, header: str) -> str:
-    """The body of one ``[header]`` table, without a TOML parser.
+def _toml_load(toml_text: str) -> dict | None:
+    """*toml_text* parsed by the real TOML parser, or ``None`` when unavailable.
 
-    Only ever used to isolate ``[project.scripts]``, whose entries are flat
-    ``name = "module:attr"`` lines.
+    ``None`` means "no authoritative parse exists" -- either the interpreter has
+    no parser (3.10 without tomli) or the text is not valid TOML -- and sends the
+    caller to the line scanner, which degrades the same way it always has rather
+    than inventing a new failure mode for invalid input.
     """
-    lines = toml_text.splitlines()
-    out: list[str] = []
+    if _toml is None:
+        return None
+    try:
+        return _toml.loads(toml_text)
+    except Exception:
+        return None
+
+
+def _inline_scripts(toml_text: str) -> str | None:
+    """``[project]``'s ``scripts`` declared inline or dotted, as flat lines.
+
+    TOML lets the scripts table be spelled without its own ``[project.scripts]``
+    header: an inline table (``scripts = { name = "..." }``) or dotted keys
+    (``scripts.name = "..."``) inside ``[project]``. Either spelling is the same
+    authoritative declaration setuptools builds the wrapper from, so reading
+    setup.cfg when a revision uses one of them would consult the stale copy in
+    exactly the case where the two disagree. Returns the entries as
+    ``name = value`` lines (an empty string when the declaration exists and
+    names nothing), or ``None`` when ``[project]`` declares no ``scripts`` key
+    in either form.
+    """
+    project = _section(toml_text, "project")
+    if project is None:
+        return None
+    entries: list[str] = []
+    found = False
+    for line in project.splitlines():
+        dotted = re.match(
+            r"\s*scripts\s*\.\s*(?:\"([^\"]+)\"|'([^']+)'|([A-Za-z0-9._-]+))\s*=\s*(.+)",
+            line,
+        )
+        if dotted:
+            found = True
+            name = dotted.group(1) or dotted.group(2) or dotted.group(3)
+            entries.append(f"{name} = {dotted.group(4)}")
+            continue
+        inline = re.match(r"\s*scripts\s*=\s*\{(.*)\}\s*(?:#.*)?$", line)
+        if inline:
+            found = True
+            for item in inline.group(1).split(","):
+                key, sep, value = item.partition("=")
+                if sep:
+                    name = key.strip().strip("'\"")
+                    entries.append(f"{name} = {value.strip()}")
+    return "\n".join(entries) if found else None
+
+
+#: TOML multiline strings (basic and literal). Their CONTENTS are data, not
+#: structure: a line inside one can look exactly like a table header or a
+#: ``name = "value"`` entry, so the line scanner blanks them before scanning.
+#: Non-greedy matching ends a basic string at the first unescaped-looking
+#: delimiter -- an embedded ``\"""`` escape can end it early, which is accepted
+#: for a fallback path (the parser-first primary path is exact).
+_TOML_MULTILINE_STRING = re.compile(r'"""(?:[^"]|"(?!""))*"""|\'\'\'(?:[^\']|\'(?!\'\'))*\'\'\'')
+
+
+def _blank_multiline_strings(toml_text: str) -> str:
+    """*toml_text* with every multiline string's span reduced to blank lines."""
+    return _TOML_MULTILINE_STRING.sub(lambda m: "\n" * m.group(0).count("\n"), toml_text)
+
+
+def _declared_dynamic(project_body: str) -> str:
+    """The ``dynamic = [...]`` array's contents with comments removed.
+
+    TOML allows comments between the elements of a multi-line array, so comment
+    text must not read as a declared field -- in either direction: a commented
+    ``"scripts"`` must not send the console-script read to setup.cfg's stale
+    copy, and a commented ``"dependencies"`` must not make a moved field look
+    still-dynamic. Legal PEP 621 dynamic values are bare quoted field names, so
+    everything from ``#`` to end of line is comment, never value.
+    """
+    match = re.search(r"^\s*dynamic\s*=\s*\[([^\]]*)\]", project_body, re.M)
+    if not match:
+        return ""
+    return "\n".join(re.sub(r"#.*", "", line) for line in match.group(1).splitlines())
+
+
+def _section(toml_text: str, header: str) -> str | None:
+    """The body of one ``[header]`` table, or ``None`` when the table is absent.
+
+    Presence and content answer different questions -- an existing table that
+    omits an entry is a REMOVAL of that entry, not an invitation to read a stale
+    copy elsewhere -- so absence is reported distinctly rather than as an empty
+    body. Done without a TOML parser: only ever used on flat tables whose
+    entries are ``name = "value"`` lines. Multiline strings are blanked first so
+    their contents cannot masquerade as headers or entries. The header
+    comparison tolerates the spellings TOML allows on the header line itself --
+    whitespace around the dotted parts, quoted parts, and a trailing comment --
+    because a header that fails to be RECOGNIZED here reads as the table being
+    absent, which is a different answer with different consequences.
+    """
+    wanted = header.split(".")
     inside = False
-    for line in lines:
+    found = False
+    out: list[str] = []
+    for line in _blank_multiline_strings(toml_text).splitlines():
         stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            inside = stripped[1:-1].strip() == header
+        if stripped.startswith("["):
+            matched = re.match(r"\[([^\]]*)\]\s*(?:#.*)?$", stripped)
+            parts = (
+                [p.strip().strip("\"'") for p in matched.group(1).split(".")]
+                if matched
+                else None
+            )
+            inside = parts == wanted
+            found = found or inside
             continue
         if inside:
             out.append(line)
-    return "\n".join(out)
+    return "\n".join(out) if found else None
 
 
 def installed_console_script_target(target_py: Path, script: str) -> str | None:
@@ -648,11 +853,39 @@ def main(argv: list[str] | None = None) -> int:
         if breach:
             return _refuse(
                 f"the incoming revision requires Python {floor_spec} but the "
-                f"target venv runs {version[0]}.{version[1]}, so its code could "
+                f"target venv runs {'.'.join(map(str, version))}, so its code could "
                 "not be imported after a merge.",
                 target_py,
                 repo,
             )
+
+    # The one thing a dependency-only sync structurally cannot deliver: if the
+    # incoming revision REPOINTED or REMOVED the console script, the wrapper on
+    # disk still dispatches to the old target and no amount of dependency
+    # installing refreshes it. The comparison needs nothing from the install, so
+    # it runs here with every other refusal -- before pip as well as before the
+    # merge, keeping the invariant that a refusal leaves BOTH writes unapplied.
+    declared = console_script_target_at(repo, git_bin, incoming_rev, _SCRIPT)
+    installed = installed_console_script_target(target_py, _SCRIPT)
+    removed = declared == SCRIPT_REMOVED
+    if removed or (declared and installed and declared != installed):
+        # A removal refuses even when the installed wrapper's own target cannot
+        # be read: the removal is a fact about the incoming revision alone, and
+        # whatever the locked wrapper dispatches to, the revision that removed
+        # the entry point no longer promises that target exists.
+        change = "removed" if removed else f"repointed to {declared}"
+        wrapper = (
+            f"the installed wrapper still calls {installed}"
+            if installed
+            else "the installed wrapper's target cannot be read to confirm agreement"
+        )
+        return _refuse(
+            f"the {_SCRIPT!r} console script is {change} by the incoming revision "
+            f"while {wrapper}, and that "
+            "wrapper cannot be rewritten while a process is running from it.",
+            target_py,
+            repo,
+        )
 
     specs, chosen, skipped = plan(incoming, previous[1], installed_names(target_py))
     if not specs:
@@ -686,22 +919,6 @@ def main(argv: list[str] | None = None) -> int:
         if proc.returncode != 0:
             return proc.returncode
 
-    # The one thing a dependency-only sync structurally cannot deliver: if the
-    # incoming revision REPOINTED the console script, the wrapper on disk still
-    # dispatches to the old target and no amount of dependency installing
-    # refreshes it. Refuse before the merge rather than leave a wrapper that
-    # cannot start the code it points at.
-    declared = console_script_target_at(repo, git_bin, incoming_rev, _SCRIPT)
-    installed = installed_console_script_target(target_py, _SCRIPT)
-    if declared and installed and declared != installed:
-        return _refuse(
-            f"the {_SCRIPT!r} console script is repointed to {declared} by the "
-            f"incoming revision while the installed wrapper still calls "
-            f"{installed}, and that wrapper cannot be rewritten while a process is "
-            "running from it.",
-            target_py,
-            repo,
-        )
     return 0
 
 

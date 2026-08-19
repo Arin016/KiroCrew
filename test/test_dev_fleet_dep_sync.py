@@ -219,6 +219,54 @@ def test_python_floor_breach_reports_the_highest_unmet_floor():
     assert dep_sync.python_floor_breach(">=3.11,>=3.13", (3, 12)) == "3.13"
 
 
+def test_python_floor_breach_reads_a_compatible_release_as_a_floor():
+    """``~=3.12`` means ``>=3.12,<4``, so its floor half must be enforced.
+
+    Read as declaring no floor at all, a revision that switches its
+    requires-python to the compatible-release spelling and adopts 3.12-only
+    syntax would merge cleanly under a 3.10 interpreter and fail at import.
+    """
+    assert dep_sync.python_floor_breach("~=3.12", (3, 10)) == "3.12"
+    assert dep_sync.python_floor_breach("~=3.10", (3, 12)) is None
+    assert dep_sync.python_floor_breach("~=3.12", (3, 12)) is None
+
+
+def test_python_floor_breach_compares_the_micro_component():
+    """``>=3.10.5`` refuses a 3.10.0 interpreter; truncating to the minor would not.
+
+    The interpreter probe reports three components for the same reason: at
+    exactly the boundary being checked, 3.12.13 and 3.12.14 are different
+    answers, whichever spelling declared the floor.
+    """
+    assert dep_sync.python_floor_breach(">=3.10.5", (3, 10, 0)) == "3.10.5"
+    assert dep_sync.python_floor_breach(">=3.10.5", (3, 10, 6)) is None
+    assert dep_sync.python_floor_breach("~=3.12.14", (3, 12, 13)) == "3.12.14"
+    assert dep_sync.python_floor_breach("~=3.12.14", (3, 12, 14)) is None
+    # A two-component interpreter answer reads as micro 0: the conservative side.
+    assert dep_sync.python_floor_breach(">=3.10.5", (3, 10)) == "3.10.5"
+
+
+def test_python_floor_breach_excludes_the_named_version_under_a_bare_gt():
+    """``>3.10`` excludes 3.10.0 itself; reading it as ``>=`` waves it through."""
+    assert dep_sync.python_floor_breach(">3.10", (3, 10)) == "3.10"
+    assert dep_sync.python_floor_breach(">3.10", (3, 10, 5)) is None
+    assert dep_sync.python_floor_breach(">3.10", (3, 11)) is None
+
+
+def test_python_floor_breach_reads_an_equality_pin_as_a_floor():
+    """``==X.Y.*`` and ``===X.Y.Z`` declare their named version as the floor.
+
+    Left unrecognized they read as no floor at all -- the same silent merge of an
+    unimportable revision the ``~=`` fix closes. Only the floor side is enforced
+    here; a higher interpreter is left to pip like every other upper bound.
+    """
+    assert dep_sync.python_floor_breach("==3.12.*", (3, 11)) == "3.12"
+    assert dep_sync.python_floor_breach("==3.12.*", (3, 12)) is None
+    assert dep_sync.python_floor_breach("==3.12.*", (3, 13)) is None
+    assert dep_sync.python_floor_breach("===3.12.4", (3, 12, 3)) == "3.12.4"
+    assert dep_sync.python_floor_breach("===3.12.4", (3, 12, 4)) is None
+
+
 def test_requires_python_is_read_from_the_incoming_revision():
     with patch.object(dep_sync, "show", _shows(**{"pyproject.toml": _PYPROJECT})):
         assert (
@@ -252,6 +300,203 @@ def test_console_script_target_falls_back_to_setup_cfg():
         )
 
     assert got == "kiro_crew._bootstrap:main"
+
+
+def test_console_script_removed_from_pyproject_is_not_read_from_setup_cfg():
+    """A present-but-omitting ``[project.scripts]`` table means REMOVED.
+
+    setuptools builds the wrapper from the pyproject table when it exists, so a
+    revision whose table drops the script has removed the entry point. setup.cfg's
+    copy is stale in exactly that case, and reading it would report an agreement
+    that no longer holds -- so the answer is the removal sentinel, distinct from
+    the unreadable-declarations ``None``.
+    """
+    removed = _PYPROJECT.replace('kirocrew = "kiro_crew._bootstrap:main"', "")
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": removed, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == dep_sync.SCRIPT_REMOVED
+
+
+def test_console_script_renamed_in_pyproject_reads_as_removed():
+    """A table that lists OTHER scripts but not this one is the rename spelling.
+
+    The stale setup.cfg copy must not be consulted just because the table's
+    remaining entries do not include the script being asked about.
+    """
+    renamed = _PYPROJECT.replace(
+        'kirocrew = "kiro_crew._bootstrap:main"',
+        'kirocrew-next = "kiro_crew._bootstrap:main"',
+    )
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": renamed, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == dep_sync.SCRIPT_REMOVED
+
+
+def test_console_script_absent_with_a_static_project_table_reads_as_removed():
+    """``[project]`` present, ``scripts`` neither named nor dynamic: REMOVED.
+
+    setuptools treats a statically-absent field as authoritative and builds no
+    wrapper from setup.cfg's copy (verified against setuptools 80.9), so reading
+    setup.cfg here would report an agreement the incoming revision no longer
+    makes -- the merge would leave the locked wrapper dispatching to a target
+    the revision may have deleted.
+    """
+    tableless = _PYPROJECT.split("[project.scripts]")[0]
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": tableless, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == dep_sync.SCRIPT_REMOVED
+
+
+def test_console_script_falls_back_to_setup_cfg_when_scripts_is_dynamic():
+    """``dynamic = [..., "scripts"]`` is the one PEP 621 shape that reads setup.cfg."""
+    dynamic = _PYPROJECT.split("[project.scripts]")[0].replace(
+        'dynamic = ["dependencies", "optional-dependencies"]',
+        'dynamic = ["dependencies", "optional-dependencies", "scripts"]',
+    )
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": dynamic, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == "kiro_crew._bootstrap:main"
+
+
+def test_console_script_falls_back_to_setup_cfg_without_a_project_table():
+    """A pyproject with no ``[project]`` table (pre-PEP 621) leaves setup.cfg governing."""
+    build_only = '[build-system]\nrequires = ["setuptools"]\n'
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": build_only, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == "kiro_crew._bootstrap:main"
+
+
+def test_console_script_header_with_a_trailing_comment_is_still_the_declaration():
+    """``[project.scripts]  # note`` is the same table, not an absent one.
+
+    TOML allows a comment after the header; reading that spelling as absence
+    would fall back to setup.cfg's stale copy exactly when pyproject repointed
+    the script.
+    """
+    commented = _PYPROJECT.replace("[project.scripts]", "[ project.scripts ]  # wrapper")
+    repointed = commented.replace("_bootstrap:main", "cli:main")
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": repointed, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == "kiro_crew.cli:main"
+
+
+def test_console_script_declared_as_an_inline_table_is_read_not_setup_cfg():
+    """``scripts = { ... }`` inside ``[project]`` is the authoritative table.
+
+    A revision that spells the declaration inline and repoints the script must
+    be seen as a repoint; the pre-fix fallback read setup.cfg's stale copy,
+    which agreed with the installed wrapper and let the merge proceed.
+    """
+    inline = _PYPROJECT.split("[project.scripts]")[0].replace(
+        'name = "kirocrew"',
+        'name = "kirocrew"\nscripts = { kirocrew = "kiro_crew.cli:main" }',
+    )
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": inline, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == "kiro_crew.cli:main"
+
+
+def test_console_script_omitted_from_an_inline_table_reads_as_removed():
+    """An inline table that names other scripts has removed this one."""
+    inline = _PYPROJECT.split("[project.scripts]")[0].replace(
+        'name = "kirocrew"',
+        'name = "kirocrew"\nscripts = { kirocrew-next = "kiro_crew._bootstrap:main" }',
+    )
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": inline, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == dep_sync.SCRIPT_REMOVED
+
+
+def test_console_script_declared_with_dotted_keys_is_read_not_setup_cfg():
+    """``scripts.kirocrew = ...`` inside ``[project]`` is the same declaration."""
+    dotted = _PYPROJECT.split("[project.scripts]")[0].replace(
+        'name = "kirocrew"',
+        'name = "kirocrew"\nscripts.kirocrew = "kiro_crew.cli:main"',
+    )
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": dotted, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == "kiro_crew.cli:main"
+
+
+def test_console_script_absent_from_dotted_keys_reads_as_removed():
+    """Dotted keys that declare only other scripts are a removal of this one."""
+    dotted = _PYPROJECT.split("[project.scripts]")[0].replace(
+        'name = "kirocrew"',
+        'name = "kirocrew"\nscripts."kirocrew-next" = "kiro_crew._bootstrap:main"',
+    )
+    with patch.object(
+        dep_sync,
+        "show",
+        _shows(**{"pyproject.toml": dotted, "setup.cfg": _SETUP_CFG}),
+    ):
+        got = dep_sync.console_script_target_at(
+            Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+        )
+
+    assert got == dep_sync.SCRIPT_REMOVED
 
 
 def test_merge_not_guaranteed_flags_a_dirty_checkout():
@@ -461,6 +706,8 @@ def test_main_hands_every_spec_to_pip_and_stops_on_failure():
         patch.object(dep_sync, "declared_requirements_at", return_value=(["aiohttp>=3.9,<4"], {})),
         patch.object(dep_sync, "requires_python_at", return_value=None),
         patch.object(dep_sync, "installed_names", return_value=set()),
+        patch.object(dep_sync, "console_script_target_at", return_value=None),
+        patch.object(dep_sync, "installed_console_script_target", return_value=None),
         patch.object(dep_sync, "subprocess") as sp,
     ):
         sp.run.side_effect = fake_run
@@ -534,6 +781,8 @@ def test_main_refuses_a_declaration_that_names_the_project(capsys):
         patch.object(dep_sync, "declared_requirements_at", return_value=(["."], {})),
         patch.object(dep_sync, "requires_python_at", return_value=None),
         patch.object(dep_sync, "installed_names", return_value=set()),
+        patch.object(dep_sync, "console_script_target_at", return_value=None),
+        patch.object(dep_sync, "installed_console_script_target", return_value=None),
         patch.object(dep_sync, "subprocess") as sp,
     ):
         sp.run.return_value = _Ok()
@@ -547,13 +796,18 @@ def test_main_refuses_a_declaration_that_names_the_project(capsys):
 
 
 def test_main_refuses_a_repointed_console_script_before_merging(capsys):
-    """The one gap: a moved entry point cannot be refreshed while it is locked."""
+    """The one gap: a moved entry point cannot be refreshed while it is locked.
+
+    The refusal must also precede the install: the comparison needs nothing from
+    pip, so a mismatch leaves the venv untouched -- requirements are declared here
+    precisely to prove pip was never asked to install them.
+    """
 
     class _Ok:
         returncode = 0
 
     with (
-        patch.object(dep_sync, "declared_requirements_at", return_value=([], {})),
+        patch.object(dep_sync, "declared_requirements_at", return_value=(["aiohttp>=3.9"], {})),
         patch.object(dep_sync, "requires_python_at", return_value=None),
         patch.object(dep_sync, "installed_names", return_value=set()),
         patch.object(dep_sync, "console_script_target_at", return_value="kiro_crew.new:main"),
@@ -566,10 +820,164 @@ def test_main_refuses_a_repointed_console_script_before_merging(capsys):
         rc = dep_sync.main(list(_ARGS))
 
     assert rc == 1
+    assert not sp.run.called
     err = capsys.readouterr().err
     assert "kiro_crew.new:main" in err
     assert "kiro_crew.old:main" in err
     assert "Nothing was merged" in err
+
+
+def test_main_refuses_a_removed_console_script_before_any_write(capsys):
+    """A removal is the same disagreement as a repoint and must refuse end to end.
+
+    The removal sentinel travels the same comparison as a repointed target; were
+    it collapsed into the unreadable-``None``, the sync would exit 0 and the merge
+    would leave the locked wrapper dispatching to a target the revision may have
+    deleted. Requirements are declared here to prove pip was never asked either.
+    """
+
+    class _Ok:
+        returncode = 0
+
+    with (
+        patch.object(dep_sync, "declared_requirements_at", return_value=(["aiohttp>=3.9"], {})),
+        patch.object(dep_sync, "requires_python_at", return_value=None),
+        patch.object(dep_sync, "installed_names", return_value=set()),
+        patch.object(dep_sync, "console_script_target_at", return_value=dep_sync.SCRIPT_REMOVED),
+        patch.object(
+            dep_sync, "installed_console_script_target", return_value="kiro_crew.old:main"
+        ),
+        patch.object(dep_sync, "subprocess") as sp,
+    ):
+        sp.run.return_value = _Ok()
+        rc = dep_sync.main(list(_ARGS))
+
+    assert rc == 1
+    assert not sp.run.called
+    err = capsys.readouterr().err
+    assert "removed" in err
+    assert "kiro_crew.old:main" in err
+    assert "Nothing was merged" in err
+
+
+def test_main_refuses_a_removal_even_when_the_installed_target_is_unreadable(capsys):
+    """A removal is a fact about the incoming revision alone.
+
+    Whatever the locked wrapper dispatches to, the revision that removed the
+    entry point no longer promises that target exists -- so an unreadable
+    installed target must not launder the removal into a merge.
+    """
+
+    class _Ok:
+        returncode = 0
+
+    with (
+        patch.object(dep_sync, "declared_requirements_at", return_value=(["aiohttp>=3.9"], {})),
+        patch.object(dep_sync, "requires_python_at", return_value=None),
+        patch.object(dep_sync, "installed_names", return_value=set()),
+        patch.object(dep_sync, "console_script_target_at", return_value=dep_sync.SCRIPT_REMOVED),
+        patch.object(dep_sync, "installed_console_script_target", return_value=None),
+        patch.object(dep_sync, "subprocess") as sp,
+    ):
+        sp.run.return_value = _Ok()
+        rc = dep_sync.main(list(_ARGS))
+
+    assert rc == 1
+    assert not sp.run.called
+    err = capsys.readouterr().err
+    assert "removed" in err
+    assert "Nothing was merged" in err
+
+
+def test_console_script_multiline_string_contents_are_not_declarations():
+    """Text inside a TOML multiline string must not read as the scripts table.
+
+    A ``description`` string carrying the OLD header and entry would otherwise
+    mask the real repointed declaration below it. Pinned on both read paths:
+    the TOML parser (when available) and the line-scanner fallback, which
+    blanks multiline strings before scanning.
+    """
+    decoy = (
+        "[project]\n"
+        'name = "kirocrew"\n'
+        'description = """\n'
+        "[project.scripts]\n"
+        'kirocrew = "kiro_crew._bootstrap:main"\n'
+        '"""\n'
+        'dynamic = ["dependencies", "optional-dependencies"]\n'
+        "\n"
+        "[project.scripts]\n"
+        'kirocrew = "kiro_crew.cli:main"\n'
+    )
+    for parser in (dep_sync._toml, None):
+        with (
+            patch.object(dep_sync, "_toml", parser),
+            patch.object(
+                dep_sync,
+                "show",
+                _shows(**{"pyproject.toml": decoy, "setup.cfg": _SETUP_CFG}),
+            ),
+        ):
+            got = dep_sync.console_script_target_at(
+                Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+            )
+
+        assert got == "kiro_crew.cli:main"
+
+
+def test_console_script_commented_dynamic_entry_does_not_count_as_declared():
+    """A commented ``"scripts"`` inside the dynamic array is not a declaration.
+
+    TOML allows comments between multi-line array elements; on the scanner
+    fallback the comment text must not send the read to setup.cfg's stale copy
+    when the field is statically absent. Pinned on both read paths.
+    """
+    commented = (
+        "[project]\n"
+        'name = "kirocrew"\n'
+        "dynamic = [\n"
+        '    "dependencies",\n'
+        '    "optional-dependencies",\n'
+        '    # "scripts",\n'
+        "]\n"
+    )
+    for parser in (dep_sync._toml, None):
+        with (
+            patch.object(dep_sync, "_toml", parser),
+            patch.object(
+                dep_sync,
+                "show",
+                _shows(**{"pyproject.toml": commented, "setup.cfg": _SETUP_CFG}),
+            ),
+        ):
+            got = dep_sync.console_script_target_at(
+                Path("/fake/repo"), Path("/fake/git"), "newrev", "kirocrew"
+            )
+
+        assert got == dep_sync.SCRIPT_REMOVED
+
+
+def test_dependency_authority_commented_dynamic_entry_reads_as_moved():
+    """The same comment blindness in the other direction: a move must be seen.
+
+    A commented ``"optional-dependencies"`` means the field is NOT dynamic any
+    more; comment text keeping it looking dynamic would install a stale set.
+    """
+    commented = (
+        "[project]\n"
+        'name = "kirocrew"\n'
+        "dynamic = [\n"
+        '    "dependencies",\n'
+        '    # "optional-dependencies",\n'
+        "]\n"
+    )
+    with patch.object(dep_sync, "show", _shows(**{"pyproject.toml": commented})):
+        moved = dep_sync.dependency_authority_moved(
+            Path("/fake/repo"), Path("/fake/git"), "newrev"
+        )
+
+    assert moved is not None
+    assert "optional-dependencies" in moved
 
 
 def test_main_reports_which_extras_were_left_alone(capsys):
