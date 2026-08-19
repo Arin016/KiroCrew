@@ -336,7 +336,8 @@ describe('MarkdownRenderer path chips — stat gate', () => {
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
     const code = container.querySelector('code')!
     expect(code.querySelector('svg')).toBeNull()
-    expect(code.className).not.toContain('cursor-pointer')
+    // Non-path chips now have cursor-pointer for click-to-copy, but no file glyph.
+    expect(code.className).toContain('cursor-pointer')
   })
 
   it('renders a confirmed directory as a folder chip, not a broken file link', async () => {
@@ -356,7 +357,8 @@ describe('MarkdownRenderer path chips — stat gate', () => {
     const { container } = render(<MarkdownRenderer content={'`/home/user/ghost.md`'} />)
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
     const code = container.querySelector('code')!
-    expect(code.className).not.toContain('cursor-pointer')
+    // Non-path chips now have cursor-pointer for click-to-copy.
+    expect(code.className).toContain('cursor-pointer')
     expect(code.dataset.pathKind).toBeUndefined()
   })
 
@@ -402,7 +404,7 @@ describe('MarkdownRenderer path chips — stat gate', () => {
     )
     await waitFor(() => {
       const code = container.querySelector('code[data-path-kind]')!
-      expect(code.getAttribute('title')).toBe(`${path}\n${hint}`)
+      expect(code.getAttribute('title')).toBe(`${path}\n${hint}\nCtrl+click to copy`)
     })
   })
 
@@ -415,7 +417,7 @@ describe('MarkdownRenderer path chips — stat gate', () => {
     await waitFor(() => {
       const code = container.querySelector('code[data-path-kind]')!
       expect(code.getAttribute('title')).toBe(
-        '/home/user/a.md\nClick to open / Shift+click to show in file manager',
+        '/home/user/a.md\nClick to open / Shift+click to show in file manager\nCtrl+click to copy',
       )
     })
   })
