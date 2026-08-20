@@ -28,7 +28,9 @@ If the dashboard doesn't load after setup:
 ### Chat (`/chat`)
 
 Multi-session parallel chat with full Markdown rendering, syntax-highlighted
-code blocks, Mermaid diagrams, and clickable file paths.
+code blocks, Mermaid diagrams, and clickable file paths. A confirmed local file
+link in an agent reply opens that file in the chat side panel; a `:line` suffix
+opens the file at that line instead of navigating the browser back to Chat.
 
 - **Multiple tabs**: each tab runs its own agent session in parallel
 - **Agent selection**: pick an agent before starting a chat, or switch mid-session
