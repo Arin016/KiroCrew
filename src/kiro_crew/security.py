@@ -4441,6 +4441,12 @@ _CREW_SECRET_LEAVES: list[str] = [
     # gateway's own writers open these paths directly and do NOT route through this
     # gate, so legitimate startup/spawn writes still work.
     "run",
+    # Encrypted secret vault directory — denylists the entire subdirectory so
+    # the key file, ciphertext store, lock, and atomic-write temp files are all
+    # unreadable to the agent through any Kiro Crew-mediated channel (PR 1 of
+    # #2351). The verb-independent sensitive-path backstop covers a scripted
+    # ``python -c "open('~/.kiro/crew/.vault/...')"`` too.
+    ".vault",
 ]
 _SENSITIVE_HOME_DIRS += [
     f"{prefix}/{leaf}" for prefix in _CREW_HOME_PREFIXES for leaf in _CREW_SECRET_LEAVES

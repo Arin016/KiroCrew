@@ -74,6 +74,15 @@ _STRICT_DIRS: list[str] = [
     ".azure",
     ".docker",
     ".kube",
+    # Encrypted secret vault (PR 1 of #2351). The ``.vault`` dir is also a
+    # keystone leaf in ``security._CREW_SECRET_LEAVES`` (which blocks the
+    # agent's in-process tool-call file access), but a spawned ``python -c``
+    # subprocess does an OS ``open()`` that never routes through that gate — so
+    # the vault dir must ALSO be bind-mount-hidden here, exactly as ``.env`` is
+    # in ``_CC_FILES``. Without this a same-UID agent subprocess could read
+    # ``.vault/.vault_key`` and decrypt the store.
+    ".kiro/crew/.vault",
+    ".kirocrew/.vault",
 ]
 
 _STANDARD_DIRS: list[str] = [
@@ -83,6 +92,9 @@ _STANDARD_DIRS: list[str] = [
     ".config/gcloud",
     ".azure",
     ".docker",
+    # Secret vault — hidden in every mode (see _STRICT_DIRS note above).
+    ".kiro/crew/.vault",
+    ".kirocrew/.vault",
 ]
 
 # CC mode: hides all credential dirs including .aws, but selectively exposes
@@ -97,6 +109,9 @@ _CC_DIRS: list[str] = [
     ".azure",
     ".docker",
     ".kube",
+    # Secret vault — hidden in every mode (see _STRICT_DIRS note above).
+    ".kiro/crew/.vault",
+    ".kirocrew/.vault",
 ]
 
 # CC mode: files to expose read-only inside otherwise-hidden dirs.
@@ -417,9 +432,7 @@ sweep came up short.
 """
 
 
-def _fd_sweep_ranges(
-    keep: frozenset[int], limit: int | None = None
-) -> tuple[tuple[int, int], ...]:
+def _fd_sweep_ranges(keep: frozenset[int], limit: int | None = None) -> tuple[tuple[int, int], ...]:
     """Precompute the ``os.closerange`` spans covering ``[0, bound)`` minus *keep*.
 
     Runs in the PARENT, before ``os.fork()``. The probe child of a threaded
@@ -2474,8 +2487,7 @@ def _no_backend_guidance() -> str:
             # it, and it is the same binary the desktop app already spawns.
             cli = _bundled_cli_invocation() or "kirocrew"
             where = (
-                " (that path is inside the running app, so run it while Kiro Crew "
-                "is open)"
+                " (that path is inside the running app, so run it while Kiro Crew " "is open)"
                 if cli != "kirocrew"
                 else ""
             )
@@ -2486,20 +2498,28 @@ def _no_backend_guidance() -> str:
             # substitution executed by the paste, turning a diagnostic into a
             # command-injection vector. Mirrors the quoting the desktop side
             # already does in website/electron/sandbox-profile.js.
-            return base + (
-                "This is an AppImage launch, which no profile is attached to yet. "
-                "Run this in a terminal (it needs sudo, so it cannot be done from "
-                f"the app): {cli} sandbox install-profile --path "
-                f"{shlex.quote(appimage)}{where} — then restart the app. Do NOT "
-                "set the sysctl to 0: that disables a kernel-wide protection for "
-                "every application on the machine. "
-            ) + optout
-        return base + (
-            "Run `kirocrew service install` to install the profile and have "
-            "systemd apply it to the gateway unit. Do NOT set the sysctl to 0: "
-            "that disables a kernel-wide protection for every application on the "
-            "machine. "
-        ) + optout
+            return (
+                base
+                + (
+                    "This is an AppImage launch, which no profile is attached to yet. "
+                    "Run this in a terminal (it needs sudo, so it cannot be done from "
+                    f"the app): {cli} sandbox install-profile --path "
+                    f"{shlex.quote(appimage)}{where} — then restart the app. Do NOT "
+                    "set the sysctl to 0: that disables a kernel-wide protection for "
+                    "every application on the machine. "
+                )
+                + optout
+            )
+        return (
+            base
+            + (
+                "Run `kirocrew service install` to install the profile and have "
+                "systemd apply it to the gateway unit. Do NOT set the sysctl to 0: "
+                "that disables a kernel-wide protection for every application on the "
+                "machine. "
+            )
+            + optout
+        )
     return (
         "If this host genuinely lacks a sandbox backend, set "
         "agent.sandbox_allow_unsandboxed_exec=true in "
@@ -3062,9 +3082,7 @@ def wrap_argv(
         # but the old early return never checked. Now we verify the delegation
         # on macOS kiro-cli spawns; on Linux (where kiro's internal sandbox
         # doesn't apply) or non-kiro spawns, "off" means genuinely unconfined.
-        kiro_spawn_off = (
-            _spawns_kiro_cli(argv) if is_kiro_cli is None else is_kiro_cli
-        )
+        kiro_spawn_off = _spawns_kiro_cli(argv) if is_kiro_cli is None else is_kiro_cli
         if sys.platform == "darwin" and kiro_spawn_off and kiro_internal_sandbox_enabled():
             # Delegation is valid: kiro-cli's sandbox IS active. Apply env scrub
             # (same as _delegate_to_kiro_internal_sandbox) but WITHOUT the
@@ -3372,9 +3390,7 @@ def wrap_argv(
                 and _classify_unavailable(transient) == "no_backend"
                 and not governance_floor
             ):
-                return _first_party_no_backend_passthrough(
-                    argv, sandbox_level, strip_python_env
-                )
+                return _first_party_no_backend_passthrough(argv, sandbox_level, strip_python_env)
             if transient:
                 # The mechanism follows the retry advice rather than leading it: the
                 # cap case is permanently reported transient, so withholding it here
@@ -3470,12 +3486,8 @@ def wrap_argv(
                     "unsandboxed execution. "
                 )
             else:
-                sel_reason = (
-                    "No sandbox backend available and allow_unsandboxed_exec is not set"
-                )
-                refusal = (
-                    "Sandbox backend unavailable and allow_unsandboxed_exec is not set. "
-                )
+                sel_reason = "No sandbox backend available and allow_unsandboxed_exec is not set"
+                refusal = "Sandbox backend unavailable and allow_unsandboxed_exec is not set. "
             # Emit SEL audit event for this security-relevant denial so it
             # appears in the tamper-evident audit log (security-review requirement).
             try:
@@ -3493,8 +3505,7 @@ def wrap_argv(
             except Exception:
                 logger.warning("Failed to emit SEL audit event for sandbox denial", exc_info=True)
             raise SandboxUnavailableError(
-                refusal
-                + "No OS-level sandbox backend is available on this host, and the "
+                refusal + "No OS-level sandbox backend is available on this host, and the "
                 "agent subprocess cannot be safely isolated. "
                 f"Probe detail: {probe_reason}. " + guidance,
                 kind=_classify_unavailable(transient),
@@ -4121,9 +4132,7 @@ def _reconcile_slice_memory_high_off_thread() -> None:
             _check_slice_memory_pressure()
 
     try:
-        threading.Thread(
-            target=_worker, name="agent-slice-memhigh", daemon=True
-        ).start()
+        threading.Thread(target=_worker, name="agent-slice-memhigh", daemon=True).start()
     except RuntimeError as exc:
         # Thread exhaustion. This sits on the agent-spawn path, so it must
         # never abort the spawn. Disarm like any other reconciliation
