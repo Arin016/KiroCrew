@@ -1070,6 +1070,10 @@ async def api_lessons_create(request: web.Request) -> web.Response:
     # omitted the kwarg -- so every NOT-clause sent to this route, from the
     # learn_add MCP tool, the dashboard, or the CLI, was silently lost.
     negative = cleaned.get("negative") or None
+    # Restricts the lesson to one repository; absent means it applies everywhere.
+    # Both write paths carry it, so the JSONL fallback store gates identically to
+    # the vector store rather than injecting a scoped lesson the other withholds.
+    repo_scope = cleaned.get("repo_scope") or None
     # Write to vector store if available, else JSONL
     vs = _get_memory(state).vector_store
     if vs:
@@ -1099,6 +1103,7 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             "user_explicit",
             rule_emb,
             rule_emb_generation,
+            repo_scope,
         )
         # Sweep ONLY when the lesson actually landed. write_lesson returns False
         # for a value its preflight refuses (reachable now that ``negative`` is
@@ -1111,7 +1116,7 @@ async def api_lessons_create(request: web.Request) -> web.Response:
         # wrong for BOTH False cases, so gate on the result rather than the cause.
         if wrote:
             candidates = await asyncio.to_thread(
-                vs.find_contradiction_candidates, rule, 0.4, 0.85, rule_emb
+                vs.find_contradiction_candidates, rule, 0.4, 0.85, rule_emb, repo_scope
             )
             if candidates:
                 # Fire-and-forget via this module's _background_tasks
@@ -1129,6 +1134,7 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             rule=rule,
             category=category,
             negative=negative,
+            repo_scope=repo_scope,
             ts=datetime.now(timezone.utc).isoformat(),
         )
         store = _get_lessons(state, cleaned.get("workspace")) if scope == "workspace" else (

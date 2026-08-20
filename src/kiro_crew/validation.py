@@ -32,6 +32,7 @@ from typing import Any
 # reads as "the computer-use vocabulary" rather than bare names.
 from kiro_crew.computer_use import types as _cu_types
 from kiro_crew.constants import WINDOWS_DEVICE_STEMS
+from kiro_crew.project_scope import SCOPE_FRAGMENT_RE
 
 # ── Constants ──
 
@@ -1033,9 +1034,18 @@ LEARN_ADD_SCHEMA = ToolSchema(
         FieldSpec("rule", str, required=True, max_len=MAX_SHORT_STRING),
         FieldSpec("category", str, allowed=ALLOWED_LESSON_CATEGORIES, default="knowledge"),
         FieldSpec("negative", str, max_len=MAX_SHORT_STRING),
-        # scope/workspace: the learn_add MCP tool (mcp_core.py) and the
-        # /api/lessons handler support workspace-scoped lessons. The "workspace
-        # required when scope='workspace'" rule is enforced in the handler.
+        # Path fragment naming the repository a correction belongs to; absent means
+        # it applies everywhere. The pattern is the gate's own (imported, not
+        # restated), so a value the gate could never satisfy -- a dot segment,
+        # traversal, an empty segment, a drive-qualified path -- is refused HERE
+        # rather than stored as a lesson that reports success and applies nowhere.
+        # Whether the named path exists is still the gate's business, at injection.
+        FieldSpec("repo_scope", str, max_len=MAX_SHORT_STRING, pattern=SCOPE_FRAGMENT_RE),
+        # scope/workspace: the /api/lessons handler stores and lists
+        # workspace-scoped lessons, but that tier does NOT reach a prompt -- the
+        # context builder gates injected lessons on repo_scope instead. The
+        # "workspace required when scope='workspace'" rule is enforced in the
+        # handler.
         FieldSpec("scope", str, allowed=ALLOWED_LESSON_SCOPES, default="global"),
         FieldSpec("workspace", str, max_len=MAX_SHORT_STRING, pattern=WORKSPACE_NAME_RE),
     ],

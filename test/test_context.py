@@ -1209,6 +1209,46 @@ class TestMemoryGetContextQueryWiring:
         kwargs = fake_memory.get_context.call_args.kwargs
         assert kwargs["query"] == "what did we decide about paris"
 
+    def test_an_empty_scoped_lesson_result_does_not_fall_back_to_jsonl(self, tmp_path):
+        # A POPULATED vector store whose rows are all out of scope has already
+        # answered. Falling through would let the JSONL store speak for it and
+        # re-inject rows deleted from it.
+        from types import SimpleNamespace
+
+        from kiro_crew.learn import Lesson
+
+        builder = self._builder(tmp_path)
+        store = builder.get_memory_for(None)
+        store._vector_store = SimpleNamespace(
+            get_episodic_context=lambda query_text, cap: "",
+            get_semantic_context=lambda query_text, cap: "",
+            get_lessons_context=lambda query_text, cap, project_dir=None: "",
+            has_any_lesson=lambda: True,
+        )
+        builder.lessons.save(Lesson(ts="t", rule="JSONL-SENTINEL", category="tool"))
+        msg, _ = builder.build_message("q", True, "s1")
+        assert "JSONL-SENTINEL" not in msg
+
+    def test_an_unpopulated_vector_store_still_yields_jsonl_lessons(self, tmp_path):
+        # The opposite failure: while a first-boot migration is still filling the
+        # vector store it exists but holds nothing, and saved corrections must not
+        # vanish from the prompt in the meantime.
+        from types import SimpleNamespace
+
+        from kiro_crew.learn import Lesson
+
+        builder = self._builder(tmp_path)
+        store = builder.get_memory_for(None)
+        store._vector_store = SimpleNamespace(
+            get_episodic_context=lambda query_text, cap: "",
+            get_semantic_context=lambda query_text, cap: "",
+            get_lessons_context=lambda query_text, cap, project_dir=None: "",
+            has_any_lesson=lambda: False,
+        )
+        builder.lessons.save(Lesson(ts="t", rule="JSONL-SENTINEL", category="tool"))
+        msg, _ = builder.build_message("q", True, "s1")
+        assert "JSONL-SENTINEL" in msg
+
     def test_episodic_injected_exactly_once(self, tmp_path):
         from types import SimpleNamespace
 
@@ -1217,7 +1257,8 @@ class TestMemoryGetContextQueryWiring:
         store._vector_store = SimpleNamespace(
             get_episodic_context=lambda query_text, cap: "[EPISODIC-SENTINEL]",
             get_semantic_context=lambda query_text, cap: "",
-            get_lessons_context=lambda query_text, cap: "",
+            get_lessons_context=lambda query_text, cap, project_dir=None: "",
+            has_any_lesson=lambda: True,
         )
         msg, _ = builder.build_message("q", True, "s1")
         assert msg.count("[EPISODIC-SENTINEL]") == 1
@@ -1236,7 +1277,8 @@ class TestMemoryGetContextQueryWiring:
         store._vector_store = SimpleNamespace(
             get_episodic_context=_episodic,
             get_semantic_context=lambda query_text, cap: "",
-            get_lessons_context=lambda query_text, cap: "",
+            get_lessons_context=lambda query_text, cap, project_dir=None: "",
+            has_any_lesson=lambda: True,
         )
         builder.build_message("find my tokyo notes", True, "s2")
         assert seen == ["find my tokyo notes"]

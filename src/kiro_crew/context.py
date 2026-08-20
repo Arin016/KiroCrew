@@ -2051,35 +2051,40 @@ class ContextBuilder:
                 parts.append(skills_ctx)
         _mark("skills")
 
-        # Lessons: global only — injected for ALL agents (skipped for temporary
-        # sessions).
+        # Lessons: injected for ALL agents (skipped for temporary sessions), gated
+        # by the same project scope the skill loader applies. A lesson with no
+        # ``repo_scope`` applies everywhere, so this changes nothing for an
+        # existing store; a scoped one reaches only sessions whose active project
+        # is inside the named tree.
         #
-        # Workspace-scoped lessons are deliberately NOT merged here. The scope
-        # dates from when a workspace WAS a project, so "workspace lessons" meant
-        # "this project's rules"; project identity now lives on the session
-        # (``slot.project``), leaving the scope with nothing to anchor to. The
-        # merge it replaced was also unreachable in practice: it required
-        # ``workspace != "default"`` while every member resolves to ``default``,
-        # so a lesson saved with ``scope="workspace"`` reported success and then
-        # never reached a prompt. Removing the read keeps that silent failure
-        # from looking like a working feature.
+        # The legacy ``scope="workspace"`` tier is NOT merged here. It dates from
+        # when a workspace WAS a project, and its read was removed because a
+        # workspace no longer identifies one -- project identity lives on the
+        # session (``slot.project``), which is what ``repo_scope`` keys on instead.
         #
         # ``LessonStore`` and ``get_lessons_for`` are intentionally left intact:
         # the per-member memory work re-targets the write side onto them, so the
         # store is dormant here, not dead.
         lessons_ctx = ""
         if not blocks_reads and _group_included(context_groups, CONTEXT_GROUP_LESSONS):
-            # One query, not two: get_lessons_context() already returns "" when the
-            # store holds no lessons, so a separate get_lessons() existence probe
-            # would be a duplicate SELECT * over the same rows (embedding blobs
-            # included) whose only use is an emptiness check.
-            lessons_ctx = (
-                memory.vector_store.get_lessons_context(query_text=query_text, cap=caps.lessons)
-                if memory.vector_store
-                else ""
-            )
-            if not lessons_ctx:
-                lessons_ctx = self.lessons.get_context()
+            # The JSONL store answers when the vector store is absent OR not yet
+            # populated, and stays silent once it holds lessons.
+            #
+            # Two real failures pull in opposite directions here and both are
+            # avoided by keying on POPULATION rather than on the rendered result.
+            # Keying on "the render came back empty" lets the JSONL store speak for
+            # a live store whose rows were simply all out of scope, re-injecting
+            # rows deleted from it. Keying on "a store object exists" instead
+            # silences saved corrections while a first-boot migration is still
+            # filling that store. Population tells the two apart: no rows at all
+            # means the JSONL store is still the authority, rows-but-none-in-scope
+            # means this store already answered.
+            if memory.vector_store and memory.vector_store.has_any_lesson():
+                lessons_ctx = memory.vector_store.get_lessons_context(
+                    query_text=query_text, cap=caps.lessons, project_dir=project
+                )
+            else:
+                lessons_ctx = self.lessons.get_context(project_dir=project)
             if lessons_ctx:
                 if len(lessons_ctx) > caps.lessons:
                     over = len(lessons_ctx) - caps.lessons

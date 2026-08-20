@@ -316,8 +316,14 @@ TEI (Text Embeddings Inference) uses the candle Rust framework with a Metal back
 ### Lessons in Vector Memory
 
 When vector memory is active, lessons are stored as semantic entries:
-- Key: `lesson.<md5_of_rule>` (dedup via hash)
+- Key: `lesson.<md5_of_rule>` when the lesson is global (dedup via hash). A lesson
+  carrying `repo_scope` folds the scope into the hash, so the same rule scoped to two
+  repositories is two rows and an unscoped row keeps its historical key byte-for-byte.
 - Value: a mapping `{"rule": ..., "category": ..., "negative": ...}` — the NOT-clause
+  — plus `"repo_scope": ...` when the lesson is restricted to one repository. The key
+  is absent for a global lesson, so no migration was needed. A `repo_scope` that is
+  present but not a usable string is withheld from injection rather than read as
+  global, and is refused at every write surface.
   is its own field, so a rule containing the separator literal round-trips. Legacy
   rows written as `"rule text"` or `"rule text — NOT: negative text"` stay readable
   (read-time fallback, no migration); they upgrade to the mapping shape only when a
@@ -484,10 +490,16 @@ concurrent native write from being duplicated.
 
 User-taught corrections ("always do X", "never do Y"). Single write path through `vector_memory.write_lesson()`:
 
-1. **Vector memory** (primary): stored as `lesson.<md5hash>` semantic entries with `confidence=1.0, source=user_explicit`. The value is a mapping `{"rule", "category", "negative"}` — the NOT-clause is a separate field; legacy in-band `"rule — NOT: negative"` rows stay readable without migration. Injected via `get_lessons_context()` — separate from `[Semantic Memory]` block.
+1. **Vector memory** (primary): stored as `lesson.<md5hash>` semantic entries with `confidence=1.0, source=user_explicit`. The value is a mapping `{"rule", "category", "negative"}`, plus `"repo_scope"` when the lesson is restricted to one repository — the NOT-clause is a separate field; legacy in-band `"rule — NOT: negative"` rows stay readable without migration. Injected via `get_lessons_context()` — separate from `[Semantic Memory]` block. A scoped lesson is gated by `project_scope.project_scope_satisfied` against the session's active project BEFORE the shown/omitted counts are computed, using the same rule as a skill's `repo_scope`.
 2. **JSONL fallback** (`~/.kiro/crew/lessons.jsonl`): only used when vector memory is not initialized. Read-only migration source once vector memory is active.
 
-**Priority**: vector lessons override JSONL. If `vector_store.get_lessons()` returns entries, JSONL is skipped entirely.
+**Priority**: vector lessons override JSONL. The fallback is keyed on whether the
+vector store holds any renderable lesson at all (`has_any_lesson()`), NOT on whether
+the rendered block came back empty. The two are different: no rows means the JSONL
+store is still the authority (the first-boot migration window), while rows that exist
+but are all out of scope for this project means the vector store already answered, so
+falling back would resurrect lessons the user deleted and ignore the scope gate. A row
+whose `repo_scope` is present but unusable counts as neither.
 
 **Single write path** — all lesson writes go through `write_lesson()` which provides:
 - Substring dedup: "use dark mode" won't duplicate "always use dark mode"
