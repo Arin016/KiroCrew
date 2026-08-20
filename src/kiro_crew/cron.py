@@ -645,6 +645,75 @@ def _record_is_enabled(j: dict[str, Any]) -> bool:
     return not user_paused and not auto_paused
 
 
+def _job_from_record(j: dict[str, Any]) -> CronJob:
+    """Build one :class:`CronJob` from its serialized record.
+
+    Raises ``KeyError``/``TypeError``/``AttributeError`` when the record is
+    malformed (missing required keys, or not shaped like a job object at all).
+    The caller (:meth:`CronService._load`) isolates that failure to THIS entry
+    — one bad record must never discard the rest of the store (#4664).
+    """
+    return CronJob(
+        id=j["id"],
+        name=j["name"],
+        message=j["message"],
+        schedule=CronSchedule(
+            kind=j["schedule"]["kind"],
+            every_secs=j["schedule"].get("every_secs"),
+            at_ts=j["schedule"].get("at_ts"),
+            cron_expr=j["schedule"].get("cron_expr"),
+        ),
+        channel=j.get("channel"),
+        thread_ts=j.get("thread_ts"),
+        # Effective enabled is derived from the two "reasons a job is
+        # off": an explicit user pause and an execution auto-pause
+        # (repeated failures). Deriving it — rather than trusting the
+        # stored `enabled` — is what makes an auto-pause survive a
+        # restart: the failing run sets auto_paused=True, and a
+        # recurring job's `enabled` is otherwise never persisted, so a
+        # naive `enabled` read would resurrect the job on reload.
+        # The predicate (incl. the legacy !enabled fallback) has one
+        # owner, `_record_is_enabled`, shared with
+        # count_enabled_from_disk so the two readers cannot drift.
+        enabled=_record_is_enabled(j),
+        user_paused=j.get("user_paused", not j.get("enabled", True)),
+        auto_paused=j.get("auto_paused", False),
+        last_run_ts=j.get("last_run_ts"),
+        last_status=j.get("last_status"),
+        last_error=j.get("last_error"),
+        created_ts=j.get("created_ts", 0.0),
+        delete_after_run=j.get("delete_after_run", False),
+        last_result=j.get("last_result"),
+        context_enabled=j.get("context_enabled", False),
+        agent_id=j.get("agent_id", ""),
+        approval_mode=j.get("approval_mode", ""),
+        acked_items=j.get("acked_items", []),
+        created_by=j.get("created_by", ""),
+        silent=j.get("silent", False),
+        session_key=j.get("session_key", ""),
+        last_posted_hash=j.get("last_posted_hash", ""),
+        consecutive_dupes=j.get("consecutive_dupes", 0),
+        last_posted_at=j.get("last_posted_at", 0.0),
+        last_failure_hash=j.get("last_failure_hash", ""),
+        last_failure_at=j.get("last_failure_at", 0.0),
+        consecutive_failures=j.get("consecutive_failures", 0),
+        skip_dates=j.get("skip_dates", []),
+        timezone=j.get("timezone", ""),
+        persistent_session=j.get("persistent_session", True),
+        minimal_context=j.get("minimal_context", False),
+        hide_in_chat=j.get("hide_in_chat", False),
+        folder_id=j.get("folder_id", ""),
+        model=j.get("model", ""),
+        agent_sequence=j.get("agent_sequence", []),
+        env=j.get("env", {}),
+        timeout_secs=j.get("timeout_secs", _JOB_TIMEOUT_SECS),
+        strict_schedule=j.get("strict_schedule", False),
+        script=j.get("script", ""),
+        command=j.get("command", ""),
+        timeout=j.get("timeout", 0),
+    )
+
+
 class CronService:
     """Background service for managing and executing scheduled jobs."""
 
@@ -2221,8 +2290,24 @@ class CronService:
             data = json.loads(self._path.read_text())
         except (OSError, json.JSONDecodeError):
             return 0
+        records = data.get("jobs", []) if isinstance(data, dict) else None
+        if not isinstance(records, list):
+            # Mirrors _load's document guard (#4674): a parseable non-object
+            # or a non-list jobs value ({"jobs": null}) would raise an
+            # uncaught AttributeError/TypeError past the handler above and
+            # kill the WS status pusher calling this reader.
+            return 0
         count = 0
-        for j in data.get("jobs", []):
+        for j in records:
+            # Same skip decision as _load (#4664): a record _job_from_record
+            # rejects is not a schedulable job, so it must not be counted —
+            # and a non-dict entry would otherwise crash _record_is_enabled
+            # with an AttributeError this method's handler does not catch,
+            # silently killing the WS status pusher that calls this reader.
+            try:
+                _job_from_record(j)
+            except (KeyError, TypeError, AttributeError):
+                continue
             if _record_is_enabled(j):
                 count += 1
         return count
@@ -3137,68 +3222,41 @@ class CronService:
             st = self._path.stat()
             raw = _preread if _preread is not None else self._path.read_bytes()
             data = json.loads(raw)
-            self._jobs = [
-                CronJob(
-                    id=j["id"],
-                    name=j["name"],
-                    message=j["message"],
-                    schedule=CronSchedule(
-                        kind=j["schedule"]["kind"],
-                        every_secs=j["schedule"].get("every_secs"),
-                        at_ts=j["schedule"].get("at_ts"),
-                        cron_expr=j["schedule"].get("cron_expr"),
-                    ),
-                    channel=j.get("channel"),
-                    thread_ts=j.get("thread_ts"),
-                    # Effective enabled is derived from the two "reasons a job is
-                    # off": an explicit user pause and an execution auto-pause
-                    # (repeated failures). Deriving it — rather than trusting the
-                    # stored `enabled` — is what makes an auto-pause survive a
-                    # restart: the failing run sets auto_paused=True, and a
-                    # recurring job's `enabled` is otherwise never persisted, so a
-                    # naive `enabled` read would resurrect the job on reload.
-                    # The predicate (incl. the legacy !enabled fallback) has one
-                    # owner, `_record_is_enabled`, shared with
-                    # count_enabled_from_disk so the two readers cannot drift.
-                    enabled=_record_is_enabled(j),
-                    user_paused=j.get("user_paused", not j.get("enabled", True)),
-                    auto_paused=j.get("auto_paused", False),
-                    last_run_ts=j.get("last_run_ts"),
-                    last_status=j.get("last_status"),
-                    last_error=j.get("last_error"),
-                    created_ts=j.get("created_ts", 0.0),
-                    delete_after_run=j.get("delete_after_run", False),
-                    last_result=j.get("last_result"),
-                    context_enabled=j.get("context_enabled", False),
-                    agent_id=j.get("agent_id", ""),
-                    approval_mode=j.get("approval_mode", ""),
-                    acked_items=j.get("acked_items", []),
-                    created_by=j.get("created_by", ""),
-                    silent=j.get("silent", False),
-                    session_key=j.get("session_key", ""),
-                    last_posted_hash=j.get("last_posted_hash", ""),
-                    consecutive_dupes=j.get("consecutive_dupes", 0),
-                    last_posted_at=j.get("last_posted_at", 0.0),
-                    last_failure_hash=j.get("last_failure_hash", ""),
-                    last_failure_at=j.get("last_failure_at", 0.0),
-                    consecutive_failures=j.get("consecutive_failures", 0),
-                    skip_dates=j.get("skip_dates", []),
-                    timezone=j.get("timezone", ""),
-                    persistent_session=j.get("persistent_session", True),
-                    minimal_context=j.get("minimal_context", False),
-                    hide_in_chat=j.get("hide_in_chat", False),
-                    folder_id=j.get("folder_id", ""),
-                    model=j.get("model", ""),
-                    agent_sequence=j.get("agent_sequence", []),
-                    env=j.get("env", {}),
-                    timeout_secs=j.get("timeout_secs", _JOB_TIMEOUT_SECS),
-                    strict_schedule=j.get("strict_schedule", False),
-                    script=j.get("script", ""),
-                    command=j.get("command", ""),
-                    timeout=j.get("timeout", 0),
+            records = data.get("jobs", []) if isinstance(data, dict) else None
+            if not isinstance(records, list):
+                # A document that parses but is not an object holding a jobs
+                # LIST (top-level [], a scalar, {"jobs": null}) cannot yield
+                # any job — same salvage story as unparseable JSON (there is
+                # nothing to keep), and without this guard data.get() / the
+                # loop below would raise an uncaught AttributeError/TypeError
+                # into _sync and gateway startup (#4674).
+                logger.warning(
+                    "Failed to load cron store: document is not an object with a jobs list"
                 )
-                for j in data.get("jobs", [])
-            ]
+                self._jobs = []
+                self._reset_fingerprint()
+                return
+            # Per-entry isolation (#4664): one malformed or legacy record must
+            # not discard the whole registry. Each record is built in its own
+            # try block; a bad one is warned about and skipped, and every
+            # well-formed job survives. The whole-store reset below is reserved
+            # for a genuinely unparseable file (json.JSONDecodeError), where
+            # there is nothing to salvage.
+            jobs: list[CronJob] = []
+            for j in records:
+                try:
+                    jobs.append(_job_from_record(j))
+                except (KeyError, TypeError, AttributeError) as entry_exc:
+                    entry_id = (
+                        j.get("id", "<missing id>") if isinstance(j, dict) else "<not an object>"
+                    )
+                    logger.warning(
+                        "Skipping malformed cron job entry (id=%r): %r; "
+                        "the entry will be dropped from the store on the next write",
+                        entry_id,
+                        entry_exc,
+                    )
+            self._jobs = jobs
             # Fingerprint from the stat taken BEFORE the read: if a writer
             # replaced the file between our stat and read we may have loaded the
             # newer content under an older fingerprint, which only costs one
@@ -3209,7 +3267,7 @@ class CronService:
             self._last_mtime_ns = st.st_mtime_ns
             self._last_size = st.st_size
             self._last_digest = hashlib.blake2b(raw, digest_size=16).digest()
-        except (json.JSONDecodeError, KeyError) as exc:
+        except json.JSONDecodeError as exc:
             logger.warning("Failed to load cron store: %s", exc)
             self._jobs = []
             self._reset_fingerprint()
