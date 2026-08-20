@@ -2215,6 +2215,49 @@ def _validate_hook_has_action(args: dict) -> None:
     """A hook must have either a command or skills — an empty hook is invalid."""
     if not args.get("command") and not args.get("skills"):
         raise ValidationError("command", "either command or skills must be provided")
+    # Skills injection only fires for a *standalone* skills hook (no command) on
+    # UserPromptSubmit/AgentSpawn — see ScriptHookStore.fire(), which emits the
+    # "Load skills:" directive only when `hook.skills and not hook.command` and
+    # the event is one of those two. Reject any other pairing at save time so a
+    # hook can never save cleanly and then silently never fire:
+    #   - skills + a command: the command runs but the skills are inert.
+    #   - skills on PreToolUse/PostToolUse/Stop: the directive has no consumer.
+    if args.get("skills"):
+        if args.get("command"):
+            raise ValidationError(
+                "skills",
+                "skills cannot be combined with a command — the skills would "
+                "never fire; use a skills-only hook or drop the skills",
+            )
+        event = args.get("event", "")
+        if event in ("PreToolUse", "PostToolUse", "Stop"):
+            raise ValidationError(
+                "skills",
+                f"skills hooks cannot fire on {event} events — "
+                "choose UserPromptSubmit or AgentSpawn",
+            )
+
+
+def _validate_hook_create(args: dict) -> None:
+    """Validate a hook at creation time: action + regex syntax."""
+    _validate_hook_has_action(args)
+    _validate_hook_regex(args)
+
+
+def _validate_hook_update(args: dict) -> None:
+    """Validate a hook at update time: regex syntax (action already checked by store)."""
+    _validate_hook_regex(args)
+
+
+def _validate_hook_regex(args: dict) -> None:
+    """Reject an invalid regex pattern at save time with a field-level error."""
+    matcher = args.get("matcher", "")
+    mode = args.get("matcher_mode", "glob")
+    if mode == "regex" and matcher:
+        try:
+            re.compile(matcher)
+        except re.error as exc:
+            raise ValidationError("matcher", f"invalid regex: {exc}") from None
 
 
 HOOK_CREATE_SCHEMA = ToolSchema(
@@ -2229,7 +2272,7 @@ HOOK_CREATE_SCHEMA = ToolSchema(
         FieldSpec("timeout", int, min_val=1, max_val=300, default=30),
         FieldSpec("enabled", bool, default=True),
     ],
-    custom_validator=_validate_hook_has_action,
+    custom_validator=_validate_hook_create,
 )
 
 HOOK_UPDATE_SCHEMA = ToolSchema(
@@ -2244,6 +2287,7 @@ HOOK_UPDATE_SCHEMA = ToolSchema(
         FieldSpec("timeout", int, min_val=1, max_val=300),
         FieldSpec("enabled", bool),
     ],
+    custom_validator=_validate_hook_update,
 )
 
 # ── Tool Schemas (File I/O) ──
