@@ -8161,6 +8161,7 @@
       "drop_here_to_remove_from_folder": "拖到此处可从文件夹中移出",
       "drop_to_reference_session": "拖到此处可引用该会话",
       "duplicate": "复制",
+      "experimental": "实验性",
       "expand_folder_name": "展开文件夹 {{name}}",
       "expand_group_results": "展开 {{group}} 的结果",
       "failed_to_load_preview": "加载预览失败。",
