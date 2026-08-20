@@ -5,7 +5,7 @@ import { usePointerDrag } from '../../hooks/usePointerDrag'
 import { useLongPressReorder } from '../../hooks/useLongPressReorder'
 import { Reorder } from 'framer-motion'
 import { FileText, Bot, Workflow, ScrollText, MessageCircleQuestionMark, TerminalSquare, GitCompare, GitPullRequest, GitBranch, Plus, MoreHorizontal, X, Hash, Pen, Columns2, Component, Globe, CircleDot, Folder, Folders, Link as LinkIcon, PanelRight, PanelBottom, Layers, ListTree, Pin } from 'lucide-react'
-import { PanelRightLight, PanelBottomSolid } from '../../components/icons/panels'
+import { PanelRightLight } from '../../components/icons/panels'
 import ActivityViewer from './ActivityViewer'
 import DiffPanel from '../../components/DiffPanel'
 import DetailPanel from '../../components/DetailPanel'
@@ -20,7 +20,6 @@ import { countLines } from '../../components/FileChangeChips'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api/client'
 import { useTerminalEnabled, useTerminalTitle } from '../../utils/terminalRegistry'
-import { adoptTab as adoptBottomTerminal } from '../../hooks/useBottomTerminal'
 import type { usePanelTabs, ViewKind, PanelTab, TabKind } from '../../hooks/usePanelTabs'
 import { PINNED_VIEWS, useAllAppTabs } from '../../hooks/usePanelTabs'
 import { usePersistedBool } from '../../hooks/usePersistedBool'
@@ -429,13 +428,6 @@ export default function SidePanel({
   }, [tabs, closeTab, deleteTerminalSession])
   // Move a terminal tab OUT of this chat into the app-wide bottom panel. Unlike
   // handleCloseTab this must NOT dispose the session — the PTY + xterm live in
-  // terminalRegistry/termCache keyed by session id and simply re-attach in the
-  // bottom panel. Only drop it from this chat once the panel accepts it.
-  const handleTransferToBottom = useCallback((id: string) => {
-    const t = tabs.find(x => x.id === id)
-    if (t?.kind !== 'terminal' || !t.sessionId) return
-    if (adoptBottomTerminal(t.sessionId, t.cwd)) closeTab(id)
-  }, [tabs, closeTab])
   // Diff view preferences — persisted; 'mc-diff-split' is shared with the
   // file view's git-diff toggle so split/unified is one app-wide preference.
   const [diffLineNumbers, setDiffLineNumbers] = usePersistedBool('mc-diff-linenums', false)
@@ -579,7 +571,6 @@ export default function SidePanel({
               instantLayout={resizing}
               onSelect={() => setActive(t.id)}
               onClose={() => handleCloseTab(t.id)}
-              onTransfer={t.kind === 'terminal' ? () => handleTransferToBottom(t.id) : undefined}
             />
           ))}
         </Reorder.Group>
@@ -1011,16 +1002,14 @@ function TerminalTabTitle({ sessionId, fallback }: { sessionId: string; fallback
  *
  *  A component rather than inline JSX inside the map: each chip owns its own
  *  long-press drag state, and a hook cannot be called from a loop. */
-function DraggableTabItem({ tab, active, separator, instantLayout, onSelect, onClose, onTransfer }: {
+function DraggableTabItem({ tab, active, separator, instantLayout, onSelect, onClose}: {
   tab: PanelTab
   active: boolean
   separator: boolean
   /** Skip the layout spring while the panel is being resized — see the caller. */
   instantLayout: boolean
   onSelect: () => void
-  onClose: () => void
-  onTransfer?: () => void
-}) {
+  onClose: () => void}) {
   const { itemProps, dragging } = useLongPressReorder()
   return (
     <Reorder.Item
@@ -1040,12 +1029,12 @@ function DraggableTabItem({ tab, active, separator, instantLayout, onSelect, onC
         // Centered in the group's gap-2.
         <span aria-hidden="true" className="absolute -left-[4.5px] top-1/2 -translate-y-1/2 w-px h-4 bg-border" />
       )}
-      <TabChip tab={tab} active={active} onSelect={onSelect} onClose={onClose} onTransfer={onTransfer} />
+      <TabChip tab={tab} active={active} onSelect={onSelect} onClose={onClose} />
     </Reorder.Item>
   )
 }
 
-function TabChip({ tab, active, onSelect, onClose, closable = true, onTransfer, pinned = false }: { tab: PanelTab; active: boolean; onSelect: () => void; onClose: () => void; closable?: boolean; onTransfer?: () => void; pinned?: boolean }) {
+function TabChip({ tab, active, onSelect, onClose, closable = true, pinned = false }: { tab: PanelTab; active: boolean; onSelect: () => void; onClose: () => void; closable?: boolean; pinned?: boolean }) {
   // Pinned views (Changes / Files / Artifacts) are icon-only when inactive and
   // expand to icon + label when active — a hybrid that keeps the strip compact
   // while still naming the current view. Dynamic (document / terminal) tabs
@@ -1084,28 +1073,16 @@ function TabChip({ tab, active, onSelect, onClose, closable = true, onTransfer, 
             : tab.title}
         </span>
       )}
-      {(onTransfer || closable) && (
+      {closable && (
         <div className="flex items-center gap-0.5 shrink-0">
-          {onTransfer && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onTransfer() }}
-              className={`pi-morph shrink-0 flex items-center justify-center w-[18px] h-[18px] rounded-full transition-all bg-transparent border-none cursor-pointer text-muted hover:text-text hover:bg-bg-hover ${active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70'}`}
-              title={i18nT('pages.chat.sidePanel.move_to_bottom_panel')}
-              aria-label={i18nT('pages.chat.sidePanel.move_to_bottom_panel')}
-            >
-              <PanelBottomSolid size={12} />
-            </button>
-          )}
-          {closable && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onClose() }}
-              className={`shrink-0 -ml-0.5 flex items-center justify-center w-[18px] h-[18px] rounded-full transition-all bg-transparent border-none cursor-pointer text-muted hover:text-text hover:bg-bg-hover ${active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70'}`}
-              title={i18nT('pages.chat.sidePanel.close_tab')}
-              aria-label={i18nT('pages.chat.sidePanel.close_tab')}
-            >
-              <X size={12} />
-            </button>
-          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onClose() }}
+            className={`shrink-0 -ml-0.5 flex items-center justify-center w-[18px] h-[18px] rounded-full transition-all bg-transparent border-none cursor-pointer text-muted hover:text-text hover:bg-bg-hover ${active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70'}`}
+            title={i18nT('pages.chat.sidePanel.close_tab')}
+            aria-label={i18nT('pages.chat.sidePanel.close_tab')}
+          >
+            <X size={12} />
+          </button>
         </div>
       )}
     </div>

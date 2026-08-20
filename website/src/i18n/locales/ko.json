@@ -7771,7 +7771,6 @@
         "menu_summary_desc": "이 세션의 목적과 확인이 필요한 항목",
         "menu_workflows": "워크플로",
         "menu_workflows_desc": "실행·단계·재실행 가능한 스텝",
-        "move_to_bottom_panel": "하단 패널로 이동",
         "open_in_editor": "에디터에서 열기",
         "open_in_editor_2": "{{path}}을(를) 에디터에서 열기",
         "open_side_panel_tab": "사이드 패널 탭 열기",

@@ -7771,7 +7771,6 @@
         "menu_summary_desc": "这个会话在做什么，以及哪些事需要你处理",
         "menu_workflows": "工作流",
         "menu_workflows_desc": "运行、阶段与可重启的步骤",
-        "move_to_bottom_panel": "移到底部面板",
         "open_in_editor": "在编辑器中打开",
         "open_in_editor_2": "在编辑器中打开 {{path}}",
         "open_side_panel_tab": "打开侧边面板标签页",

@@ -32,6 +32,7 @@ import {
 import { confirmedDelivered } from '../utils/sendDelivery'
 import { addNotification, removeNotificationByTs } from '../store/notificationsSlice'
 import { onTerminalReady, sendToTerminalSession } from '../utils/terminalRegistry'
+import { addTab as addDockTerminal } from '../hooks/useBottomTerminal'
 import { interceptSlashCommand, isInterceptedSlashCommand } from './chat/ChatInput'
 import { sseSlotTitle, triggerRefresh } from '../store/dashboardSlice'
 import { api } from '../api/client'
@@ -4639,17 +4640,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       tabsCtlRef.current.openView('browser')
     })
   }, [dispatch])
-  // "Run in terminal" (from chat code blocks): open a FRESH terminal tab in
-  // this chat and run the command in it, starting in the chat's working dir.
-  // The result is echoed back so the code-block button can show sent/failed.
+  // "Run in terminal" (from chat code blocks): open a terminal tab in the
+  // app-wide dock panel and run the command in it, starting in the chat's
+  // working dir. The dock panel persists across routes (unlike chat-scoped
+  // terminal tabs) so the running shell survives navigation.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail || {}
       const code: string = detail.code
       const reqId: string = detail.reqId
       if (typeof code !== 'string' || !code) return
-      dispatch(openActivityPanel())
-      const sessionId = tabsCtlRef.current.openTerminal({ cwd: currentProjectRef.current })
+      const sessionId = addDockTerminal(currentProjectRef.current ?? undefined)
       let settled = false
       const emit = (ok: boolean) => {
         if (settled) return
@@ -4663,7 +4664,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     }
     window.addEventListener('mc:run-in-terminal', handler)
     return () => window.removeEventListener('mc:run-in-terminal', handler)
-  }, [dispatch])
+  }, [])
   // Cold-tab hydration: after a reload (or when restoring a slot's strip from
   // the persisted panel-tabs store), file tabs come back as lightweight
   // references with their heavy content stripped (content === undefined). Read
