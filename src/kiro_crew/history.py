@@ -7259,7 +7259,10 @@ class HistoryConsolidator:
             # learn_add, spawn_run). REJECT_ALL keeps both providers tool-free.
             try:
                 result = await stream_and_collect_json(
-                    client, prompt, approval_policy=ToolApprovalPolicy.REJECT_ALL
+                    client,
+                    prompt,
+                    approval_policy=ToolApprovalPolicy.REJECT_ALL,
+                    model_fallback=True,
                 )
             except Exception:
                 logger.warning(

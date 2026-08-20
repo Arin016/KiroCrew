@@ -173,6 +173,26 @@ def transient_retry_delay(attempt: int) -> float:
     return base + _JITTER_RNG.random() * 0.25 * base
 
 
+def first_advertised_fallback(advertised: Any, rejected: str | None) -> str | None:
+    """First advertised model that is neither *rejected* nor ``"auto"``.
+
+    Used as the reactive replacement when the configured model (often ``"auto"``)
+    is refused mid-prompt — e.g. on a GovCloud partition that does not serve the
+    ``"auto"`` sentinel.  Shared by :func:`run_bg_oneliner` and
+    :func:`stream_and_collect` so every background LLM path has the same
+    fallback behaviour.
+    """
+    rej = (rejected or "").strip().lower()
+    for m in advertised or []:
+        if not isinstance(m, str) or not m.strip():
+            continue
+        low = m.strip().lower()
+        if low == rej or low == "auto":
+            continue
+        return m
+    return None
+
+
 class PromptBusyExhaustedError(Exception):
     """Provider was shut down after prompt-busy retries were exhausted."""
 
@@ -322,20 +342,6 @@ async def run_bg_oneliner(
     # background row can carry, and every other dispatch surface supplies one.
     turn_started = time.monotonic()
 
-    def _first_advertised_fallback(advertised: Any, rejected: str | None) -> str | None:
-        """First advertised model that is neither the rejected id nor the
-        ``"auto"`` sentinel — the reactive replacement when the preferred model
-        is refused mid-prompt."""
-        rej = (rejected or "").strip().lower()
-        for m in advertised or []:
-            if not isinstance(m, str) or not m.strip():
-                continue
-            low = m.strip().lower()
-            if low == rej or low == "auto":
-                continue
-            return m
-        return None
-
     async def _drive(model_to_use: str | None) -> str:
         text = ""
         set_model = getattr(session, "set_model", None)
@@ -431,7 +437,7 @@ async def run_bg_oneliner(
             rejected = getattr(exc, "rejected_model", None)
             advertised = getattr(exc, "advertised", None) or []
             fallback = (
-                _first_advertised_fallback(advertised, rejected)
+                first_advertised_fallback(advertised, rejected)
                 if rejected and not strict_model
                 else None
             )
@@ -773,6 +779,7 @@ async def stream_and_collect(
     session_key: str = "",
     agent: str = "",
     app: str = "",
+    model_fallback: bool = False,
 ) -> str:
     """Stream a message through an LLM provider and collect the full response.
 
@@ -831,6 +838,7 @@ async def stream_and_collect(
         The complete response text.
     """
     transient_attempts = 0
+    _model_fallback_attempted = False
     attempt = 0
     # Accumulates across attempts, so it lives OUTSIDE the retry loop: a turn that
     # was billed and then retried must report the sum, not the last attempt.
@@ -1006,6 +1014,50 @@ async def stream_and_collect(
                 retrying = True
                 continue
 
+            # ── Case 2.5: model rejected (e.g. "auto" on GovCloud) — retry once
+            # with the first advertised model. ──
+            # Same reactive fallback as run_bg_oneliner: some partitions do not
+            # serve the "auto" sentinel, and the advertised list cannot gate it
+            # statically. When the backend rejects a model AND names available
+            # alternatives, retry ONCE with the first usable advertised model.
+            # Only fires when no tokens have streamed (safe to replay) and the
+            # error carries rejection metadata.
+            #
+            # OPT-IN (model_fallback=True): a silent model swap is only correct
+            # for a caller that did NOT choose the model — a background/system
+            # turn on the governed "auto" (history consolidation). An interactive
+            # turn where the user picked a model must surface the rejection, not
+            # swap underneath them (AGENTS.md), so the default is off.
+            rejected = getattr(exc, "rejected_model", None)
+            advertised = getattr(exc, "advertised", None) or []
+            if (
+                model_fallback
+                and not result_text
+                and rejected
+                and advertised
+                and not _model_fallback_attempted
+            ):
+                fallback = first_advertised_fallback(advertised, rejected)
+                if fallback:
+                    _model_fallback_attempted = True
+                    set_model_fn = getattr(provider, "set_model", None)
+                    if set_model_fn:
+                        try:
+                            await set_model_fn(fallback)
+                        except Exception:
+                            logger.debug(
+                                "set_model(%r) failed during model fallback",
+                                fallback,
+                                exc_info=True,
+                            )
+                    logger.warning(
+                        "stream_and_collect: model %r rejected; " "retrying once with %r",
+                        rejected,
+                        fallback,
+                    )
+                    retrying = True
+                    continue
+
             # ── Case 3: fatal (auth, validation, exhausted retries) — propagate. ──
             raise
         finally:
@@ -1063,13 +1115,20 @@ async def stream_and_collect_json(
     *,
     approval_policy: ToolApprovalPolicy = ToolApprovalPolicy.AUTO_APPROVE,
     hooks: HookManager | None = None,
+    model_fallback: bool = False,
 ) -> dict | None:
     """Stream a message and parse the response as JSON.
 
     Combines ``stream_and_collect`` with ``parse_llm_json``.
     Returns parsed dict or None on failure.
     """
-    text = await stream_and_collect(provider, message, approval_policy=approval_policy, hooks=hooks)
+    text = await stream_and_collect(
+        provider,
+        message,
+        approval_policy=approval_policy,
+        hooks=hooks,
+        model_fallback=model_fallback,
+    )
     return parse_llm_json(text)
 
 
