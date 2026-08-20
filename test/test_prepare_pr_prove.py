@@ -42,15 +42,25 @@ def _load_prove():
     checked-out skill tree, so a plain import would leave a ``__pycache__``
     directory in the working copy -- a persistent side effect outside any tmp
     dir, which the blocking no-test-side-effects rule forbids.
+
+    Disabling the write only covers this import. An earlier unguarded import of
+    ``prove`` elsewhere in the suite (or a stale ``.pyc`` left by a prior run)
+    would already have dropped bytecode beside the source, and this helper hands
+    back that cached module -- so we also delete any ``prove`` bytecode after
+    loading, keeping the "no bytecode in the checkout" guarantee order-independent.
     """
     sys.path.insert(0, str(Path(PROVE).parent))
     previous = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     try:
-        return importlib.import_module("prove")
+        module = importlib.import_module("prove")
     finally:
         sys.dont_write_bytecode = previous
         sys.path.pop(0)
+    cached = getattr(module, "__cached__", None)
+    if cached:
+        Path(cached).unlink(missing_ok=True)
+    return module
 
 
 def _load_reporter_plugin(tmp_path: Path):
@@ -322,8 +332,7 @@ def test_a_non_python_production_file_is_still_reverted(tmp_path: Path) -> None:
     _git(repo, "config", "user.name", "prove")
     (repo / "limits.json").write_text('{"max": 1}\n')
     (repo / "mod.py").write_text(
-        "import json\n\n\ndef limit():\n"
-        "    return json.load(open('limits.json'))['max']\n"
+        "import json\n\n\ndef limit():\n" "    return json.load(open('limits.json'))['max']\n"
     )
     (repo / "test_mod.py").write_text(
         "from mod import limit\n\n\ndef test_one():\n    assert limit() == 1\n"
