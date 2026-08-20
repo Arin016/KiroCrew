@@ -4357,7 +4357,13 @@
       "other_search_hint": "Para buscar en conocimiento, artefactos, habilidades o prompts, desactiva Command Bar en la App Store — este lanzador solo alcanza sesiones",
       "cmd_toggle_theme": "Cambiar tema",
       "search_failed": "La busqueda fallo",
-      "retry": "Reintentar"
+      "retry": "Reintentar",
+      "kind": {
+        "app": "Aplicación",
+        "command": "Comando",
+        "setting": "Ajuste",
+        "view": "Vista"
+      }
     }
   },
   "autoImprovement": {

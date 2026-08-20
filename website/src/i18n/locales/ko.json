@@ -802,7 +802,13 @@
       "other_search_hint": "지식, 산출물, 스킬, 프롬프트를 검색하려면 App Store에서 Command Bar를 비활성화하세요 — 이 런처는 세션만 다룹니다",
       "cmd_toggle_theme": "테마 전환",
       "search_failed": "검색 실패",
-      "retry": "다시 시도"
+      "retry": "다시 시도",
+      "kind": {
+        "app": "앱",
+        "command": "명령",
+        "setting": "설정",
+        "view": "보기"
+      }
     },
     "crewCompanion": {
       "accessory": {

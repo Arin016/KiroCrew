@@ -21,7 +21,7 @@ import { i18nT } from '../../i18n/t'
 import { useLanguage } from '../../i18n/LanguageProvider'
 
 import { loadUsage, recordUse, type UsageMap } from './frecency'
-import { rankRootRows, type RankedRow, type RootGroup, type RootRow } from './rootIndex'
+import { rankRootRows, type RankedRow, type RootGroup, type RootRow, type RootRowKind } from './rootIndex'
 
 /**
  * Command Bar — the ⌘K launcher.
@@ -56,6 +56,23 @@ function groupLabel(group: RootGroup): string {
     case 'settings':
       return i18nT('apps.commandBar.group_settings')
   }
+}
+
+/**
+ * The row's own type, for the right-aligned label.
+ *
+ * Keyed off `kind` first: a `view` row opens a surface inside the bar, which is a
+ * different promise from a row that acts and closes, and that difference matters
+ * more to the reader than which group it was filed under. Everything else is named
+ * by its group. There is deliberately no "Quicklink" case -- that group was removed
+ * from this surface for having no writer, so a label for it would name a row type
+ * the bar cannot produce.
+ */
+function kindLabel(row: { kind: RootRowKind; group: RootGroup }): string {
+  if (row.kind === 'view') return i18nT('apps.commandBar.kind.view')
+  if (row.group === 'apps') return i18nT('apps.commandBar.kind.app')
+  if (row.group === 'settings') return i18nT('apps.commandBar.kind.setting')
+  return i18nT('apps.commandBar.kind.command')
 }
 
 function groupIcon(group: RootGroup) {
@@ -434,7 +451,17 @@ export default function CommandBarOverlay({
             aria-controls={listId}
             aria-autocomplete="list"
             aria-activedescendant={rowCount > 0 ? rowId(selected) : undefined}
-            className="flex-1 min-w-0 bg-transparent border-none outline-none rounded text-[13px] text-text placeholder:text-muted focus-visible:ring-1 focus-visible:ring-accent/40"
+            // The cue belongs on the active OPTION -- it says what Enter will do,
+            // which a box round the field does not -- and this input is focused for
+            // the whole life of the dialog, so an unconditional `focus-visible`
+            // utility here renders a permanent box no launcher UI has. But
+            // `aria-activedescendant` is omitted when there are no rows (entering
+            // the sessions view before two characters are typed), and in THAT state
+            // the option cue does not exist, so the field has to carry it or a
+            // keyboard user sees nothing at all.
+            className={`flex-1 min-w-0 bg-transparent border-none outline-none rounded text-[13px] text-text placeholder:text-muted${
+              rowCount === 0 ? ' focus-visible:ring-1 focus-visible:ring-accent/40' : ''
+            }`}
           />
         </div>
 
@@ -525,9 +552,36 @@ export default function CommandBarOverlay({
                           <span className="block truncate text-[11px] text-muted">{rr.subtitle}</span>
                         )}
                       </span>
-                      {isRoot && rr.kind === 'view' && (
-                        <ArrowRight size={13} className="lucide-inline text-muted shrink-0" />
+                      {/* What activating this row will produce, right-aligned. Groups
+                          always render as contiguous blocks under their own header
+                          (rankRootRows sorts on groupOrder), so this is NOT about
+                          groups interleaving -- an earlier version of this comment
+                          claimed that and it was false. The label earns its place
+                          because the only other per-row kind signal is the group
+                          icon, which is self-describing only to a reader who has
+                          already learned it, and because a block taller than the
+                          dialog scrolls its header out of view. `view` rows are
+                          called out separately from their group because they open a
+                          surface inside the bar rather than doing something and
+                          closing -- the one value the icon cannot convey. */}
+                      {/* Root only. In the sessions view every row IS a session and the
+                          scope chip above already says so, so a per-row label there
+                          repeats the chip on every line without telling the reader
+                          anything -- the mixing it disambiguates cannot happen. */}
+                      {isRoot && (
+                        <span className="shrink-0 text-[11px] text-muted">
+                          {kindLabel(rr)}
+                        </span>
                       )}
+                      {/* The arrow gets a slot of its own on EVERY row, not just the
+                          rows that have one. Rendered inline it pushed the label of a
+                          `view` row left by its own width, so the labels stopped
+                          sharing a right edge and the column read as misaligned. */}
+                      <span className="shrink-0 w-[13px] flex justify-end">
+                        {isRoot && rr.kind === 'view' && (
+                          <ArrowRight size={13} className="lucide-inline text-muted" />
+                        )}
+                      </span>
                       {isRoot && pendingRow === rr.id && (
                         <Loader2
                           size={13}

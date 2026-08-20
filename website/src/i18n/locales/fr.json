@@ -852,7 +852,13 @@
       "other_search_hint": "Pour rechercher dans les connaissances, artefacts, competences ou prompts, desactivez Command Bar dans l App Store — ce lanceur n atteint que les sessions",
       "cmd_toggle_theme": "Changer de theme",
       "search_failed": "Recherche echouee",
-      "retry": "Reessayer"
+      "retry": "Reessayer",
+      "kind": {
+        "app": "Application",
+        "command": "Commande",
+        "setting": "Paramètre",
+        "view": "Vue"
+      }
     },
     "crewCompanion": {
       "accessory": {

@@ -827,7 +827,13 @@
       "other_search_hint": "Um Wissen, Artefakte, Skills oder Prompts zu durchsuchen, deaktiviere Command Bar im App Store — dieser Starter erreicht nur Sitzungen",
       "cmd_toggle_theme": "Theme wechseln",
       "search_failed": "Suche fehlgeschlagen",
-      "retry": "Erneut versuchen"
+      "retry": "Erneut versuchen",
+      "kind": {
+        "app": "App",
+        "command": "Befehl",
+        "setting": "Einstellung",
+        "view": "Ansicht"
+      }
     },
     "crewCompanion": {
       "accessory": {

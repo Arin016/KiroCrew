@@ -1153,7 +1153,13 @@
       "other_search_hint": "To search knowledge, artifacts, skills or prompts, disable Command Bar in the App Store — this launcher reaches sessions only",
       "cmd_toggle_theme": "Toggle Theme",
       "search_failed": "Search failed",
-      "retry": "Retry"
+      "retry": "Retry",
+      "kind": {
+        "app": "App",
+        "command": "Command",
+        "setting": "Setting",
+        "view": "View"
+      }
     }
   },
   "components": {

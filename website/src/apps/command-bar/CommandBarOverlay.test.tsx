@@ -331,6 +331,39 @@ describe('CommandBarOverlay rows', () => {
     }
   })
 
+  it('carries a focus cue on the field only when no row can hold one', () => {
+    // `aria-activedescendant` is the cue while rows exist, and it is omitted when
+    // there are none -- so the field must paint in exactly that state and stay
+    // unpainted otherwise, or the surface is either permanently boxed or, on the
+    // empty sessions view, shows a keyboard user no focus at all.
+    const src = readFileSync(
+      path.join(__dirname, 'CommandBarOverlay.tsx'),
+      'utf-8',
+    )
+    expect(src).toContain("rowCount === 0 ? ' focus-visible:ring-1 focus-visible:ring-accent/40' : ''")
+    // Unconditional forms are what produced the permanent box.
+    expect(src).not.toMatch(/placeholder:text-muted focus-visible:ring/)
+    expect(src).not.toMatch(/placeholder:text-muted focus-visible:bg/)
+  })
+
+  it('labels every row with what activating it produces', () => {
+    // Groups always render as contiguous blocks under their own header, so this is
+    // not about groups interleaving. The label earns its place because the only
+    // other per-row kind signal is the group icon, which reads only to someone who
+    // already knows it. `view` is called out separately from its group because it
+    // opens a surface inside the bar instead of acting and closing -- the one value
+    // the icon cannot convey, and the difference the reader acts on.
+    mount()
+    expect(rowByText('New Session').textContent).toContain('Command')
+    expect(rowByText('Search Sessions').textContent).toContain('View')
+    expect(rowByText('Search Sessions').textContent).not.toContain('Command')
+    expect(rowByText('Toggle Theme').textContent).toContain('Command')
+    // The arrow needs a slot on EVERY row: rendered inline it pushed a `view` row's
+    // label left by its own width and the labels stopped sharing a right edge.
+    const src = readFileSync(path.join(__dirname, 'CommandBarOverlay.tsx'), 'utf-8')
+    expect(src).toContain('shrink-0 w-[13px] flex justify-end')
+  })
+
   it('reports a failed session search instead of claiming no matches', async () => {
     // A rejected search leaves `data` undefined, which by row count alone looks
     // identical to an empty result -- so the empty copy would tell the user their

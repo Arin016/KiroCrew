@@ -4229,7 +4229,13 @@
       "other_search_hint": "要搜索知识库、产物、技能或提示词，请在应用商店中停用 Command Bar — 这个启动器只能到达会话",
       "cmd_toggle_theme": "切换主题",
       "search_failed": "搜索失败",
-      "retry": "重试"
+      "retry": "重试",
+      "kind": {
+        "app": "应用",
+        "command": "命令",
+        "setting": "设置",
+        "view": "视图"
+      }
     }
   },
   "autoImprovement": {

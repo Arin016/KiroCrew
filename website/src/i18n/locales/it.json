@@ -4357,7 +4357,13 @@
       "other_search_hint": "Per cercare in conoscenza, artefatti, competenze o prompt, disattiva Command Bar nell App Store — questo launcher raggiunge solo le sessioni",
       "cmd_toggle_theme": "Cambia tema",
       "search_failed": "Ricerca non riuscita",
-      "retry": "Riprova"
+      "retry": "Riprova",
+      "kind": {
+        "app": "App",
+        "command": "Comando",
+        "setting": "Impostazione",
+        "view": "Vista"
+      }
     }
   },
   "autoImprovement": {

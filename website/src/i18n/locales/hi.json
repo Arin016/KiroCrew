@@ -4293,7 +4293,13 @@
       "other_search_hint": "ज्ञान, आर्टिफ़ैक्ट, स्किल या प्रॉम्प्ट खोजने के लिए App Store में Command Bar बंद करें — यह लॉन्चर केवल सेशन तक पहुंचता है",
       "cmd_toggle_theme": "थीम बदलें",
       "search_failed": "खोज विफल",
-      "retry": "फिर कोशिश करें"
+      "retry": "फिर कोशिश करें",
+      "kind": {
+        "app": "ऐप",
+        "command": "कमांड",
+        "setting": "सेटिंग",
+        "view": "व्यू"
+      }
     }
   },
   "autoImprovement": {

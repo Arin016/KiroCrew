@@ -4357,7 +4357,13 @@
       "other_search_hint": "Para buscar em conhecimento, artefatos, habilidades ou prompts, desative o Command Bar na App Store — este lancador alcanca apenas sessoes",
       "cmd_toggle_theme": "Alternar tema",
       "search_failed": "A busca falhou",
-      "retry": "Tentar novamente"
+      "retry": "Tentar novamente",
+      "kind": {
+        "app": "Aplicativo",
+        "command": "Comando",
+        "setting": "Configuração",
+        "view": "Visualização"
+      }
     }
   },
   "autoImprovement": {

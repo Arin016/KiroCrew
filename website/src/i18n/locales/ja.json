@@ -802,7 +802,13 @@
       "other_search_hint": "ナレッジ、成果物、スキル、プロンプトを検索するには、App Store で Command Bar を無効にしてください — このランチャーはセッションのみに届きます",
       "cmd_toggle_theme": "テーマを切り替え",
       "search_failed": "検索に失敗しました",
-      "retry": "再試行"
+      "retry": "再試行",
+      "kind": {
+        "app": "アプリ",
+        "command": "コマンド",
+        "setting": "設定",
+        "view": "ビュー"
+      }
     },
     "crewCompanion": {
       "accessory": {

@@ -4293,7 +4293,13 @@
       "other_search_hint": "জ্ঞান, আর্টিফ্যাক্ট, স্কিল বা প্রম্পট খুঁজতে App Store-এ Command Bar বন্ধ করুন — এই লঞ্চার শুধু সেশনে পৌঁছায়",
       "cmd_toggle_theme": "থিম বদলান",
       "search_failed": "সার্চ ব্যর্থ",
-      "retry": "আবার চেষ্টা করুন"
+      "retry": "আবার চেষ্টা করুন",
+      "kind": {
+        "app": "অ্যাপ",
+        "command": "কমান্ড",
+        "setting": "সেটিং",
+        "view": "ভিউ"
+      }
     }
   },
   "autoImprovement": {
