@@ -20,6 +20,71 @@ export function getCtrlDigitsEnabled(): boolean {
 }
 
 /**
+ * Slots in the order the chat-jump and chat-cycle shortcuts should walk them:
+ * the sidebar's DISPLAYED order (`dashboard.sidebarOrder`, pinned-first + the
+ * user's sort), not the store array (backend insertion order). Ctrl+1 must hit
+ * the row the user sees at the top.
+ *
+ * Slots absent from the published order — filtered out of the sidebar, or
+ * created since its last publish — append in store order so cycling still
+ * reaches every open session. Stale keys (slot closed since publish) drop out.
+ * An empty published order (sidebar never rendered) falls back to store order.
+ */
+export function orderSlotsBySidebar<T extends { key: string }>(
+  slots: readonly T[],
+  sidebarOrder: readonly string[] | undefined,
+): T[] {
+  if (!sidebarOrder?.length) return [...slots]
+  const byKey = new Map(slots.map(s => [s.key, s]))
+  const ordered: T[] = []
+  for (const k of sidebarOrder) {
+    const s = byKey.get(k)
+    if (s) { ordered.push(s); byKey.delete(k) }
+  }
+  for (const s of slots) if (byKey.has(s.key)) ordered.push(s)
+  return ordered
+}
+
+/**
+ * True while the chat-jump digit modifier is physically held — Ctrl on Mac in
+ * Ctrl+digit mode, Alt otherwise (the exact modifier the Digit1..9 chords
+ * use). Drives the sidebar's transient 1–9 row badges, so the user can see
+ * which row each digit will pick before committing to one.
+ *
+ * Cleared on window blur and tab-hide as well as keyup: Alt+Tab and ⌘-Tab
+ * steal the keyup, and a stuck badge overlay would otherwise persist until
+ * the next keypress.
+ */
+export function useDigitModifierHeld(): boolean {
+  const [held, setHeld] = useState(false)
+  useEffect(() => {
+    // Identify the modifier STATE via ctrlKey/altKey, and the modifier KEY
+    // itself via e.location — modifier keys are the only keys reporting
+    // DOM_KEY_LOCATION_LEFT/RIGHT (1/2), so this needs no key-name string
+    // literals (which the i18n gate flags). Only a press of the modifier key
+    // may set the held state: a modified ordinary key (Alt+ArrowDown) must
+    // NOT flip it, or the badge re-render disrupts in-flight row interactions
+    // like arrow navigation. Any keyup without the modifier down clears.
+    const isHeld = (e: KeyboardEvent) => (getCtrlDigitsEnabled() ? e.ctrlKey : e.altKey)
+    const isModifierKey = (e: KeyboardEvent) => e.location === 1 || e.location === 2
+    const down = (e: KeyboardEvent) => { if (isHeld(e) && isModifierKey(e)) setHeld(true) }
+    const up = (e: KeyboardEvent) => { if (!isHeld(e)) setHeld(false) }
+    const clear = () => setHeld(false)
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    window.addEventListener('blur', clear)
+    document.addEventListener('visibilitychange', clear)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', clear)
+      document.removeEventListener('visibilitychange', clear)
+    }
+  }, [])
+  return held
+}
+
+/**
  * Which section of the shortcuts reference an entry belongs to.
  *
  * A STABLE, NON-LOCALISED ID — deliberately not the displayed heading. The value is
@@ -498,7 +563,12 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     const tag = (e.target as HTMLElement)?.tagName
     const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable
     // Read at keypress time; subscribing re-renders the root on every slots frame.
-    const { dashboard: { slots }, chat: { activeSlot, slotHistory } } = appStore.getState()
+    const { dashboard: { slots, sidebarOrder }, chat: { activeSlot, slotHistory } } = appStore.getState()
+    // Jump/cycle targets in the order the sidebar displays them, so Ctrl/Alt+N
+    // picks the Nth visible row and cycling walks the list the user is looking
+    // at. `sidebarOrder` may be undefined in stores seeded before the field
+    // existed (tests with partial preloaded state).
+    const orderedSlots = orderSlotsBySidebar(slots, sidebarOrder)
 
     // On Mac (when Ctrl+digit mode enabled), Ctrl+digit switches chats.
     // Check for that first, before the Alt-based gate.
@@ -508,7 +578,7 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       if (!enabled || disabled) return
       const idx = parseInt(code.charAt(5)) - 1
       e.preventDefault()
-      if (idx < slots.length) { dispatch(switchSlot(slots[idx].key)); navigate('/chat') }
+      if (idx < orderedSlots.length) { dispatch(switchSlot(orderedSlots[idx].key)); navigate('/chat') }
       return
     }
 
@@ -536,8 +606,8 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       if (!enabled || disabled) return
       // Claim the keystroke: on macOS ⌘[ / ⌘] are the browser's Back/Forward.
       e.preventDefault()
-      const nextIdx = wrapIndex(slots.length, activeSlot ? slots.findIndex(s => s.key === activeSlot) : -1, step)
-      if (nextIdx >= 0) { dispatch(switchSlot(slots[nextIdx].key)); navigate('/chat') }
+      const nextIdx = wrapIndex(orderedSlots.length, activeSlot ? orderedSlots.findIndex(s => s.key === activeSlot) : -1, step)
+      if (nextIdx >= 0) { dispatch(switchSlot(orderedSlots[nextIdx].key)); navigate('/chat') }
       return
     }
 
@@ -662,17 +732,17 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     if (!ctrlDigits && code >= 'Digit1' && code <= 'Digit9' && !e.shiftKey) {
       const idx = parseInt(code.charAt(5)) - 1
       e.preventDefault()
-      if (idx < slots.length) { dispatch(switchSlot(slots[idx].key)); navigate('/chat') }
+      if (idx < orderedSlots.length) { dispatch(switchSlot(orderedSlots[idx].key)); navigate('/chat') }
       return
     }
 
     // Alt+←/→: Previous/next chat (skip when in text input to preserve word-jump)
     if ((code === 'ArrowLeft' || code === 'ArrowRight') && !isInput) {
       e.preventDefault()
-      const curIdx = activeSlot ? slots.findIndex(s => s.key === activeSlot) : -1
-      const nextIdx = wrapIndex(slots.length, curIdx, code === 'ArrowLeft' ? -1 : 1)
+      const curIdx = activeSlot ? orderedSlots.findIndex(s => s.key === activeSlot) : -1
+      const nextIdx = wrapIndex(orderedSlots.length, curIdx, code === 'ArrowLeft' ? -1 : 1)
       if (nextIdx < 0) return
-      dispatch(switchSlot(slots[nextIdx].key))
+      dispatch(switchSlot(orderedSlots[nextIdx].key))
       navigate('/chat')
       return
     }

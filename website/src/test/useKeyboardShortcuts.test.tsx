@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, screen, act } from '@testing-library/react'
-import { DEFAULT_SHORTCUTS, formatShortcut, SHORTCUTS_ENABLED_KEY, SHORTCUTS_ENABLED_EVENT, useKeyboardShortcuts, sessionCycleStep, wrapIndex, isAgentMonitorChord, RESERVED_PANEL_CODES } from '../hooks/useKeyboardShortcuts'
+import { DEFAULT_SHORTCUTS, formatShortcut, SHORTCUTS_ENABLED_KEY, SHORTCUTS_ENABLED_EVENT, useKeyboardShortcuts, sessionCycleStep, wrapIndex, isAgentMonitorChord, RESERVED_PANEL_CODES, orderSlotsBySidebar, useDigitModifierHeld } from '../hooks/useKeyboardShortcuts'
 import { renderHookWithProviders, createTestStore, renderWithProviders } from './helpers'
+import chatReducer from '../store/chatSlice'
+import dashboardReducer from '../store/dashboardSlice'
 import ShortcutsModal from '../components/ShortcutsModal'
 import type { RootState } from '../store'
 
@@ -685,5 +687,99 @@ describe('Ctrl+G opens the agent monitor', () => {
     const store = setup()
     fireEvent.keyDown(document, { code: 'KeyG', altKey: true })
     expect(store.getState().chat.activityOpen).toBe(false)
+  })
+})
+
+describe('orderSlotsBySidebar', () => {
+  const s = (key: string) => ({ key })
+
+  it('reorders slots to the published sidebar order', () => {
+    const slots = [s('a'), s('b'), s('c')]
+    expect(orderSlotsBySidebar(slots, ['c', 'a', 'b']).map(x => x.key)).toEqual(['c', 'a', 'b'])
+  })
+
+  it('falls back to store order when the published order is empty or undefined', () => {
+    const slots = [s('a'), s('b')]
+    expect(orderSlotsBySidebar(slots, []).map(x => x.key)).toEqual(['a', 'b'])
+    expect(orderSlotsBySidebar(slots, undefined).map(x => x.key)).toEqual(['a', 'b'])
+  })
+
+  it('drops stale keys and appends unpublished slots in store order', () => {
+    const slots = [s('a'), s('b'), s('c'), s('d')]
+    // 'gone' was closed since publish; 'c' and 'd' were created/filtered since.
+    expect(orderSlotsBySidebar(slots, ['b', 'gone', 'a']).map(x => x.key)).toEqual(['b', 'a', 'c', 'd'])
+  })
+})
+
+describe('chat jump + cycle follow the sidebar display order', () => {
+  const slots = [
+    { key: 'slot-1', title: 'Oldest', messages: 0, running: false },
+    { key: 'slot-2', title: 'Middle', messages: 0, running: false },
+    { key: 'slot-3', title: 'Newest', messages: 0, running: false },
+  ]
+
+  function setup(sidebarOrder?: string[], activeSlot: string | null = null) {
+    // Full slice states (reducer defaults) with overrides: switchSlot.pending
+    // touches slotActivity/slotMessages/messages, so a partial chat state
+    // would throw inside the reducer and silently swallow the switch.
+    const chatInitial = chatReducer(undefined, { type: '@@test/init' })
+    const dashInitial = dashboardReducer(undefined, { type: '@@test/init' })
+    const store = createTestStore({
+      dashboard: { ...dashInitial, slots, ...(sidebarOrder ? { sidebarOrder } : {}) } as RootState['dashboard'],
+      chat: { ...chatInitial, activeSlot, slotHistory: [] } as RootState['chat'],
+    })
+    renderHookWithProviders(
+      () => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn() }),
+      { store },
+    )
+    return store
+  }
+
+  it('Alt+1 picks the TOP displayed row, not the first store element', () => {
+    // Sidebar shows newest-first (recent sort): 3, 2, 1.
+    const store = setup(['slot-3', 'slot-2', 'slot-1'])
+    fireEvent.keyDown(document, { code: 'Digit1', altKey: true })
+    expect(store.getState().chat.activeSlot).toBe('slot-3')
+  })
+
+  it('Alt+2 picks the second displayed row', () => {
+    const store = setup(['slot-3', 'slot-2', 'slot-1'])
+    fireEvent.keyDown(document, { code: 'Digit2', altKey: true })
+    expect(store.getState().chat.activeSlot).toBe('slot-2')
+  })
+
+  it('falls back to store order when the sidebar has not published (fresh store)', () => {
+    const store = setup(undefined)
+    fireEvent.keyDown(document, { code: 'Digit1', altKey: true })
+    expect(store.getState().chat.activeSlot).toBe('slot-1')
+  })
+
+  it('Alt+ArrowRight steps to the next session in sidebar order, wrapping', () => {
+    const store = setup(['slot-3', 'slot-2', 'slot-1'], 'slot-1')
+    // slot-1 is the LAST displayed row; stepping forward wraps to the top row.
+    fireEvent.keyDown(document, { code: 'ArrowRight', altKey: true })
+    expect(store.getState().chat.activeSlot).toBe('slot-3')
+  })
+})
+
+describe('useDigitModifierHeld', () => {
+  it('tracks the Alt key on non-Mac and clears on blur', () => {
+    const { result } = renderHookWithProviders(() => useDigitModifierHeld())
+    expect(result.current).toBe(false)
+    act(() => { fireEvent.keyDown(window, { altKey: true, location: 1 }) })
+    expect(result.current).toBe(true)
+    act(() => { fireEvent.keyUp(window, { altKey: false }) })
+    expect(result.current).toBe(false)
+    // Alt+Tab steals the keyup: blur must clear the held state.
+    act(() => { fireEvent.keyDown(window, { altKey: true, location: 1 }) })
+    expect(result.current).toBe(true)
+    act(() => { fireEvent.blur(window) })
+    expect(result.current).toBe(false)
+  })
+
+  it('ignores non-modifier keys', () => {
+    const { result } = renderHookWithProviders(() => useDigitModifierHeld())
+    act(() => { fireEvent.keyDown(window, { ctrlKey: true, location: 1 }) })
+    expect(result.current).toBe(false)
   })
 })

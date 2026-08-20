@@ -17,7 +17,8 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent } from '../components/ui/context-menu'
 import { offlineProps } from '../utils/offline'
 import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession, clearSlotReveal } from '../store/chatSlice'
-import { sseSlotTitle } from '../store/dashboardSlice'
+import { sseSlotTitle, setSidebarOrder } from '../store/dashboardSlice'
+import { useDigitModifierHeld } from '../hooks/useKeyboardShortcuts'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
 import { computeRecentRank, recencyTintShadow, clampTintCount } from '../utils/recencyTint'
@@ -2554,6 +2555,39 @@ function ChatSidebar({
     })
   }, [filteredSlots, folderFilterActive, filterHiddenSubtree, slotFolders])
 
+  // The order the chat-jump/cycle shortcuts should follow — what this sidebar
+  // displays. Flat view: the flat lane's exact row order. Folder tree and
+  // column layouts: filteredSlots (pinned-first + the user's sort); folder
+  // grouping can visually interleave rows, so those views rely on the held-
+  // modifier badges below to make the digit mapping visible rather than on a
+  // full tree walk here.
+  const shortcutOrderKeys = useMemo(
+    () => (flatView && folders.length > 0 ? flatSlots : filteredSlots).map(s => s.key),
+    [flatView, folders.length, flatSlots, filteredSlots],
+  )
+  // Publish to the store for useKeyboardShortcuts (which reads at keypress
+  // time). Diff-guarded so slot-detail churn that doesn't reorder rows never
+  // dispatches. Deliberately not cleared on unmount: a last-known display
+  // order beats falling back to backend insertion order while the sidebar is
+  // collapsed.
+  const lastPublishedOrderRef = useRef('')
+  useEffect(() => {
+    const joined = shortcutOrderKeys.join('\n')
+    if (joined === lastPublishedOrderRef.current) return
+    lastPublishedOrderRef.current = joined
+    dispatch(setSidebarOrder(shortcutOrderKeys))
+  }, [shortcutOrderKeys, dispatch])
+
+  // First nine sessions in shortcut order → their digit, shown as row badges
+  // while the jump modifier is held (Ctrl on Mac in Ctrl+digit mode, Alt
+  // elsewhere — mirrors the Digit1..9 chords).
+  const digitModifierHeld = useDigitModifierHeld()
+  const shortcutDigitByKey = useMemo(() => {
+    const m = new Map<string, number>()
+    shortcutOrderKeys.slice(0, 9).forEach((k, i) => m.set(k, i + 1))
+    return m
+  }, [shortcutOrderKeys])
+
   // Folder rows for the filter menu: every folder in tree order, each with the
   // count of flat-lane sessions filed directly in it, and whether an unchecked
   // ancestor is already hiding it (that row renders inert).
@@ -3560,6 +3594,17 @@ function ChatSidebar({
             dispatch(switchSlot(s.key))
             onSelectSlot?.(s.key)
           }}>
+          {/* Held-modifier digit badge: while the chat-jump modifier is down,
+           *  the first nine sessions in shortcut order show the digit that
+           *  jumps to them. Overlays the row's right edge; pointer-events-none
+           *  so it never intercepts the click it is describing, aria-hidden
+           *  because the shortcuts modal is the accessible reference. */}
+          {digitModifierHeld && shortcutDigitByKey.has(s.key) && (
+            <span aria-hidden="true" data-testid="digit-jump-badge"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 z-10 min-w-[18px] h-[18px] px-1 rounded flex items-center justify-center text-[11px] font-semibold tabular-nums bg-bg-elevated border border-border text-text shadow-sm pointer-events-none">
+              {shortcutDigitByKey.get(s.key)}
+            </span>
+          )}
           {/* STATUS GUTTER — one slot, left of the content column, holding at most
            *  ONE glyph. Every status branch's glyph lives here rather than inline
            *  before its own subtitle, so a row has exactly one place to look for

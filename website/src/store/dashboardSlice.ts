@@ -13,6 +13,13 @@ interface DashboardState {
   status: StatusData | null
   connected: boolean
   slots: ChatSlot[]
+  // Slot keys in the order the session sidebar actually DISPLAYS them
+  // (pinned-first + the user's sort, flat-view aware). Published by
+  // ChatSidebar; consumed by the chat-jump / chat-cycle keyboard shortcuts so
+  // Ctrl/Alt+N targets the Nth visible row rather than the Nth element of
+  // `slots` (which arrives in backend insertion order). Empty until the
+  // sidebar first renders — consumers fall back to `slots` order then.
+  sidebarOrder: string[]
   approvalMode: string
   channelTrusted: boolean
   refreshTrigger: number
@@ -57,6 +64,7 @@ const initialState: DashboardState = {
   status: null,
   connected: false,
   slots: [],
+  sidebarOrder: [],
   approvalMode: 'normal',
   channelTrusted: false,
   refreshTrigger: 0,
@@ -229,6 +237,9 @@ const dashboardSlice = createSlice({
       state.slotsLoaded = true
       reconcileSlots(state, new Set(action.payload.map(s => s.key)))
     },
+    // Sidebar → shortcuts order feed (see DashboardState.sidebarOrder). The
+    // dispatch site diff-guards, so every action here is a real order change.
+    setSidebarOrder(state, action: PayloadAction<string[]>) { state.sidebarOrder = action.payload },
     // Live TODO-list delta. Patched into the SAME slots array that sseSlots
     // populates rather than a parallel map, so the mid-turn push and the
     // reconnect snapshot can never disagree about a slot's list. A delta for an
@@ -446,7 +457,7 @@ const dashboardSlice = createSlice({
   },
 })
 
-export const { sseStatus, sseConnected, sseDisconnected, sseSlots, sseTodoUpdate, touchSlotActivity, setChannelTrusted, sseSlotTitle, addSlotOptimistic, removeSlotOptimistic, updateSlot, updateSlotFolder, updateSlotPin, triggerRefresh, markSlotUnread, markSlotRead, setUpdateProgress,
+export const { sseStatus, sseConnected, sseDisconnected, sseSlots, setSidebarOrder, sseTodoUpdate, touchSlotActivity, setChannelTrusted, sseSlotTitle, addSlotOptimistic, removeSlotOptimistic, updateSlot, updateSlotFolder, updateSlotPin, triggerRefresh, markSlotUnread, markSlotRead, setUpdateProgress,
   setDesktopUpdateAvailable, sseSubagentStatus, sseSubagentText, sseSlotColor, setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, setSessionColorsIntensity, setEnabledAppIds, patchSlotSourceLinks, patchSlotLink } = dashboardSlice.actions
 
 /**
