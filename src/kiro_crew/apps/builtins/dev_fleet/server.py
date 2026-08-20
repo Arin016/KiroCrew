@@ -3929,8 +3929,15 @@ async def _prune_run(names: list[str], force_names: set[str] | None = None) -> d
     # and a duplicate would spawn two workers racing to remove the SAME
     # worktree — the second one then reports a spurious failure over the
     # first one's success.
-    names = list(dict.fromkeys(names))
     _force = force_names or set()
+    # Forced items (kept worktrees the user overrode) arrive in ``force_names``
+    # disjoint from the regular candidate ``names``. Both must be processed, so
+    # the work list is the order-preserving union — regulars first, then any
+    # forced name not already present. Building ``total``/``items``/the dispatch
+    # from this union (rather than ``names`` alone) is what keeps a force-only
+    # prune counted: otherwise its ``done`` bump has no matching denominator or
+    # item row, producing an impossible ``1/0`` counter and a false failure.
+    names = list(dict.fromkeys([*names, *_force]))
     async with _PRUNE_LOCK:
         if _PRUNE_STATE["running"]:
             return {"ok": False, "error": "prune already running"}

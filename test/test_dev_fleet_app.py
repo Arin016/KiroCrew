@@ -6715,6 +6715,85 @@ async def test_prune_run_deduplicates_names(reset_prune_state):
 
 
 @pytest.mark.asyncio
+async def test_prune_run_processes_force_only_names(reset_prune_state):
+    """A force-override on a kept worktree arrives in ``force_names`` disjoint
+    from ``names``. It must still be processed and counted: absent from the
+    work list, its ``done`` bump would have no denominator or item row,
+    producing the impossible ``1/0`` counter (and a false failure toast). The
+    forced item also skips the prunable-verdict recheck — ``_prunable`` is
+    never consulted for it."""
+    prunable_calls: list[str] = []
+    removed: list[str] = []
+
+    async def fake_find(nm):
+        return {"path": f"/wt/{nm}", "branch": f"feat/{nm}"}, None
+
+    async def fake_prunable(path, branch):
+        prunable_calls.append(path)
+        return {"ok": True, "code": "merged"}
+
+    async def fake_remove(nm, force=False, progress=None, _caller="handler"):
+        removed.append(nm)
+        return {"ok": True, "removed": True}
+
+    with patch.object(mod, "_find_worktree", side_effect=fake_find), \
+         patch.object(mod, "_prunable", side_effect=fake_prunable), \
+         patch.object(mod, "_live_worktree_path", new_callable=AsyncMock, return_value=None), \
+         patch.object(mod, "_staged_target", return_value=None), \
+         patch.object(mod, "_worktree_remove", side_effect=fake_remove):
+        # No regular candidates; a single kept worktree via force-override.
+        r = await mod._prune_run([], force_names={"wt-kept"})
+        assert r == {"ok": True, "total": 1}
+        await _await_prune_idle()
+
+    st = await mod._prune_status()
+    # The forced worktree is in the denominator, has an item row, and is done.
+    assert st["total"] == 1 and st["done"] == 1
+    assert set(st["items"]) == {"wt-kept"}
+    assert st["items"]["wt-kept"]["status"] == "done"
+    assert removed == ["wt-kept"]
+    # Forced items bypass the prunable verdict recheck entirely.
+    assert prunable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_prune_run_unions_regular_and_forced_names(reset_prune_state):
+    """A mixed batch (regular candidates + a forced kept worktree) processes
+    the order-preserving union: every name is counted and removed exactly
+    once, and only the non-forced names go through the prunable recheck."""
+    prunable_paths: list[str] = []
+    removed: list[str] = []
+
+    async def fake_find(nm):
+        return {"path": f"/wt/{nm}", "branch": f"feat/{nm}"}, None
+
+    async def fake_prunable(path, branch):
+        prunable_paths.append(path)
+        return {"ok": True, "code": "merged"}
+
+    async def fake_remove(nm, force=False, progress=None, _caller="handler"):
+        removed.append(nm)
+        return {"ok": True, "removed": True}
+
+    with patch.object(mod, "_find_worktree", side_effect=fake_find), \
+         patch.object(mod, "_prunable", side_effect=fake_prunable), \
+         patch.object(mod, "_live_worktree_path", new_callable=AsyncMock, return_value=None), \
+         patch.object(mod, "_staged_target", return_value=None), \
+         patch.object(mod, "_worktree_remove", side_effect=fake_remove):
+        r = await mod._prune_run(["wt-a", "wt-b"], force_names={"wt-forced"})
+        assert r == {"ok": True, "total": 3}
+        await _await_prune_idle()
+
+    st = await mod._prune_status()
+    assert st["total"] == 3 and st["done"] == 3
+    assert set(st["items"]) == {"wt-a", "wt-b", "wt-forced"}
+    assert all(it["status"] == "done" for it in st["items"].values())
+    assert sorted(removed) == ["wt-a", "wt-b", "wt-forced"]
+    # Only the two regular candidates go through the verdict recheck.
+    assert sorted(prunable_paths) == ["/wt/wt-a", "/wt/wt-b"]
+
+
+@pytest.mark.asyncio
 async def test_worktree_remove_refuses_when_pod_reactivates_before_mutation(reset_prune_state):
     """TOCTOU guard: pod inactivity is verified before _GIT_MUTATION_LOCK is
     acquired; if the pod comes back while the worker queues on the lock, the
