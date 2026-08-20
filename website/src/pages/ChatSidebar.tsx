@@ -494,7 +494,7 @@ function SortableColumnFolder({ folder, columnId, colSlotKeys, subtree, renderCo
  *  visual is identical in both layouts. */
 function FolderDragGhost({ folder }: { folder?: ChatFolder }) {
   return (
-    <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2">
+    <div data-testid="folder-drag-ghost" className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2">
       <FolderGlyph color={folder?.color} size={14} />{folder?.name ?? i18nT('pages.chatSidebar.folder')}
     </div>
   )
@@ -5162,10 +5162,19 @@ function ChatSidebar({
                             {/* Compact ghost follows the pointer while a folder drags —
                              *  same visual as the list-view overlay. DragOverlay renders
                              *  null unless THIS column's DndContext has an active drag,
-                             *  so per-column overlays never stack. */}
-                            <DragOverlay dropAnimation={null}>
-                              {activeDrag?.type === 'folder' ? <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} /> : null}
-                            </DragOverlay>
+                             *  so per-column overlays never stack. Portaled to
+                             *  document.body: the sidebar rides inside OverlayDrawer's
+                             *  morph clip-path, and a clip-path clips fixed-position
+                             *  descendants too, so an in-place overlay is erased the
+                             *  moment the ghost strays past the drawer edge. React
+                             *  portals preserve context, so the overlay still reads
+                             *  THIS column's active drag. */}
+                            {createPortal(
+                              <DragOverlay dropAnimation={null}>
+                                {activeDrag?.type === 'folder' ? <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} /> : null}
+                              </DragOverlay>,
+                              document.body,
+                            )}
                           </DndContext>
                           {ungrouped.map((s, i) => {
                             const isActive = activeSlot === s.key
