@@ -3702,6 +3702,20 @@ LOOP_STALL_EXIT_AFTER_MAX = 300
 # constant to avoid a config→subagent import cycle).
 MAX_SUBAGENTS_FIXED_FLOOR = 3
 
+# session.autocompact_pct — context-usage percentage at which the backend
+# autocompactor fires. SINGLE SOURCE OF TRUTH for the documented 5-90 range:
+# the dashboard config API (``dashboard/handlers/core.py``) validates writes
+# against these same constants, and the load read clamps a hand-edited
+# config.json value into them, so the two ranges cannot drift as separate
+# literals. The autocompactor is the backstop that keeps a session's context
+# window from overflowing — above the ceiling the trigger
+# (``pct >= autocompact_pct``) never fires before the window overflows, and
+# at/below zero it fires on every turn. Floats are outside the int-only
+# ``_SECURITY_BOUNDED_FIELDS`` sweep, so the clamp lives on the ``_safe_float``
+# read instead.
+AUTOCOMPACT_PCT_MIN = 5.0
+AUTOCOMPACT_PCT_MAX = 90.0
+
 # (section, key, min, max) for each bounded field clamped at load time. The
 # mins match the runtime floors: subagent_auto_max has a floor of 3
 # (``subagent._LEGACY_DEFAULT_MAX`` — the auto-size minimum), so a value < 3 is
@@ -6253,7 +6267,12 @@ class KiroCrewConfig:
                 empty_response_auto_continue=bool(
                     session_data.get("empty_response_auto_continue", True)
                 ),
-                autocompact_pct=_safe_float(session_data.get("autocompact_pct", 90.0), 90.0),
+                autocompact_pct=_safe_float(
+                    session_data.get("autocompact_pct", 90.0),
+                    90.0,
+                    lo=AUTOCOMPACT_PCT_MIN,
+                    hi=AUTOCOMPACT_PCT_MAX,
+                ),
                 pool_size=_safe_int(session_data.get("pool_size", 2), 2, 0, POOL_SIZE_MAX),
                 pool_agent=str(session_data.get("pool_agent", "")),
                 pool_ttl_secs=_safe_int(session_data.get("pool_ttl_secs", 1800), 1800),

@@ -29,6 +29,8 @@ from kiro_crew.computer_use.types import MAX_TREE_NODES_LIMIT as _CU_MAX_TREE_NO
 from kiro_crew.computer_use.types import MIN_SCREENSHOT_MAX_PX as _CU_MIN_SCREENSHOT_MAX_PX
 from kiro_crew.config.loader import (
     _VALID_STT_PROVIDERS,
+    AUTOCOMPACT_PCT_MAX,
+    AUTOCOMPACT_PCT_MIN,
     MAX_SUBAGENTS_FIXED_FLOOR,
     SUBAGENT_AUTO_MAX_CEILING,
     SUBAGENT_MAX_TURNS_CEILING,
@@ -1636,7 +1638,13 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     "agent.completion_keep_chars": {"type": "int", "min": 0, "max": RESULT_FILE_MAX_BYTES},
     "agent.soft_stop_budget_secs": {"type": "float", "min": 0.5, "max": 60.0},
     "session.timeout_secs": {"type": "int", "min": 0, "max": 86400},
-    "session.autocompact_pct": {"type": "float", "min": 5.0, "max": 90.0},
+    # Range shared with the load-time clamp in config/loader.py — one constant
+    # pair, so the write gate and the load path cannot drift (issue #4734).
+    "session.autocompact_pct": {
+        "type": "float",
+        "min": AUTOCOMPACT_PCT_MIN,
+        "max": AUTOCOMPACT_PCT_MAX,
+    },
     "session.pool_size": {"type": "int", "min": 0, "max": 10},
     "session.pool_agent": {"type": "str", "values_fn": _agent_values},
     "session.pool_ttl_secs": {"type": "int", "min": 0, "max": 7200},
