@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Boxes, FolderOpen, Database, Sparkles, Plus, MessageSquare, Users, Star, LayoutGrid, Rows3 } from 'lucide-react'
 import Clickable from '../components/Clickable'
-import { useQuery, useMutation, keepPreviousData } from '@tanstack/react-query'
-import { useAppSelector, useAppDispatch } from '../store'
+import { useQuery, useMutation } from '@tanstack/react-query'
+import { useAppDispatch } from '../store'
 import { createSlot } from '../store/chatSlice'
 import { api } from '../api/client'
 import { useProvider } from '../providers'
@@ -497,37 +497,27 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
   const provider = useProvider()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
-  const refreshTrigger = useAppSelector(s => s.dashboard.refreshTrigger)
-
   const { data: agentsData, refetch: refetchAgents } = useQuery({
-    queryKey: ['kirocrew-agents', refreshTrigger],
+    queryKey: ['kirocrew-agents'],
     queryFn: () => api.kirocrewAgents(),
-    // `refreshTrigger` is part of the key, so every WS-driven bump (a `refresh`,
-    // `sessions_restarting`, or `refine` frame from ANY session, not this page)
-    // mints a fresh query whose `data` starts `undefined`. Without this the
-    // roster would collapse to `[]` for the refetch window and the
-    // `agents.length === 0` branch below would flash the "No crews yet" empty
-    // state on a populated install. Retaining the prior roster keeps the page
-    // stable across those unrelated refreshes.
-    placeholderData: keepPreviousData,
   })
   const agents: KiroCrewAgent[] = agentsData?.agents || []
   const defaultAgent = agentsData?.default_agent || ''
 
   const { data: installedAgents } = useQuery({
-    queryKey: ['agents-installed', refreshTrigger],
+    queryKey: ['agents-installed'],
     queryFn: () => api.agentsInstalled(),
   })
   const kiroAgentOptions = Array.isArray(installedAgents) ? installedAgents.map((x: { name: string }) => x.name).filter(Boolean) : ['kirocrew']
 
   const { data: workspacesData, refetch: refetchWorkspaces } = useQuery({
-    queryKey: ['workspaces', refreshTrigger],
+    queryKey: ['workspaces'],
     queryFn: () => api.workspaces(),
   })
   const workspaceOptions = workspacesData?.workspaces?.map((w: { name: string }) => w.name) || ['default']
 
   const { data: kirocrewCfg } = useQuery({
-    queryKey: ['kirocrewConfig', refreshTrigger],
+    queryKey: ['kirocrewConfig'],
     queryFn: () => api.kirocrewConfig(),
   })
   const memoryStoreOptions = kirocrewCfg?.memory_stores ? Object.keys(kirocrewCfg.memory_stores) : ['default']

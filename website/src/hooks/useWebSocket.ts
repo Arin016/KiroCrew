@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { isArtifactEditing } from '../utils/artifactEditGuard'
 import { isReconcileNote } from '../lib/noteContract'
 import { useAppDispatch } from '../store'
@@ -32,6 +32,27 @@ function voiceMessageId(message: ChatMessage): string {
   if (message.ts) return message.ts
   const serverId = message.meta?.mid
   return typeof serverId === 'string' ? serverId : ''
+}
+
+/**
+ * Invalidate React Query caches for keys that previously relied on the
+ * `refreshTrigger` counter being part of their queryKey.  Calling
+ * `invalidateQueries` refetches **in-place** (keeping the cached data visible
+ * to the UI) instead of minting a brand-new cache entry with `undefined` data
+ * — which is what caused the flash-to-empty bug (#4132, #4179).
+ */
+function invalidateRefreshQueries(qc: QueryClient): void {
+  qc.invalidateQueries({ queryKey: ['cron-jobs'] })
+  qc.invalidateQueries({ queryKey: ['cron-history-all'] })
+  qc.invalidateQueries({ queryKey: ['spawn-list'] })
+  qc.invalidateQueries({ queryKey: ['sessions-context'] })
+  qc.invalidateQueries({ queryKey: ['sessions-usage'] })
+  qc.invalidateQueries({ queryKey: ['agents-installed'] })
+  qc.invalidateQueries({ queryKey: ['mcp-tools'] })
+  qc.invalidateQueries({ queryKey: ['kirocrew-agents'] })
+  qc.invalidateQueries({ queryKey: ['default-agent'] })
+  qc.invalidateQueries({ queryKey: ['workspaces'] })
+  qc.invalidateQueries({ queryKey: ['kirocrewConfig'] })
 }
 
 /** Single multiplexed WebSocket replacing all SSE + polling connections. */
@@ -919,6 +940,7 @@ export function useWebSocket() {
           case 'refresh': {
             const kinds: string[] = data.kinds || []
             dispatch(triggerRefresh())
+            invalidateRefreshQueries(queryClient)
             if (kinds.includes('history')) dispatch(fetchHistory(false))
             break
           }
@@ -1417,6 +1439,7 @@ export function useWebSocket() {
           case 'sessions_restarting':
             // Backend pushed session restart status (restarting/ready)
             dispatch(triggerRefresh())
+            invalidateRefreshQueries(queryClient)
             break
           case 'update_progress': {
             const prog = data as { step: string; detail: string }
@@ -1436,6 +1459,7 @@ export function useWebSocket() {
           case 'refine':
             // Handled by ProjectsPage via Redux
             dispatch(triggerRefresh())
+            invalidateRefreshQueries(queryClient)
             break
           case 'channel_message':
           case 'channel_agent_status':

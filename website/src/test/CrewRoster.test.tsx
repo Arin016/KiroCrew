@@ -307,13 +307,12 @@ describe('crew roster — filtering', () => {
     expect(screen.queryAllByTestId('crew-card')).toHaveLength(0)
   })
 
-  it('does not flash the empty state while a refreshTrigger-driven refetch is in flight', async () => {
-    // `refreshTrigger` is part of the roster query key, so any WS-driven bump
-    // (a `refresh` / `sessions_restarting` / `refine` frame from ANOTHER
-    // session, a cron, or a restart) mints a fresh query whose `data` starts
-    // `undefined`. Without `placeholderData: keepPreviousData` that collapses
-    // `agents` to `[]` for the refetch window and the roster flashes the
-    // "No crews yet" empty state on a populated install — the reported bug.
+  it('does not flash the empty state while an invalidateQueries-driven refetch is in flight', async () => {
+    // After retiring the refreshTrigger-in-queryKey pattern (#4179), the
+    // roster query key is stable (`['kirocrew-agents']`) and refetches are
+    // triggered by `queryClient.invalidateQueries` from the WS handler.
+    // `invalidateQueries` keeps the cached data visible during the refetch,
+    // so the roster must never collapse to the empty state.
     let resolveSecond: (v: unknown) => void = () => {}
     mockApi.kirocrewAgents
       .mockResolvedValueOnce(AGENTS_RESPONSE)
@@ -332,10 +331,8 @@ describe('crew roster — filtering', () => {
     )
     await waitFor(() => expect(screen.getAllByTestId('crew-card')).toHaveLength(2))
 
-    // Bump refreshTrigger → the roster query key changes and refetches. The
-    // second fetch is deliberately left pending so the "no data yet" window is
-    // observable rather than a sub-millisecond flicker.
-    act(() => { store.dispatch({ type: 'dashboard/triggerRefresh' }) })
+    // Simulate the WS handler: invalidate the query in-place (no key change).
+    act(() => { qc.invalidateQueries({ queryKey: ['kirocrew-agents'] }) })
 
     // The prior roster must remain on screen throughout the pending refetch —
     // no empty state, cards intact.
