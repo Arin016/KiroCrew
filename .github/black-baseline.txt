@@ -390,7 +390,6 @@ src/kiro_crew/mcp_gateway/backend.py
 src/kiro_crew/mcp_gateway/breaker.py
 src/kiro_crew/mcp_gateway/claim.py
 src/kiro_crew/mcp_gateway/evaluate.py
-src/kiro_crew/mcp_gateway/gatewayd.py
 src/kiro_crew/mcp_gateway/hazards.py
 src/kiro_crew/mcp_gateway/image_budget.py
 src/kiro_crew/mcp_gateway/manager.py
