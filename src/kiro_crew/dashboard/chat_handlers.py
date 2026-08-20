@@ -1172,6 +1172,96 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
             # Re-read the tail after the await: that suspension point lets a message
             # land mid-read, and the client replaces its list with this response.
             messages = older + list(slot.messages)
+        elif state.conversation_log:
+            # _disk_older_count == 0: the window is supposed to be the whole
+            # session. But disk can grow beyond the window (a concurrent writer,
+            # a foreign append, or a persistence race). Detect and include any
+            # rows the in-memory window is missing (#4373).
+            # Safety: skip when the slot has unflushed rows or pending rewrites.
+            _slot_idle = (
+                len(mem_msgs) <= getattr(slot, "_disk_window_len", 0)
+                and not getattr(slot, "_pending_rewrite", False)
+                and not getattr(slot, "_dirty_flag", False)
+            )
+            if _slot_idle:
+                history_key = slot_history_key(slot)
+                try:
+                    disk_msgs = await asyncio.to_thread(
+                        state.conversation_log.read_messages_chained, history_key
+                    )
+                except Exception:
+                    logger.warning(
+                        "read_messages_chained failed for %s", history_key, exc_info=True
+                    )
+                    disk_msgs = []
+                # Re-read after the await to capture anything that arrived mid-read.
+                current_mem = list(slot.messages)
+                # Post-await re-check: slot may have gained unflushed rows.
+                _slot_idle = (
+                    len(current_mem) <= getattr(slot, "_disk_window_len", 0)
+                    and not getattr(slot, "_pending_rewrite", False)
+                    and not getattr(slot, "_dirty_flag", False)
+                )
+                if _slot_idle and len(disk_msgs) > len(current_mem):
+                    # Validate alignment: if rotation shifted offsets, the disk
+                    # prefix no longer matches memory — skip reconciliation to
+                    # avoid appending the wrong slice (#4373 fix, GPT finding 2).
+                    _aligned = True
+                    if current_mem and disk_msgs:
+                        # Spot-check last memory row against its expected disk position.
+                        last_mem = current_mem[-1]
+                        disk_at = disk_msgs[len(current_mem) - 1] if len(current_mem) <= len(disk_msgs) else None
+                        if disk_at and (
+                            last_mem.get("ts", "") != disk_at.get("ts", "")
+                            or last_mem.get("role") != disk_at.get("role")
+                        ):
+                            _aligned = False
+                    if not _aligned:
+                        messages = current_mem
+                    else:
+                        # Disk has rows the window does not — reconcile by appending
+                        # the missing tail to the slot and returning the union.
+                        fresh = disk_msgs[len(current_mem):]
+                        for msg in fresh:
+                            role = msg.get("role", "assistant")
+                            cls = msg.get("cls") or (
+                                "msg msg-u" if role == "user" else "msg msg-a"
+                            )
+                            content = msg.get("content", "")
+                            if role != "user":
+                                content, _ = redact_exfiltration_urls(content)
+                                content, _ = redact_credentials(content)
+                            slot.append(
+                                role,
+                                content,
+                                cls,
+                                ts=msg.get("ts", ""),
+                                broadcast=False,
+                                meta=(
+                                    _redact_meta_for_role(role, msg["meta"])
+                                    if isinstance(msg.get("meta"), dict)
+                                    else None
+                                ),
+                            )
+                            carry_provenance(slot.messages[-1], msg)
+                            _attach_variants(slot, msg)
+                        # Replayed rows came from disk — drain the replay
+                        # frames and mark the window persisted (not dirty) so a
+                        # fork/SSE drain or the next save does not duplicate them.
+                        slot.drain()
+                        slot._resumed_count = len(slot.messages)
+                        slot._disk_window_len = len(slot.messages)
+                        slot._dirty = False
+                        # Use the full disk corpus (which includes the prefix
+                        # plus the reconciled tail) rather than slot.messages,
+                        # because slot.append may have trimmed the head under
+                        # _MAX_SLOT_MESSAGES — returning slot.messages alone
+                        # would lose older rows without signaling has_more.
+                        messages = disk_msgs
+                else:
+                    messages = current_mem
+            else:
+                messages = mem_msgs
         else:
             messages = mem_msgs
         total = len(messages)
@@ -3919,6 +4009,128 @@ async def api_recent_projects(request: web.Request) -> web.Response:
     return web.json_response({"dirs": dirs})
 
 
+async def _reconcile_slot_window(
+    state: DashboardState, slot: "_ChatSlot"
+) -> None:
+    """Detect and reconcile stale in-memory window from disk.
+
+    A live slot's window can fall behind disk when messages are written to the
+    session file by a path that does not (or cannot) also push into the
+    in-memory window — e.g. a concurrent subagent flush, a channel-origin
+    append, or a persistence race during heavy traffic.
+
+    This function compares the slot's believed disk coverage
+    (``_disk_older_count + len(messages)``) against the actual on-disk message
+    count. If disk has grown beyond what the slot accounts for, the missing
+    tail is read and appended to the in-memory window, making the next detail
+    or resume response self-healing on refresh.
+
+    Safety: skips reconciliation when the slot has unflushed in-memory rows
+    beyond what the last save persisted (``len(messages) > _disk_window_len``),
+    because a concurrent flush could persist those rows between the
+    ``represented`` snapshot and the disk read, leading to a duplicate
+    append. Re-validates after the await to guard against appends that landed
+    during the disk read.
+    """
+    if not state.conversation_log:
+        return
+    # Safety gate: do not reconcile a slot that has in-memory rows the last
+    # flush has not yet persisted, or that is mid-rewind, or that has unsaved
+    # in-place edits (dirty) — clearing dirty at the end would erase the edit.
+    if len(slot.messages) > getattr(slot, "_disk_window_len", 0):
+        return
+    if getattr(slot, "_pending_rewrite", False):
+        return
+    if getattr(slot, "_dirty_flag", False):
+        return
+    history_key = slot_history_key(slot)
+    represented = (getattr(slot, "_disk_older_count", 0) or 0) + len(slot.messages)
+    try:
+        disk_msgs = await asyncio.to_thread(
+            state.conversation_log.read_messages_chained, history_key
+        )
+    except Exception:
+        logger.warning(
+            "reconcile: read_messages_chained failed for %s", history_key, exc_info=True
+        )
+        return
+    disk_total = len(disk_msgs)
+    if disk_total <= represented:
+        return
+    # Post-await safety: the slot may have received appends (and a flush) while
+    # we were reading disk. Re-check and recompute represented to avoid
+    # duplicating rows that arrived during the await.
+    if len(slot.messages) > getattr(slot, "_disk_window_len", 0):
+        return
+    if getattr(slot, "_pending_rewrite", False):
+        return
+    if getattr(slot, "_dirty_flag", False):
+        return
+    represented = (getattr(slot, "_disk_older_count", 0) or 0) + len(slot.messages)
+    if disk_total <= represented:
+        return
+    # Validate alignment: if transcript rotation shifted offsets, the disk
+    # prefix no longer matches memory — abort to avoid appending wrong rows.
+    # The slot's window starts at disk offset _disk_older_count, so we compare
+    # the last memory row against its expected position on disk.
+    disk_older = getattr(slot, "_disk_older_count", 0) or 0
+    if slot.messages and (disk_older + len(slot.messages)) <= len(disk_msgs):
+        last_mem = slot.messages[-1]
+        expected_pos = disk_older + len(slot.messages) - 1
+        disk_at = disk_msgs[expected_pos]
+        if (
+            last_mem.get("ts", "") != disk_at.get("ts", "")
+            or last_mem.get("role") != disk_at.get("role")
+        ):
+            logger.info(
+                "reconcile: slot %s alignment mismatch at offset %d — skipping "
+                "(possible transcript rotation)",
+                slot.key,
+                expected_pos,
+            )
+            return
+    # Disk has rows the slot does not know about — append the tail.
+    fresh = disk_msgs[represented:]
+    logger.info(
+        "reconcile: slot %s has %d messages in memory + %d older on disk = %d represented, "
+        "but disk has %d; appending %d missing rows",
+        slot.key,
+        len(slot.messages),
+        getattr(slot, "_disk_older_count", 0) or 0,
+        represented,
+        disk_total,
+        len(fresh),
+    )
+    for msg in fresh:
+        role = msg.get("role", "assistant")
+        cls = msg.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
+        content = msg.get("content", "")
+        if role != "user":
+            content, _ = redact_exfiltration_urls(content)
+            content, _ = redact_credentials(content)
+        slot.append(
+            role,
+            content,
+            cls,
+            ts=msg.get("ts", ""),
+            broadcast=False,
+            meta=(
+                _redact_meta_for_role(role, msg["meta"])
+                if isinstance(msg.get("meta"), dict)
+                else None
+            ),
+        )
+        carry_provenance(slot.messages[-1], msg)
+        _attach_variants(slot, msg)
+    # The appended rows came from the file, so drain the replay frames and
+    # mark the window as persisted (not dirty) — the next save must not
+    # re-serialize them, and a fork/SSE drain must not treat them as new.
+    slot.drain()
+    slot._resumed_count = len(slot.messages)
+    slot._disk_window_len = len(slot.messages)
+    slot._dirty = False
+
+
 def _resume_session_identity(state: DashboardState, history_key: str) -> str:
     """The session a transcript runs under, spelled as a slot spells its own.
 
@@ -3997,6 +4209,9 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
                     error="app does not own this slot",
                 )
                 return web.json_response({"error": "not found"}, status=404)
+        # Reconcile: if disk grew beyond what the in-memory window covers,
+        # append the missing tail so a page refresh self-heals (#4373).
+        await _reconcile_slot_window(state, existing)
         total = len(existing.messages)
         recent = existing.messages[-200:] if total > 200 else existing.messages
         prepared = _prepare_messages(recent, existing.running)
