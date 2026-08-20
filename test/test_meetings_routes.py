@@ -407,6 +407,30 @@ class TestMeetingLifecycleRoutes:
             assert body["live"] is None
 
     @pytest.mark.asyncio
+    async def test_get_meeting_reports_dispatch_admission(self, app, fake_sessions):
+        """The poll payload carries the same admission flag dispatch checks.
+
+        The frontend opens the microphone off this field, so it must track the
+        holder's ``accepting_dispatches`` — not merely whether a session is
+        installed. A completed start reports it open; suspending ingress (the
+        state the whole ~46s initialization window is in, and what reviewing
+        does) reports it closed while ``live`` itself is still present.
+        """
+        async with client_for(app) as client:
+            await _start(client)
+            body = await (await client.get(f"{BASE}/meetings/standup")).json()
+            assert body["live"] is not None
+            assert body["live"]["accepting_dispatches"] is True
+
+            # Ingress closed but session installed — what a poll observes while
+            # a start is mid-initialization, here reached via the same holder
+            # call the start handler uses.
+            _common.ACTIVE.suspend_dispatches(_common.ACTIVE.get("standup"))
+            body = await (await client.get(f"{BASE}/meetings/standup")).json()
+            assert body["live"] is not None
+            assert body["live"]["accepting_dispatches"] is False
+
+    @pytest.mark.asyncio
     async def test_delete_removes_the_meeting_and_all_outputs(self, app, root: Path):
         async with client_for(app) as client:
             await client.post(f"{BASE}/meetings/standup/init", json={"title": "Standup"})
