@@ -393,6 +393,41 @@ def _safe_nonnegative_int(value: object, default: int) -> int:
     return result if result >= 0 else default
 
 
+def _clamp_pct(value: int) -> int:
+    """Clamp an integer context-threshold percentage to 1..100.
+
+    The single statement of the range: the floor is 1, not 0, because a 0%
+    threshold means "always over" and would fire the notice/compaction on
+    every turn.
+    """
+    return max(1, min(100, value))
+
+
+def _threshold_pct(raw: object, default: int) -> int:
+    """Coerce a transport context-threshold percentage and clamp it to 1..100.
+
+    The single coercion for every ``soft_threshold_pct`` / ``hard_threshold_pct``
+    read, so a hand-edited config can never load an out-of-range threshold on
+    any channel.
+    """
+    return _clamp_pct(_safe_int(raw, default))
+
+
+def _normalize_threshold_pair(soft: int, hard: int) -> tuple[int, int]:
+    """Normalize a soft/hard context-threshold pair to a valid ordering.
+
+    Clamp both to the shared range and pull the soft threshold down to the
+    hard one when it exceeds it, so a misconfig (e.g. hard=50, soft=95) can't
+    make the soft nudge unreachable — the transports check ``pct >= hard``
+    first.
+    """
+    soft = _clamp_pct(soft)
+    hard = _clamp_pct(hard)
+    if soft > hard:
+        soft = hard
+    return soft, hard
+
+
 def _safe_bool(value: object, default: bool) -> bool:
     """Return *value* only when it is a real bool, else *default*."""
     return value if isinstance(value, bool) else default
@@ -4879,13 +4914,13 @@ class WeComConfig:
     )
 
     def __post_init__(self) -> None:
-        # Clamp thresholds to [0, 100] and guarantee soft <= hard so a misconfig
-        # (e.g. hard=50, soft=95, or an out-of-range value) can't make the soft
-        # nudge unreachable -- _maybe_notice checks ``pct >= hard`` first.
-        self.soft_threshold_pct = max(0, min(100, self.soft_threshold_pct))
-        self.hard_threshold_pct = max(0, min(100, self.hard_threshold_pct))
-        if self.soft_threshold_pct > self.hard_threshold_pct:
-            self.soft_threshold_pct = self.hard_threshold_pct
+        # Shared normalization: clamp both thresholds and guarantee soft <= hard
+        # so a misconfig (e.g. hard=50, soft=95, or an out-of-range value) can't
+        # make the soft nudge unreachable -- _maybe_notice checks ``pct >= hard``
+        # first.
+        self.soft_threshold_pct, self.hard_threshold_pct = _normalize_threshold_pair(
+            self.soft_threshold_pct, self.hard_threshold_pct
+        )
 
 
 def _coerce_int_ids(raw: object) -> list[int]:
@@ -4978,9 +5013,7 @@ def _parse_telegram_accounts(raw: object) -> dict[str, "TelegramAccountConfig"]:
             allowed_user_ids=_coerce_int_ids(acct_data.get("allowed_user_ids")),
             allow_forum=_safe_bool(acct_data.get("allow_forum"), False),
             allowed_forum_chat_ids=_coerce_int_ids(acct_data.get("allowed_forum_chat_ids")),
-            soft_threshold_pct=max(
-                1, min(100, _coerce_int(acct_data.get("soft_threshold_pct"), 80))
-            ),
+            soft_threshold_pct=_threshold_pct(acct_data.get("soft_threshold_pct"), 80),
         )
     return out
 
@@ -5258,6 +5291,11 @@ class TelegramConfig:
         ),
     )
 
+    def __post_init__(self) -> None:
+        # Telegram carries only the soft nudge threshold; the hard-compaction
+        # backstop is the backend autocompactor (session.autocompact_pct).
+        self.soft_threshold_pct = _clamp_pct(self.soft_threshold_pct)
+
 
 @dataclass
 class WeixinConfig:
@@ -5352,6 +5390,14 @@ class WeixinConfig:
         ),
     )
 
+    def __post_init__(self) -> None:
+        # Shared normalization: clamp both thresholds and guarantee soft <= hard
+        # so a misconfig can't make the soft nudge unreachable -- _maybe_notice
+        # checks ``pct >= hard`` first. Mirrors WeComConfig.
+        self.soft_threshold_pct, self.hard_threshold_pct = _normalize_threshold_pair(
+            self.soft_threshold_pct, self.hard_threshold_pct
+        )
+
 
 @dataclass
 class DiscordConfig:
@@ -5430,6 +5476,11 @@ class DiscordConfig:
         ),
     )
 
+    def __post_init__(self) -> None:
+        # Discord carries only the soft nudge threshold; the hard-compaction
+        # backstop is the backend autocompactor (session.autocompact_pct).
+        self.soft_threshold_pct = _clamp_pct(self.soft_threshold_pct)
+
 
 @dataclass
 class WebexConfig:
@@ -5493,13 +5544,12 @@ class WebexConfig:
     )
 
     def __post_init__(self) -> None:
-        # Clamp thresholds to [0, 100] and guarantee soft <= hard so a misconfig
-        # can't make the soft nudge unreachable -- _maybe_notice checks
-        # ``pct >= hard`` first. Mirrors WeComConfig.
-        self.soft_threshold_pct = max(0, min(100, self.soft_threshold_pct))
-        self.hard_threshold_pct = max(0, min(100, self.hard_threshold_pct))
-        if self.soft_threshold_pct > self.hard_threshold_pct:
-            self.soft_threshold_pct = self.hard_threshold_pct
+        # Shared normalization: clamp both thresholds and guarantee soft <= hard
+        # so a misconfig can't make the soft nudge unreachable -- _maybe_notice
+        # checks ``pct >= hard`` first. Mirrors WeComConfig.
+        self.soft_threshold_pct, self.hard_threshold_pct = _normalize_threshold_pair(
+            self.soft_threshold_pct, self.hard_threshold_pct
+        )
 
 
 @dataclass
@@ -5588,12 +5638,12 @@ class TeamsConfig:
     )
 
     def __post_init__(self) -> None:
-        # Clamp thresholds to [0, 100] and guarantee soft <= hard so a misconfig
-        # can't make the soft nudge unreachable. Mirrors WebexConfig.
-        self.soft_threshold_pct = max(0, min(100, self.soft_threshold_pct))
-        self.hard_threshold_pct = max(0, min(100, self.hard_threshold_pct))
-        if self.soft_threshold_pct > self.hard_threshold_pct:
-            self.soft_threshold_pct = self.hard_threshold_pct
+        # Shared normalization: clamp both thresholds and guarantee soft <= hard
+        # so a misconfig can't make the soft nudge unreachable. Mirrors
+        # WebexConfig.
+        self.soft_threshold_pct, self.hard_threshold_pct = _normalize_threshold_pair(
+            self.soft_threshold_pct, self.hard_threshold_pct
+        )
 
 
 @dataclass
@@ -6362,9 +6412,7 @@ class KiroCrewConfig:
                 enabled=bool(telegram_data.get("enabled", False)),
                 bot_token=str(telegram_data.get("bot_token", "")),
                 allowed_user_ids=_coerce_int_ids(telegram_data.get("allowed_user_ids")),
-                soft_threshold_pct=max(
-                    1, min(100, _coerce_int(telegram_data.get("soft_threshold_pct"), 80))
-                ),
+                soft_threshold_pct=_threshold_pct(telegram_data.get("soft_threshold_pct"), 80),
                 allow_forum=bool(telegram_data.get("allow_forum", False)),
                 allowed_forum_chat_ids=_coerce_int_ids(telegram_data.get("allowed_forum_chat_ids")),
                 accounts=_parse_telegram_accounts(telegram_data.get("accounts")),
@@ -6377,12 +6425,8 @@ class KiroCrewConfig:
                 base_url=str(weixin_data.get("base_url", "") or "https://ilinkai.weixin.qq.com"),
                 dm_policy=str(weixin_data.get("dm_policy", "allowlist") or "allowlist"),
                 allowed_user_ids=_coerce_opaque_str_ids(weixin_data.get("allowed_user_ids")),
-                soft_threshold_pct=max(
-                    1, min(100, _coerce_int(weixin_data.get("soft_threshold_pct"), 80))
-                ),
-                hard_threshold_pct=max(
-                    1, min(100, _coerce_int(weixin_data.get("hard_threshold_pct"), 95))
-                ),
+                soft_threshold_pct=_threshold_pct(weixin_data.get("soft_threshold_pct"), 80),
+                hard_threshold_pct=_threshold_pct(weixin_data.get("hard_threshold_pct"), 95),
             ),
             discord=DiscordConfig(
                 session_folder=_coerce_session_folder(discord_data.get("session_folder")),
@@ -6395,9 +6439,7 @@ class KiroCrewConfig:
                 allowed_thread_ids=_coerce_str_ids(discord_data.get("allowed_thread_ids")),
                 allowed_channel_ids=_coerce_str_ids(discord_data.get("allowed_channel_ids")),
                 auto_thread=bool(discord_data.get("auto_thread", True)),
-                soft_threshold_pct=max(
-                    1, min(100, _coerce_int(discord_data.get("soft_threshold_pct"), 80))
-                ),
+                soft_threshold_pct=_threshold_pct(discord_data.get("soft_threshold_pct"), 80),
             ),
             webex=WebexConfig(
                 session_folder=_coerce_session_folder(webex_data.get("session_folder")),
@@ -6408,8 +6450,8 @@ class KiroCrewConfig:
                     if isinstance(webex_data.get("allowed_emails", []), list)
                     else []
                 ),
-                soft_threshold_pct=_coerce_int(webex_data.get("soft_threshold_pct"), 80),
-                hard_threshold_pct=_coerce_int(webex_data.get("hard_threshold_pct"), 95),
+                soft_threshold_pct=_threshold_pct(webex_data.get("soft_threshold_pct"), 80),
+                hard_threshold_pct=_threshold_pct(webex_data.get("hard_threshold_pct"), 95),
             ),
             teams=TeamsConfig(
                 session_folder=_coerce_session_folder(teams_data.get("session_folder")),
@@ -6425,8 +6467,8 @@ class KiroCrewConfig:
                     if isinstance(teams_data.get("allowed_emails", []), list)
                     else []
                 ),
-                soft_threshold_pct=_coerce_int(teams_data.get("soft_threshold_pct"), 80),
-                hard_threshold_pct=_coerce_int(teams_data.get("hard_threshold_pct"), 95),
+                soft_threshold_pct=_threshold_pct(teams_data.get("soft_threshold_pct"), 80),
+                hard_threshold_pct=_threshold_pct(teams_data.get("hard_threshold_pct"), 95),
             ),
             slack=SlackConfig(
                 session_folder=_coerce_session_folder(slack_data.get("session_folder")),
@@ -6487,8 +6529,8 @@ class KiroCrewConfig:
                 ],
                 allow_all_users=bool(wecom_data.get("allow_all_users", False)),
                 ws_url=str(wecom_data.get("ws_url", "wss://openws.work.weixin.qq.com")),
-                soft_threshold_pct=_safe_int(wecom_data.get("soft_threshold_pct", 80), 80),
-                hard_threshold_pct=_safe_int(wecom_data.get("hard_threshold_pct", 95), 95),
+                soft_threshold_pct=_threshold_pct(wecom_data.get("soft_threshold_pct"), 80),
+                hard_threshold_pct=_threshold_pct(wecom_data.get("hard_threshold_pct"), 95),
             ),
             dashboard=DashboardConfig(
                 url=dashboard_data.get("url", ""),

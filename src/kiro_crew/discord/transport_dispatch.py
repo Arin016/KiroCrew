@@ -1250,7 +1250,11 @@ class DiscordDispatcher:
     async def _maybe_notice(
         self, channel_id: str, scope_id: str, session_key: str, provider: Any
     ) -> None:
-        """Soft-threshold context warning as a SEPARATE message (not persisted)."""
+        """Soft-threshold context warning as a SEPARATE message (not persisted).
+
+        The hard-compaction backstop is the backend autocompactor
+        (``session.autocompact_pct``).
+        """
         pct = self.sessions.check_context_usage(session_key, provider)
         soft_pct = self.cfg.discord.soft_threshold_pct
         if pct >= soft_pct and not self._conv.is_awaiting(scope_id):

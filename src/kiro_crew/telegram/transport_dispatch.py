@@ -1571,6 +1571,8 @@ class TelegramDispatcher:
 
         Kept out of the streamed answer buffer so it is never persisted into the
         assistant turn and replayed next turn as though the assistant said it.
+        The hard-compaction backstop is the backend autocompactor
+        (``session.autocompact_pct``).
         """
         pct = self.sessions.check_context_usage(session_key, provider)
         soft_pct = self.cfg.telegram.soft_threshold_pct

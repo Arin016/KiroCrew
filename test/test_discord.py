@@ -2750,3 +2750,26 @@ def test_receipt_text_caps_displayed_items() -> None:
     out = _receipt_text(texts)
     assert out.startswith("⏳ Queued (8):")
     assert "…and 3 more" in out
+
+
+# ── context thresholds ───────────────────────────────────────────────────
+
+
+class TestContextThresholdNotices:
+    @pytest.mark.asyncio
+    async def test_soft_threshold_nudges(self) -> None:
+        d, cli, sess = _dispatcher({"u1"})
+        sess.check_context_usage = lambda key, provider: 85.0  # >= soft (80)
+
+        await d._maybe_notice("chan1", "scope1", "key", object())
+
+        assert any("!compact" in s[0] for s in cli.sent)
+
+    @pytest.mark.asyncio
+    async def test_below_soft_threshold_stays_silent(self) -> None:
+        d, cli, sess = _dispatcher({"u1"})
+        sess.check_context_usage = lambda key, provider: 10.0
+
+        await d._maybe_notice("chan1", "scope1", "key", object())
+
+        assert cli.sent == []

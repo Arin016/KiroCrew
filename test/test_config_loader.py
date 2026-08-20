@@ -5050,3 +5050,110 @@ class TestMigrationBackupContainment:
         # But the on-disk config is untouched, so the migration retries next load.
         assert json.loads(cfg_file.read_text(encoding="utf-8")) == json.loads(original)
         assert not (home / "config.json.bak").exists()
+
+
+# Transports carrying a soft/hard context-threshold pair, and those carrying
+# only the soft nudge (their hard backstop is the backend autocompactor).
+# A future transport that forgets _threshold_pct / _normalize_threshold_pair
+# fails these tests rather than shipping an unclamped read.
+_THRESHOLD_PAIR_TRANSPORTS = ["weixin", "webex", "teams", "wecom"]
+_THRESHOLD_SOFT_ONLY_TRANSPORTS = ["telegram", "discord"]
+
+
+class TestTransportThresholdConsistency:
+    """Every transport's context thresholds share ONE validation.
+
+    Locks in the invariant that validity is a property of the type: the loader
+    coerces every read through _threshold_pct (clamped to 1..100) and each
+    dataclass's __post_init__ normalizes its fields (pair transports also
+    enforce soft <= hard), so neither a hand-edited config nor a
+    code-constructed object can hold an out-of-range or inverted value.
+    """
+
+    @staticmethod
+    def _section(cfg, transport: str):
+        return getattr(cfg, transport)
+
+    @pytest.mark.parametrize(
+        "transport", _THRESHOLD_PAIR_TRANSPORTS + _THRESHOLD_SOFT_ONLY_TRANSPORTS
+    )
+    def test_defaults_when_missing(self, transport: str) -> None:
+        section = self._section(_load_from_dict({transport: {}}), transport)
+        assert section.soft_threshold_pct == 80
+        if transport in _THRESHOLD_PAIR_TRANSPORTS:
+            assert section.hard_threshold_pct == 95
+
+    @pytest.mark.parametrize(
+        "transport", _THRESHOLD_PAIR_TRANSPORTS + _THRESHOLD_SOFT_ONLY_TRANSPORTS
+    )
+    @pytest.mark.parametrize("raw", [-5, 0, 101, 10_000])
+    def test_out_of_range_values_are_clamped(self, transport: str, raw: int) -> None:
+        payload: dict = {"soft_threshold_pct": raw}
+        if transport in _THRESHOLD_PAIR_TRANSPORTS:
+            payload["hard_threshold_pct"] = raw
+        section = self._section(_load_from_dict({transport: payload}), transport)
+        assert 1 <= section.soft_threshold_pct <= 100
+        if transport in _THRESHOLD_PAIR_TRANSPORTS:
+            assert 1 <= section.hard_threshold_pct <= 100
+            assert section.soft_threshold_pct <= section.hard_threshold_pct
+
+    @pytest.mark.parametrize("transport", _THRESHOLD_PAIR_TRANSPORTS)
+    def test_soft_above_hard_is_corrected(self, transport: str) -> None:
+        # An inverted pair (soft=90, hard=50) would make the soft nudge
+        # unreachable -- the transports check pct >= hard first.
+        section = self._section(
+            _load_from_dict(
+                {transport: {"soft_threshold_pct": 90, "hard_threshold_pct": 50}}
+            ),
+            transport,
+        )
+        assert section.hard_threshold_pct == 50
+        assert section.soft_threshold_pct == 50
+
+    @pytest.mark.parametrize(
+        "transport", _THRESHOLD_PAIR_TRANSPORTS + _THRESHOLD_SOFT_ONLY_TRANSPORTS
+    )
+    def test_non_numeric_values_fall_back_to_defaults(self, transport: str) -> None:
+        payload: dict = {"soft_threshold_pct": "abc"}
+        if transport in _THRESHOLD_PAIR_TRANSPORTS:
+            payload["hard_threshold_pct"] = None
+        section = self._section(_load_from_dict({transport: payload}), transport)
+        assert section.soft_threshold_pct == 80
+        if transport in _THRESHOLD_PAIR_TRANSPORTS:
+            assert section.hard_threshold_pct == 95
+
+    @pytest.mark.parametrize(
+        "transport", _THRESHOLD_PAIR_TRANSPORTS + _THRESHOLD_SOFT_ONLY_TRANSPORTS
+    )
+    def test_code_constructed_object_is_normalized(self, transport: str) -> None:
+        # __post_init__ makes an object constructed in code valid too, not just
+        # one loaded from disk.
+        cls = {
+            "telegram": loader_module.TelegramConfig,
+            "weixin": loader_module.WeixinConfig,
+            "discord": loader_module.DiscordConfig,
+            "webex": loader_module.WebexConfig,
+            "teams": loader_module.TeamsConfig,
+            "wecom": loader_module.WeComConfig,
+        }[transport]
+        if transport in _THRESHOLD_PAIR_TRANSPORTS:
+            obj = cls(soft_threshold_pct=150, hard_threshold_pct=-3)
+            assert obj.hard_threshold_pct == 1
+            assert obj.soft_threshold_pct == 1
+        else:
+            obj = cls(soft_threshold_pct=150)
+            assert obj.soft_threshold_pct == 100
+
+    def test_telegram_account_soft_threshold_clamped(self) -> None:
+        # Deprecated/inert telegram.accounts entries still parse through the
+        # same coercion so a round-tripped config stays in range.
+        cfg = _load_from_dict(
+            {
+                "telegram": {
+                    "accounts": {
+                        "acct-1": {"bot_token": "123:abc", "soft_threshold_pct": 400}
+                    }
+                }
+            }
+        )
+        assert cfg.telegram.accounts["acct-1"].soft_threshold_pct == 100
