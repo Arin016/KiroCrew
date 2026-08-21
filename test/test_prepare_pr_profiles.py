@@ -303,9 +303,14 @@ def test_ci_blocking_scans_are_covered_by_the_floor():
         "python": "covered by the scripts/ scan and the pytest gate",
         "python3": "covered by the scripts/ scan and the pytest gate",
         "unshare": "namespace wrapper around the pytest gate",
-        # Diagnostic only: the blob-reconcile step in frontend-coverage-merge
-        # always exits 0 and never changes a job verdict, so it is not a gate.
-        "node": "runs the diagnostic frontend-blob-reconcile step, which never gates",
+        # node runs two kinds of step: the diagnostic blob-reconcile step in
+        # frontend-coverage-merge (always exits 0, never a gate) and the
+        # bundle-size gate. The latter IS a gate and is carried in gates[]
+        # (analyze-mode build + scripts/check-bundle-size.mjs); this exemption
+        # covers only the diagnostic step. A future gating node step must be
+        # added to gates[] by hand -- the tool scan cannot see through this
+        # exemption, so keep the reason accurate.
+        "node": "diagnostic blob-reconcile step; the gating bundle-size step is in gates[]",
     }
     tools = set(re.findall(r"(?m)^\s*run: ([a-z][a-z0-9_-]+) ", run_text))
     tool_missing = sorted(

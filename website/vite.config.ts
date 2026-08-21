@@ -667,10 +667,13 @@ export default defineConfig({
     // window in which a NEW oversized chunk could slip in undetected is as
     // small as physically possible. TRADEOFF (accept knowingly): this is a
     // single global knob, so it cannot distinguish "known-large" from "new
-    // regression" — a new chunk up to ~3.81MB would not warn. That residual gap
-    // is unavoidable without per-chunk limits (unsupported by Vite); the honest
-    // alternatives — leaving the limit at 500KB (a permanent false-positive that
-    // trains reviewers to ignore it) or splitting Monaco's monolithic core (not
+    // regression" — a new chunk up to ~3.81MB would not warn HERE. That residual
+    // gap is covered in CI by the per-chunk gate (scripts/check-bundle-size.mjs,
+    // run against the analyze-mode build): explicit ceilings for the known-large
+    // chunks, a 500KB default for everything else. This knob stays anyway as the
+    // only signal a plain local `npm run build` prints; the honest local
+    // alternatives — a 500KB limit (a permanent false-positive that trains
+    // developers to ignore it) or splitting Monaco's monolithic core (not
     // feasible) — are worse. Lower this the moment `editor.main`/`index` shrink;
     // do NOT raise it without first splitting the chunk that forced the raise.
     chunkSizeWarningLimit: 3810,

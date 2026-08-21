@@ -1465,6 +1465,45 @@ jobs:
           path: website/build/coverage/
           if-no-files-found: error
 
+  bundle-size:
+    name: Bundle Size Gate
+    needs: [changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # A backend-only diff cannot change the frontend bundle, so this gate has
+    # nothing to measure there. Meta diffs (.github/**, scripts/**) leave both
+    # surface flags false and still run the gate -- this job's own config lives
+    # in that bucket.
+    if: needs.changes.outputs.only_backend != 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci --no-audit --no-fund
+
+      - name: Build in analyze mode
+        working-directory: website
+        # `--mode analyze` activates the kirocrew-bundle-report plugin (see
+        # vite.config.ts), which emits dist/bundle-report.json with per-chunk
+        # sizes. A normal `npm run build` deliberately never writes one, so the
+        # gate below measures a dedicated build instead of taxing the real one.
+        # The memory flag mirrors package.json's `build` script.
+        run: node --max-old-space-size=6144 ./node_modules/vite/bin/vite.js build --mode analyze
+
+      - name: Per-chunk size gate
+        working-directory: website
+        # Explicit ceilings for known-large chunks, a 500 KB default for every
+        # other chunk; fails with one line per breach. Budgets and rationale:
+        # website/scripts/check-bundle-size.mjs (CHUNK_BUDGETS).
+        run: node scripts/check-bundle-size.mjs
+
   e2e:
     name: E2E (stub ACP backend, offline)
     runs-on: ubuntu-latest
