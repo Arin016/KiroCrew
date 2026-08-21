@@ -493,6 +493,16 @@ function FolderDragGhost({ folder }: { folder?: ChatFolder }) {
   )
 }
 
+/** Compact drag-preview ghost for a session row, rendered inside a DragOverlay.
+ *  Shared by the folder-tree and flat-lane overlays. Falls back to the slot key
+ *  when the session carries no distinct title. */
+function SessionDragGhost({ slot, fallbackLabel }: { slot?: Slot; fallbackLabel: string }) {
+  const label = slot?.title && slot.title !== slot.key ? slot.title : (slot?.key ?? fallbackLabel)
+  return (
+    <div data-testid="session-drag-ghost" className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none">{label}</div>
+  )
+}
+
 interface Slot {
   key: string
   title?: string
@@ -3217,8 +3227,14 @@ function ChatSidebar({
     // row as the SAME element across the view toggle and animates it from its
     // tree position into the flat lane (and back). Safe: the two views are
     // ternary branches — never mounted simultaneously — so IDs can't collide.
-    // Behavior stays keyed on the real scope ('flat' disables DnD etc.).
+    // Behavior stays keyed on the real scope.
     const layoutScope = scope === 'flat' ? 'list' : scope
+    // dnd-kit pickup, in the tree and in the flat lane. Flat view's own
+    // DndContext registers no folder or sortable targets, so the gesture there
+    // can only reach the chat pane: dragging a session into the open chat
+    // works, while manual reordering stays unavailable by construction.
+    // Board columns keep the separate native-HTML5 drag (their own scope).
+    const dndRow = scope === 'list' || scope === 'flat'
     const agentName = s.agent || defaultAgent || ''
     const agentMeta = installedAgents.find(a => a.name === agentName)
     const isPackageAgent = agentMeta?.source === 'package'
@@ -3497,15 +3513,15 @@ function ChatSidebar({
         initial={{ opacity: 0, x: -12 }}
         animate={{ opacity: 1, x: 0 }}
         transition={{ layout: { type: 'spring', stiffness: 500, damping: 35 }, opacity: { duration: 0.2 }, x: { duration: 0.2 } }}>
-        <DndDraggable id={`session:${s.key}`} data={{ type: 'session', key: s.key }} disabled={scope !== 'list' || renamingSlot === s.key}>
+        <DndDraggable id={`session:${s.key}`} data={{ type: 'session', key: s.key }} disabled={!dndRow || renamingSlot === s.key}>
           {({ setNodeRef, listeners, isDragging }) => (
         <ContextMenu>
           <ContextMenuTrigger asChild>
-        <div ref={scope === 'list' ? setNodeRef : undefined} {...(scope === 'list' ? listeners : {})}
+        <div ref={dndRow ? setNodeRef : undefined} {...(dndRow ? listeners : {})}
           data-draggable={(renamingSlot !== s.key).toString()}
           className={`session-row group relative flex items-start pl-3.5 pr-3 py-2 rounded-md text-sm transition-all select-none ${isActive ? !connected ? 'session-active text-text-strong bg-accent-subtle cursor-not-allowed' : 'session-active text-text-strong bg-accent-subtle cursor-pointer' : !connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'} ${rowColor ? 'session-colored' : ''} ${rowColor && colorMode === 'gradient' ? 'session-gradient' : ''} ${isDragging ? 'opacity-40' : ''} ${revealFlash?.key === s.key ? `session-reveal-flash${revealFlash.fading ? ' session-reveal-flash-fade' : ''}` : ''}`}
           style={boostStyle as React.CSSProperties}
-          draggable={(scope !== 'list' && scope !== 'flat' && renamingSlot !== s.key) && (connected || isActive)}
+          draggable={(!dndRow && renamingSlot !== s.key) && (connected || isActive)}
           {...offlineProps(connected, 'switch sessions')}
           role="button"
           tabIndex={0}
@@ -3543,7 +3559,7 @@ function ChatSidebar({
             // for these rows (plain useDraggable without SortableContext), so
             // consuming Enter/Space here does not regress it.
             if (e.key !== 'Enter' && e.key !== ' ') {
-              if (scope === 'list') (listeners as Record<string, (e: React.KeyboardEvent) => void> | undefined)?.onKeyDown?.(e)
+              if (dndRow) (listeners as Record<string, (e: React.KeyboardEvent) => void> | undefined)?.onKeyDown?.(e)
               return
             }
             if ((e.target as HTMLElement) !== e.currentTarget) return // don't hijack inner buttons
@@ -3552,7 +3568,7 @@ function ChatSidebar({
             dispatch(switchSlot(s.key))
             onSelectSlot?.(s.key)
           }}
-          onDragStart={scope !== 'list' && scope !== 'flat' ? (e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }) : undefined}
+          onDragStart={!dndRow ? (e => { e.dataTransfer.setData('text/plain', s.key); e.dataTransfer.effectAllowed = 'move' }) : undefined}
           onClick={e => {
             if ((e.target as HTMLElement).closest?.('[data-fork]')) { sessionActions.duplicate(s.key); return }
             if ((e.target as HTMLElement).closest?.('[data-close]')) { sessionActions.close(s.key); return }
@@ -4140,6 +4156,38 @@ function ChatSidebar({
   // True while dragging a folder that currently has a parent — the only case
   // where "drop on the root lane to move to top level" applies.
   const draggingNestedFolder = activeDrag?.type === 'folder' && !!folders.find(f => f.id === activeDrag.id)?.parent_id
+
+  // Droppable rects are normally snapshotted once at drag-start, but these
+  // lanes ANIMATE during drags (the dragged folder's body collapses over 150ms;
+  // hovered collapsed folders auto-expand; the chat-pane zone mounts mid-drag),
+  // so the snapshot goes stale and drop targets diverge from the cursor. While a
+  // drag is live, poll re-measurement (dnd-kit's numeric `frequency`
+  // self-reschedules a measure loop) so rects track the animating layout. Idle
+  // sessions keep the plain strategy — no background measuring.
+  const dndMeasuring = activeDrag
+    ? { droppable: { strategy: MeasuringStrategy.Always, frequency: 100 } }
+    : { droppable: { strategy: MeasuringStrategy.Always } }
+  /** The follow-the-cursor preview for whatever is being dragged. */
+  const dragGhost = activeDrag
+    ? activeDrag.type === 'folder'
+      ? <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} />
+      : <SessionDragGhost slot={slots.find(x => x.key === activeDrag.id)} fallbackLabel={activeDrag.id} />
+    : null
+  /**
+   * The drag preview is PORTALED to `document.body`.
+   *
+   * dnd-kit positions the overlay `fixed`, which normally escapes ancestor
+   * overflow — but the sidebar rides inside OverlayDrawer's morph `clip-path`,
+   * and a clip-path clips every descendant including fixed ones. Rendered in
+   * place, the ghost therefore vanished the instant the cursor crossed out of
+   * the sidebar and into the chat pane, i.e. for the whole second half of the
+   * one gesture that aims there. Portaling keeps it visible until release; it
+   * stays inside the DndContext because React portals preserve context.
+   */
+  const dragOverlay = createPortal(
+    <DragOverlay dropAnimation={null}>{dragGhost}</DragOverlay>,
+    document.body,
+  )
 
   // Narrow-sidebar header responsiveness: below ~256px the full "New chat"
   // label no longer fits next to the label + kebab, so collapse the create
@@ -4800,46 +4848,66 @@ function ChatSidebar({
           // Flat view: every chat exploded out of its folder into one lane.
           // Removes only the folder rendering hierarchy — sort, pin priority,
           // filters, and search all apply as usual (filteredSlots). No folder
-          // tree, no DnD. Takes precedence over the tag-columns layout.
+          // tree. Takes precedence over the tag-columns layout.
           // Inactive without folders (the toggle is hidden then too), so a
           // persisted flat preference can never strand the user.
-          <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto scrollbar-none p-2 flex flex-col" style={{ scrollbarWidth: 'none' }} data-testid="flat-view-lane">
-            {(() => {
-              // Date segments (Today / Yesterday / Last 7 Days / …) between
-              // rows — resurrects the 9bb0f71 active-list pattern: only for
-              // date sorts (segments mislead on name/created order, same
-              // guard as the history pane), and pinned rows render first
-              // without segments since pinning overrides date order.
-              const isDateSort = sortKey === 'date-desc' || sortKey === 'date-asc'
-              const segOf = (s: Slot) => isDateSort && !pinned.has(s.key) ? dateSegment(slotActivityTs(s)) : ''
-              let prevSeg = ''
-              return flatSlots.map((s, i) => {
-                const seg = segOf(s)
-                const showHeader = seg !== '' && seg !== prevSeg
-                if (seg) prevSeg = seg
-                const next = i < flatSlots.length - 1 ? flatSlots[i + 1] : null
-                const nextIsActive = next != null && activeSlot === next.key
-                const isActive = activeSlot === s.key
-                // No divider before a segment header — the header separates.
-                const nextSeg = next ? segOf(next) : seg
-                const showDivider = next != null && !isActive && !nextIsActive && nextSeg === seg
-                return (
-                  <Fragment key={s.key}>
-                    {showHeader && (
-                      <div data-testid="date-segment-header" className="px-3 pt-3 pb-1 text-[11px] font-semibold text-muted uppercase tracking-[.06em] select-none first:pt-1">{seg}</div>
-                    )}
-                    {renderSessionRow(s, 0, showDivider, 'flat')}
-                  </Fragment>
-                )
-              })
-            })()}
-            {flatSlots.length === 0 && (
-              <div className="px-3 py-4 text-[12px] text-muted">{i18nT('pages.chatSidebar.no_sessions_match')}</div>
-            )}
-            {/* Flat view has no containers to anchor to — every hide, top-level
-             *  or nested, collapses into this one row at the bottom of the lane. */}
-            {renderHiddenReveal('flat', allHiddenFolders, 0)}
-          </motion.div>
+          //
+          // Its DndContext carries EXACTLY ONE target: the chat pane. No
+          // SortableContext and no folder droppables are registered, so
+          // dragging a session into the open chat works here just as it does in
+          // the tree, while row order stays a pure function of the sort key —
+          // there is nothing for a drop inside the lane to land on. (Order is
+          // the reason: a flat lane spans every folder, so a manual position
+          // would have no place to be stored.) `sidebarCollision` also keeps the
+          // pane out of its closestCenter fallback, so a release inside the
+          // sidebar resolves to no target rather than snapping to the pane.
+          <DndContext sensors={dndSensors} collisionDetection={sidebarCollision}
+            measuring={dndMeasuring}
+            onDragStart={handleSidebarDragStart} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
+            {chatDropTarget && onDropSessionRef && activeDrag?.type === 'session'
+              && createPortal(
+                <ChatPaneDropZone refusal={draggingRefRefusal} />,
+                chatDropTarget,
+              )}
+            <motion.div layoutScroll className="flex-1 min-h-0 overflow-y-auto scrollbar-none p-2 flex flex-col" style={{ scrollbarWidth: 'none' }} data-testid="flat-view-lane">
+              {(() => {
+                // Date segments (Today / Yesterday / Last 7 Days / …) between
+                // rows — resurrects the 9bb0f71 active-list pattern: only for
+                // date sorts (segments mislead on name/created order, same
+                // guard as the history pane), and pinned rows render first
+                // without segments since pinning overrides date order.
+                const isDateSort = sortKey === 'date-desc' || sortKey === 'date-asc'
+                const segOf = (s: Slot) => isDateSort && !pinned.has(s.key) ? dateSegment(slotActivityTs(s)) : ''
+                let prevSeg = ''
+                return flatSlots.map((s, i) => {
+                  const seg = segOf(s)
+                  const showHeader = seg !== '' && seg !== prevSeg
+                  if (seg) prevSeg = seg
+                  const next = i < flatSlots.length - 1 ? flatSlots[i + 1] : null
+                  const nextIsActive = next != null && activeSlot === next.key
+                  const isActive = activeSlot === s.key
+                  // No divider before a segment header — the header separates.
+                  const nextSeg = next ? segOf(next) : seg
+                  const showDivider = next != null && !isActive && !nextIsActive && nextSeg === seg
+                  return (
+                    <Fragment key={s.key}>
+                      {showHeader && (
+                        <div data-testid="date-segment-header" className="px-3 pt-3 pb-1 text-[11px] font-semibold text-muted uppercase tracking-[.06em] select-none first:pt-1">{seg}</div>
+                      )}
+                      {renderSessionRow(s, 0, showDivider, 'flat')}
+                    </Fragment>
+                  )
+                })
+              })()}
+              {flatSlots.length === 0 && (
+                <div className="px-3 py-4 text-[12px] text-muted">{i18nT('pages.chatSidebar.no_sessions_match')}</div>
+              )}
+              {/* Flat view has no containers to anchor to — every hide, top-level
+               *  or nested, collapses into this one row at the bottom of the lane. */}
+              {renderHiddenReveal('flat', allHiddenFolders, 0)}
+            </motion.div>
+            {dragOverlay}
+          </DndContext>
         ) : orderedColumns.length === 0 ? (
           // Legacy single-lane layout (identical to pre-columns behavior)
           // Scrollbar hidden (scrollbar-none + inline scrollbarWidth covers
@@ -4853,17 +4921,7 @@ function ChatSidebar({
             {/* One DndContext owns folder reorder (sortable) + session drag-to-
              *  assign (draggable rows + droppable folder/root targets). */}
             <DndContext sensors={dndSensors} collisionDetection={sidebarCollision}
-              // Droppable rects are normally snapshotted once at drag-start, but
-              // this tree ANIMATES during drags (the dragged folder's body
-              // collapses over 150ms; hovered collapsed folders auto-expand), so
-              // the snapshot goes stale and drop targets diverge from the
-              // cursor. While a drag is live, poll re-measurement (dnd-kit's
-              // numeric `frequency` self-reschedules a measure loop) so rects
-              // track the animating layout. Idle sessions keep the plain
-              // strategy — no background measuring.
-              measuring={activeDrag
-                ? { droppable: { strategy: MeasuringStrategy.Always, frequency: 100 } }
-                : { droppable: { strategy: MeasuringStrategy.Always } }}
+              measuring={dndMeasuring}
               onDragStart={handleSidebarDragStart} onDragOver={handleSidebarDragOver} onDragEnd={handleSidebarDragEnd} onDragCancel={handleSidebarDragCancel}>
               {/* "Drag a session into the open chat" target. Portaled into
                *  ChatPage's pane so it covers the WHOLE conversation area (not
@@ -4922,16 +4980,7 @@ function ChatSidebar({
                   </div>
                 )}
               </DndDroppable>
-              <DragOverlay dropAnimation={null}>
-                {activeDrag ? (() => {
-                  if (activeDrag.type === 'folder') {
-                    return <FolderDragGhost folder={folders.find(x => x.id === activeDrag.id)} />
-                  }
-                  const ds = slots.find(x => x.key === activeDrag.id)
-                  const label = ds?.title && ds.title !== ds.key ? ds.title : (ds?.key ?? activeDrag.id)
-                  return <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none">{label}</div>
-                })() : null}
-              </DragOverlay>
+              {dragOverlay}
             </DndContext>
           </motion.div>
         ) : (
