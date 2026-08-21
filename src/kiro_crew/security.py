@@ -4619,8 +4619,11 @@ _CREW_SECRET_LEAVES: list[str] = [
     # for the same reason: flipping ``enabled`` grants full desktop observation
     # plus keystroke/click synthesis into the operator's real applications — a
     # security ceiling, not a preference. Storing it in the agent-readable
-    # ``config.json`` would leave it writable by any auto-approved agent shell
-    # (verified: ``is_sensitive_bash_command("echo x > …/config.json")`` is None),
+    # ``config.json`` would leave it exposed: config's anchored shell-write
+    # forms are denied since #4956 (``_WRITE_SHAPED_BASH_LEAVES``), but the
+    # write-only tier keeps reads open and accepts write residuals (a
+    # ``cd``-relative form, a novel verb-less write) that only the resource-value
+    # clamp neutralizes — and a boolean enable has no clamp,
     # so it lives here and gets read+write protection on BOTH the tool path
     # (``is_sensitive_path``) and the shell forms (``cat``, ``>``, ``tee``,
     # ``tar -C`` / ``unzip -d`` extraction into the trust root). The dashboard PUT
@@ -4957,6 +4960,49 @@ _WRITE_PROTECTED_BASH_LEAVES: tuple[str, ...] = (
     "playwright-cli-config.json",
 )
 
+# ── WRITE-SHAPED leaf matching (the crew config files, #4956) ──
+# The crew config leaves, paired with the same leaves in
+# _WRITE_PROTECTED_HOME_PATHS so the file-edit and shell paths agree — the
+# pairing comment there says it outright: "protected on one path only is not
+# protected". These carry the agent's own resource ceilings (concurrent
+# subagents, turn budget, warm-pool size), so a prompt-injected agent that could
+# ``tee``/redirect/``cp`` over them would rewrite its own limits; until #4956
+# only the file-EDIT door was shut and every shell write walked through.
+#
+# These leaves live in their OWN tier, deliberately NOT in
+# ``_WRITE_PROTECTED_BASH_LEAVES`` above, because that list is matched
+# verb-INDEPENDENTLY and ``hooks.on_tool_call`` runs this gate over EVERY
+# target — including a file-READ tool's normalized title, which on the
+# claude-agent-acp adapter (and after kiro-cli's ``Reading `` prefix strip) IS
+# the bare path. A verb-independent entry therefore denies the file-READ tool
+# itself, and ``llm_helpers``' tool_input scan and the cron script vetting
+# (``mcp_cron._vet_script_contents``) inherit the same refusal. For the four
+# leaves above that cost is acceptable (nothing reads them through the read
+# tool); for config.json it inverts the write-only tier's defining premise —
+# the dashboard file viewer, ``cat``, knowledge indexing and config-reading
+# cron scripts are the tier's raison d'être. So these two leaves are matched
+# only in WRITE-SHAPED contexts: a redirect/heredoc aimed at the path, a write
+# verb taking it as an operand, a copy/sync destination, or a script-open. A
+# bare path token (a read title, a tool_input string, ``cat``/``jq``/``git
+# show`` forms) does not match.
+#
+# A write-verb allowlist is weaker than verb-independent matching — the module
+# says so above, and it is true here too. The residuals are accepted
+# DELIBERATELY, not overlooked: (1) a novel write verb not in ``_WRITE_CMDS``
+# with no redirect character (the load-time clamp in ``config.loader``
+# neutralizes inflated resource values however they land on disk, which is the
+# backstop that makes this affordable for THESE leaves — the four
+# authorization-input leaves above have no such clamp, which is exactly why
+# they stay verb-independent); (2) the ``cd``-into-home + relative-name form,
+# the same residual every anchored leaf accepts (the SCOPE note on
+# ``_BARE_TOKEN_PROTECTED_LEAVES`` names config.json as the explicit
+# counter-example for bare-token matching); (3) reads are NOT blocked on any
+# path — that is the point, not a gap.
+_WRITE_SHAPED_BASH_LEAVES: tuple[str, ...] = (
+    "config.json",
+    "config.local.json",
+)
+
 # ── Anchor-INDEPENDENT leaf matching ──
 # Every pattern above (POSIX and Windows alike) is HOME-ANCHORED, so one ``cd``
 # defeats all of them: ``cd ~/.kiro/crew && echo forged >
@@ -5006,11 +5052,12 @@ _READ_CMDS = r"(?:cat|head|tail|less|more|strings|xxd|base64|cp|scp|open|vi|vim|
 # show/blame/grep -- <sensitive path>``) that operators run during incident
 # triage. The verb-independent catch-all still flags a sensitive-path token
 # regardless of git verb, so this only trims false positives.
-_WRITE_CMDS = (
-    r"(?:tee|mv|dd|truncate|ln|install|sed|chmod|chown|rm|rmdir|touch|mkdir|rsync"
+_WRITE_CMD_NAMES = (
+    r"tee|mv|dd|truncate|ln|install|sed|chmod|chown|rm|rmdir|touch|mkdir"
     r"|tar|unzip|gunzip|gzip|cpio|patch"
-    r"|git\s+(?:checkout|restore|reset|apply|clean|rm|mv|stash))\s"
+    r"|git\s+(?:checkout|restore|reset|apply|clean|rm|mv|stash)"
 )
+_WRITE_CMDS = rf"(?:{_WRITE_CMD_NAMES}|rsync)\s"
 
 # Matches python/ruby/perl one-liners that open sensitive paths
 _SCRIPT_OPEN = r"(?:python|ruby|perl)\S*\s.*open\s*\("
@@ -5154,6 +5201,75 @@ def _build_sensitive_regex() -> re.Pattern[str]:
         rf"{win_home_alts}{win_gsep}(?:{win_wp_prefixes}){win_gsep}"
         rf"(?:{win_wp_leaves})(?:{win_sep}|\s|$|['\"])"
     )
+    # ── WRITE-SHAPED matching for the crew config leaves (#4956) ──
+    # Unlike every branch above, these two leaves are matched ONLY in write
+    # contexts: ``hooks.on_tool_call`` runs this whole gate over a file-READ
+    # tool's normalized title (which can be the bare path), and llm_helpers'
+    # tool_input scan and the cron script vetting reuse it on raw strings — so a
+    # verb-independent entry here would deny the read tool itself and every
+    # config-reading cron script, inverting the write-only tier. See the comment
+    # on ``_WRITE_SHAPED_BASH_LEAVES`` for the accepted residuals (novel
+    # verb-less write forms fall to the config loader's load-time clamp).
+    # Write shapes: a write verb with the path as any operand (``mv``/``rm`` of
+    # the config is a destructive write; ``sed``/``tar`` over-match a rare read
+    # form — the safe direction), a script-open, or a redirect aimed at the
+    # path (``>``, ``>>``, and the ``>|`` clobber form). ``cp``/``scp``/
+    # ``rsync`` are matched only with the path in DESTINATION (final-path-
+    # operand) position, so ``cp <config> /tmp/backup`` and
+    # ``rsync -a <config> /tmp/b/`` stay reads while ``cp evil <config>`` is a
+    # write — which is why ``rsync`` is EXCLUDED from the any-operand verb
+    # alternation below (``_WRITE_CMD_NAMES`` omits it; ``_WRITE_CMDS`` re-adds
+    # it for the verb-independent tiers, where over-matching a read is the
+    # accepted-safe direction).
+    ws_leaves = "|".join(re.escape(leaf) for leaf in _WRITE_SHAPED_BASH_LEAVES)
+    ws_core = rf"{home_alts}/(?:{wp_prefixes})/(?:{ws_leaves})"
+    ws_path = rf"{ws_core}(?:/|\s|$|['\"])"
+    # The verb alternations carry a non-name lookbehind so a verb embedded in a
+    # longer word cannot fire ("model" contains "del", "committee" contains
+    # "tee") — this tier must not over-match, since a false positive here
+    # refuses a command about a file everyone is allowed to read.
+    ws_verb_guard = r"(?<![\w.-])"
+    # The verb is bounded by a NON-IDENTIFIER lookahead, not literal
+    # whitespace: the shell tokenizer collapses ``${IFS}``/``$IFS``, empty
+    # quotes (``''``/``""``) and backslash-newline into argv separators, so
+    # ``tee${IFS}<config>`` reaches ``tee`` with the config as its operand
+    # while carrying no literal whitespace for a ``\s`` boundary to match (the
+    # #4745 bypass class). Anything that is not an identifier character ends
+    # the verb; the lookbehind above still blocks mid-word hits.
+    ws_write_cmds = rf"(?:{_WRITE_CMD_NAMES})(?![\w.-])"
+    # After the redirect ``>``: optional ``|`` (the ``>|`` noclobber-override
+    # spelling writes exactly like ``>``); ``>>`` is already consumed by the
+    # greedy ``.*`` before the final ``>``.
+    write_shaped_path = (
+        rf"(?:{ws_verb_guard}{ws_write_cmds}.*|{_SCRIPT_OPEN}.*|.*>\|?\s*['\"]?)"
+        rf"{ws_path}"
+    )
+    # Destination position = last PATH operand: trailing redirection words
+    # (``2>/dev/null``, ``>out``, ``2>&1``) after the destination do not
+    # demote it, so they are consumed before the terminator.
+    ws_trailing_redirs = r"(?:\s+[0-9]*>>?\|?\s*(?:&[0-9]+|\S+))*"
+    ws_dest_path = (
+        rf"{ws_verb_guard}(?:cp|scp|rsync)\s[^;&|\n#]*[\s:'\"=]"
+        rf"{ws_core}['\"]?{ws_trailing_redirs}\s*(?:[;&|#\n]|$)"
+    )
+    win_ws_leaves = "|".join(
+        win_gsep.join(re.escape(part) for part in leaf.split("/"))
+        for leaf in _WRITE_SHAPED_BASH_LEAVES
+    )
+    win_ws_path = (
+        rf"{win_home_alts}{win_gsep}(?:{win_wp_prefixes}){win_gsep}"
+        rf"(?:{win_ws_leaves})(?:{win_sep}|\s|$|['\"])"
+    )
+    # Windows-native write verbs (``copy``/``del``/...) are not in
+    # ``_WRITE_CMD_NAMES``; a ``copy``-source read is over-matched — the safe
+    # direction, consistent with the module's posture on native spellings.
+    # ``rsync`` naming a WINDOWS-spelled path is the one shape this branch
+    # drops by reusing the rsync-free alternation; rsync does not accept
+    # backslash paths, so the form is not executable — not a residual.
+    win_write_shaped_path = (
+        rf"(?:{ws_verb_guard}{ws_write_cmds}.*|{_SCRIPT_OPEN}.*|.*>\|?\s*['\"]?"
+        rf"|{ws_verb_guard}(?:copy|xcopy|robocopy|move|del|erase)\s.*){win_ws_path}"
+    )
     # ── ~/.kiro/agents WRITE-protection (a whole DIRECTORY, not a leaf) ──
     # A spec under this dir becomes a KIROCREW_MCP_TARGET_<SERVER> command the
     # gateway execs — pooled backends run OUTSIDE the per-session sandbox — so an
@@ -5249,6 +5365,15 @@ def _build_sensitive_regex() -> re.Pattern[str]:
         rf"|(?:^|.*[\s'\"=:,;]){win_sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){appdata_sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){win_write_protected_path}"
+        # (9) WRITE-SHAPED crew-config matching (#4956): write verb / script-open
+        # / redirect aimed at the leaf, the cp/scp/rsync destination form, and
+        # the Windows-native spellings of the same. Deliberately NOT
+        # verb-independent — a bare path token (a read title, a tool_input
+        # string, ``cat``/``git show`` forms) must keep NOT matching, because
+        # this gate also runs on file-READ titles and cron script bodies.
+        rf"|{write_shaped_path}"
+        rf"|{ws_dest_path}"
+        rf"|{win_write_shaped_path}"
         # (8) ~/.kiro/agents (POSIX and Windows-native spelling, plus the
         # ``$KIRO_HOME`` override), matched verb-INDEPENDENTLY with the same token
         # anchor as (2)/(3): naming the dir is the signal, so ``curl -o``/``wget

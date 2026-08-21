@@ -4322,10 +4322,12 @@ class ComputerUseConfig:
     The primary enable is NOT here. It lives on the keystone
     ``computer_use.json`` (see :func:`computer_use_state_path`) because turning
     computer use on grants full desktop observation plus input synthesis, which
-    is a security ceiling rather than a preference: ``config.json`` is writable
-    by an auto-approved agent shell (``is_sensitive_bash_command`` does NOT block
-    ``echo … > config.json``), so an enable stored here could be flipped by
-    prompt injection. Adding an ``enabled`` field to this dataclass would
+    is a security ceiling rather than a preference: ``config.json`` stays
+    agent-readable and its shell-write protection (write-shaped and anchored
+    since #4956) deliberately accepts residual write forms that only the
+    resource-value clamp neutralizes — and a boolean enable has no clamp, so a
+    flag stored here could still be flipped by prompt injection through a
+    residual. Adding an ``enabled`` field to this dataclass would
     silently re-open that hole — do not.
 
     Everything modelled here is safe for the agent to read and, at worst,

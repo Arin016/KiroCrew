@@ -379,11 +379,13 @@ class TestTrustTier:
         assert _is_owner_designated_repo({"_registry": "mine", "gitUrl": SIBLING}) is False
 
     def test_an_operator_typed_tier_is_ignored(self, monkeypatch):
-        """`config.json` is agent-writable, so a tier from it is not an assertion.
+        """`config.json` is not a trustworthy carrier for a tier assertion.
 
-        `security.py` states it directly, with the check inline:
-        `is_sensitive_bash_command("echo x > …/config.json")` is None. A
-        prompt-injected shell could therefore mint `owner` — and the same write
+        Its anchored shell-write forms are denied since #4956, but the
+        write-only tier deliberately accepts residual write forms (a
+        cd-relative write, a novel verb-less write) that only the
+        resource-value clamp neutralizes — and nothing clamps a forged registry
+        row. A prompt-injected shell could therefore mint `owner` — and the same write
         also adds its chosen host to the trusted set and lets it control the index
         `_owner_tier_confirmed` re-fetches, so every layer downstream would
         already be satisfied by that one write. Only a build-pinned row may carry

@@ -2994,12 +2994,21 @@ class TestConfigWriteProtection:
         assert is_sensitive_write_path(str(Path.home() / ".kirocrew" / "config.local.json"))
 
     def test_config_json_reads_still_allowed(self) -> None:
+        # The read allowance is the write-only tier's defining premise: the
+        # dashboard file viewer, ``cat``, and knowledge indexing legitimately
+        # read config. Pinned on BOTH gates because ``hooks.on_tool_call`` runs
+        # ``is_sensitive_bash_command`` over file-READ tool titles too (a read
+        # title can be the bare path) — a verb-independent leaf entry would
+        # flip this test red, which is exactly the regression it exists to stop
+        # (#4956 kept the crew config leaves write-SHAPED for this reason).
         from kiro_crew.security import is_sensitive_bash_command, is_sensitive_path
 
-        assert is_sensitive_path("~/.kiro/crew/config.json") is False
-        assert is_sensitive_bash_command("cat ~/.kiro/crew/config.json") is None
-        assert is_sensitive_path("~/.kirocrew/config.json") is False
-        assert is_sensitive_bash_command("cat ~/.kirocrew/config.json") is None
+        for leaf in ("config.json", "config.local.json"):
+            for prefix in (".kiro/crew", ".kirocrew"):
+                assert is_sensitive_path(f"~/{prefix}/{leaf}") is False
+                assert is_sensitive_bash_command(f"cat ~/{prefix}/{leaf}") is None
+                # the bare-path form a file-READ tool title takes
+                assert is_sensitive_bash_command(f"~/{prefix}/{leaf}") is None
 
     def test_write_protection_superset_of_sensitive(self) -> None:
         from kiro_crew.security import is_sensitive_write_path

@@ -726,12 +726,15 @@ leaf on `security._CREW_SECRET_LEAVES`):
 ```
 
 The absence is deliberate and the precedent is `denied_commands.json`:
-`is_sensitive_write_path("~/.kiro/crew/config.json")` is `True` (the *tool* path is
-protected), but `is_sensitive_bash_command("echo x > ~/.kiro/crew/config.json")` is
-`None` — `config.json` is not among `_WRITE_PROTECTED_BASH_LEAVES` (which fences
-only a few specific control files elsewhere under the home). A config
-toggle would therefore be flippable by a prompt-injected agent through any shell
-redirect.
+`config.json` is a write-only tier file — the tool path is protected
+(`is_sensitive_write_path` is `True`) and, since #4956, anchored shell WRITES
+are denied too (`_WRITE_SHAPED_BASH_LEAVES` — redirects, write verbs,
+copy-destinations). But the tier keeps reads open by design and accepts
+residual write forms (a `cd`-relative write, a novel verb-less write) that only
+the loader's resource-value clamp neutralizes. A boolean security toggle has no
+clamp, so a config
+toggle would still be flippable by a prompt-injected agent through a residual
+write form, and readable besides.
 
 - **`enabled`** — the primary enable for full desktop observation plus input
   synthesis. A security ceiling, so it goes where the agent can neither read nor

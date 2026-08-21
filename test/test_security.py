@@ -4731,6 +4731,231 @@ class TestBareTokenProtectedLeaves:
                 assert is_sensitive_bash_command(anchored) is not None, anchored
 
 
+class TestCrewConfigShellWriteProtection:
+    """#4956: config.json / config.local.json are paired on BOTH write paths.
+
+    ``_WRITE_PROTECTED_HOME_PATHS`` fenced the file-EDIT tool from the start, and
+    its own pairing comment states the rule: "protected on one path only is not
+    protected". The shell gate nonetheless walked -- redirect, ``tee`` and
+    ``cp``-destination writes naming the crew config were allowed while the
+    identical shapes naming ``playwright-cli-config.json`` were denied. These
+    files carry the agent's own resource ceilings (concurrent subagents, turn
+    budget, warm-pool size), and that rationale applies identically to both
+    doors.
+
+    The shell tier is WRITE-SHAPED (``_WRITE_SHAPED_BASH_LEAVES``), not
+    verb-independent: ``hooks.on_tool_call`` runs ``is_sensitive_bash_command``
+    over file-READ tool titles (which can be the bare path), tool_input strings,
+    and cron script bodies, so a verb-independent entry would deny the read tool
+    itself -- inverting the write-only tier whose whole point is that the
+    dashboard file viewer, ``cat``, and knowledge indexing read config freely.
+    """
+
+    def test_crew_config_shell_writes_are_denied(self) -> None:
+        # The reporter's probe table (redirect / tee / cp-destination) plus the
+        # other write shapes: every form here was ALLOWED before the pairing fix.
+        for leaf in ("config.json", "config.local.json"):
+            for prefix in security.crew_home_prefixes():
+                for form in (
+                    f"echo x > ~/{prefix}/{leaf}",
+                    f"echo x > $HOME/{prefix}/{leaf}",
+                    f"echo x >~/{prefix}/{leaf}",
+                    f"tee ~/{prefix}/{leaf}",
+                    f"cp /tmp/evil.json ~/{prefix}/{leaf}",
+                    f"mv /tmp/evil.json ~/{prefix}/{leaf}",
+                    f"rm ~/{prefix}/{leaf}",
+                    f"sed -i 's/8/999/' ~/{prefix}/{leaf}",
+                    f"touch ~/{prefix}/{leaf}",
+                    f"python -c \"open('/home/u/{prefix}/{leaf}', 'w')\"",
+                ):
+                    assert is_sensitive_bash_command(form) is not None, form
+
+    def test_windows_native_write_shapes_are_denied(self) -> None:
+        # The POSIX branch anchors on ``/`` separators, so the Windows-native
+        # spelling needs its own branch -- host-independently, since the raw
+        # pass never depends on the runner's OS.
+        for leaf in ("config.json", "config.local.json"):
+            for prefix in security.crew_home_prefixes():
+                win_prefix = prefix.replace("/", "\\")
+                for anchor in ("C:\\Users\\u", "%USERPROFILE%", "$env:USERPROFILE"):
+                    target = f"{anchor}\\{win_prefix}\\{leaf}"
+                    for cmd in (
+                        f'echo forged > "{target}"',
+                        f'copy /Y evil.json "{target}"',
+                        f'del "{target}"',
+                        f"python -c \"open(r'{target}','w')\"",
+                    ):
+                        assert is_sensitive_bash_command(cmd) is not None, cmd
+
+    def test_parity_with_an_existing_protected_leaf_on_write_shapes(self) -> None:
+        # The durable assertion for the probe table's shapes: the gate treats
+        # the config leaves exactly as it treats the long-standing browse launch
+        # config. Fails if someone protects one leaf of the paired tuple and not
+        # the others -- the very defect #4956 reported.
+        existing = "playwright-cli-config.json"
+        for leaf in ("config.json", "config.local.json"):
+            for form in (
+                "echo x > ~/.kiro/crew/{leaf}",
+                "echo x > $HOME/.kiro/crew/{leaf}",
+                "echo x > ~/.kirocrew/{leaf}",
+                "tee ~/.kiro/crew/{leaf}",
+                "cp /tmp/evil.json ~/.kiro/crew/{leaf}",
+            ):
+                assert (
+                    is_sensitive_bash_command(form.format(leaf=leaf)) is not None
+                ) == (
+                    is_sensitive_bash_command(form.format(leaf=existing)) is not None
+                ), (leaf, form)
+
+    def test_reads_stay_allowed_on_every_path(self) -> None:
+        # The write-only tier's defining premise. Three surfaces, each pinned:
+        # (1) the read-tier classification (file-READ tool / safe_read_file);
+        # (2) the bash gate on read commands AND on the bare-path form a
+        #     file-READ title takes after prefix normalization -- hooks runs
+        #     this gate over titles, so a verb-independent leaf entry would
+        #     flip these red (the #4956 review's blocking finding);
+        # (3) the file-EDIT gate still refuses (the pairing's other half).
+        for leaf in ("config.json", "config.local.json"):
+            for prefix in security.crew_home_prefixes():
+                path = f"~/{prefix}/{leaf}"
+                assert is_sensitive_path(path) is False, path
+                assert security.is_sensitive_write_path(path) is True, path
+                for read_form in (
+                    path,  # bare file-READ title (claude-agent-acp adapter)
+                    f"cat {path}",
+                    f"jq .agent {path}",
+                    f"head -5 {path}",
+                    # export/backup: config as copy SOURCE is a read
+                    f"cp {path} /tmp/backup.json",
+                    f"scp {path} remote:backup/",
+                ):
+                    assert is_sensitive_bash_command(read_form) is None, read_form
+
+    def test_hooks_read_tool_allowed_and_edit_tool_denied(self) -> None:
+        # The gate that actually decides a tool call is hooks.on_tool_call --
+        # pin the read/write asymmetry there, end to end, so no future
+        # security.py-internal change can quietly turn the write block into a
+        # read block without this test seeing it.
+        from kiro_crew.hooks import TOOL_DENY, HookManager
+
+        mgr = HookManager()
+        path = "~/.kiro/crew/config.json"
+        read_result = mgr.on_tool_call(
+            f"Reading {path}", tool_kind="read", raw_params={"path": path}
+        )
+        assert read_result.action != TOOL_DENY, read_result
+        edit_result = mgr.on_tool_call(
+            f"Editing {path}", tool_kind="edit", raw_params={"path": path}
+        )
+        assert edit_result.action == TOOL_DENY, edit_result
+
+    def test_unrelated_config_json_stays_allowed(self) -> None:
+        # False-positive floor (the real blast-radius risk -- see the
+        # four-iteration history of #4745): ``config.json`` is one of the most
+        # common filenames in any repository, so only the crew-home-ANCHORED
+        # write shapes may be refused. Ordinary commands naming an unrelated
+        # config.json keep working, reads and writes alike.
+        for cmd in (
+            # repo-relative paths
+            "cat config.json",
+            "cat ./config.json",
+            "jq .name src/config.json",
+            "echo '{}' > config.json",
+            "tee config.json",
+            "cp config.json config.json.bak",
+            # another project's tree under the home dir
+            "cat ~/projects/myapp/config.json",
+            "echo x > ~/repos/webapp/config.json",
+            # near-miss crew prefixes must not anchor
+            "echo x > ~/.kiro/crew-backup/config.json",
+            "echo x > ~/.kirocrewx/config.json",
+            # /tmp and other absolute paths outside the crew home
+            "jq . /tmp/config.json",
+            "echo x > /tmp/config.json",
+            "cat /etc/myservice/config.json",
+            # a git read of one
+            "git show HEAD:config.json",
+            "git show HEAD~1:website/config.json",
+            # config.local.json variants
+            "cat config.local.json",
+            "echo x > /tmp/config.local.json",
+            # crew-home content that is NOT a protected leaf
+            "touch ~/.kiro/crew/sessions.db",
+            "echo x > ~/.kiro/crew/notes.json",
+            # a verb embedded in a longer word must not fire ("model" > "del")
+            "grep model ~/.kiro/crew/config.json",
+            # Windows path outside the crew home
+            'echo forged > "C:\\Users\\u\\project\\config.json"',
+        ):
+            assert is_sensitive_bash_command(cmd) is None, cmd
+
+    def test_tokenizer_glue_and_redirect_variants_are_denied(self) -> None:
+        # The write-verb boundary is NON-IDENTIFIER, not literal whitespace:
+        # the shell tokenizer collapses ``${IFS}``/``$IFS``, empty quotes and
+        # backslash-newline into argv separators, so a ``\s`` boundary passes a
+        # whitespace-only sweep while dropping every glue-separator write (the
+        # #4745 bypass class). ``>|`` writes exactly like ``>``; a trailing
+        # redirection after a ``cp`` destination does not demote it from
+        # final-path-operand position. All four shapes here were denied by the
+        # verb-independent v1 draft and must never regress.
+        for leaf in ("config.json", "config.local.json"):
+            for cmd in (
+                # tokenizer-removable glue between verb and operand
+                "tee${IFS}'" + f"/home/u/.kiro/crew/{leaf}'",
+                f"tee$IFS~/.kiro/crew/{leaf}",
+                f"tee'' ~/.kiro/crew/{leaf}",
+                # noclobber-override redirect
+                f"echo x >| ~/.kiro/crew/{leaf}",
+                # destination followed by trailing redirections
+                f"cp /tmp/evil ~/.kiro/crew/{leaf} 2>/dev/null",
+                f"cp /tmp/evil ~/.kiro/crew/{leaf} >log 2>&1",
+            ):
+                assert is_sensitive_bash_command(cmd) is not None, cmd
+        # The glue boundary must not widen the false-positive floor: glue
+        # shapes naming an UNRELATED config.json stay allowed, and a verb
+        # embedded in a longer word still cannot fire.
+        for cmd in (
+            "tee${IFS}/tmp/config.json",
+            "tee'' ./config.json",
+            "echo x >| /tmp/config.json",
+            "committee ~/.kiro/crew/config.json",
+        ):
+            assert is_sensitive_bash_command(cmd) is None, cmd
+
+    def test_rsync_and_copy_source_reads_stay_allowed(self) -> None:
+        # ``cp``/``scp``/``rsync`` with the config as SOURCE are reads (the
+        # backup direction); only the destination position is a write. rsync
+        # is therefore excluded from the any-operand write-verb alternation --
+        # an rsync in _WRITE_CMD_NAMES would deny the read form.
+        for cmd in (
+            "rsync -a ~/.kiro/crew/config.json /tmp/backup/",
+            "rsync -av ~/.kiro/crew/config.local.json host:/backup/",
+            "cp ~/.kiro/crew/config.json /tmp/backup.json",
+            "scp ~/.kiro/crew/config.json host:/tmp/",
+        ):
+            assert is_sensitive_bash_command(cmd) is None, cmd
+        # ...while the write direction stays denied.
+        assert is_sensitive_bash_command("rsync -a /tmp/evil ~/.kiro/crew/config.json") is not None
+
+    def test_config_leaves_live_in_the_write_shaped_tier_only(self) -> None:
+        # Tier-placement guard, both directions:
+        # - NOT in ``_WRITE_PROTECTED_BASH_LEAVES``: that list is matched
+        #   verb-independently and hooks runs it over file-READ titles, so
+        #   membership there blocks the read tool (the #4956 review's blocking
+        #   finding).
+        # - NOT in ``_BARE_TOKEN_PROTECTED_LEAVES``: its SCOPE note names
+        #   config.json as the explicit counter-example -- an unanchored entry
+        #   would refuse a large fraction of routine commands in any repository.
+        for leaf in ("config.json", "config.local.json"):
+            assert leaf in security._WRITE_SHAPED_BASH_LEAVES
+            assert leaf not in security._WRITE_PROTECTED_BASH_LEAVES
+            assert leaf not in security._BARE_TOKEN_PROTECTED_LEAVES
+        # The cd-into-home + relative-name residual is accepted on purpose (the
+        # limit every non-distinctive anchored leaf shares); the config loader's
+        # load-time clamp neutralizes inflated values that land through it.
+        assert is_sensitive_bash_command("cd ~/.kiro/crew && echo x > config.json") is None
+
+
 class TestKiroAgentsDirWriteProtection:
     """``~/.kiro/agents`` is WRITE-protected on both the file-edit and bash gates.
 

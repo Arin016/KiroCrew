@@ -401,10 +401,12 @@ The primary enable lives at **`~/.kiro/crew/computer_use.json`**, NOT in
 { "enabled": false, "allowed_apps": [], "extra_denied_apps": [] }
 ```
 
-Why not `config.json` — verified, and with a precedent in this repo:
-`is_sensitive_write_path("~/.kiro/crew/config.json")` is `True` (the tool path is
-protected) but `is_sensitive_bash_command("echo x > ~/.kiro/crew/config.json")` is
-`None` and `is_denied(...)` is `None`. `security.py` states the governing
+Why not `config.json` — with a precedent in this repo:
+`config.json` sits on the write-only tier — the tool path is protected
+(`is_sensitive_write_path` is `True`) and anchored shell writes are denied since
+#4956 (`_WRITE_SHAPED_BASH_LEAVES`) — but that tier keeps reads open by design
+and accepts residual write forms that only the loader's resource-value clamp
+neutralizes, and a boolean enable has no clamp. `security.py` states the governing
 precedent outright: the denied-command opt-out is deliberately kept OFF
 `config.json` **because it is a security ceiling**. A primary enable for full
 desktop observation plus input synthesis is the same class of control, so

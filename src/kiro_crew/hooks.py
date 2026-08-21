@@ -584,9 +584,24 @@ class HookManager:
         # resource exhaustion. Gated
         # on the ACP ``edit`` kind (the fs_write/code tool) so a plain read of
         # config is unaffected — the dashboard file viewer, ``cat``, and knowledge
-        # indexing legitimately read config.json. Bash writes (``tee``/``>``/
-        # ``cp``-dest) are blocked separately by ``is_sensitive_bash_command``
-        # above; this branch covers the file-EDIT tool.
+        # indexing legitimately read config.json. The shell surface is covered by
+        # ``is_sensitive_bash_command`` above: since #4956 the crew config leaves
+        # are in ``_WRITE_SHAPED_BASH_LEAVES``, so home-anchored WRITE-shaped
+        # shell commands (redirects, ``tee``/``mv``/``sed -i``-class verbs,
+        # ``cp``/``scp``/``rsync`` with the config as destination, script-opens,
+        # and the Windows-native spellings) are denied on both crew-home
+        # prefixes. The tier is write-SHAPED rather than verb-independent on
+        # purpose: this gate also runs on file-READ tool titles (which can be
+        # the bare path), tool_input strings, and cron script bodies, so a
+        # verb-independent entry would deny the read tool itself. A bare path
+        # token, ``cat``, ``git show`` and copy-as-source forms keep matching
+        # nothing. Accepted residuals, both deliberate: (1) a novel write verb
+        # with no redirect and (2) the ``cd``-into-home + relative-filename form
+        # — the config loader's load-time clamp neutralizes inflated resource
+        # values however they land on disk (bare-token matching stays reserved
+        # for the one globally distinctive filename; see the SCOPE note on
+        # ``_BARE_TOKEN_PROTECTED_LEAVES``). This branch covers the file-EDIT
+        # tool.
         #
         # Empty/unknown ``tool_kind`` (the ACP kind field is spec-optional; some
         # backends omit it) is DELIBERATELY not mirrored here.

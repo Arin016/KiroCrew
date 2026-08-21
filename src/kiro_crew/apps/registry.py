@@ -558,9 +558,13 @@ def _registry_trust_tier(registry_name: str) -> str:
 
     **Only a BUILD-PINNED registry can carry ``owner``.** A row in
     ``config.json`` is read as ``index`` no matter what it declares, because
-    ``config.json`` is agent-writable — ``security.py`` says so in as many words,
-    with the check inline: ``is_sensitive_bash_command("echo x > …/config.json")``
-    is ``None``. A tier read from there would therefore not be an operator's
+    ``config.json`` is not a trustworthy carrier for an authorization grant: the
+    file stays agent-readable and, while the anchored shell-write forms are
+    denied since #4956 (``_WRITE_SHAPED_BASH_LEAVES``), the accepted residuals
+    remain — a ``cd``-into-home relative write, a novel verb-less write form —
+    and unlike the resource ceilings (which the loader clamps) nothing
+    downstream neutralizes a forged registry row. A tier read from there would
+    therefore not be an operator's
     assertion at all; a prompt-injected shell could mint ``owner``, and the same
     write also adds its chosen host to ``_configured_registry_hosts()`` and lets
     it control the index that :func:`_owner_tier_confirmed` re-fetches. Every
