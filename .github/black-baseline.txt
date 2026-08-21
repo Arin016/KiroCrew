@@ -326,7 +326,6 @@ src/kiro_crew/diagnostics.py
 src/kiro_crew/discord/attachments.py
 src/kiro_crew/discord/client.py
 src/kiro_crew/discord/gateway.py
-src/kiro_crew/discord/session_resume.py
 src/kiro_crew/discord/transport_dispatch.py
 src/kiro_crew/doc_parser.py
 src/kiro_crew/embeddings.py
@@ -841,10 +840,8 @@ test/test_dev_fleet_repo_accessor.py
 test/test_dev_fleet_server_coverage.py
 test/test_dev_fleet_server_more_coverage.py
 test/test_diagnostics.py
-test/test_discord.py
 test/test_discord_client_coverage.py
 test/test_discord_config_handlers.py
-test/test_discord_sessions.py
 test/test_display_time_redaction.py
 test/test_doc_parser.py
 test/test_docker_entrypoint.py

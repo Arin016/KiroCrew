@@ -18,6 +18,14 @@ HTML translation pass -- the final seal sends the markdown as-is. Steer
 rotation (sealing the pre-steer segment and opening a fresh message headed by
 a "↪️ steered" chip) mirrors the Telegram renderer.
 
+Length splitting belongs to :func:`kiro_crew.messaging.split.split_markdown_safe`,
+the shared fence-safe splitter. This renderer owns no fence grammar: it consumes
+the splitter's streaming contract, which is that every chunk but the last is
+sealed (a cut inside a fence carries a synthetic closer and the next chunk
+reopens the original opener line) while the final chunk is deliberately left
+OPEN. So each sealed chunk is posted verbatim and the final one is retained as
+the live buffer, with nothing to append and nothing to undo.
+
 ``DiscordApprovalDecider`` is the interactive ladder's awaiter: ``__call__``
 registers a Future keyed by ``session:request_id`` and awaits a button press,
 denying by default on timeout; the interaction handler resolves it via
@@ -36,7 +44,9 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from kiro_crew.constants import OPTIONS_RE_TRAILER, split_trailing_protocol_suffix
-from kiro_crew.messaging.renderer import Renderer, apply_options_cap
+from kiro_crew.discord.client import DISCORD_MAX_TEXT
+from kiro_crew.messaging.renderer import Renderer, apply_options_cap, chunk_text
+from kiro_crew.messaging.split import split_markdown_safe
 from kiro_crew.messaging.transport import TransportCapabilities
 
 if TYPE_CHECKING:
@@ -139,108 +149,27 @@ def build_option_components(options: list[str]) -> list[dict] | None:
     return rows
 
 
-def _split_text(text: str, limit: int) -> list[str]:
-    """Split text into <=``limit`` chunks, preferring paragraph boundaries."""
-    if limit <= 0 or len(text) <= limit:
-        return [text] if text else []
-    chunks: list[str] = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n\n", 0, limit)
-        if split_at < limit // 2:
-            split_at = text.rfind("\n", 0, limit)
-        # Back the cut up to the FIRST newline of its run. rfind reports the
-        # LAST one ("\n\n" reports the first of the RIGHTMOST pair), so a run of
-        # 3+ straddles the cut and its earlier newlines land in text[:split_at],
-        # where the .rstrip() below deletes them. Cutting at the run's start
-        # keeps the whole run in the remainder, so the only newline anyone
-        # absorbs is the one separator below. The promotion guard still has the
-        # final say, so a cut that walked too far left becomes a hard cut rather
-        # than an empty chunk.
-        while split_at > 0 and text[split_at - 1] == "\n":
-            split_at -= 1
-        if split_at < limit // 4:
-            split_at = limit
-        chunks.append(text[:split_at].rstrip())
-        remainder = text[split_at:]
-        # Consume EXACTLY ONE newline: the line separator this message boundary
-        # itself represents. Every newline after it is an authored blank line --
-        # content inside a fence -- so lstrip("\n") deleted whole runs of them
-        # and pulled the next code line up onto the last one. Horizontal
-        # whitespace is never touched, or a cut just before an indented line
-        # re-indents split code. A hard (mid-line) cut sits on no separator, so
-        # removeprefix finds nothing and the continuation is verbatim. Every cut
-        # consumes at least one character, so the loop always advances.
-        text = remainder.removeprefix("\n")
-    return chunks
+def _fit_platform_cap(text: str) -> list[str]:
+    """Slice *text* into payloads Discord's message API will accept whole.
 
+    ``split_markdown_safe`` budgets every chunk against :meth:`_limit`, with one
+    documented exception: a logical line that admits no cut clean on both sides
+    is placed WHOLE rather than cut into a fence delimiter its source never
+    contained, and the chunk carries its fence scaffolding — the reopener line
+    plus the newline and synthetic closer — on top of the limit. The 100
+    characters :meth:`_limit` holds back absorb ordinary scaffolding, but an
+    opener line long enough (a several-hundred-backtick run, a huge info string)
+    still pushes such a chunk past Discord's hard cap. ``client.send_message``
+    truncates to that cap, which drops the tail INCLUDING the synthetic closer,
+    so the user reads an unterminated code block missing content and gets no
+    signal that anything was lost.
 
-_FENCE_RE = re.compile(r"```[^\n]*\n?(.*?)```", re.DOTALL)
-
-
-def _ends_inside_fence(text: str) -> bool:
-    """True when ``text`` ends INSIDE an open fenced code block.
-
-    Line-anchored per CommonMark rather than counting ``` substrings: a literal
-    ``` written mid-line is prose about fencing, not a fence, and counting it
-    flips the parity of every fence decision that follows -- a sealed chunk gets
-    a closer it never needed, and the retained tail loses the one it did.
-
-    A fence opens on a line whose first non-space content (at most 3 spaces of
-    indent; 4+ is an indented code line) is a run of 3+ backticks, optionally
-    followed by an info string, which may not itself contain a backtick. It
-    closes on a later such line whose run is at least as long as the opener's
-    and which carries nothing but trailing whitespace.
+    Blind fixed-width slicing is the right last resort in exactly that regime:
+    it keeps every authored character at the price of a boundary Markdown may
+    render badly, where truncation keeps neither. Nothing here re-derives fence
+    grammar — the splitter owns that, and this only bounds what reaches the API.
     """
-    opener = 0  # backtick run length of the fence now open; 0 == closed
-    for line in text.split("\n"):
-        stripped = line.lstrip(" ")
-        if len(line) - len(stripped) > 3:
-            continue
-        run = len(stripped) - len(stripped.lstrip("`"))
-        if run < 3:
-            continue
-        rest = stripped[run:]
-        if opener:
-            if run >= opener and not rest.strip():
-                opener = 0
-        elif "`" not in rest:
-            opener = run
-    return opener > 0
-
-
-def _split_markdown(text: str, limit: int) -> tuple[list[str], bool]:
-    """Split markdown into <=``limit`` chunks, keeping fenced code blocks
-    balanced: close a dangling fence at a chunk's end and reopen it at the next
-    chunk's start, so every chunk is self-contained markdown (Discord renders
-    an unbalanced fence as literal backticks).
-
-    Returns the chunks and whether a synthetic closer was appended to the FINAL
-    chunk. That flag is this function's own record of what it did, and it is the
-    only sound basis for undoing it: the fence state is judged per chunk AFTER
-    prepending a bare ``` reopen, which discards the original opener's run
-    length, so no predicate re-derived from the source text can tell whether
-    this walk appended anything.
-    """
-    chunks = _split_text(text, limit)
-    if len(chunks) <= 1:
-        # A lone chunk is handed back untouched -- nothing appended, nothing to
-        # undo.
-        return chunks, False
-    out: list[str] = []
-    carry_open = False
-    for ch in chunks:
-        if carry_open:
-            ch = "```\n" + ch
-        if _ends_inside_fence(ch):
-            ch = ch.rstrip() + "\n```"
-            carry_open = True
-        else:
-            carry_open = False
-        out.append(ch)
-    return out, carry_open
+    return chunk_text(text, DISCORD_MAX_TEXT) or [text]
 
 
 class DiscordApprovalDecider:
@@ -460,23 +389,16 @@ class DiscordRenderer(Renderer):
         if len(raw) <= limit:
             return
         raw, protocol_suffix = split_trailing_protocol_suffix(raw)
-        chunks, appended_closer = _split_markdown(raw, limit)
-        # Mid-stream the source fence is often still OPEN (the model has not
-        # emitted its closing ``` yet). _split_markdown balances each chunk by
-        # appending a synthetic closer, right for the chunks we seal but wrong
-        # for the tail we keep streaming into: every later token would land
-        # after that closer and the model's real closer would show up
-        # literally. Drop it from the retained tail -- reading the splitter's
-        # own report of what it appended, never a predicate re-derived from the
-        # source. One judgment, made once, so the strip fires iff the append
-        # happened and cannot delete a line the author wrote.
-        if appended_closer:
-            # The splitter attached "\n```" to the rstripped content, so the
-            # exact inverse drops those four characters and restores the
-            # whitespace suffix it ate -- dropping the closer alone would eat
-            # the newline the content ended on and glue the next streamed line
-            # onto the last code line.
-            chunks[-1] = chunks[-1][:-4] + raw[len(raw.rstrip()) :]
+        # The shared splitter's streaming contract does the whole job: every
+        # chunk but the last is already sealed, and the last is deliberately
+        # left OPEN so a still-arriving fence keeps streaming into it. Mid-stream
+        # the source fence is usually still open (the model has not emitted its
+        # closing ``` yet), which is exactly the case that needs a synthetic
+        # closer on the chunks we seal and none on the tail we keep. Nothing is
+        # appended to the tail here, so there is nothing to strip back off it —
+        # and prefix stability means a later, longer buffer re-derives these same
+        # sealed chunks byte-for-byte, so no message already posted can move.
+        chunks = await asyncio.to_thread(split_markdown_safe, raw, limit)
         for ch in chunks[:-1]:
             self._buf = [ch]
             await self._seal_current()
@@ -525,23 +447,36 @@ class DiscordRenderer(Renderer):
         """Finalize the current segment: land the full markdown text (and
         optional button rows). Edits the streamed message in place, or sends
         one if the segment never streamed (e.g. throttled out). Empty segments
-        are skipped so a bare steer doesn't post a blank bubble."""
+        are skipped so a bare steer doesn't post a blank bubble.
+
+        This is the one chokepoint every non-throwaway payload passes, so it is
+        where the splitter's bounded-overlimit chunk is bounded again against the
+        platform cap (see :func:`_fit_platform_cap`). Buttons ride the LAST
+        payload, which is the one the user reads under them."""
         text = self._segment_text().strip()
         if not text:
             if components is None:
                 return
             text = "…"
+        head, *overflow = _fit_platform_cap(text)
+        head_components = None if overflow else components
         if self._stream_mid is not None:
             ok = await self._client.edit_message(
-                self._channel_id, self._stream_mid, text, components=components
+                self._channel_id, self._stream_mid, head, components=head_components
             )
-            if ok:
-                return
-            # Edit failed — the live message is gone (e.g. deleted mid-turn).
-            # Fall through and SEND the final content so the completed answer
-            # (and its buttons) is never silently lost.
-            self._stream_mid = None
-        await self._client.send_message(self._channel_id, text, components=components)
+            if not ok:
+                # Edit failed — the live message is gone (e.g. deleted mid-turn).
+                # SEND the content so the completed answer (and its buttons) is
+                # never silently lost.
+                self._stream_mid = None
+                await self._client.send_message(self._channel_id, head, components=head_components)
+        else:
+            await self._client.send_message(self._channel_id, head, components=head_components)
+        for i, part in enumerate(overflow):
+            last = i == len(overflow) - 1
+            await self._client.send_message(
+                self._channel_id, part, components=components if last else None
+            )
 
     async def on_thinking(self, text: str) -> None:
         # Discord does not surface reasoning inline (parity with Telegram).

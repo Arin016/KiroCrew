@@ -1,9 +1,10 @@
 """Fence-safe markdown splitting, shared by every messaging channel.
 
-Six splitters grew independently — Discord and Telegram each carry a
+Six splitters grew independently — Telegram carries a
 ``_split_text``/``_split_markdown`` pair, ``messaging/renderer.py`` chunks blind
 fixed-width, and Slack, Webex and Weixin have their own — so a fix landed in one
-never reached the others. This module is the single engine they converge on.
+never reached the others. This module is the single engine they converge on, and
+Discord is the first channel on it.
 
 Three properties make it safe for the shared path:
 
