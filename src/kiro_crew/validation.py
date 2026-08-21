@@ -34,6 +34,12 @@ from kiro_crew.computer_use import types as _cu_types
 from kiro_crew.constants import WINDOWS_DEVICE_STEMS
 from kiro_crew.project_scope import SCOPE_FRAGMENT_RE
 
+# Reasoning-effort vocabulary: ``effort.py`` is the single source of truth for
+# the valid levels; EFFORT_VALUES additionally admits ``""`` ("unset — defer to
+# the role pin / provider default"). Import-safe: ``effort`` pulls in only
+# ``model_registry`` (stdlib-only), so no cycle back into validation.
+from kiro_crew.effort import EFFORT_VALUES
+
 # ── Constants ──
 
 # Max lengths for string inputs
@@ -971,6 +977,10 @@ SPAWN_RUN_SCHEMA = ToolSchema(
         # Optional model override for the subagent (e.g. "deepseek-3.2").
         # When set, the subagent runs on this model instead of the gateway default.
         FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
+        # Optional per-call reasoning-effort override for the subagent(s).
+        # Batch-wide, like ``model``. ``""`` (in EFFORT_VALUES) means "unset —
+        # defer to the role_efforts['subagent'] pin, else the provider default".
+        FieldSpec("reasoning_effort", str, allowed=EFFORT_VALUES),
         # keep=True makes the run a continuable conversation: its session
         # persists (hibernated on disk) after completion, and spawn_continue
         # can dispatch follow-up turns into it with full prior context.

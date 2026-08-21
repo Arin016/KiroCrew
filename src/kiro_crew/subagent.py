@@ -1176,6 +1176,10 @@ class SubagentInfo:
     _raw_task: str = ""  # unredacted task for kiro-cli execution prompt
     # CC-specific overrides (ignored for ACP)
     model: str = ""
+    # Per-call reasoning-effort override (spawn_run ``reasoning_effort``).
+    # Wins over the ``role_efforts['subagent']`` pin; ``""`` defers to it.
+    # Like ``model``, a non-empty value forces the dedicated-process path.
+    reasoning_effort: str = ""
     allowed_tools: list[str] = field(default_factory=list)
     bare: bool = False
     # Continuable conversations (spawn_run keep=True / spawn_continue):
@@ -3006,6 +3010,7 @@ class SubagentManager:
         agent: str = "",
         max_turns: int = 0,
         model: str | None = None,
+        reasoning_effort: str = "",
         allowed_tools: list[str] | None = None,
         bare: bool = False,
         cwd: str = "",
@@ -3049,6 +3054,8 @@ class SubagentManager:
             parent_session_key (str): Session key of the caller.
             agent (str): Agent name override (default: "kirocrew").
             model (str): Model override for CC provider (ignored for ACP).
+            reasoning_effort (str): Per-call reasoning-effort override; wins
+                over the ``role_efforts['subagent']`` pin. ``""`` defers to it.
             allowed_tools (list): Tool allowlist for CC provider (ignored for ACP).
             bare (bool): Launch CC in bare mode (ignored for ACP).
             cwd (str): Optional absolute path where the subagent subprocess
@@ -3308,6 +3315,7 @@ class SubagentManager:
                     "agent": agent,
                     "max_turns": max_turns,
                     "model": model,
+                    "reasoning_effort": reasoning_effort,
                     "allowed_tools": allowed_tools,
                     "bare": bare,
                     "cwd": resolved_cwd,
@@ -3395,6 +3403,7 @@ class SubagentManager:
             silent=silent,
             max_turns=max_turns,
             model=model or "",
+            reasoning_effort=reasoning_effort or "",
             allowed_tools=list(allowed_tools) if allowed_tools else [],
             bare=bare,
             cwd=resolved_cwd,
@@ -5256,10 +5265,10 @@ class SubagentManager:
         eff_model = info.model or _subagent_default_model()
         if eff_model:
             extra_kwargs["model"] = eff_model
-        # Sub-agent reasoning effort (role_efforts['subagent'] -> chat default).
-        # Passed as an override so it wins over the factory's agent-derived
-        # default; "" leaves it to that default.
-        eff_effort = _subagent_default_effort()
+        # Sub-agent reasoning effort (per-call override -> role_efforts['subagent']
+        # -> chat default). Passed as an override so it wins over the factory's
+        # agent-derived default; "" leaves it to that default.
+        eff_effort = info.reasoning_effort or _subagent_default_effort()
         if eff_effort:
             extra_kwargs["reasoning_effort_override"] = eff_effort
         if info.bare:

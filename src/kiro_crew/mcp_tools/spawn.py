@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 from kiro_crew import mcp_core
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.context_management import COMPLETION_KEEP_DEFAULT_CHARS
+from kiro_crew.effort import model_supports_effort
 from kiro_crew.mcp_shared import ToolCancelled, is_tool_cancelled
 from kiro_crew.platform import redact_via_context as redact
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -226,6 +227,21 @@ def schemas() -> list[dict[str, Any]]:
                             "'claude-haiku-4.5'). When set, the subagent runs on this model "
                             "instead of the gateway default. To discover available models, "
                             "run: kiro-cli chat --list-models --format json"
+                        ),
+                    },
+                    "reasoning_effort": {
+                        "type": "string",
+                        "description": (
+                            "Optional reasoning-effort override for the subagent(s): "
+                            "'low', 'medium', 'high', 'xhigh', or 'max' (empty/absent "
+                            "= unset). Batch-wide — applies to every task in this "
+                            "call and wins over the configured subagent role pin. "
+                            "Setting it forces the dedicated-process path: each "
+                            "subagent runs its own process (~3-5s start, ~400MB) "
+                            "instead of session sharing (~200ms, near-zero memory), "
+                            "so weigh it on a wide fan-out. Models that do not "
+                            "support effort ignore the level, but the process cost "
+                            "is still paid."
                         ),
                     },
                     "keep": {
@@ -489,6 +505,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
     max_turns = args.get("max_turns") or 0
     cwd = args.get("cwd") or ""
     model = args.get("model") or ""
+    reasoning_effort = args.get("reasoning_effort") or ""
     keep = bool(args.get("keep"))
     # Context scope: absent ⇒ true, so a parent that passes nothing gets the
     # same context a normal session would.
@@ -566,6 +583,8 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
             body["cwd"] = cwd
         if model:
             body["model"] = model
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         if keep:
             body["keep"] = True
         if not inc_memory:
@@ -606,6 +625,19 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
         agent_tasks.append(t)
 
     spawn_lines: list[str] = []
+    # Best-effort effort-capability report (never a rejection — gated on
+    # agent_ids so a total-failure result keeps its "Error:" first line, which
+    # SEL and callers test as a prefix). Only possible when the caller ALSO
+    # pinned a per-call model: with no explicit model the effective model
+    # resolves server-side (role pin / provider default) after this tool has
+    # returned, so this layer cannot know it and stays silent rather than
+    # guessing.
+    if agent_ids and reasoning_effort and model and not model_supports_effort(model):
+        spawn_lines.append(
+            f"ℹ reasoning_effort='{reasoning_effort}' was requested but model "
+            f"'{model}' does not support effort configuration — the level will "
+            "not be applied to these subagent(s)."
+        )
     if not parent_session and agent_ids:
         # Orphan alert: without a parent session key the subagents cannot
         # deliver completion events back to this conversation and will

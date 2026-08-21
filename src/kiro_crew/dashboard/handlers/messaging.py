@@ -109,6 +109,7 @@ async def api_spawn(request: web.Request) -> web.Response:
                 "max_turns": body.get("max_turns", 0),
                 "cwd": body.get("cwd", ""),
                 "model": body.get("model", ""),
+                "reasoning_effort": body.get("reasoning_effort", ""),
                 "include_memory": body.get("include_memory", True),
                 "include_lessons": body.get("include_lessons", True),
                 "include_project": body.get("include_project", True),
@@ -146,6 +147,7 @@ async def api_spawn(request: web.Request) -> web.Response:
     max_turns = cleaned.get("max_turns") or 0
     cwd = cleaned.get("cwd") or ""
     model = cleaned.get("model") or ""
+    reasoning_effort = cleaned.get("reasoning_effort") or ""
     # Batch/wave identity (transport-layer params from spawn_run MCP, like
     # approval_mode/silent above): validated inline, bounded, never LLM-schema.
     batch_id = str(body.get("batch_id", "") or "")[:32]
@@ -166,6 +168,7 @@ async def api_spawn(request: web.Request) -> web.Response:
         max_turns=max_turns,
         cwd=cwd,
         model=model or None,
+        reasoning_effort=reasoning_effort,
         approval_mode=approval_mode or None,
         silent=silent,
         batch_id=batch_id,
@@ -645,6 +648,9 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
         max_turns=old.max_turns,
         cwd=old.cwd,
         model=old.model or None,
+        # Like model and the context groups: a retry must run at the SAME
+        # effort as the run it replaces, or it is a different experiment.
+        reasoning_effort=old.reasoning_effort,
         approval_mode=old.approval_mode or None,
         silent=old.silent,
         # A retry must see the SAME context scope as the run it replaces —
