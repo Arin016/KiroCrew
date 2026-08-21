@@ -502,6 +502,17 @@ describe('turn stats footer (elapsed time + credits)', () => {
     expect(screen.queryByTestId('turn-model')).not.toBeInTheDocument()
   })
 
+  // An Auto turn arrives as the literal `auto`, not a model id, because Auto's
+  // per-turn choice is not disclosed on the wire. It still renders: a blank
+  // chip there is indistinguishable from a turn with no measurement at all,
+  // which is exactly the reading this chip exists to prevent.
+  it('shows the bare auto sentinel for a turn the backend routed itself', () => {
+    render(<AssistantMessage content="done" isStreaming={false} slotRunning={false} turnStats={{ elapsed_ms: 6_100, credits: 0.64, model: 'auto' }} />)
+    expect(screen.getByTestId('turn-model')).toHaveTextContent('auto')
+    const text = screen.getByTestId('turn-stats').textContent!.replace(/\s+/g, ' ').trim()
+    expect(text).toMatch(/^auto ·\s*0\.64 credits ·\s*6\.1s$/)
+  })
+
   // The tooltip is four whole-sentence catalog keys, one per combination of the
   // two optional clauses. Nothing else asserts the `title`, so without these a
   // wrong key or a dropped clause would render silently and every visible-text
@@ -556,6 +567,9 @@ describe('turn stats footer (elapsed time + credits)', () => {
     expect(fmtTurnModel('anthropic.claude-haiku-4-5')).toBe('claude-haiku-4-5')
     expect(fmtTurnModel('claude-sonnet-4.6')).toBe('claude-sonnet-4.6')
     expect(fmtTurnModel('gpt-5.6-luna')).toBe('gpt-5.6-luna')
+    // The Auto sentinel is passed through verbatim — the trimmer must not
+    // mistake it for a vendor-prefixed id and leave an empty label behind.
+    expect(fmtTurnModel('auto')).toBe('auto')
   })
 })
 

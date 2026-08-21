@@ -110,7 +110,7 @@ from kiro_crew.dashboard.handlers.usage import (
     persist_token_record_async,
     read_context_tokens,
     read_effective_agent,
-    read_effective_model,
+    read_turn_model,
 )
 from kiro_crew.dashboard.session_directive_apply import apply_session_directive
 from kiro_crew.dashboard.state import (
@@ -1027,11 +1027,12 @@ def _attach_turn_stats(
 
     ``elapsed_ms`` is the turn wall clock (or the provider-reported duration
     when available); ``credits`` is kiro-cli's per-turn ``meteringUsage`` sum;
-    ``cost_usd`` is claude_code's API-reported cost. ``model`` is the id the
-    backend actually served this turn (``read_effective_model``) — on the
-    ``auto`` path this is the disclosure of what auto resolved to, on a pinned
-    session it is confirmation. Zero/empty fields are omitted so the frontend
-    renders only what the provider actually reported.
+    ``cost_usd`` is claude_code's API-reported cost. ``model`` is what served
+    this turn (``read_turn_model``): a concrete id on a pinned session, or the
+    bare ``"auto"`` when the turn was handed to Auto and the backend disclosed
+    no id for it — Auto's per-turn choice is not on the ACP wire, so ``"auto"``
+    is the whole of what can be said truthfully. Zero/empty fields are omitted
+    so the frontend renders only what the provider actually reported.
 
     ``turn_boundary`` is ``len(slot.messages)`` captured at turn start: only
     messages appended DURING this turn are candidates. Without it, an
@@ -6628,12 +6629,13 @@ async def _run_chat(
                     _turn_cost_usd = float(_u.cost_usd or 0.0)
                 except (TypeError, ValueError):
                     _turn_elapsed_ms = int((time.monotonic() - _turn_t0) * 1000)
-                # Resolved model for the footer: the id the backend actually
-                # served this turn. read_effective_model prefers
-                # _resolved_model_id over _model, skips the "auto" sentinel,
-                # and never raises — an unresolved auto turn stays "" and the
-                # footer omits the field rather than guessing.
-                _turn_model = read_effective_model(client)
+                # Model attribution for the footer. read_turn_model reports the
+                # id the backend actually served, or the bare "auto" when the
+                # turn was handed to Auto and no concrete id came back — the
+                # two are different facts and a blank footer conflates them
+                # with a missing measurement. Still never guesses: an
+                # unattributable turn stays "" and the footer omits the field.
+                _turn_model = read_turn_model(client)
                 if _u.input_tokens or _u.output_tokens or _u.credits:
                     try:
                         _provider_name = cfg.agent.provider  # type: ignore[possibly-undefined]
