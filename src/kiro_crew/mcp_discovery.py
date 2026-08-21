@@ -894,7 +894,9 @@ _MANAGED_SERVER_TOOL_MODULES = {
 #: entry point and asserts this set matches the ``advertise_caller_identity``
 #: argument actually handed to the shim. That check imports the modules in the
 #: TEST process, where running package code is the point rather than a hazard.
-_MANAGED_SERVERS_CALLER_AWARE: frozenset[str] = frozenset({"kirocrew-core"})
+_MANAGED_SERVERS_CALLER_AWARE: frozenset[str] = frozenset(
+    {"kirocrew-core", "kirocrew-cron"}
+)
 
 
 def managed_server_is_session_bound(name: str) -> bool:

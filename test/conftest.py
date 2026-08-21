@@ -978,3 +978,26 @@ def _no_live_catalog_network(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(official_catalog, "_open_catalog", _refuse, raising=True)
     yield original
+
+
+@pytest.fixture
+def named_cron_caller(monkeypatch):
+    """Give the calling test an identity the cron MCP server can resolve.
+
+    ``mcp_cron`` refuses a WRITE from a caller it cannot name (see
+    ``_unidentified_caller_refusal``): on a pooled backend an unidentified stub
+    shares the process with identified ones, so granting it authority over stored
+    rows would let it reach another session's jobs.
+
+    Tests about cron's FIELD handling -- schedules, channels, models, validation
+    -- have always assumed a caller the gateway vouches for; they simply never
+    said so, because the unidentified state used to be allowed to write. This
+    states the precondition. A test that is actually ABOUT the unidentified
+    caller must not use this fixture.
+
+    Yields the key it set, so a test that mocks ``CronService`` can stamp the same
+    owner onto its fake job instead of hardcoding this value.
+    """
+    key = "dashboard:conftest-slot"
+    monkeypatch.setenv("KIROCREW_SESSION_KEY", key)
+    return key

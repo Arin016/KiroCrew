@@ -26,6 +26,16 @@ from kiro_crew.cron_script import (
 
 
 @pytest.fixture(autouse=True)
+def _cron_caller_is_named(named_cron_caller):
+    """Every test in this module exercises cron field handling, not authorization.
+
+    ``mcp_cron`` refuses a write from a caller it cannot name, so this states the
+    precondition these tests always assumed. See the ``named_cron_caller``
+    fixture in ``test/conftest.py``.
+    """
+
+
+@pytest.fixture(autouse=True)
 def _crons_dir_tracks_patched_home(monkeypatch):
     """Keep ``cron_script.config_dir()`` pointed at ``<patched home>/.kirocrew``.
 
@@ -1168,6 +1178,9 @@ class TestMcpCronHandlerPaths:
         job.last_status = "error"
         job.last_error = "connection refused"
         job.enabled = True
+        # cron_list scopes to the caller's own rows, so the fixture row has to
+        # name the session the autouse caller fixture provides.
+        job.session_key = os.environ["KIROCREW_SESSION_KEY"]
         with patch("kiro_crew.mcp_cron.config_dir", return_value=tmp_path), patch(
             "kiro_crew.mcp_cron.CronService"
         ) as mock_svc:
@@ -1190,6 +1203,9 @@ class TestMcpCronHandlerPaths:
         job.last_status = "ok"
         job.last_result = "CR passed"
         job.enabled = True
+        # cron_list scopes to the caller's own rows, so the fixture row has to
+        # name the session the autouse caller fixture provides.
+        job.session_key = os.environ["KIROCREW_SESSION_KEY"]
         with patch("kiro_crew.mcp_cron.config_dir", return_value=tmp_path), patch(
             "kiro_crew.mcp_cron.CronService"
         ) as mock_svc:

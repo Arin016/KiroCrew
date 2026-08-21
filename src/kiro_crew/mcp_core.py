@@ -1911,10 +1911,11 @@ def run_mcp_core_server() -> None:
         _call_tool,
         # Pooled-operation opt-in: kirocrew-core consumes the per-call
         # ``kirocrew.caller`` identity (see _resolve_session_key*), so it is
-        # safe to share one backend across sessions. kirocrew-cron does NOT
-        # advertise — it imports this module's resolver, so it would consume the
-        # caller block if one were injected, but nothing injects one for a
-        # backend that never advertised, and its channel identity still comes
-        # from process env. So gatewayd keeps it per-session.
+        # safe to share one backend across sessions. kirocrew-cron advertises
+        # too, for the same reason. The two managed servers that do not --
+        # kirocrew-computer and kirocrew-dashboard -- are pooled all the same
+        # (nothing declines to pool an unadvertised backend; see
+        # ``rewriter.UNPOOLABLE_SERVERS``), so what they lack is the injected
+        # block, not co-tenancy.
         advertise_caller_identity=ADVERTISE_CALLER_IDENTITY,
     )
