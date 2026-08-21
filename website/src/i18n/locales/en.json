@@ -5925,6 +5925,8 @@
         "loading_graph": "Loading graph...",
         "no_graph_data_yet": "No graph data yet",
         "nodes": "nodes,",
+        "all_sources": "All sources",
+        "filter_by_source": "Filter by source",
         "recenter": "Recenter"
       },
       "sourceGroup": {
