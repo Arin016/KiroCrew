@@ -265,11 +265,17 @@ async def _synthesize_nonstreaming(
             audio_b64 = base64.b64encode(f.read()).decode()
         state.broadcast_ws(
             "voice_chunk",
-            {"slot": slot_key, "index": 0, "sentence": text, "audio": audio_b64},
+            {
+                "slot": slot_key,
+                "index": 0,
+                "sentence": text,
+                "audio": audio_b64,
+                "audioMime": "audio/wav",
+            },
         )
         state.broadcast_ws(
             "voice_complete",
-            {"slot": slot_key, "audio": audio_b64, "chunks": 1},
+            {"slot": slot_key, "audio": audio_b64, "chunks": 1, "audioMime": "audio/wav"},
         )
         return web.json_response({"ok": True, "chunks": 1})
     except Exception as exc:

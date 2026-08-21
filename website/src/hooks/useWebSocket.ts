@@ -1415,11 +1415,11 @@ export function useWebSocket() {
             if (voiceMutedRef.current) break
             if (data.slot !== store.getState().chat.activeSlot) break
             // Queue and play audio chunks as they arrive
-            const b64 = (data as { audio: string }).audio
+            const { audio: b64, audioMime } = data as { audio: string; audioMime?: string }
             if (b64) {
               try {
                 const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0))
-                const blob = new Blob([bytes], { type: 'audio/mpeg' })
+                const blob = new Blob([bytes], { type: audioMime === 'audio/wav' ? 'audio/wav' : 'audio/mpeg' })
                 const url = URL.createObjectURL(blob)
                 voiceQueueRef.current.push(url)
                 dispatch(setVoicePlaying(true))

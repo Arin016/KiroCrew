@@ -266,6 +266,8 @@ class TestVoiceConfig:
         assert streaming_called is False  # Polly path NOT used for Piper
         kinds = [c.args[0] for c in state.broadcast_ws.call_args_list]
         assert "voice_chunk" in kinds and "voice_complete" in kinds
+        payloads = [c.args[1] for c in state.broadcast_ws.call_args_list]
+        assert all(payload["audioMime"] == "audio/wav" for payload in payloads)
 
     @pytest.mark.asyncio
     async def test_put_config_invalid_json(self, tmp_path, monkeypatch):
