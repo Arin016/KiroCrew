@@ -471,11 +471,18 @@ def _collect_system_metrics() -> dict[str, object]:
     """
     data: dict[str, object] = dict(_get_static_system_info())
 
-    # Process memory (RSS)
+    # Process memory. `proc_mem_mb` is the LIVE resident set (falls when memory
+    # is released); `proc_mem_peak_mb` is the high-water mark since start, kept
+    # as a separate reading so a transient spike stays diagnosable without the
+    # live figure inheriting it.
     try:
         data["proc_mem_mb"] = round(platform_compat.proc_rss_bytes() / (1024 * 1024), 1)
     except Exception:
         data["proc_mem_mb"] = 0
+    try:
+        data["proc_mem_peak_mb"] = round(platform_compat.proc_peak_rss_bytes() / (1024 * 1024), 1)
+    except Exception:
+        data["proc_mem_peak_mb"] = 0
 
     # System-wide memory — cross-platform
     try:

@@ -15,7 +15,6 @@ the per-test ``KIROCREW_HOME`` that Kiro Crew's conftest pins.
 from __future__ import annotations
 
 import asyncio
-import builtins
 import json
 import os
 import sys
@@ -1227,38 +1226,16 @@ class TestReadRssKb:
         assert isinstance(got, int)
         assert got == -1 or got > 0
 
-    @_POSIX_ONLY
-    def test_falls_back_to_getrusage_when_procfs_is_unreadable(self, monkeypatch):
-        import resource
-
-        real_open = builtins.open
-
-        def _no_procfs(path, *args, **kwargs):
-            if isinstance(path, str) and path.startswith("/proc/"):
-                raise OSError("no procfs")
-            return real_open(path, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "open", _no_procfs)
-        rusage = MagicMock()
-        rusage.ru_maxrss = 4096
-        monkeypatch.setattr(resource, "getrusage", MagicMock(return_value=rusage))
-        monkeypatch.setattr(sys, "platform", "darwin")
-        # macOS reports ru_maxrss in bytes, so it must be divided down to KB.
+    def test_delegates_to_the_shared_current_rss_reader(self, monkeypatch):
+        # The per-platform duplicate that used to live here read ru_maxrss on
+        # macOS -- a peak that never falls. There is now one reader, and this
+        # pins the delegation (and the bytes -> KB conversion) so a second
+        # implementation cannot quietly reappear.
+        monkeypatch.setattr(gw, "_proc_rss_bytes", lambda: 4096)
         assert gw._read_rss_kb() == 4
 
-    @_POSIX_ONLY
-    def test_returns_minus_one_when_every_source_fails(self, monkeypatch):
-        import resource
-
-        real_open = builtins.open
-
-        def _no_procfs(path, *args, **kwargs):
-            if isinstance(path, str) and path.startswith("/proc/"):
-                raise OSError("no procfs")
-            return real_open(path, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "open", _no_procfs)
-        monkeypatch.setattr(resource, "getrusage", MagicMock(side_effect=OSError("nope")))
+    def test_returns_minus_one_when_the_reader_cannot_measure(self, monkeypatch):
+        monkeypatch.setattr(gw, "_proc_rss_bytes", lambda: 0)
         assert gw._read_rss_kb() == -1
 
 

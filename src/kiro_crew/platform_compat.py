@@ -3274,21 +3274,135 @@ def find_python_interpreter(reject: Optional[Callable[[str], bool]] = None) -> s
 # Resource limits
 # ---------------------------------------------------------------------------
 
+#: ``task_info`` flavor selector for ``mach_task_basic_info``
+#: (``<mach/task_info.h>``). Chosen over the legacy ``TASK_BASIC_INFO`` because
+#: its sizes are 64-bit, so a footprint above 4 GiB is not truncated.
+_MACH_TASK_BASIC_INFO = 20
 
-def proc_rss_bytes() -> int:
-    """Return this process's resident set size in bytes, or 0 on failure.
 
-    POSIX: ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` (KiB on Linux, bytes
-    on macOS). Windows: ``GetProcessMemoryInfo().WorkingSetSize``.
+class _MachTimeValue(ctypes.Structure):
+    """``time_value_t`` (``<mach/time_value.h>``).
+
+    Never read; present only so the fields after it in
+    :class:`_MachTaskBasicInfo` land at the offsets the kernel writes them to.
     """
-    if IS_POSIX:
-        try:
 
-            ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            # Linux reports KiB; macOS reports bytes.
-            return ru_maxrss if sys.platform == "darwin" else ru_maxrss * 1024
-        except (ImportError, OSError, ValueError):
-            return 0
+    _fields_ = [("seconds", ctypes.c_int32), ("microseconds", ctypes.c_int32)]
+
+
+class _MachTaskBasicInfo(ctypes.Structure):
+    """``mach_task_basic_info`` (``<mach/task_info.h>``), in kernel order.
+
+    ``resident_size`` is the task's CURRENT resident footprint in bytes and
+    falls when pages are released; ``resident_size_max`` is the high-water mark
+    that never falls. Reading the wrong one of the two is exactly the bug this
+    layout exists to avoid, so both are named rather than indexed.
+
+    Module scope is load-bearing: ``ctypes.POINTER(T)`` memoises T in a
+    module-level dict inside ctypes that is never evicted, so declaring this
+    inside the probe would pin a fresh pair of type objects on every call — and
+    this probe is polled by the dashboard's system-metrics endpoint.
+    """
+
+    _fields_ = [
+        ("virtual_size", ctypes.c_uint64),
+        ("resident_size", ctypes.c_uint64),
+        ("resident_size_max", ctypes.c_uint64),
+        ("user_time", _MachTimeValue),
+        ("system_time", _MachTimeValue),
+        ("policy", ctypes.c_int),
+        ("suspend_count", ctypes.c_int),
+    ]
+
+
+#: ``task_info`` takes and returns a count in ``natural_t``-sized elements
+#: (``MACH_TASK_BASIC_INFO_COUNT``). Derived from the layout so it cannot go
+#: stale if a field is added above.
+_MACH_TASK_BASIC_INFO_COUNT = ctypes.sizeof(_MachTaskBasicInfo) // ctypes.sizeof(ctypes.c_int)
+
+
+def _scale_ru_maxrss(ru_maxrss: int) -> int:
+    """``ru_maxrss`` -> bytes. macOS reports bytes; Linux and other POSIX KiB.
+
+    The unit differs by platform with nothing in the value to tell them apart,
+    so every reader of ``ru_maxrss`` goes through here.
+    """
+    return ru_maxrss if sys.platform == "darwin" else ru_maxrss * 1024
+
+
+def _ru_maxrss_bytes() -> int | None:
+    """Peak (high-water) RSS in bytes from ``getrusage``, or None on failure.
+
+    POSIX only. This is a **peak**, not a live reading: ``ru_maxrss`` never
+    decreases for the life of the process.
+    """
+    try:
+        return _scale_ru_maxrss(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, OSError, ValueError, AttributeError):
+        return None
+
+
+def _linux_current_rss_bytes() -> int | None:
+    """Current RSS in bytes from ``/proc/self/statm``, or None if unreadable.
+
+    Field 1 of ``statm`` is the resident page count — the same quantity
+    ``/proc/self/status``'s ``VmRSS`` and ``ps -o rss=`` report, so the
+    dashboard's figure reconciles with what an operator measures by hand.
+    """
+    try:
+        fields = Path("/proc/self/statm").read_text().split()
+        return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _macos_current_rss_bytes() -> int | None:
+    """Current RSS in bytes via Mach ``task_info``, or None on any failure.
+
+    ``proc_rss_bytes_for_pid`` has no ctypes-only route for an ARBITRARY pid
+    (it needs a task port it cannot obtain), but ``mach_task_self()`` hands out
+    a port for THIS task unconditionally, so the self-only reading below is
+    always available — no subprocess, which matters because the macOS app
+    sandbox can deny spawning ``ps``.
+
+    Returns ``resident_size`` (what ``ps -o rss=`` reports), not
+    ``phys_footprint``: every other platform branch here reports RSS, and the
+    payload field it feeds is named for RSS. Activity Monitor's "Memory" column
+    is the phys_footprint variant and will read somewhat differently; that is a
+    separate accounting question from the peak-vs-current bug.
+    """
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+    except OSError:
+        return None  # not macOS / libSystem unavailable
+    try:
+        libc.mach_task_self.restype = ctypes.c_uint
+        libc.task_info.restype = ctypes.c_int
+        libc.task_info.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(_MachTaskBasicInfo),
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+        info = _MachTaskBasicInfo()
+        count = ctypes.c_uint(_MACH_TASK_BASIC_INFO_COUNT)
+        # mach_task_self() returns a port name owned by the task itself, not a
+        # fresh send right, so unlike mach_host_self() it must NOT be deallocated.
+        kern_return = libc.task_info(
+            libc.mach_task_self(),
+            _MACH_TASK_BASIC_INFO,
+            ctypes.byref(info),
+            ctypes.byref(count),
+        )
+    except (AttributeError, OSError, ValueError):
+        return None
+    if kern_return != 0:  # non-zero kern_return_t -> failure
+        return None
+    return int(info.resident_size)
+
+
+def _windows_memory_counters() -> "_ProcessMemoryCounters | None":
+    """psapi ``PROCESS_MEMORY_COUNTERS`` for this process, or None on failure."""
     try:
 
         psapi = ctypes.WinDLL("psapi", use_last_error=True)  # type: ignore[attr-defined]
@@ -3310,10 +3424,52 @@ def proc_rss_bytes() -> int:
         if psapi.GetProcessMemoryInfo(
             kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
         ):
-            return int(counters.WorkingSetSize)
-        return 0
+            return counters
+        return None
     except Exception:
-        return 0
+        return None
+
+
+def proc_rss_bytes() -> int:
+    """Return this process's CURRENT resident set size in bytes, or 0 on failure.
+
+    "Current" is the contract, not an implementation detail: this feeds an
+    operator-facing live memory figure, so it must FALL when the gateway
+    releases memory and must reconcile with ``ps -o rss=``.
+
+    - Linux: ``/proc/self/statm`` resident pages.
+    - macOS: Mach ``task_info(MACH_TASK_BASIC_INFO).resident_size``.
+    - Windows: ``GetProcessMemoryInfo().WorkingSetSize``.
+    - Last resort on POSIX only: ``getrusage(RUSAGE_SELF).ru_maxrss``, which is
+      a **peak** that never decreases. It is here so an unreadable ``/proc`` or
+      an unavailable ``libSystem`` still yields an order-of-magnitude number
+      rather than 0, and it over-reports by construction — see
+      :func:`proc_peak_rss_bytes` for the peak as a deliberate reading.
+    """
+    if IS_POSIX:
+        current = (
+            _macos_current_rss_bytes() if sys.platform == "darwin" else _linux_current_rss_bytes()
+        )
+        if current is not None:
+            return current
+        return _ru_maxrss_bytes() or 0
+    counters = _windows_memory_counters()
+    return 0 if counters is None else int(counters.WorkingSetSize)
+
+
+def proc_peak_rss_bytes() -> int:
+    """Return this process's PEAK resident set size in bytes, or 0 on failure.
+
+    The high-water mark since the process started: it never decreases, which is
+    what makes it useful for diagnosing a transient spike that a live reading
+    has already forgotten — and useless as the live reading itself. POSIX reads
+    ``getrusage(RUSAGE_SELF).ru_maxrss``; Windows reads
+    ``GetProcessMemoryInfo().PeakWorkingSetSize``.
+    """
+    if IS_POSIX:
+        return _ru_maxrss_bytes() or 0
+    counters = _windows_memory_counters()
+    return 0 if counters is None else int(counters.PeakWorkingSetSize)
 
 
 def proc_rss_bytes_for_pid(pid: int) -> int | None:

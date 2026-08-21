@@ -80,6 +80,7 @@ from kiro_crew.metrics.provider import get_recorder
 from kiro_crew.peer_resolve import resolve_peer_identity
 from kiro_crew.platform_compat import IS_WINDOWS
 from kiro_crew.platform_compat import get_process_start_id as _get_process_start_id
+from kiro_crew.platform_compat import proc_rss_bytes as _proc_rss_bytes
 from kiro_crew.sandbox import warm_backend
 from kiro_crew.sel import SecurityEventLog
 
@@ -3154,75 +3155,16 @@ def _count_open_fds() -> int:
 
 
 def _read_rss_kb() -> int:
-    """Return current RSS in kilobytes, or ``-1`` if unavailable.
+    """Return this process's CURRENT RSS in kilobytes, or ``-1`` if unavailable.
 
-    Platform implementations:
-    - Linux: ``/proc/self/status`` VmRSS field (already in KB).
-    - macOS: ``resource.getrusage`` (``ru_maxrss`` is in bytes on macOS).
-    - Other POSIX: ``resource.getrusage`` (``ru_maxrss`` is in KB on Linux,
-      but this branch only runs on non-Linux where it is bytes; if neither
-      applies we fall through to ``-1``).
-    - Windows: ``GetProcessMemoryInfo`` via ctypes (WorkingSetSize in bytes).
-
-    Returns ``-1`` when the platform cannot provide the value.
+    Delegates to :func:`platform_compat.proc_rss_bytes` — the one per-platform
+    current-RSS reader — so this diagnostic cannot drift from the figure the
+    dashboard reports. The per-platform duplicate that used to live here read
+    ``ru_maxrss`` on macOS, which is a high-water mark that never decreases, so
+    a spike the gateway had already released stayed in every later snapshot.
     """
-    # Linux — parse VmRSS from /proc/self/status (current RSS, not peak).
-    try:
-        with open("/proc/self/status", "r", encoding="ascii") as fh:
-            for line in fh:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-
-    # macOS / other POSIX — resource.getrusage gives ru_maxrss.
-    # On macOS ru_maxrss is in bytes; on other BSDs it is in KB.
-    if sys.platform != "win32":
-        try:
-            import resource
-
-            ru = resource.getrusage(resource.RUSAGE_SELF)
-            maxrss = ru.ru_maxrss
-            if maxrss > 0:
-                if sys.platform == "darwin":
-                    return maxrss // 1024  # bytes → KB
-                return maxrss  # already in KB on most other POSIX
-        except (OSError, ValueError, AttributeError, ImportError):
-            pass
-
-    # Windows — GetProcessMemoryInfo returns WorkingSetSize in bytes.
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            import ctypes.wintypes as wintypes
-
-            SIZE_T = ctypes.c_size_t
-
-            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", SIZE_T),
-                    ("WorkingSetSize", SIZE_T),
-                    ("QuotaPeakPagedPoolUsage", SIZE_T),
-                    ("QuotaPagedPoolUsage", SIZE_T),
-                    ("QuotaPeakNonPagedPoolUsage", SIZE_T),
-                    ("QuotaNonPagedPoolUsage", SIZE_T),
-                    ("PagefileUsage", SIZE_T),
-                    ("PeakPagefileUsage", SIZE_T),
-                ]
-
-            psapi = ctypes.WinDLL("psapi", use_last_error=True)  # type: ignore[attr-defined]
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-            pmc = PROCESS_MEMORY_COUNTERS()
-            pmc.cb = ctypes.sizeof(pmc)
-            handle = kernel32.GetCurrentProcess()
-            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
-                return pmc.WorkingSetSize // 1024  # bytes → KB
-        except (OSError, AttributeError, ValueError):
-            pass
-
-    return -1
+    rss_bytes = _proc_rss_bytes()
+    return rss_bytes // 1024 if rss_bytes > 0 else -1
 
 
 def _collect_task_stacks() -> list[dict[str, Any]]:

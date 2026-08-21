@@ -12,6 +12,7 @@ output we can assert directly), and the process-helper return contracts.
 from __future__ import annotations
 
 import errno
+import gc
 import json
 import logging
 import os
@@ -485,6 +486,54 @@ class TestResourceShims:
         # truncated without argtypes and this silently returned 0, disabling the
         # watchdog's RSS ceiling.
         assert pc.proc_rss_bytes() > 0
+
+    def test_proc_rss_bytes_falls_back_down_when_memory_is_released(self):
+        """The reading must be CURRENT residency, not the high-water mark.
+
+        Reported symptom: the dashboard's per-process memory figure only ever
+        rose, so it disagreed with Activity Monitor / ``ps -o rss=`` by however
+        much the gateway had ever transiently used. ``ru_maxrss`` never
+        decreases, so this drives a real allocation and requires the number to
+        come back down — the one property a peak cannot have.
+        """
+        chunk = 128 * 1024 * 1024
+        page = 4096
+        baseline = pc.proc_rss_bytes()
+        buf = bytearray(chunk)
+        for offset in range(0, chunk, page):  # fault the pages in
+            buf[offset] = 1
+        while_held = pc.proc_rss_bytes()
+        peak_while_held = pc.proc_peak_rss_bytes()
+        del buf
+        gc.collect()
+        after_free = pc.proc_rss_bytes()
+
+        # Rose by most of the buffer while it was resident.
+        assert while_held - baseline > chunk // 2
+        # And gave a real part of it back. Deliberately relative to `while_held`
+        # rather than an absolute `baseline + chunk // 2` ceiling: how much the
+        # OS actually returns on free is its decision, not ours. Windows keeps
+        # freed pages in the working set until there is pressure, so it returned
+        # ~45MB of a 128MB buffer where Linux returns nearly all of it, and an
+        # absolute ceiling failed there on a reading that was behaving correctly.
+        # A peak-based implementation cannot pass this at any tolerance, because
+        # it returns a number that has not moved at all.
+        assert after_free < while_held - chunk // 8
+        # The decisive property, and the one the bug got wrong: after a free the
+        # CURRENT reading must be strictly below the peak. `ru_maxrss` returns
+        # exactly the peak here, so this is the assertion that fails for it.
+        assert after_free < peak_while_held
+        # The peak, by contrast, is not allowed to fall.
+        assert pc.proc_peak_rss_bytes() >= peak_while_held
+
+    def test_proc_peak_rss_bytes_is_never_below_the_current_reading(self):
+        # The high-water mark of a quantity cannot be under the quantity. A
+        # mismatched unit on either side (ru_maxrss is KiB on Linux, bytes on
+        # macOS) shows up here as a 1024x violation.
+        current = pc.proc_rss_bytes()
+        peak = pc.proc_peak_rss_bytes()
+        assert peak > 0
+        assert peak >= current
 
     def test_proc_rss_bytes_for_pid_self_positive(self):
         rss = pc.proc_rss_bytes_for_pid(os.getpid())
@@ -1845,8 +1894,12 @@ class TestRestrictToOwner:
 
 
 class TestResourceShimFailures:
-    def test_proc_rss_bytes_returns_zero_on_getrusage_failure(self, monkeypatch):
-        # The failure branch: getrusage raising OSError must yield 0, not raise.
+    def test_proc_rss_bytes_returns_zero_when_every_source_fails(self, monkeypatch):
+        # getrusage is no longer the primary source for proc_rss_bytes -- it is
+        # the labelled last-resort peak -- so reaching 0 now needs BOTH the
+        # current-RSS reader and the fallback to fail. Asserting only the
+        # getrusage failure would pass on a platform whose primary reader was
+        # silently removed.
         if not pc.IS_POSIX:
             pytest.skip("POSIX resource.getrusage branch")
 
@@ -1854,7 +1907,21 @@ class TestResourceShimFailures:
             raise OSError("getrusage failed")
 
         monkeypatch.setattr(pc.resource, "getrusage", boom)
+        monkeypatch.setattr(pc, "_linux_current_rss_bytes", lambda: None)
+        monkeypatch.setattr(pc, "_macos_current_rss_bytes", lambda: None)
         assert pc.proc_rss_bytes() == 0
+
+    def test_proc_peak_rss_bytes_returns_zero_on_getrusage_failure(self, monkeypatch):
+        # The peak reading has getrusage as its ONLY POSIX source, so its
+        # failure branch is still a plain 0.
+        if not pc.IS_POSIX:
+            pytest.skip("POSIX resource.getrusage branch")
+
+        def boom(*args, **kwargs):
+            raise OSError("getrusage failed")
+
+        monkeypatch.setattr(pc.resource, "getrusage", boom)
+        assert pc.proc_peak_rss_bytes() == 0
 
     def test_proc_cpu_seconds_returns_zero_on_getrusage_failure(self, monkeypatch):
         # The failure branch: getrusage raising OSError must yield 0.0, not raise.
@@ -2314,6 +2381,9 @@ class TestCtypesStructsAreModuleScoped:
         "_win_process_image_name",
         "_process_token_sid_unguarded",
         "proc_rss_bytes",
+        "proc_peak_rss_bytes",
+        "_windows_memory_counters",
+        "_macos_current_rss_bytes",
         "proc_rss_bytes_for_pid",
         "system_memory",
         "apply_job_limits",
@@ -2337,6 +2407,8 @@ class TestCtypesStructsAreModuleScoped:
             "_JobObjectExtendedLimitInformation",
             "_ThreadEntry32",
             "_VMStatistics64",
+            "_MachTimeValue",
+            "_MachTaskBasicInfo",
         ):
             assert issubclass(getattr(pc, name), ctypes.Structure), name
 
@@ -2370,6 +2442,7 @@ class TestCtypesStructsAreModuleScoped:
         pid = os.getpid()
         probes = (
             pc.proc_rss_bytes,
+            pc.proc_peak_rss_bytes,
             lambda: pc.proc_rss_bytes_for_pid(pid),
             pc.system_memory,
             lambda: pc.get_ppid(pid),

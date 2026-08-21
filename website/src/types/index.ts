@@ -90,7 +90,9 @@ export interface SystemData {
   net_rx_kbs: number; net_tx_kbs: number
   disk_total_gb?: number; disk_free_gb?: number
   python: string; pid: number; cwd: string
-  proc_mem_mb: number; proc_cpu_pct: number
+  /** Live resident set size. `proc_mem_peak_mb` is the high-water mark since
+   *  the gateway started, so it never falls; do not render it as live memory. */
+  proc_mem_mb: number; proc_mem_peak_mb?: number; proc_cpu_pct: number
   child_processes: number; thread_count: number
   mcp_processes?: { sandbox: number; kiro_cli: number; builder_mcp: number }
   mcp_total?: number

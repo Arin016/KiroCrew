@@ -401,7 +401,7 @@ Kiro Crew runs on macOS, Linux (x86_64 and ARM), and Windows (native). `fcntl`,
 | Owner-only secret (fail-loud) | `restrict_to_owner(path)` | `os.chmod(path, 0o600)` under `if IS_POSIX` (silent no-op leaves secrets world-readable) |
 | Directory link | `symlink_or_junction(target, link)` | `os.symlink` (`WinError 1314` without elevation) |
 | Detect/remove a dir link | `is_link_or_junction(path)` / `unlink_link_or_junction(path)` | `path.is_symlink()` (misses a Windows junction) |
-| Process RSS / CPU | `proc_rss_bytes()` / `proc_cpu_seconds()` | `resource.getrusage` |
+| Process RSS (live) / peak RSS / CPU | `proc_rss_bytes()` / `proc_peak_rss_bytes()` / `proc_cpu_seconds()` | `resource.getrusage` (`ru_maxrss` is a high-water mark, never a live reading, and its unit is KiB on Linux but bytes on macOS) |
 | Available host memory | `host_available_mib()` (0 = unknown, never 0 = no memory) | `/proc/meminfo` directly (Linux-only, so the bound built on it silently vanishes on macOS and Windows) |
 | FD soft limit | `raise_nofile_soft_limit(n)` | `resource.setrlimit` |
 | Port to PID | `find_listening_pids(port)` / `listening_pid_tool_available()` | `lsof` directly |
