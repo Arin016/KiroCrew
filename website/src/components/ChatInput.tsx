@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, memo } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useId, memo } from 'react'
 import { ArrowUpFromLine, ArrowUp, Loader2, RotateCw, Plus, Crop, Bot, Mic, Square, BookOpen, X, ClipboardList, CheckCircle, Ban, Sparkles, Target, Lock, Folder, FolderOpen, FileText } from 'lucide-react'
 import CopyBranchButton from './CopyBranchButton'
 import { usePointerDrag } from '../hooks/usePointerDrag'
@@ -917,6 +917,7 @@ function ChatInput({
   // when the caret enters a token — the AT half of the paste-preview a11y fix.
   const [pastePreviewPanelId, setPastePreviewPanelId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const fileInputId = useId()
   // "+" drop-up menu (upload file / image + browse toggle).
   const [plusOpen, setPlusOpen] = useState(false)
   const [ctxPopoverOpen, setCtxPopoverOpen] = useState(false)
@@ -1066,6 +1067,7 @@ function ChatInput({
   }, [disabled, onFollowUpSend])
   const { botName } = useBranding()
   const isMobile = useIsMobile()
+  const directFilePicker = isMobile || isTouchDevice()
   const [attachControlRow, controlRowEdges, remeasureControlRow] = useScrollEdges<HTMLDivElement>()
   // The control row's chips are prop-driven (the auto-nudge loop chip, the
   // approval-mode picker) and appear or change label while the row keeps its
@@ -2407,7 +2409,7 @@ function ChatInput({
         </div>
       )}
 
-      <input ref={fileInputRef} type="file" aria-label={i18nT('components.chatInput.attach_files')} multiple accept={FILE_ACCEPT} className="hidden" onChange={handleFileInputChange} />
+      <input id={fileInputId} ref={fileInputRef} type="file" aria-label={i18nT('components.chatInput.attach_files')} multiple accept={FILE_ACCEPT} className="sr-only" onChange={handleFileInputChange} />
 
       <SlashCommandMenu input={value} anchorRef={inputRef as React.RefObject<HTMLElement>} open={slashMenuOpen} onSelect={cmd => { onChange(cmd); setSlashMenuOpen(false) }} onClose={() => setSlashMenuOpen(false)} />
 
@@ -2547,19 +2549,31 @@ function ChatInput({
           <div className="flex items-center gap-0.5 min-w-0">
             {onUploadFiles && (
               <div className="relative shrink-0" ref={plusWrapRef}>
-                <button
-                  ref={plusBtnRef}
-                  className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none ${plusOpen ? 'text-text bg-bg-hover' : 'text-muted hover:text-text hover:bg-bg-hover'}`}
-                  onClick={togglePlus}
-                  disabled={uploading}
-                  aria-haspopup="menu"
-                  aria-expanded={plusOpen}
-                  aria-label={i18nT('components.chatInput.add_files_options')}
-                  title={i18nT('components.chatInput.add_files_options')}
-                >
-                  {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} className={`transition-transform ${plusOpen ? 'rotate-45' : ''}`} />}
-                </button>
-                {plusOpen && plusRect && createPortal(
+                {directFilePicker ? (
+                  <label
+                    htmlFor={uploading ? undefined : fileInputId}
+                    aria-disabled={uploading || undefined}
+                    className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all bg-transparent ${uploading ? 'opacity-30 cursor-default' : 'cursor-pointer text-muted hover:text-text hover:bg-bg-hover'}`}
+                    aria-label={i18nT('components.chatInput.attach_files')}
+                    title={i18nT('components.chatInput.attach_files')}
+                  >
+                    {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
+                  </label>
+                ) : (
+                  <button
+                    ref={plusBtnRef}
+                    className={`w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-all disabled:opacity-30 bg-transparent border-none ${plusOpen ? 'text-text bg-bg-hover' : 'text-muted hover:text-text hover:bg-bg-hover'}`}
+                    onClick={togglePlus}
+                    disabled={uploading}
+                    aria-haspopup="menu"
+                    aria-expanded={plusOpen}
+                    aria-label={i18nT('components.chatInput.add_files_options')}
+                    title={i18nT('components.chatInput.add_files_options')}
+                  >
+                    {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} className={`transition-transform ${plusOpen ? 'rotate-45' : ''}`} />}
+                  </button>
+                )}
+                {!directFilePicker && plusOpen && plusRect && createPortal(
                   <div
                     ref={plusMenuRef}
                     className="fixed w-[260px] rounded-xl bg-bg-elevated border border-border shadow-xl p-2 animate-slide-up z-[60]"
