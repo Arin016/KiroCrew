@@ -128,6 +128,7 @@ from kiro_crew.embeddings import (
     model_file_present,
     reconcile_store_embedding_space,
     start_background_model_download,
+    store_embedding_space_is_stale,
 )
 from kiro_crew.executors import (
     cron_executor,
@@ -6541,10 +6542,13 @@ class GatewayOrchestrator:
              ``memory.migrated`` to True (even for a fresh install with zero
              legacy entries, so everyone lands in vector-only mode), sync the
              live consolidator, and acknowledge via an audit event + log line.
-          2. Re-embed sweep (gated on model readiness, independent of phase 1):
-             once the model file is present, embed any episodic rows written
-             without a vector (migrated before the model landed) and rebuild the
-             FAISS index. Self-healing across boots.
+          2. Re-embed sweep (independent of phase 1): embed any episodic rows
+             written without a vector (migrated before the model landed) and
+             rebuild the FAISS index. Self-healing across boots. Gated on a cheap
+             non-loading probe FIRST — nothing pending and a current vector space
+             means the sweep returns without loading the embedding model at all,
+             so a steady-state boot never pays its ~1GB RSS. Only once there is
+             work does it wait on model readiness.
 
         Never raises: any failure is logged and leaves ``migrated`` unchanged so
         the next boot retries. Boot survives regardless.
@@ -6625,6 +6629,27 @@ class GatewayOrchestrator:
             # reconciled. Readiness is the property actually required here.
 
             def _wait_then_backfill() -> int:
+                # Probe for work BEFORE touching the embedder. wait_ready() below
+                # calls _kick_background_load(), which mmaps the ~700MB GGUF and
+                # allocates its KV/compute buffers — the single largest chunk of
+                # gateway RSS. A boot with nothing to embed used to pay all of it
+                # for a sweep that then embedded zero rows. Both probes here are
+                # non-loading: has_pending_embeddings() is three LIMIT-1 SELECTs,
+                # and store_embedding_space_is_stale() compares signatures built
+                # from model_id/dim, which are set when the backend is CONSTRUCTED.
+                # Deliberately NOT reconcile_store_embedding_space(): that one is
+                # destructive and refuses to clear against an unready backend, so
+                # it is the wrong tool for a question asked before the load.
+                has_pending = getattr(store, "has_pending_embeddings", None)
+                # A store without the probe (a stub, a foreign implementation)
+                # keeps the old behaviour rather than silently losing its sweep.
+                pending = has_pending() if callable(has_pending) else True
+                if not pending and not store_embedding_space_is_stale(store):
+                    logger.debug(
+                        "Re-embed sweep: no rows pending and the stored vector space "
+                        "is current — leaving the embedding model unloaded"
+                    )
+                    return 0
                 embedder = get_shared_embedder()
                 # wait_ready() is on the llama.cpp backend but not the
                 # EmbeddingBackend ABC (a swapped-in backend may not support
@@ -8077,8 +8102,9 @@ class GatewayOrchestrator:
 
         # Auto-migrate legacy markdown memory to the vector store in the
         # background (fire-and-forget) — never blocks boot. Idempotent: gated on
-        # memory.migrated for the migrate phase; the re-embed sweep is cheap when
-        # nothing is pending.
+        # memory.migrated for the migrate phase; the re-embed sweep probes for
+        # pending rows with plain SQL and returns without loading the embedding
+        # model when there is nothing to embed.
         self._auto_migrate_task = asyncio.create_task(self._auto_migrate_memory())
         self._background_tasks.add(self._auto_migrate_task)
         self._auto_migrate_task.add_done_callback(self._background_tasks.discard)

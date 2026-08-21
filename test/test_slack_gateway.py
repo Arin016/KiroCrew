@@ -14,6 +14,7 @@ import pytest
 
 from kiro_crew.autonudge import NudgeLoop
 from kiro_crew.config.loader import KiroCrewConfig
+from kiro_crew.slack import gateway as gw
 from kiro_crew.slack.gateway import (
     _CRON_MSG_LIMIT,
     _EPOCH_RE,
@@ -3719,6 +3720,165 @@ class TestAutoMigrateMemory:
             await orch._auto_migrate_memory()
         set_migrated.assert_not_awaited()
         assert orch._cfg.memory.migrated is False
+
+
+class _LoadRecordingEmbedder:
+    """A backend that records whether the model load was kicked.
+
+    Mirrors ``LlamaCppEmbedder``: ``wait_ready()`` kicks the background load (the
+    ~700MB GGUF mmap plus its KV/compute buffers) before joining the loader
+    thread, so a call to ``wait_ready`` IS the cost this sweep must avoid paying
+    on a boot with nothing to embed. ``model_id``/``dim`` are set at construction
+    and readable without a load, which is what lets the staleness probe run
+    ahead of it.
+    """
+
+    def __init__(self, *, model_id: str = "qwen3-embedding:0.6b", dim: int = 1024) -> None:
+        self.model_id = model_id
+        self.dim = dim
+        self.load_kicks = 0
+        self.wait_ready_calls = 0
+
+    def _kick_background_load(self) -> None:
+        self.load_kicks += 1
+
+    def wait_ready(self, timeout: float | None = None) -> bool:
+        self.wait_ready_calls += 1
+        self._kick_background_load()
+        return True
+
+    def is_ready(self) -> bool:
+        return self.load_kicks > 0
+
+
+class TestReembedSweepDefersTheModelLoad:
+    """The sweep must probe with SQL before it loads a ~700MB embedding model.
+
+    ``wait_ready()`` is not a free question: it kicks the GGUF load, costing
+    ~1GB RSS for the process's lifetime (measured: VmRSS +1069 MiB — RssAnon
+    +455 MiB private buffers, RssFile +614 MiB mmap'd weights). Steady state has
+    nothing to embed, so a boot that loads the model to discover that is pure
+    waste. These tests pin the load itself, not a proxy for it.
+    """
+
+    def _orch(self, *, pending: bool):
+        orch = _make_orchestrator()
+        orch._cfg.memory.migrated = True  # phase 1 already done
+        store = MagicMock()
+        store.embed_fn = None
+        store.has_pending_embeddings = MagicMock(return_value=pending)
+        store.backfill_missing_embeddings = MagicMock(return_value=0)
+        orch.vector_memory = store
+        orch.consolidator = None
+        return orch, store
+
+    @pytest.mark.asyncio
+    async def test_a_boot_with_no_work_never_loads_the_model(self):
+        orch, store = self._orch(pending=False)
+        embedder = _LoadRecordingEmbedder()
+        with (
+            patch.object(gw, "get_shared_embedder", return_value=embedder),
+            patch.object(gw, "model_file_present", return_value=True),
+            patch.object(gw, "make_sync_embed_fn", return_value=lambda s: [0.0]),
+            patch.object(gw, "store_embedding_space_is_stale", return_value=False),
+            patch.object(gw, "reconcile_store_embedding_space") as reconcile,
+        ):
+            await orch._auto_migrate_memory()
+        store.has_pending_embeddings.assert_called_once_with()
+        assert embedder.load_kicks == 0, "the model must not be loaded for a no-op sweep"
+        assert embedder.wait_ready_calls == 0
+        store.backfill_missing_embeddings.assert_not_called()
+        # No destructive reconcile either: nothing was cleared, so nothing needs
+        # re-embedding, and the store's recorded space already matches.
+        reconcile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pending_rows_do_load_the_model_and_sweep(self):
+        orch, store = self._orch(pending=True)
+        embedder = _LoadRecordingEmbedder()
+        stale = MagicMock(return_value=False)
+        with (
+            patch.object(gw, "get_shared_embedder", return_value=embedder),
+            patch.object(gw, "model_file_present", return_value=True),
+            patch.object(gw, "make_sync_embed_fn", return_value=lambda s: [0.0]),
+            patch.object(gw, "store_embedding_space_is_stale", stale),
+            patch.object(gw, "reconcile_store_embedding_space") as reconcile,
+        ):
+            await orch._auto_migrate_memory()
+        assert embedder.wait_ready_calls == 1
+        assert embedder.load_kicks == 1, "pending rows must still load the model"
+        reconcile.assert_called_once_with(store)
+        store.backfill_missing_embeddings.assert_called_once()
+        # Short-circuit: pending work needs no staleness question.
+        stale.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_stale_vector_space_loads_the_model_with_no_pending_rows(self):
+        """A model swap leaves every row embedded — and every vector wrong.
+
+        ``has_pending_embeddings()`` is False here (no NULL vectors yet), so
+        without the staleness arm the store would never reconcile and search
+        would keep scoring old-space vectors against new-space queries.
+        """
+        orch, store = self._orch(pending=False)
+        embedder = _LoadRecordingEmbedder()
+        with (
+            patch.object(gw, "get_shared_embedder", return_value=embedder),
+            patch.object(gw, "model_file_present", return_value=True),
+            patch.object(gw, "make_sync_embed_fn", return_value=lambda s: [0.0]),
+            patch.object(gw, "store_embedding_space_is_stale", return_value=True),
+            patch.object(gw, "reconcile_store_embedding_space") as reconcile,
+        ):
+            await orch._auto_migrate_memory()
+        assert embedder.load_kicks == 1, "a stale space must still load and re-embed"
+        reconcile.assert_called_once_with(store)
+        store.backfill_missing_embeddings.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_store_without_the_probe_keeps_its_sweep(self):
+        """A foreign/stub store must not silently lose the sweep.
+
+        The probe is an optimisation; its absence has to fail toward doing the
+        work, not toward skipping it forever.
+        """
+        orch = _make_orchestrator()
+        orch._cfg.memory.migrated = True
+        store = MagicMock(spec=["embed_fn", "backfill_missing_embeddings"])
+        store.embed_fn = None
+        store.backfill_missing_embeddings = MagicMock(return_value=0)
+        orch.vector_memory = store
+        orch.consolidator = None
+        embedder = _LoadRecordingEmbedder()
+        with (
+            patch.object(gw, "get_shared_embedder", return_value=embedder),
+            patch.object(gw, "model_file_present", return_value=True),
+            patch.object(gw, "make_sync_embed_fn", return_value=lambda s: [0.0]),
+            patch.object(gw, "reconcile_store_embedding_space"),
+        ):
+            await orch._auto_migrate_memory()
+        assert not hasattr(store, "has_pending_embeddings")
+        assert embedder.load_kicks == 1
+        store.backfill_missing_embeddings.assert_called_once()
+
+    def test_binding_embed_fn_does_not_load_the_model(self):
+        """The lazy path this fix relies on: binding is not loading.
+
+        ``_start_embeddings`` binds ``embed_fn``/``embed_fn_factory`` at boot. If
+        that bind loaded the model, deferring the sweep's load would buy nothing.
+        ``make_sync_embed_fn`` returns a closure and the load is kicked inside
+        ``embed_batch`` only when it finds no resident model.
+        """
+        import inspect
+
+        from kiro_crew import embeddings as emb
+
+        src = inspect.getsource(emb.make_sync_embed_fn)
+        assert "_kick_background_load" not in src
+        assert "wait_ready" not in src
+        # The kick lives on the embed path instead.
+        assert "_kick_background_load()" in inspect.getsource(emb.LlamaCppEmbedder.embed_batch)
+        # And wait_ready() is what makes the sweep's question expensive.
+        assert "_kick_background_load()" in inspect.getsource(emb.LlamaCppEmbedder.wait_ready)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

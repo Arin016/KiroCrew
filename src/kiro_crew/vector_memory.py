@@ -3239,6 +3239,36 @@ class VectorMemoryStore:
             logger.info("Recorded embedding vector space %s (no stored vectors)", signature)
         return invalidated
 
+    def has_pending_embeddings(self) -> bool:
+        """True when any row is waiting for a vector. Never loads the model.
+
+        The existence probe for :meth:`backfill_missing_embeddings`: it answers
+        "would that sweep have anything to do?" without touching the embedder, so
+        a caller can skip a ~700MB model load on a boot with nothing to embed.
+        Three ``SELECT 1 ... LIMIT 1`` reads over the SAME predicates the sweep's
+        three sub-sweeps use — episodic, ``lesson.*`` semantic, and non-lesson
+        semantic — so a row this returns False for is a row that sweep would not
+        have embedded either.
+
+        Deliberately independent of ``embed_fn``: the question is whether WORK
+        exists, not whether this store is currently able to do it. The sweep
+        keeps its own ``embed_fn is None`` guard, and a caller that is about to
+        bind ``embed_fn`` needs the answer before it does so.
+
+        The numpy gate on the episodic loop is likewise not mirrored here. numpy
+        is a declared runtime dependency, so its absence is a broken install
+        rather than a state to optimise for, and erring toward True there only
+        costs what every boot pays today.
+        """
+        probes = (
+            "SELECT 1 FROM episodic_memories WHERE is_deleted = 0 AND embedding IS NULL LIMIT 1",
+            "SELECT 1 FROM semantic_memory WHERE is_deleted = 0 AND embedding IS NULL "
+            "AND key LIKE 'lesson.%' LIMIT 1",
+            "SELECT 1 FROM semantic_memory WHERE is_deleted = 0 AND embedding IS NULL "
+            "AND key NOT LIKE 'lesson.%' LIMIT 1",
+        )
+        return any(self._fetch_one_locked(sql) is not None for sql in probes)
+
     def backfill_missing_embeddings(
         self, progress: "Callable[[int, int], None] | None" = None
     ) -> int:
