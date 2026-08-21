@@ -24,6 +24,9 @@ import {
 } from '../src/shared/trustPatterns'
 import { permissionApprovalFromFrame } from '../panel/panelBridge'
 import { approvalBubbleText, approvalPurpose } from '../src/renderer/hooks/useApprovalBubble'
+// The dashboard copy, imported ONLY so the parity test can compare the two
+// implementations directly rather than restating one of them as literals.
+import { truncateCommandLabel as dashboardTruncateCommandLabel } from '../../../utils/trustPatterns'
 
 /** A permission-role chat frame, as the gateway broadcasts it. */
 function frame(meta: Record<string, unknown>): Record<string, unknown> {
@@ -47,18 +50,41 @@ describe('trust pattern transform (shared with the dashboard)', () => {
 
   it('truncates only the LABEL, never the pattern', () => {
     const long = 'a'.repeat(80)
-    expect(truncateCommandLabel(long)).toHaveLength(65) // 64 + ellipsis
+    expect(truncateCommandLabel(long)).toHaveLength(64)
     expect(trustBasePattern(long)).toBe(long + ' *')
   })
 
-  it('matches the dashboard budget: leaves exactly-max untouched, truncates one past it', () => {
-    // 64 mirrors the budget PR #4393 introduces for the dashboard copy in
-    // website/src/utils/trustPatterns.ts (still 30 until that PR lands). The two
-    // must converge — a divergent constant re-creates the collision on one
-    // surface only (see #4462 / #4436).
-    const exactly64 = 'a'.repeat(64)
-    expect(truncateCommandLabel(exactly64)).toBe(exactly64)
-    expect(truncateCommandLabel('a'.repeat(65))).toBe(exactly64 + '…')
+  it('is byte-identical to the dashboard implementation', () => {
+    // Stronger than mirroring a constant by hand: this compares the two copies
+    // directly, so a divergent BUDGET or a divergent ALGORITHM both fail here.
+    // The previous version pinned literals, which meant the dashboard moving to
+    // middle-ellipsis left this copy silently head-truncating -- the same
+    // collision on one surface only (see #4436).
+    const cases = [
+      'a'.repeat(64),
+      'a'.repeat(65),
+      'gh api repos/owner/some-repository/contents/config.json --jq .sha',
+      'gh api repos/rapid7-security-platform-team/ai-vault-service/contents/config.json --jq .sha',
+      'gh api repos/rapid7-security-platform-team/ai-vault-service/contents/secrets.json --jq .sha',
+      // These two STRADDLE the cut points at the default budget, so the parity
+      // comparison actually exercises the surrogate snapping. At max=64 the cuts
+      // are head=42 and tailStart=length-21; an emoji merely sitting in the
+      // elided middle (as the first version of this case did) never snaps, and
+      // the test would have stayed green while the two copies' snap arithmetic
+      // diverged -- the exact behaviour this PR added.
+      `${'a'.repeat(41)}😀${'b'.repeat(40)}`,
+      `${'a'.repeat(61)}😀${'b'.repeat(20)}`,
+      `gh api ${'a'.repeat(40)}😀${'b'.repeat(40)}`,
+      'short',
+      '',
+    ]
+    for (const cmd of cases) {
+      expect(truncateCommandLabel(cmd)).toBe(dashboardTruncateCommandLabel(cmd))
+    }
+    for (const max of [2, 4, 8, 24, 30, 64, 200]) {
+      const cmd = 'gh api repos/owner/some-repository/contents/secrets.json --jq .sha'
+      expect(truncateCommandLabel(cmd, max)).toBe(dashboardTruncateCommandLabel(cmd, max))
+    }
   })
 
   it('does not render two commands from the original report with the same label', () => {
