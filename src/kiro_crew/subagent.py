@@ -20,6 +20,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
+from kiro_crew.acp.liveness import (
+    VERDICT_DEAD,
+    VERDICT_STUCK_INPUT,
+    VERDICT_UNKNOWN,
+    VERDICT_WORKING,
+    LivenessOracle,
+    ToolCallState,
+    consult_offloaded,
+)
 from kiro_crew.acp.session_provider import AcpSessionProvider
 from kiro_crew.acp.types import PROVIDER_LABEL_CLAUDE, PROVIDER_LABEL_DEFAULT
 from kiro_crew.executors import run_in_embed_pool
@@ -422,6 +431,19 @@ def _subagent_default_effort() -> str:
 _STALL_IDLE_SECS = (
     120  # seconds with no stream activity before a running subagent is surfaced as "stalled"
 )
+
+# SUPPRESSION CEILING: the multiple of the idle threshold past which a WORKING
+# liveness verdict may no longer hold the "stalled" badge back.
+#
+# Attribution is not infallible. Under ``agent.session_sharing`` (default true)
+# siblings share a runtime pid, so two subagents running similar commands can
+# cmdline-match the SAME child process; a genuinely wedged agent can then read
+# WORKING for as long as its sibling's child lives. Unbounded, that converts a
+# case the old idle-time-only path DID badge into a permanent false negative --
+# suppressing the only user-facing signal is worse than badging a healthy agent,
+# because the badge is self-clearing and a missing badge is not. With the ceiling
+# a misattribution costs extra latency instead of the signal itself.
+_SUPPRESS_CEILING = 4
 
 # Wave-digest HOLD DEADLINE: the maximum time a COMPLETED wave member's result
 # may sit undelivered while the gateway waits for the digest chunk to fill.
@@ -1033,6 +1055,33 @@ class SubagentInfo:
     _awaiting_approval: bool = (
         False  # True while blocked on a human tool-approval prompt; exempt from idle-stall
     )
+    # Attribution snapshot of the tool currently in flight, mirroring what
+    # ``AcpSessionHandle`` keeps for the main agent. This is what lets the
+    # liveness oracle key evidence to THIS subagent's own child process (by
+    # cmdline match) instead of to the whole runtime subtree — which, on a
+    # session-shared runtime, is dominated by kiro-cli's own background I/O.
+    _inflight_tool: Any = None
+    # Per-agent liveness oracle. One instance PER AGENT is required, not one per
+    # manager: the oracle keys its counter samples by kind ("io"/"cpu"), not by
+    # pid, so a shared instance would let one agent's sample become another's
+    # baseline and read as movement. Retired (not cleared) on every new tool
+    # dispatch so a walk still running against the previous tool cannot write
+    # into the next tool's baseline.
+    _stall_oracle: Any = None
+    # The in-flight offloaded consult for this agent, if any. Tracked so at most
+    # ONE /proc walk per agent is outstanding: a permanently wedged read would
+    # otherwise leave a blocked worker behind on every reaper sweep and starve
+    # the shared subprocess pool that teardown also draws from. Deliberately NOT
+    # cleared when the oracle is retired on a new tool dispatch — dropping the
+    # handle would un-bound exactly that growth.
+    _consult_future: Any = None
+    # Monotonic generation of the attribution snapshot above. Bumped on EVERY
+    # retirement (new dispatch, final tool result, fresh stream activity) so an
+    # offloaded consult that outlived the tool it was submitted for can be
+    # recognised as stale and discarded instead of applied to whatever is in
+    # flight now. Without it the ``/proc`` walk's own latency is enough to flag a
+    # subagent that resumed work while the walk was still running.
+    _stall_gen: int = 0
     # Batch/wave identity: set when this spawn is part of a multi-task wave
     # (spawn_run tasks=[...]) so scale plumbing can digest completions and
     # emit batch lifecycle events. Empty for standalone spawns.
@@ -1959,22 +2008,152 @@ class SubagentManager:
             info.turns == 0 and info._pid is None and (now - exec_started) > self._startup_deadline
         )
 
+    @staticmethod
+    def _note_tool_dispatch(info: SubagentInfo, event: Any) -> None:
+        """Record the in-flight tool for liveness attribution.
+
+        Mirrors ``AcpSessionHandle``'s ``_inflight_tool`` snapshot: title, the
+        already-redacted input, the dispatch instant, and the TRUSTED
+        ``is_shell`` / ``tool_name`` fields from ``_meta.kiro`` (never the
+        LLM-authored title). The subagent event loop already receives the same
+        ``AcpEvent``; it previously kept only ``title`` and dropped the rest,
+        which is why stall detection had nothing to attribute evidence with.
+
+        Retiring the oracle here (rather than clearing it) is load-bearing: a
+        movement walk still running against the PREVIOUS tool's command holds a
+        reference to the old instance, and clearing in place would let its late
+        write land on the new tool's baseline and read as movement.
+        """
+        info._inflight_tool = ToolCallState(
+            title=event.title or "",
+            command=event.tool_input or "",
+            dispatch_ts=time.monotonic(),
+            is_shell=bool(getattr(event, "is_shell", False)),
+            tool_name=getattr(event, "tool_name", "") or "",
+        )
+        oracle = info._stall_oracle
+        info._stall_oracle = oracle.fresh() if oracle is not None else None
+        info._stall_gen += 1
+
+    @staticmethod
+    def _note_tool_result(info: SubagentInfo, event: Any) -> None:
+        """Retire the attribution snapshot when a tool's FINAL result arrives.
+
+        The gate lives here rather than at the call site so the invariant is
+        directly testable. ``EVENT_TOOL_RESULT`` is also emitted for
+        non-completed progress updates (``_dispatch`` sets
+        ``tool_final = status == "completed"``), and treating one of those as the
+        end of the tool would drop attribution while the command is still
+        running — degrading liveness to idle-time-only for exactly the long
+        silent command this detection exists to judge, and so raising the badge
+        on a healthy agent. ``acp.client`` gates on the same field.
+        """
+        if event.tool_final:
+            SubagentManager._clear_tool_dispatch(info)
+
+    @staticmethod
+    def _clear_tool_dispatch(info: SubagentInfo) -> None:
+        """Drop the in-flight tool snapshot and retire the oracle with it."""
+        info._inflight_tool = None
+        oracle = info._stall_oracle
+        info._stall_oracle = oracle.fresh() if oracle is not None else None
+        info._stall_gen += 1
+
+    async def _stall_verdict(self, info: SubagentInfo) -> tuple[str, str]:
+        """Liveness verdict for an idle subagent: working, wedged, or unknown.
+
+        Idle time alone cannot separate a hung tool call from a slow silent one,
+        so this consults the same ``LivenessOracle`` the main agent's watchdog
+        uses (:mod:`kiro_crew.acp.liveness`) for ``/proc`` evidence.
+
+        The attribution is what makes it sound. With the in-flight tool's real
+        ``is_shell`` + command, the consult takes the oracle's shell-child
+        branch, which matches a live descendant by CMDLINE and then tracks that
+        pid — so the evidence belongs to THIS subagent's own child even when the
+        runtime is shared with sibling subagents. That is the distinction an
+        earlier whole-subtree attempt could not make: a subtree aggregate is
+        dominated by kiro-cli's own background socket/keepalive traffic, so a
+        ``sleep``-only subagent read as "working" and was never flagged.
+
+        Returns ``(verdict, evidence)``; any failure degrades to
+        ``(VERDICT_UNKNOWN, ...)`` so the caller falls back to idle time.
+        """
+        if not info._pid:
+            return VERDICT_UNKNOWN, "no runtime pid"
+        tool = info._inflight_tool
+        if tool is None:
+            # Idle with no tool in flight is a model-wait, not a hung command.
+            # The model-wait branch reads the whole runtime subtree, which is not
+            # attributable on a shared runtime — so decline rather than guess.
+            return VERDICT_UNKNOWN, "no tool in flight"
+        if not tool.is_shell:
+            # A non-shell MCP tool has no child process to match, so the oracle
+            # can only offer the same unattributable subtree aggregate. Decline.
+            return VERDICT_UNKNOWN, "non-shell tool — not attributable"
+        if info._stall_oracle is None:
+            info._stall_oracle = LivenessOracle()
+        # The consult is a SYNCHRONOUS /proc filesystem walk (``iter_descendants``
+        # over the runtime's descendant subtree, plus ``os.readlink`` on
+        # ``/proc/<pid>/fd/*``, which can block on the very wedged fd being
+        # investigated) — and this runs on the reaper's event loop, the same loop
+        # that serves every chat turn and the liveness heartbeat, sweeping agents
+        # serially. Inline, one wedged read freezes the gateway until the
+        # loop-stall watchdog kills it. Offload it exactly as the main-agent path
+        # does (``AcpSessionHandle._consult_oracle_offloaded``): bounded await,
+        # and at most ONE outstanding walk per agent so a permanently wedged read
+        # cannot leave a new blocked worker behind on every sweep.
+        # ``consult_offloaded`` owns that whole sequence -- one outstanding walk per
+        # holder, submission inside the guard, exception retrieval attached at
+        # submission, every failure degrading to UNKNOWN -- for the two watchdog
+        # paths that already depend on it, so a fix there lands here too.
+        # ``SubagentInfo`` satisfies its ``ConsultFutureHolder`` protocol via
+        # ``_consult_future``. That handle deliberately OUTLIVES snapshot
+        # retirement: ``_clear_tool_dispatch`` bumps ``_stall_gen`` (which
+        # invalidates a stale verdict, below) but leaves the future in place, so a
+        # walk still wedged on a stuck fd keeps suppressing resubmission instead
+        # of letting each later sweep strand another blocked worker.
+        submitted_gen = info._stall_gen
+        verdict = await consult_offloaded(
+            info,
+            info._stall_oracle.check_tool,
+            (info._pid, tool),
+            executor_factory=subprocess_executor,
+            log_label=f"stall consult for {info.id}",
+        )
+        # The consult awaits, so fresh activity, a final tool result, or the next
+        # dispatch can retire this snapshot while the walk is still running. A
+        # verdict about a tool that is no longer in flight must not be applied to
+        # whatever replaced it: DEAD/STUCK_INPUT skips the two-sweep confirmation,
+        # so a stale one would flag an agent that has demonstrably resumed working.
+        if info._stall_gen != submitted_gen:
+            return VERDICT_UNKNOWN, "superseded mid-consult"
+        return verdict
+
     async def _maybe_flag_stall(self, agent_id: str, info: SubagentInfo, now: float) -> None:
         """Idle-stall detection for a running subagent (surface-only).
 
-        A subagent that has actually started (>=1 turn or a live runtime PID)
-        but has emitted no stream activity for ``_stall_idle_secs`` is likely
-        wedged in a single hung tool call — or simply running one slow, silent
-        command. Unlike the main agent, subagents get no liveness oracle /
-        tool-stall watchdog, and (because session-sharing subagents share the
-        parent's runtime PID) a per-PID oracle could not tell the two apart.
+        A subagent that has started (>=1 turn or a live runtime PID) but has
+        emitted no stream activity for ``_stall_idle_secs`` may be wedged in a
+        hung tool call — or simply running one slow, silent command. Idle time
+        cannot tell those apart, so the flag is gated on a ``LivenessOracle``
+        consult (:meth:`_stall_verdict`) that attributes evidence to the
+        subagent's OWN child process by cmdline match:
 
-        So this is deliberately *surface-only*: it emits a ``subagent_stalled``
-        UI signal (so the user understands why a "simple" task is taking so
-        long) and records the slow command for later analysis, but it NEVER
-        terminates the agent — the user closes a genuinely-hung subagent from
-        the UX (per-row stop / Stop-all). This means a slow-but-healthy command
-        can only ever produce a self-clearing badge, never a kill.
+        * ``WORKING`` — a live matched child, so it is progressing: not flagged.
+        * ``DEAD`` / ``STUCK_INPUT`` — the child exited with no result frame, or
+          its subtree is flat and blocked on a tty/stdin read. That is positive
+          evidence of a wedge, so it flags IMMEDIATELY, skipping the two-sweep
+          confirmation the idle-time path needs.
+        * ``UNKNOWN`` — no attributable evidence (no shell child to match, no
+          tool in flight, unreadable ``/proc``). Falls back to idle time with the
+          two-sweep confirmation, i.e. exactly the previous behaviour.
+
+        Still deliberately *surface-only*: it emits a ``subagent_stalled`` UI
+        signal and records the slow command, but NEVER terminates the agent, so
+        a slow-but-healthy command can only ever produce a self-clearing badge.
+        Escalating a ``DEAD`` verdict to an early reap would be a change to kill
+        semantics and is intentionally NOT part of this; the wall-clock reaper at
+        ``_TIMEOUT_SECS`` remains the only automatic terminator.
         """
         if not (info.turns > 0 or info._pid is not None):
             return
@@ -1985,6 +2164,57 @@ class SubagentManager:
             return
         idle = now - info.last_activity
         if not info.stalled and idle > self._stall_idle_secs:
+            verdict, evidence = await self._stall_verdict(info)
+            if verdict == VERDICT_WORKING and idle < self._stall_idle_secs * _SUPPRESS_CEILING:
+                # Attributable progress in this subagent's own child: silent, not
+                # stalled. Leave the suspicion open (do not reset
+                # _stall_suspect_at) so the badge appears as soon as that child
+                # stops moving or exits.
+                #
+                # The ceiling above bounds how long a WORKING reading may hold the
+                # badge back, because attribution is not infallible: under
+                # ``session_sharing`` two siblings running similar commands can
+                # cmdline-match the SAME child, so a wedged agent can read WORKING
+                # for as long as its sibling's child lives. Without a bound that
+                # turns an old true positive into a permanent false negative —
+                # strictly worse than the idle-time-only path it replaces. With
+                # it, misattribution costs latency, not the signal.
+                logger.debug(
+                    "Reaper: subagent %s idle %.0fs but working (%s) — not flagging",
+                    agent_id,
+                    idle,
+                    evidence,
+                )
+                return
+            # A wedged verdict normally skips it: DEAD/STUCK_INPUT is positive
+            # evidence about this agent's child rather than a guess from elapsed
+            # silence, so dampening it would only delay a signal already earned.
+            #
+            # BUT that trust is only warranted when the cmdline match cannot have
+            # landed on someone else's child. ``_SUPPRESS_CEILING`` exists
+            # precisely because the match is fallible under a shared runtime, and
+            # a DEAD derived from a fallible match is exactly as wrong as the
+            # WORKING the ceiling bounds — a sibling's matched child exiting would
+            # otherwise raise an immediate badge on a healthy agent, skipping the
+            # very dampening added to keep the badge trustworthy at scale. So the
+            # skip is withdrawn whenever another session could be the one being
+            # measured, and the wedged verdict then earns its badge the same way
+            # an idle-time guess does: by holding across two sweeps.
+            #
+            # The gate keys on ``session_sharing`` itself, not on a count of live
+            # siblings, because the confusable co-tenant is not only a sibling:
+            # ``_create_shared_session`` puts the subagent on the PARENT's
+            # AcpRuntime ("one process hosts everything"), so ``info._pid`` is the
+            # parent's process and the parent's own tool children are descendants
+            # of it too. ``_live_shared_count`` iterates the subagent registry and
+            # therefore cannot see the parent, so a LONE subagent counted 1 and
+            # kept the fast path while still able to cmdline-match the parent's
+            # child — and flag instantly when that child exited. Since a shared
+            # runtime always has the parent in it, "could this match belong to
+            # someone else?" is true for every session-sharing agent.
+            wedged = verdict in (VERDICT_DEAD, VERDICT_STUCK_INPUT)
+            if wedged and info._session_sharing:
+                wedged = False
             # Two-sweep confirmation (scale dampening): at 60-100 concurrent
             # agents a single-window trip ambers several healthy-slow agents at
             # any moment, training users to ignore the badge. Require the idle
@@ -1992,14 +2222,16 @@ class SubagentManager:
             # flagging — a stream event between sweeps resets the suspicion
             # (_touch_activity clears both flags). Adds at most one sweep
             # interval (~60s) of latency to a genuine stall.
-            if info._stall_suspect_at <= 0.0:
+            if not wedged and info._stall_suspect_at <= 0.0:
                 info._stall_suspect_at = now
                 return
             info.stalled = True
             logger.warning(
-                "Reaper: subagent %s idle %.0fs (no stream activity) — marking stalled",
+                "Reaper: subagent %s idle %.0fs (verdict=%s; %s) — marking stalled",
                 agent_id,
                 idle,
+                verdict,
+                evidence,
             )
             # Persist the slow command for future analysis. Best-effort; must
             # not disturb the still-running agent (NOT a tombstone — the agent
@@ -2007,7 +2239,16 @@ class SubagentManager:
             self._record_slow_command(info, idle)
             try:
                 await self._fire_event(
-                    "subagent_stalled", info, {"stalled": True, "idle_secs": int(idle)}
+                    "subagent_stalled",
+                    info,
+                    # The verdict and its evidence are deliberately NOT on the
+                    # wire: no consumer reads them (the frontend narrows this
+                    # payload to {slot, id, stalled, idle_secs} on arrival, and
+                    # the coalesced batch update forwards only `stalled`), and the
+                    # event is app-sdk-forwarded, so shipping unread keys would
+                    # create semi-permanent surface. The log line above records
+                    # both for diagnosis; add them here when something renders it.
+                    {"stalled": True, "idle_secs": int(idle)},
                 )
             except Exception:
                 logger.debug(
@@ -4779,6 +5020,13 @@ class SubagentManager:
         """
         info.last_activity = time.time()
         info._stall_suspect_at = 0.0  # activity resets the 2-sweep confirmation
+        # Retire the oracle so the next suspicion samples a fresh baseline rather
+        # than differencing against counters from before this activity, and bump
+        # the generation so a consult submitted before this moment cannot land a
+        # stalled verdict on an agent that has just proven it is working.
+        if info._stall_oracle is not None:
+            info._stall_oracle = info._stall_oracle.fresh()
+        info._stall_gen += 1
         if info.stalled:
             info.stalled = False
             await self._fire_event("subagent_stalled", info, {"stalled": False})
@@ -5321,6 +5569,7 @@ class SubagentManager:
                 # recovery must see child activity too; only the turn
                 # increment is parent-scoped.
                 info.last_tool = event.title or ""
+                self._note_tool_dispatch(info, event)
                 # Persist turn state for orphan recovery diagnostics
                 try:
                     update_state(info.id, turns=turns, last_tool=event.title or "")
@@ -5526,6 +5775,7 @@ class SubagentManager:
                 # the permission path uses so the running-card shows live activity.
                 info.tool_count += 1
                 info.last_tool = event.title or info.last_tool
+                self._note_tool_dispatch(info, event)
                 await self._fire_event(
                     "subagent_tool",
                     info,
@@ -5561,6 +5811,11 @@ class SubagentManager:
                     agent_role=info.agent or None,
                 )
             elif event.kind == EVENT_TOOL_RESULT:
+                # A FINAL result means the tool is done: drop the attribution
+                # snapshot so a later idle stretch is not judged against a
+                # command that has already returned. A non-final progress frame
+                # is not the end of the tool — the gate is in _note_tool_result.
+                self._note_tool_result(info, event)
                 # Fire PostToolUse hooks (parity with chat_runner). Until this
                 # branch existed, hooks registered for subagent-spawned tools
                 # received PreToolUse but never PostToolUse — losing the
