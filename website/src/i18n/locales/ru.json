@@ -3169,7 +3169,7 @@
         "cancel": "Отмена",
         "confirm": "Сбросить",
         "desc": "Полный сброс: очищает переписку, журнал активности, скриншоты и все выученные предпочтения. {{name}} начинает совершенно заново.",
-        "title": "Сбросить {{name}}?"
+        "title": "Сбросить «{{name}}»?"
       },
       "settingsPanel": {
         "about": "О программе",
@@ -3927,7 +3927,7 @@
         "compile": "Скомпилировать",
         "compiling": "Компиляция…",
         "cursor_position": "Стр. {{line}}, стлб. {{column}}",
-        "delete_file_confirm": "Удалить {{file}}?",
+        "delete_file_confirm": "Удалить «{{file}}»?",
         "download_pdf": "Скачать PDF",
         "editing": "Редактируется {{file}}",
         "editing_unsaved": "Редактируется {{file}} — не сохранено",

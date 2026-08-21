@@ -3063,7 +3063,7 @@
         "cancel": "キャンセル",
         "confirm": "リセット",
         "desc": "完全リセット: 会話、アクティビティログ、スクリーンショット、すべての学習した環境設定をクリアします。{{name}}は完全に最初からやり直します。",
-        "title": "{{name}}をリセットしますか？"
+        "title": "「{{name}}」をリセットしますか？"
       },
       "settingsPanel": {
         "about": "Mochi について",
@@ -3788,7 +3788,7 @@
         "compile": "コンパイル",
         "compiling": "コンパイル中…",
         "cursor_position": "行 {{line}}、列 {{column}}",
-        "delete_file_confirm": "{{file}} を削除しますか？",
+        "delete_file_confirm": "「{{file}}」を削除しますか？",
         "download_pdf": "PDF をダウンロード",
         "editing": "{{file}} を編集中",
         "editing_unsaved": "{{file}} を編集中 — 未保存",

@@ -3123,7 +3123,7 @@
         "cancel": "Cancelar",
         "confirm": "Restablecer",
         "desc": "Restablecimiento completo: borra la conversación, el registro de actividad, las capturas de pantalla y todas las preferencias aprendidas. {{name}} empieza completamente de cero.",
-        "title": "¿Restablecer {{name}}?"
+        "title": "¿Restablecer “{{name}}”?"
       },
       "settingsPanel": {
         "about": "Acerca de",
@@ -3870,7 +3870,7 @@
         "compile": "Compilar",
         "compiling": "Compilando…",
         "cursor_position": "Lín. {{line}}, col. {{column}}",
-        "delete_file_confirm": "¿Eliminar {{file}}?",
+        "delete_file_confirm": "¿Eliminar “{{file}}”?",
         "download_pdf": "Descargar PDF",
         "editing": "Editando {{file}}",
         "editing_unsaved": "Editando {{file}}: sin guardar",

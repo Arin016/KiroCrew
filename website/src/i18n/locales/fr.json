@@ -3155,7 +3155,7 @@
         "cancel": "Annuler",
         "confirm": "Réinitialiser",
         "desc": "Réinitialisation complète : efface la conversation, le journal d'activité, les captures d'écran et toutes les préférences apprises. {{name}} repart complètement à zéro.",
-        "title": "Réinitialiser {{name}} ?"
+        "title": "Réinitialiser « {{name}} » ?"
       },
       "settingsPanel": {
         "about": "À propos",
@@ -3902,7 +3902,7 @@
         "compile": "Compiler",
         "compiling": "Compilation…",
         "cursor_position": "Ligne {{line}}, col. {{column}}",
-        "delete_file_confirm": "Supprimer {{file}} ?",
+        "delete_file_confirm": "Supprimer « {{file}} » ?",
         "download_pdf": "Télécharger le PDF",
         "editing": "Modification de {{file}}",
         "editing_unsaved": "Modification de {{file}} — non enregistré",

@@ -3077,7 +3077,7 @@
         "cancel": "বাতিল করুন",
         "confirm": "রিসেট করুন",
         "desc": "সম্পূর্ণ রিসেট: কথোপকথন, কার্যকলাপ লগ, স্ক্রিনশট এবং সমস্ত শেখা পছন্দ মুছে দেয়। {{name}} সম্পূর্ণ নতুনভাবে শুরু করে।",
-        "title": "{{name}} রিসেট করবেন?"
+        "title": "“{{name}}” রিসেট করবেন?"
       },
       "settingsPanel": {
         "about": "সম্পর্কে",
@@ -3813,7 +3813,7 @@
         "compile": "কম্পাইল করুন",
         "compiling": "কম্পাইল হচ্ছে…",
         "cursor_position": "লা. {{line}}, কল. {{column}}",
-        "delete_file_confirm": "{{file}} মুছে ফেলবেন?",
+        "delete_file_confirm": "“{{file}}” মুছে ফেলবেন?",
         "download_pdf": "PDF ডাউনলোড করুন",
         "editing": "{{file}} সম্পাদনা করছেন",
         "editing_unsaved": "{{file}} সম্পাদনা করছেন — সংরক্ষিত হয়নি",

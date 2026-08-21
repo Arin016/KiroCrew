@@ -3123,7 +3123,7 @@
         "cancel": "Annulla",
         "confirm": "Reimposta",
         "desc": "Reimpostazione completa: cancella conversazione, registro attività, screenshot e tutte le preferenze apprese. {{name}} riparte completamente da zero.",
-        "title": "Reimpostare {{name}}?"
+        "title": "Reimpostare «{{name}}»?"
       },
       "settingsPanel": {
         "about": "Informazioni",
@@ -3870,7 +3870,7 @@
         "compile": "Compila",
         "compiling": "Compilazione…",
         "cursor_position": "Riga {{line}}, col. {{column}}",
-        "delete_file_confirm": "Eliminare {{file}}?",
+        "delete_file_confirm": "Eliminare «{{file}}»?",
         "download_pdf": "Scarica PDF",
         "editing": "Modifica di {{file}}",
         "editing_unsaved": "Modifica di {{file}} — non salvato",

@@ -3031,7 +3031,7 @@
         "cancel": "取消",
         "confirm": "重置",
         "desc": "完全重置：清除对话、活动日志、截图和所有学习偏好。{{name}} 将从零开始。",
-        "title": "重置 {{name}}？"
+        "title": "重置“{{name}}”？"
       },
       "settingsPanel": {
         "about": "关于",
@@ -3756,7 +3756,7 @@
         "compile": "编译",
         "compiling": "正在编译……",
         "cursor_position": "第 {{line}} 行，第 {{column}} 列",
-        "delete_file_confirm": "确定删除 {{file}} 吗？",
+        "delete_file_confirm": "确定删除“{{file}}”吗？",
         "download_pdf": "下载 PDF",
         "editing": "正在编辑 {{file}}",
         "editing_unsaved": "正在编辑 {{file}}——未保存",

@@ -3063,7 +3063,7 @@
         "cancel": "취소",
         "confirm": "초기화",
         "desc": "전체 초기화: 대화, 활동 기록, 스크린샷, 학습한 설정을 모두 지웁니다. {{name}}은(는) 완전히 처음부터 다시 시작합니다.",
-        "title": "{{name}}을(를) 초기화하시겠습니까?"
+        "title": "‘{{name}}’을(를) 초기화하시겠습니까?"
       },
       "settingsPanel": {
         "about": "정보",
@@ -3788,7 +3788,7 @@
         "compile": "컴파일",
         "compiling": "컴파일 중…",
         "cursor_position": "{{line}}행, {{column}}열",
-        "delete_file_confirm": "{{file}}을(를) 삭제하시겠습니까?",
+        "delete_file_confirm": "‘{{file}}’을(를) 삭제하시겠습니까?",
         "download_pdf": "PDF 다운로드",
         "editing": "{{file}} 편집 중",
         "editing_unsaved": "{{file}} 편집 중 — 저장되지 않음",

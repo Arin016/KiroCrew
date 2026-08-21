@@ -3123,7 +3123,7 @@
         "cancel": "Cancelar",
         "confirm": "Redefinir",
         "desc": "Redefinição completa: limpa a conversa, o registro de atividades, as capturas de tela e todas as preferências aprendidas. {{name}} começa totalmente do zero.",
-        "title": "Redefinir {{name}}?"
+        "title": "Redefinir “{{name}}”?"
       },
       "settingsPanel": {
         "about": "Sobre",
@@ -3870,7 +3870,7 @@
         "compile": "Compilar",
         "compiling": "A compilar…",
         "cursor_position": "Lin. {{line}}, col. {{column}}",
-        "delete_file_confirm": "Eliminar {{file}}?",
+        "delete_file_confirm": "Eliminar “{{file}}”?",
         "download_pdf": "Baixar PDF",
         "editing": "A editar {{file}}",
         "editing_unsaved": "A editar {{file}} — não guardado",

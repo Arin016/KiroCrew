@@ -3109,7 +3109,7 @@
         "cancel": "Abbrechen",
         "confirm": "Zurücksetzen",
         "desc": "Vollständiges Zurücksetzen: löscht Gespräch, Aktivitätsprotokoll, Screenshots und alle gelernten Einstellungen. {{name}} beginnt völlig neu.",
-        "title": "{{name}} zurücksetzen?"
+        "title": "„{{name}}“ zurücksetzen?"
       },
       "settingsPanel": {
         "about": "Über",
@@ -3845,7 +3845,7 @@
         "compile": "Kompilieren",
         "compiling": "Wird kompiliert…",
         "cursor_position": "Z. {{line}}, Sp. {{column}}",
-        "delete_file_confirm": "{{file}} löschen?",
+        "delete_file_confirm": "„{{file}}“ löschen?",
         "download_pdf": "PDF herunterladen",
         "editing": "{{file}} wird bearbeitet",
         "editing_unsaved": "{{file}} wird bearbeitet — nicht gespeichert",

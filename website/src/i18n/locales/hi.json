@@ -3077,7 +3077,7 @@
         "cancel": "रद्द करें",
         "confirm": "रीसेट करें",
         "desc": "पूर्ण रीसेट: बातचीत, गतिविधि लॉग, स्क्रीनशॉट और सभी सीखी गई प्राथमिकताएँ मिटा देता है। {{name}} पूरी तरह नए सिरे से शुरू करता है।",
-        "title": "{{name}} रीसेट करें?"
+        "title": "“{{name}}” रीसेट करें?"
       },
       "settingsPanel": {
         "about": "जानकारी",
@@ -3813,7 +3813,7 @@
         "compile": "कंपाइल करें",
         "compiling": "कंपाइल हो रहा है…",
         "cursor_position": "पं. {{line}}, स्तं. {{column}}",
-        "delete_file_confirm": "{{file}} हटाएँ?",
+        "delete_file_confirm": "“{{file}}” हटाएँ?",
         "download_pdf": "PDF डाउनलोड करें",
         "editing": "{{file}} संपादित हो रही है",
         "editing_unsaved": "{{file}} संपादित हो रही है — सहेजी नहीं गई",

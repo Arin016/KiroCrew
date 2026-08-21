@@ -2082,7 +2082,7 @@
         "cancel": "Cancel",
         "confirm": "Reset",
         "desc": "Full reset: clears conversation, activity log, screenshots, and all learned preferences. {{name}} starts completely fresh.",
-        "title": "Reset {{name}}?"
+        "title": "Reset “{{name}}”?"
       },
       "settingsPanel": {
         "about": "About",
@@ -2818,7 +2818,7 @@
         "compile": "Compile",
         "compiling": "Compiling…",
         "cursor_position": "Ln {{line}}, Col {{column}}",
-        "delete_file_confirm": "Delete {{file}}?",
+        "delete_file_confirm": "Delete “{{file}}”?",
         "download_pdf": "Download PDF",
         "editing": "Editing {{file}}",
         "editing_unsaved": "Editing {{file}} — unsaved",
