@@ -12408,7 +12408,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Permite que un sistema externo inicie un turno del agente"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "Almacena claves API y credenciales de forma segura"
       }
+    },
+    "secrets": {
+      "title": "Bóveda de secretos",
+      "description": "Almacena claves API y credenciales de forma segura. Los secretos se cifran en reposo y nunca se exponen al agente.",
+      "no_secrets": "No hay secretos almacenados.",
+      "add_secret": "Agregar secreto",
+      "name_label": "Nombre",
+      "value_label": "Valor",
+      "delete_confirm": "¿Eliminar este secreto?",
+      "delete": "Eliminar",
+      "cancel": "Cancelar",
+      "save": "Guardar",
+      "loading": "Cargando…",
+      "delete_secret_name": "Eliminar secreto {{name}}",
+      "secret_name_aria": "Nombre del secreto",
+      "secret_value_aria": "Valor del secreto"
     }
   },
   "store": {

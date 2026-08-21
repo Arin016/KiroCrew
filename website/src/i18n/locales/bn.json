@@ -12272,7 +12272,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "বাইরের কোনো সিস্টেমকে এজেন্টের একটি পালা শুরু করতে দিন"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "API কী এবং শংসাপত্রগুলি নিরাপদে সংরক্ষণ করুন"
       }
+    },
+    "secrets": {
+      "title": "সিক্রেট ভল্ট",
+      "description": "API কী এবং শংসাপত্র নিরাপদে সংরক্ষণ করুন। সিক্রেটগুলি এনক্রিপ্ট করা হয় এবং এজেন্টের কাছে কখনই প্রকাশিত হয় না।",
+      "no_secrets": "এখনও কোনো সিক্রেট সংরক্ষিত নেই।",
+      "add_secret": "সিক্রেট যোগ করুন",
+      "name_label": "নাম",
+      "value_label": "মান",
+      "delete_confirm": "এই সিক্রেটটি মুছবেন?",
+      "delete": "মুছুন",
+      "cancel": "বাতিল",
+      "save": "সংরক্ষণ",
+      "loading": "লোড হচ্ছে…",
+      "delete_secret_name": "{{name}} সিক্রেট মুছুন",
+      "secret_name_aria": "সিক্রেটের নাম",
+      "secret_value_aria": "সিক্রেটের মান"
     }
   },
   "store": {

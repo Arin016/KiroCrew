@@ -12135,7 +12135,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "让外部系统启动一次助手轮次"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "安全存储 API 密钥和凭据"
       }
+    },
+    "secrets": {
+      "title": "密钥保险库",
+      "description": "安全存储API密钥和凭据。密钥在静态时加密，永远不会暴露给代理。",
+      "no_secrets": "尚未存储任何密钥。",
+      "add_secret": "添加密钥",
+      "name_label": "名称",
+      "value_label": "值",
+      "delete_confirm": "删除此密钥？",
+      "delete": "删除",
+      "cancel": "取消",
+      "save": "保存",
+      "loading": "加载中…",
+      "delete_secret_name": "删除密钥 {{name}}",
+      "secret_name_aria": "密钥名称",
+      "secret_value_aria": "密钥值"
     }
   },
   "store": {

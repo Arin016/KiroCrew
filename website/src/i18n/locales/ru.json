@@ -12544,7 +12544,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Разрешите внешней системе запустить один ход агента"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "Безопасное хранение ключей API и учётных данных"
       }
+    },
+    "secrets": {
+      "title": "Хранилище секретов",
+      "description": "Безопасное хранение API-ключей и учётных данных. Секреты шифруются и никогда не раскрываются агенту.",
+      "no_secrets": "Секреты ещё не сохранены.",
+      "add_secret": "Добавить секрет",
+      "name_label": "Имя",
+      "value_label": "Значение",
+      "delete_confirm": "Удалить этот секрет?",
+      "delete": "Удалить",
+      "cancel": "Отмена",
+      "save": "Сохранить",
+      "loading": "Загрузка…",
+      "delete_secret_name": "Удалить секрет {{name}}",
+      "secret_name_aria": "Имя секрета",
+      "secret_value_aria": "Значение секрета"
     }
   },
   "store": {

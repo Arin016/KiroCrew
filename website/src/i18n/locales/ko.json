@@ -12135,7 +12135,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "외부 시스템이 에이전트 턴을 한 번 시작할 수 있습니다"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "API 키와 자격 증명을 안전하게 저장"
       }
+    },
+    "secrets": {
+      "title": "비밀 저장소",
+      "description": "API 키와 자격 증명을 안전하게 저장합니다. 비밀은 암호화되어 저장되며 에이전트에 노출되지 않습니다.",
+      "no_secrets": "저장된 비밀이 없습니다.",
+      "add_secret": "비밀 추가",
+      "name_label": "이름",
+      "value_label": "값",
+      "delete_confirm": "이 비밀을 삭제하시겠습니까?",
+      "delete": "삭제",
+      "cancel": "취소",
+      "save": "저장",
+      "loading": "로딩 중…",
+      "delete_secret_name": "시크릿 {{name}} 삭제",
+      "secret_name_aria": "시크릿 이름",
+      "secret_value_aria": "시크릿 값"
     }
   },
   "store": {

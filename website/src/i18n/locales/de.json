@@ -12271,7 +12271,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Externes System einen Agentendurchlauf starten lassen"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "API-Schlüssel und Anmeldedaten sicher speichern"
       }
+    },
+    "secrets": {
+      "title": "Geheimnis-Tresor",
+      "description": "API-Schlüssel und Anmeldedaten sicher speichern. Geheimnisse werden verschlüsselt gespeichert und nie dem Agenten offengelegt.",
+      "no_secrets": "Noch keine Geheimnisse gespeichert.",
+      "add_secret": "Geheimnis hinzufügen",
+      "name_label": "Name",
+      "value_label": "Wert",
+      "delete_confirm": "Dieses Geheimnis löschen?",
+      "delete": "Löschen",
+      "cancel": "Abbrechen",
+      "save": "Speichern",
+      "loading": "Laden…",
+      "delete_secret_name": "Secret {{name}} löschen",
+      "secret_name_aria": "Name des Secrets",
+      "secret_value_aria": "Wert des Secrets"
     }
   },
   "store": {

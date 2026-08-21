@@ -7978,7 +7978,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Let an outside system start one agent turn"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "Store API keys and credentials securely"
       }
+    },
+    "secrets": {
+      "title": "Secrets Vault",
+      "description": "Store API keys and credentials securely. Secrets are encrypted at rest and never exposed to the agent.",
+      "no_secrets": "No secrets stored yet.",
+      "add_secret": "Add secret",
+      "name_label": "Name",
+      "value_label": "Value",
+      "delete_confirm": "Delete this secret?",
+      "delete": "Delete",
+      "cancel": "Cancel",
+      "save": "Save",
+      "loading": "Loading…",
+      "delete_secret_name": "Delete secret {{name}}",
+      "secret_name_aria": "Secret name",
+      "secret_value_aria": "Secret value"
     }
   }
 }

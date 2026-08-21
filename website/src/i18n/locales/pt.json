@@ -12407,7 +12407,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Permite que um sistema externo inicie um turno do agente"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "Armazene chaves de API e credenciais com segurança"
       }
+    },
+    "secrets": {
+      "title": "Cofre de segredos",
+      "description": "Armazene chaves de API e credenciais com segurança. Os segredos são criptografados em repouso e nunca expostos ao agente.",
+      "no_secrets": "Nenhum segredo armazenado.",
+      "add_secret": "Adicionar segredo",
+      "name_label": "Nome",
+      "value_label": "Valor",
+      "delete_confirm": "Excluir este segredo?",
+      "delete": "Excluir",
+      "cancel": "Cancelar",
+      "save": "Salvar",
+      "loading": "Carregando…",
+      "delete_secret_name": "Excluir segredo {{name}}",
+      "secret_name_aria": "Nome do segredo",
+      "secret_value_aria": "Valor do segredo"
     }
   },
   "store": {

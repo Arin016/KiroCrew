@@ -12408,7 +12408,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Permettre à un système externe de lancer un tour d'agent"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "Stockez les clés API et identifiants en toute sécurité"
       }
+    },
+    "secrets": {
+      "title": "Coffre-fort de secrets",
+      "description": "Stockez les clés API et identifiants en toute sécurité. Les secrets sont chiffrés au repos et jamais exposés à l'agent.",
+      "no_secrets": "Aucun secret stocké.",
+      "add_secret": "Ajouter un secret",
+      "name_label": "Nom",
+      "value_label": "Valeur",
+      "delete_confirm": "Supprimer ce secret ?",
+      "delete": "Supprimer",
+      "cancel": "Annuler",
+      "save": "Enregistrer",
+      "loading": "Chargement…",
+      "delete_secret_name": "Supprimer le secret {{name}}",
+      "secret_name_aria": "Nom du secret",
+      "secret_value_aria": "Valeur du secret"
     }
   },
   "store": {

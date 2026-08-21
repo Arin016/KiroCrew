@@ -12407,7 +12407,27 @@
       "webhooks": {
         "label": "Webhooks",
         "description": "Consenti a un sistema esterno di avviare un turno dell'agente"
+      },
+      "secrets": {
+        "label": "Secrets",
+        "description": "Archivia chiavi API e credenziali in modo sicuro"
       }
+    },
+    "secrets": {
+      "title": "Cassaforte dei segreti",
+      "description": "Archivia chiavi API e credenziali in modo sicuro. I segreti sono crittografati a riposo e mai esposti all'agente.",
+      "no_secrets": "Nessun segreto memorizzato.",
+      "add_secret": "Aggiungi segreto",
+      "name_label": "Nome",
+      "value_label": "Valore",
+      "delete_confirm": "Eliminare questo segreto?",
+      "delete": "Elimina",
+      "cancel": "Annulla",
+      "save": "Salva",
+      "loading": "Caricamento…",
+      "delete_secret_name": "Elimina segreto {{name}}",
+      "secret_name_aria": "Nome del segreto",
+      "secret_value_aria": "Valore del segreto"
     }
   },
   "store": {
