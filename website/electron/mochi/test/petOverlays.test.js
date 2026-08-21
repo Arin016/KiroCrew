@@ -272,11 +272,12 @@ function fakeWin() {
     destroyed: false,
     hidden: false,
     loadedUrl: null,
+    loadOptions: null,
     isDestroyed() { return this.destroyed; },
     hide() { this.hidden = true; },
     showInactive() { this.hidden = false; },
     isVisible() { return !this.hidden; },
-    loadURL(u) { this.loadedUrl = u; },
+    loadURL(u, options) { this.loadedUrl = u; this.loadOptions = options; },
     on() {},
   };
 }
@@ -314,7 +315,7 @@ test("handleOverlayNavigation hides+latches an error page and clears on a good l
   }
 });
 
-test("rearmBlankedOverlays reloads only blanked windows, with the token the host resolved", () => {
+test("rearmBlankedOverlays reloads only blanked windows with a minted query token", () => {
   const BLANK = 99312;
   const OK = 99313;
   const blanked = fakeWin();
@@ -325,10 +326,25 @@ test("rearmBlankedOverlays reloads only blanked windows, with the token the host
     _handleOverlayNavigation(blanked, 403); // latch the blanked one; healthy never errored
     rearmBlankedOverlays("http://localhost:5476", "tok123");
     assert.match(blanked.loadedUrl || "", /token=tok123/, "blanked overlay reloads with the host's token");
+    assert.equal(blanked.loadOptions, undefined, "a minted token needs no extra request headers");
     assert.equal(healthy.loadedUrl, null, "a non-blanked overlay is left untouched");
   } finally {
     _getOverlays().delete(BLANK);
     _getOverlays().delete(OK);
+  }
+});
+
+test("rearmBlankedOverlays reloads a borrowed session through the default session", () => {
+  const DID = 99315;
+  const win = fakeWin();
+  _registerOverlay(DID, win);
+  try {
+    _handleOverlayNavigation(win, 403);
+    rearmBlankedOverlays("http://localhost:5476", "borrowed-session", true);
+    assert.doesNotMatch(win.loadedUrl || "", /[?&]token=/, "a borrowed session must not be stringified into a query token");
+    assert.equal(win.loadOptions, undefined, "the BrowserWindow default session supplies the borrowed cookie");
+  } finally {
+    _getOverlays().delete(DID);
   }
 });
 
@@ -369,17 +385,21 @@ test("every showInactive reveal is guarded by the blanked latch", () => {
   assert.equal(guarded.length, reveals.length, "every showInactive reveal must be latch-guarded");
 });
 
-test("reconcile re-arms with a current-target token: remote its own, self the cached local token", () => {
-  // The host passes the token it ALREADY resolved this tick; for self it reuses
-  // the probe-maintained cached token (empty-cookie case), only when something
-  // is actually blanked — and NEVER mints here, or a persistent non-auth error
-  // would churn a fresh session token every tick.
+test("reconcile re-arms with scalar credential values and delivery mode", () => {
+  // The host passes the credential it ALREADY resolved this tick; for self it
+  // preserves the probe-maintained delivery mode (including a borrowed-cookie
+  // credential), only when something is actually blanked — and NEVER resolves
+  // repeatedly here, or a persistent non-auth error would churn session tokens.
   const callAt = idxSrc.indexOf("rearmBlankedOverlays(mochiPetBaseUrl");
-  assert.ok(callAt >= 0, "reconcile must call rearmBlankedOverlays with the resolved base url + token");
-  const region = idxSrc.slice(idxSrc.indexOf("if (hasBlankedOverlay())"), callAt + 60);
+  assert.ok(callAt >= 0, "reconcile must call rearmBlankedOverlays with resolved auth");
+  const region = idxSrc.slice(idxSrc.indexOf("if (hasBlankedOverlay())"), callAt + 90);
   assert.match(region, /hasBlankedOverlay\(\)/, "only re-arm when an overlay is actually blanked");
-  assert.match(region, /SELF_INSTANCE/, "self supplies a local token (empty-cookie case)");
-  assert.match(region, /gatewayToken\(\)/, "self reuses the probe-maintained cached token");
-  assert.ok(!region.includes('cachedGatewayToken = ""'),
-    "must NOT clear the token cache in the rearm path — probe-driven invalidation only, or a persistent non-auth error mints every tick");
+  assert.match(region, /SELF_INSTANCE/, "self resolves its gateway credential");
+  assert.match(region, /const auth = await gatewayToken\(\)/, "self obtains the gateway auth record once");
+  assert.match(region, /rearmToken = auth\.value/, "only the credential value reaches rearm");
+  assert.match(region, /rearmViaCookie = auth\.viaCookie/, "rearm retains cookie delivery mode");
+  assert.match(region, /rearmBlankedOverlays\(mochiPetBaseUrl, rearmToken, rearmViaCookie\)/,
+    "rearm receives scalar token and delivery mode, never the auth record");
+  assert.ok(!region.includes('cachedGatewayAuth = { value: "" }'),
+    "must NOT clear the credential cache in the rearm path — probe-driven invalidation only, or a persistent non-auth error mints every tick");
 });
