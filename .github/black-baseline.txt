@@ -211,7 +211,6 @@ src/kiro_crew/config/validation.py
 src/kiro_crew/connections/alias_record.py
 src/kiro_crew/connections/l0_probe.py
 src/kiro_crew/connections/l0_record.py
-src/kiro_crew/connections/mint.py
 src/kiro_crew/connections/registry.py
 src/kiro_crew/connections/tool_aliases.py
 src/kiro_crew/context_blocks.py
@@ -244,7 +243,6 @@ src/kiro_crew/dashboard/handlers/agents.py
 src/kiro_crew/dashboard/handlers/artifacts.py
 src/kiro_crew/dashboard/handlers/ask_question.py
 src/kiro_crew/dashboard/handlers/auth_refresh.py
-src/kiro_crew/dashboard/handlers/connections.py
 src/kiro_crew/dashboard/handlers/cron.py
 src/kiro_crew/dashboard/handlers/discover.py
 src/kiro_crew/dashboard/handlers/files.py
@@ -689,7 +687,6 @@ test/test_config_patch.py
 test/test_config_rmw_preserves_settings.py
 test/test_connections_kiro_spec_fields.py
 test/test_connections_l0_probe.py
-test/test_connections_mint.py
 test/test_connections_registry.py
 test/test_connections_tool_aliases.py
 test/test_consolidate_cmd.py
