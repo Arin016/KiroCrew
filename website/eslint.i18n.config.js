@@ -1158,4 +1158,26 @@ export default [
       'i18next/no-literal-string': 'off',
     },
   },
+
+  // FONT FAMILY NAMES ONLY: the candidate names the terminal font picker probes
+  // the viewing machine's font book for, plus the probe and preview sample text.
+  // Every name is matched BY VALUE against that font book — a translated
+  // `JetBrains Mono` resolves to nothing and the terminal silently falls back to
+  // the generic monospace, so translating one breaks the feature in that locale
+  // while adding a catalog entry no one can act on. The names do reach the screen
+  // as picker rows, which is the point: a font is chosen by the name it is
+  // installed under, the way a person is addressed by their own name.
+  //
+  // Scoped to this one file for the same reason as the modules above: a shape rule
+  // cannot express "font family names, but only in this module". Title-case
+  // multi-word names are exactly the shape the gate exists to catch, and the
+  // ` Mono` / ` Nerd Font` suffixes are far too generic to anchor an exclusion on.
+  // Keep this module names-only — the picker's own copy (its label, description,
+  // and the free-text row) lives in the catalog, not behind this exemption.
+  {
+    files: ['src/utils/monoFontCandidates.ts'],
+    rules: {
+      'i18next/no-literal-string': 'off',
+    },
+  },
 ]

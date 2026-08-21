@@ -541,9 +541,9 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "display.font",
     "label": "Font",
     "labelKey": "pages.settings.displayPanel.terminal_font_family",
-    "description": "Font for the built-in terminal. Enter a monospace font installed on your computer — use a Nerd Font to render Powerline and prompt-theme glyphs.",
+    "description": "Font for the built-in terminal. Pick one installed on the machine you view the dashboard from, or type any font name — a Nerd Font renders Powerline and prompt-theme glyphs.",
     "tab": "display",
-    "type": "input",
+    "type": "select",
     "occurrence": 1
   },
   {

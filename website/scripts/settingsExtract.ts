@@ -119,6 +119,10 @@ const PANEL_TAB_MAP: Record<string, PanelTarget> = {
 const PRIMITIVE_MAP: Record<string, SettingPrimitiveType> = {
   SettingsToggle: 'toggle',
   SettingsSelect: 'select',
+  // A searchable dropdown is still a select to every consumer of this registry:
+  // nothing branches on `SettingEntry.type`, so a distinct value would be surface
+  // with no reader. Give it a distinct one only when something renders it apart.
+  SettingsCombobox: 'select',
   SettingsInput: 'input',
   SettingsStepper: 'stepper',
   SettingsButtonGroup: 'buttonGroup',
