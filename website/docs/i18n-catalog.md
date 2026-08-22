@@ -107,6 +107,10 @@ Authoring rules that follow:
 - **The `apps.<id>.manifest.*` keys are the deliberate exception.** They must
   stay byte-identical to the Python-side `app.json` prose (`[manifest-sync]`
   is a hard zero), so they keep the literal English name.
+- **Repo-attribution copy keeps the literal too.** A string naming this
+  project as the star/fork/issue target (`app.star_kirocrew_on_github`) wraps
+  a hardcoded upstream URL, so interpolating the product name would make an
+  edition render its own name linking to the upstream repository.
 - **A call-time variable of the same name wins** over the default, per
   i18next's merge order — useful when a string names a *different* crew.
 - German compounds hyphenate through the placeholder
