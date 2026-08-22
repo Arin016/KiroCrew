@@ -26,7 +26,7 @@ from pathlib import Path
 
 from kiro_crew import platform_compat, security, webhooks
 from kiro_crew.config import paths as _config_paths
-from kiro_crew.platform import current_context
+from kiro_crew.platform import current_context, redact_via_context
 from kiro_crew.platform.governance import (
     CU_CLASS_OBSERVE,
     computer_use_action_classes,
@@ -2721,6 +2721,7 @@ class ScriptHook:
     enabled: bool = True
     last_run: float = 0.0
     last_status: str = ""  # "ok", "error", "timeout", "blocked"
+    last_error: str = ""  # human-readable reason for the most recent non-ok status
     run_count: int = 0
 
     def to_dict(self) -> dict:
@@ -2732,6 +2733,17 @@ class ScriptHook:
         matcher = data.get("matcher", data.get("pattern", ""))
         skills_raw = data.get("skills", [])
         skills = skills_raw if isinstance(skills_raw, list) else []
+        # Redact + truncate a persisted last_error on load: hooks.json is
+        # operator-writable and an agent-written (or hand-edited) error can carry
+        # a credential. It flows from_dict() -> /api/hooks -> the dashboard
+        # InfoTip, so it is an output boundary and must be scrubbed here too, not
+        # only at write time. Non-string values default to "".
+        raw_last_error = data.get("last_error", "")
+        last_error = (
+            redact_via_context(raw_last_error)[:500]
+            if isinstance(raw_last_error, str) and raw_last_error
+            else ""
+        )
         return cls(
             id=data.get("id", str(uuid.uuid4())[:8]),
             name=data.get("name", ""),
@@ -2744,6 +2756,7 @@ class ScriptHook:
             enabled=data.get("enabled", True),
             last_run=data.get("last_run", 0.0),
             last_status=data.get("last_status", ""),
+            last_error=last_error,
             run_count=data.get("run_count", 0),
         )
 
@@ -2847,6 +2860,7 @@ async def run_script_hook(
     if gov_denied:
         hook.last_run = time.time()
         hook.last_status = "blocked"
+        hook.last_error = f"Blocked by governance: {gov_denied}"
         hook.run_count += 1
         _audit_governance_hook_decision(
             sk, f"run_script_hook:{hook.name or hook.id}", "denied", gov_denied
@@ -2940,20 +2954,29 @@ async def run_script_hook(
                     pass
         elapsed = int((time.monotonic() - start) * 1000)
         exit_code = proc.returncode or 0
+        stderr_text = stderr_b.decode(errors="replace").strip()
+        # Redact the FULL stderr through the canonical companion-aware shim
+        # before truncating, so a credential straddling the 500-char boundary
+        # cannot leak as an unredacted fragment. The field surfaces on the
+        # dashboard and must not expose secrets (#4708).
+        stderr_safe = redact_via_context(stderr_text)[:500] if stderr_text else ""
         hook.last_run = time.time()
         if exit_code == 2:
             hook.last_status = "blocked"
+            hook.last_error = stderr_safe or "Blocked (exit 2)"
         elif exit_code == 0:
             hook.last_status = "ok"
+            hook.last_error = ""
         else:
             hook.last_status = "error"
+            hook.last_error = stderr_safe or f"Exited with code {exit_code}"
         hook.run_count += 1
         return ScriptHookResult(
             hook_id=hook.id,
             hook_name=hook.name,
             event=hook.event,
             stdout=stdout_b.decode(errors="replace").strip(),
-            stderr=stderr_b.decode(errors="replace").strip(),
+            stderr=stderr_text,
             exit_code=exit_code,
             duration_ms=elapsed,
         )
@@ -2973,6 +2996,7 @@ async def run_script_hook(
         elapsed = int((time.monotonic() - start) * 1000)
         hook.last_run = time.time()
         hook.last_status = "timeout"
+        hook.last_error = f"Timed out after {hook.timeout}s"
         hook.run_count += 1
         return ScriptHookResult(
             hook_id=hook.id,
@@ -2985,6 +3009,7 @@ async def run_script_hook(
         elapsed = int((time.monotonic() - start) * 1000)
         hook.last_run = time.time()
         hook.last_status = "error"
+        hook.last_error = str(exc)[:500]
         hook.run_count += 1
         return ScriptHookResult(
             hook_id=hook.id,
@@ -3270,6 +3295,7 @@ class ScriptHookStore:
                 if gov_denied:
                     hook.last_run = time.time()
                     hook.last_status = "blocked"
+                    hook.last_error = f"Blocked by governance: {gov_denied}"
                     hook.run_count += 1
                     _audit_governance_hook_decision(
                         sk, f"skills_only_hook:{hook.name or hook.id}", "denied", gov_denied
@@ -3287,6 +3313,7 @@ class ScriptHookStore:
                 skills_directive = " ".join(f"${s.split('/')[-1]}" for s in hook.skills)
                 hook.last_run = time.time()
                 hook.last_status = "ok"
+                hook.last_error = ""
                 hook.run_count += 1
                 result = ScriptHookResult(
                     hook_id=hook.id,

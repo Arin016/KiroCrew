@@ -1168,6 +1168,10 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # ``_setup_cli_logging`` matches the drift-guard's redaction regex.
         # The CLI is not an egress boundary — it's an installer, not a sink.
         "cli.py",
+        # Defensive scrub: hooks.py redacts stderr before storing in last_error
+        # (an internal model field). The egress boundary is the dashboard API
+        # handler that serializes hooks via to_dict() — already a registered sink.
+        "hooks.py",
     }
 )
 
