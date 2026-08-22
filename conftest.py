@@ -75,7 +75,9 @@ and tolerate an ImportError so a partial checkout cannot break collection.
 
 from __future__ import annotations
 
+import asyncio
 import asyncio.base_events
+import atexit
 import contextlib
 import gc
 import getpass
@@ -1807,6 +1809,61 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     _ROOT_BASELINE = _root_entries()
 
 
+def _drain_windows_proactor_finalizers() -> None:
+    """Suppress 'Event loop is closed' from ProactorEventLoop transport finalizers.
+
+    On Windows with Python 3.12+, ``asyncio.run()`` creates a ProactorEventLoop,
+    runs the coroutine, then CLOSES the loop. The IocpProactor's transport objects
+    store a reference to their own loop (``self._loop``). When those transports are
+    garbage-collected later, their ``__del__`` methods call
+    ``self._loop.call_soon()`` on the *original* closed loop — not whatever loop is
+    currently set. This raises ``RuntimeError: Event loop is closed`` as an
+    unraisable exception.
+
+    On an xdist worker process, unraisable exceptions write to stderr and cause
+    exit code 1 — failing the CI shard with no named test failure (issue #4764).
+
+    The fix: install a ``sys.unraisablehook`` that silences ``RuntimeError: Event
+    loop is closed`` from asyncio transport ``__del__`` methods, and an ``atexit``
+    handler that forces GC while the hook is still active to drain pending
+    finalizers before interpreter shutdown (where unraisablehook itself may be
+    torn down).
+    """
+    _original_unraisablehook = sys.unraisablehook
+
+    def _suppress_closed_loop(unraisable: sys.UnraisableHookArgs) -> None:
+        """Suppress 'Event loop is closed' from transport __del__."""
+        exc = unraisable.exc_value
+        if (
+            isinstance(exc, RuntimeError)
+            and str(exc) == "Event loop is closed"
+        ):
+            # Silently swallow — the transport is being finalized after its loop
+            # closed, which is harmless (the I/O is already done).
+            return
+        # Everything else goes to the original hook.
+        if _original_unraisablehook is not None:
+            _original_unraisablehook(unraisable)
+        else:
+            sys.__unraisablehook__(unraisable)
+
+    sys.unraisablehook = _suppress_closed_loop
+
+    # Force GC while the hook is active to drain finalizers before interpreter
+    # shutdown tears down sys.unraisablehook itself.
+    gc.collect()
+    gc.collect()
+
+    def _final_gc_pass() -> None:
+        """Last-resort GC at interpreter exit while the hook is still installed."""
+        try:
+            gc.collect()
+        except (TypeError, AttributeError):
+            pass
+
+    atexit.register(_final_gc_pass)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Fail the run when the suite left new, non-ignored entries at the root.
 
@@ -1831,6 +1888,23 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         xdist_budget.release_worker_slots()
     except ImportError:  # pragma: no cover - partial checkout
         pass
+
+    # ── Windows ProactorEventLoop teardown cleanup (#4764) ─────────────────
+    # On Windows + Python 3.12, asyncio.run() creates and closes a
+    # ProactorEventLoop each call. The closed loop's IocpProactor leaves
+    # pending I/O Completion Port handles whose __del__ methods fire during
+    # interpreter shutdown and call loop.call_soon() on the closed loop,
+    # raising "RuntimeError: Event loop is closed". This unraisable exception
+    # writes to stderr and causes the xdist worker process to exit with code 1
+    # — failing the CI shard with no named test failure.
+    #
+    # Fix: before the worker exits, ensure a FRESH open event loop is set as
+    # current, run a gc.collect() to drain pending finalizers while the loop
+    # is still usable, then install an atexit handler that keeps a usable loop
+    # available during interpreter finalization.
+    if sys.platform == "win32":
+        _drain_windows_proactor_finalizers()
+
     if hasattr(session.config, "workerinput") or _ROOT_BASELINE is None:
         return
     current = _root_entries()
