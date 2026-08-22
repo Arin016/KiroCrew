@@ -1252,12 +1252,22 @@ async def test_worktree_remove_force_must_be_bool():
 # --- sync single-flight (409 on busy) ---
 @pytest.mark.asyncio
 async def test_sync_returns_409_when_already_running():
+    import asyncio
+
     import kiro_crew.apps.builtins.dev_fleet.server as mod
 
-    # Inject a fake running sync
+    # Inject a fake running sync with a live task + process
     mod._SYNC_RID = "fake123"
     async with mod._RUNS_LOCK:
         mod._RUNS["fake123"] = {"status": "running", "exit_code": None, "label": "sync", "output": []}
+
+    # Simulate a genuinely-running process (returncode=None)
+    from unittest.mock import MagicMock
+    mock_proc = MagicMock()
+    mock_proc.returncode = None
+    never_done = asyncio.get_event_loop().create_future()
+    running_task = asyncio.ensure_future(never_done)
+    mod._ACTIVE_RUNS["fake123"] = (running_task, mock_proc)
 
     try:
         result = await mod._sync()
@@ -1267,6 +1277,9 @@ async def test_sync_returns_409_when_already_running():
         async with mod._RUNS_LOCK:
             del mod._RUNS["fake123"]
         mod._SYNC_RID = None
+        mod._ACTIVE_RUNS.pop("fake123", None)
+        never_done.set_result(None)
+        await running_task
 
 
 # --- redaction ---

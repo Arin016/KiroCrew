@@ -3477,7 +3477,41 @@ async def _sync() -> dict:
             async with _RUNS_LOCK:
                 run = _RUNS.get(_SYNC_RID)
             if run and run["status"] == "running":
-                return {"ok": False, "error": "sync already running", "run_id": _SYNC_RID}
+                # Guard against a stale "running" status: the worker task may
+                # have exited (process reaped) but the status update has not yet
+                # landed because the event loop has not yielded back to the
+                # worker's finally block.  The correct liveness signal is the
+                # subprocess handle: _ACTIVE_RUNS[rid] is (task, proc), and
+                # proc.returncode is not None means the process has exited even
+                # if the task's finally (cleanup_paths unlinking, status write)
+                # has not completed.  task.done() is strictly LATER than the
+                # status write, so checking it would miss the exact window.
+                active = _ACTIVE_RUNS.get(_SYNC_RID)
+                if active is not None:
+                    _task, proc = active
+                    if proc is None or proc.returncode is None:
+                        # Process still running (or not yet spawned) — genuine.
+                        return {"ok": False, "error": "sync already running", "run_id": _SYNC_RID}
+                    # Process exited but worker hasn't written status yet.
+                    # Wait briefly for the task's finally block to land the
+                    # status write + cleanup, rather than starting a new sync
+                    # while the old worker is still unlinking temp files in the
+                    # same worktree.
+                    try:
+                        await asyncio.wait_for(asyncio.shield(_task), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        # Worker still cleaning up after 2s — refuse the new
+                        # sync to avoid concurrent worktree writes.
+                        return {"ok": False, "error": "sync already running", "run_id": _SYNC_RID}
+                    except Exception:
+                        pass  # task raised during cleanup; safe to proceed
+                # Re-read status after giving the worker a chance to land it.
+                async with _RUNS_LOCK:
+                    run = _RUNS.get(_SYNC_RID)
+                if run and run["status"] == "running":
+                    # Still stale after the wait — reconcile defensively.
+                    run["status"] = "done"
+                    run["exit_code"] = run.get("exit_code") or -1
         return await _sync_start_locked()
 
 

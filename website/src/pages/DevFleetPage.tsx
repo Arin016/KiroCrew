@@ -831,14 +831,40 @@ export default function DevFleetPage() {
     // A poll for this run is already in flight (it outlived a previous mount of
     // this page, which is intended — the build's auto-restart must not be lost
     // to navigation). Starting a second loop here would race it: both would see
-    // `done` and both would fire the restart POST. Skip and let the existing
-    // loop own the run.
-    if (_activeSyncPolls.has(rid)) return
+    // `done` and both would fire the restart POST. Skip — but start a
+    // lightweight state relay so this mount's UI stays updated.
+    if (_activeSyncPolls.has(rid)) {
+      _syncStateRelay(rid, startedAt)
+      return
+    }
     _activeSyncPolls.add(rid)
     try {
       await _pollSyncRunLoop(rid, startedAt)
     } finally {
       _activeSyncPolls.delete(rid)
+    }
+  }
+
+  // Lightweight relay: polls /run to keep THIS mount's syncRun state in sync
+  // while the primary poll (from a prior mount) handles the auto-restart logic.
+  // Exits when the run finishes, the component unmounts, or the run is dismissed.
+  async function _syncStateRelay(rid: string, startedAt: number) {
+    for (let i = 0; i < 900; i++) {
+      await sleep(2000)
+      if (!pollAliveRef.current) return
+      if (cancelledRunsRef.current.has(rid)) return
+      let run: { status?: string; output?: string[]; exit_code?: number; started?: number; step_label?: string } | null = null
+      try { run = await api.get('/run?id=' + rid) } catch { continue }
+      if (!run) continue
+      const t0 = run.started ? run.started * 1000 : startedAt
+      const out = run.output || []
+      const last = [...out].reverse().find((l: string) => l?.trim() && !STEP_MARKER_RE.test(l)) || ''
+      if (run.status === 'done' || run.status === 'timeout') {
+        const okRun = run.exit_code === 0
+        setSyncRun({ rid, status: okRun ? 'done' : 'error', lines: out, startedAt: t0, exit: run.exit_code, last })
+        return
+      }
+      setSyncRun({ rid, status: 'running', lines: out, startedAt: t0, last, stepLabel: run.step_label })
     }
   }
 
