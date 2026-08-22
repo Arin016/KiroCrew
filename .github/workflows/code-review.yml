@@ -223,7 +223,12 @@ jobs:
           asset="woke-${WOKE_VERSION}-linux-amd64.tar.gz"
           archive="${RUNNER_TEMP}/${asset}"
           bin_dir="${RUNNER_TEMP}/woke-bin"
-          curl -sSfL \
+          # --retry-all-errors is required in addition to --retry: a bare
+          # --retry covers transient HTTP statuses and timeouts but not a
+          # mid-transfer connection reset (curl exit 35), which is how the
+          # Releases CDN fails here. The sha256sum check below still gates a
+          # truncated or substituted download.
+          curl -sSfL --retry 3 --retry-delay 2 --retry-all-errors \
             "https://github.com/get-woke/woke/releases/download/v${WOKE_VERSION}/${asset}" \
             -o "$archive"
           printf '%s  %s\n' "$WOKE_SHA256" "$archive" | sha256sum -c -
