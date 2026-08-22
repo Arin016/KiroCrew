@@ -3695,19 +3695,46 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // still stuck at 'POP'.
   const lastLocKeyRef = useRef<string | null>(null)
   const [sidError, setSidError] = useState('')
+  const [newSlotFailed, setNewSlotFailed] = useState(false)
   const [highlightTs, setHighlightTs] = useState<string | null>(null)
-  // Embed ?new=1: create a new chat slot and navigate to it
-  const embedNewSlotMutation = useMutation({
+  // ?new=1: create a blank slot for an embed or a fresh desktop window.
+  const newSlotMutation = useMutation({
     mutationFn: () => dispatch(createSlot({ mode })).unwrap(),
     onSuccess: (slot) => {
-      if (slot?.key) navigate(`/embed/chat/${slot.key}`, { replace: true })
+      newSessionRef.current = false
+      setNewSlotFailed(false)
+      setSidError('')
+      if (!slot?.key) return
+      navigate(
+        embedMode ? `/embed/chat/${slot.key}` : `/chat?sid=${encodeURIComponent(slot.key)}`,
+        { replace: true },
+      )
+    },
+    onError: () => {
+      // Keep the failed window on its blank-session surface. Clearing only the
+      // ref lets the auto-select effect silently fall back to an older session,
+      // which makes a failed "New Window" look as if it copied that session.
+      newSessionRef.current = false
+      setNewSlotFailed(true)
+      setSidError(i18nT('pages.chatPage.could_not_start_a_new_session'))
     },
   })
   useEffect(() => {
-    if (!initialNewRef.current || !embedMode) return
+    if (!initialNewRef.current || (embedded && !embedMode) || popout) return
     initialNewRef.current = false
-    embedNewSlotMutation.mutate()
+    newSessionRef.current = true
+    setNewSlotFailed(false)
+    setSidError('')
+    if (!embedMode) dispatch(setActiveSlot(null))
+    newSlotMutation.mutate()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Choosing a real session explicitly abandons a failed blank-window intent;
+  // its banner must not follow the user into the selected conversation.
+  useEffect(() => {
+    if (!activeSlot || !newSlotFailed) return
+    setNewSlotFailed(false)
+    setSidError('')
+  }, [activeSlot, newSlotFailed])
   // On mount, URL ?sid= drives which session is active (URL wins over localStorage)
   useEffect(() => {
     if (embedded && !embedMode) return
@@ -3937,6 +3964,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // is still creating + slack-linking its session; otherwise we'd switch to
     // a different slot and orphan the linked one (breaking Slack mirroring).
     if (tokenConsumingRef.current) return
+    if (newSessionRef.current || newSlotFailed) return
     if (searchParams.get('slot') || searchParams.get('sid') || initialSidRef.current) return
     if (filteredSlots.length > 0) {
       const saved = localStorage.getItem(slotStorageKey)
@@ -3947,7 +3975,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       autoCreatedRef.current = true
       dispatch(createSlot({ agent: defaultAgent || undefined, mode }))
     }
-  }, [activeSlot, filteredSlots, searchParams, dispatch, slotStorageKey, connected, slotsLoaded, defaultAgent, mode])
+  }, [activeSlot, filteredSlots, searchParams, dispatch, slotStorageKey, connected, slotsLoaded, defaultAgent, mode, newSlotFailed])
 
   // Slot switch: the virtualizer (keyed on sessionId = activeSlot) force-pins
   // to the true bottom itself in a layout effect. Here we just re-arm the
@@ -7086,7 +7114,23 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         ) : !activeSlot ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-4 px-8">
             <EmptyState icon={<MessageSquare className="lucide-inline" />} title={i18nT('pages.chatPage.what_can_i_do_for_you')} subtitle={i18nT('pages.chatPage.start_a_new_chat_to_begin')} />
-            <Btn primary onClick={() => dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, model: pendingModel || undefined, mode }))}>{i18nT('pages.chatPage.start_a_new_chat')}</Btn>
+            <Btn
+              primary
+              disabled={newSlotMutation.isPending}
+              onClick={() => {
+                if (newSlotFailed) {
+                  // Re-arm before state updates can let auto-selection run.
+                  newSessionRef.current = true
+                  setNewSlotFailed(false)
+                  setSidError('')
+                  newSlotMutation.mutate()
+                  return
+                }
+                dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, model: pendingModel || undefined, mode }))
+              }}
+            >
+              {i18nT('pages.chatPage.start_a_new_chat')}
+            </Btn>
           </div>
         ) : (
           <SearchHighlightContext.Provider value={searchCtxValue}>
@@ -8129,4 +8173,3 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     </RowDisclosureProvider>
   )
 }
-
