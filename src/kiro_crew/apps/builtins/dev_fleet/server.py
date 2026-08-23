@@ -2297,7 +2297,7 @@ async def _build_fleet() -> dict:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "worktrees": wts,
-        "main_repo": _repo(),
+        "main_repo": _redact(_repo()),
         "main_repo_inferred": MAIN_REPO_INFERRED,
         "base_branch": BASE_BRANCH,
         "build_pending": _build_pending(),

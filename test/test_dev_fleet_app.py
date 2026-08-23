@@ -6147,6 +6147,29 @@ async def test_fleet_payload_marks_an_inferred_main_checkout():
 
 
 @pytest.mark.asyncio
+async def test_fleet_payload_redacts_credentials_in_main_repo():
+    sensitive = f"/tmp/ghp_{'A' * 40}/checkout"
+    with patch.object(mod, "_repo", return_value=sensitive):
+        fleet = await _fleet_with(
+            [{"path": "/repo", "branch": "main", "is_main": True}]
+        )
+
+    assert "ghp_" not in fleet["main_repo"]
+    assert "[REDACTED" in fleet["main_repo"]
+
+
+@pytest.mark.asyncio
+async def test_fleet_payload_preserves_ordinary_main_repo_path():
+    ordinary = "/home/user/oss/KiroCrew"
+    with patch.object(mod, "_repo", return_value=ordinary):
+        fleet = await _fleet_with(
+            [{"path": "/repo", "branch": "main", "is_main": True}]
+        )
+
+    assert fleet["main_repo"] == ordinary
+
+
+@pytest.mark.asyncio
 async def test_fleet_payload_discloses_why_pods_are_unavailable():
     """_POD_ERROR used to be computed and then read by NOTHING, so a non-Linux
     user got pod controls that silently failed. It must reach the payload."""
