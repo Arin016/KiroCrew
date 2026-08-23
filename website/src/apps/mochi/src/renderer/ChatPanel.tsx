@@ -1501,6 +1501,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onToggleWatch, watchPanelV
         <textarea
           ref={inputRef}
           {...ime.bindComposition<HTMLTextAreaElement>({
+            onFocus: (e) => {
+              e.currentTarget.style.borderColor = editingTs ? 'var(--accent)' : 'var(--border-focus)'
+              e.currentTarget.style.boxShadow = '0 0 0 3px var(--accent-glow)'
+            },
             onBlur: (e) => {
               e.currentTarget.style.borderColor = editingTs ? 'var(--accent)' : 'var(--border)'
               e.currentTarget.style.boxShadow = editingTs ? '0 0 0 2px var(--accent-glow)' : 'none'
@@ -1554,10 +1558,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onToggleWatch, watchPanelV
             lineHeight: '1.4',
             maxHeight: 120, overflowY: 'auto',
             boxShadow: editingTs ? '0 0 0 2px var(--accent-glow)' : undefined,
-          }}
-          onFocus={(e) => {
-            e.currentTarget.style.borderColor = editingTs ? 'var(--accent)' : 'var(--border-focus)'
-            e.currentTarget.style.boxShadow = '0 0 0 3px var(--accent-glow)'
           }}
         />
         <button onClick={handleSend} title={i18nT('apps.mochi.chat.send')} aria-label={i18nT('apps.mochi.chat.send')} style={{
