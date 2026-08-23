@@ -98,7 +98,7 @@ const PinnedMessagesPanel = memo(function PinnedMessagesPanel({
                 <Copy size={12} />
               </button>
               <button
-                onClick={(e) => { e.stopPropagation(); copySessionLink(slotKey, slotTitle, pin.message_ts, mode) }}
+                onClick={(e) => { e.stopPropagation(); copySessionLink(slotKey, slotTitle, pin.message_ts, mode, pin.mid) }}
                 className="text-muted hover:text-text p-0.5 rounded transition-colors"
                 title={i18nT('pages.chat.pins.copy_link')}
                 aria-label={i18nT('pages.chat.pins.copy_link')}

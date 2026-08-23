@@ -154,7 +154,7 @@ import { setSessionPreviewPending, normalizeUrl, PREVIEW_EXPAND_EVENT, PREVIEW_S
 import { detectPreviewUrl, previewFeedDecision } from '../utils/detectPreviewUrl'
 import { fileLandingSlot } from '../utils/uploadRouting'
 import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
-import { toSlug } from '../utils/shareUrl'
+import { toSlug, resolveMsgIndex } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, mergeIntoDraft, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
 import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } from '../utils/chatFileDrafts'
 import { loadPasteDrafts, savePasteDrafts as persistPasteDrafts, setPasteDraft } from '../utils/chatPasteDrafts'
@@ -3512,6 +3512,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // over owns the first switch of this mount — see the mount re-fetch effect.
   const deepLinkPendingRef = useRef(!!initialSidRef.current && initialSidRef.current !== activeSlot)
   const initialMsgRef = useRef(searchParams.get('msg'))
+  const initialMidRef = useRef(searchParams.get('mid'))
   const initialNewRef = useRef(searchParams.get('new') === '1')
   // Deep-link mount activation in progress — stops the sync effect from stripping
   // ?sid before activation lands. Cleared once activeSlot is truthy.
@@ -5968,21 +5969,25 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   }, [focusToolCallId, messages, messageToDisplayIdx, navToDisplayIndex])
 
   // Deep-link: scroll to ?msg= timestamp on cold load.
+  // When ?mid= is also present (copied from a pinned-message link), resolve by
+  // mid first (stable per-message identity) and fall back to ts for legacy links.
   // The scroll-to-bottom effect above is suppressed while initialMsgRef is set.
-  // Safety net: clear initialMsgRef after 5s to restore scroll-to-bottom if deep-link fails.
+  // Safety net: clear both refs after 5s to restore scroll-to-bottom if deep-link fails.
   useEffect(() => {
     if (!initialMsgRef.current) return
-    const timer = setTimeout(() => { initialMsgRef.current = null }, 5000)
+    const timer = setTimeout(() => { initialMsgRef.current = null; initialMidRef.current = null }, 5000)
     return () => clearTimeout(timer)
   }, [])
   useEffect(() => {
     const targetTs = initialMsgRef.current
+    const targetMid = initialMidRef.current
     if (!targetTs || messages.length === 0) return
-    const msgIdx = messages.findIndex(m => m.ts === targetTs)
+    const msgIdx = resolveMsgIndex(messages, targetTs, targetMid)
     if (msgIdx < 0) return
     const di = messageToDisplayIdx.get(msgIdx)
     if (di === undefined) return
     initialMsgRef.current = null
+    initialMidRef.current = null
     setTimeout(() => {
       navToDisplayIndex(di, { behavior: 'auto', align: 'center' })
       setHighlightTs(targetTs)
