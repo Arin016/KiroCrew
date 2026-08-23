@@ -5654,29 +5654,52 @@ async def _make_live(path: str, dry_run: bool = False,
         )}
 
     kcbin = real / ".venv" / "bin" / "kirocrew"
-    if not kcbin.is_file():
-        return {"ok": False, "code": "missing_venv", "error": (
-            f"{real.name} has no .venv/bin/kirocrew — Provision it first "
-            "(row menu \u2192 Provision) before making it live"
-        )}
-    # A present-but-non-executable binary is worse than a missing one: the
-    # drop-in gets written and the old gateway is stopped, but the replacement
-    # can never start (systemd ExecStart requires +x) — leaving NO gateway
-    # running. Gate on the exec bit with a DISTINCT, actionable code.
-    if not os.access(kcbin, os.X_OK):
-        return {"ok": False, "code": "venv_not_executable", "error": (
-            f"{real.name} has a non-executable .venv/bin/kirocrew — run "
-            "`chmod +x` on it or re-Provision the worktree before making it "
-            "live (a non-executable binary stops the live gateway but cannot "
-            "start the replacement, leaving no gateway running)"
-        )}
     dist_index = real / "src" / "kiro_crew" / "static" / "dist" / "index.html"
-    if not dist_index.is_file():
-        return {"ok": False, "code": "missing_dist", "error": (
-            f"{real.name} has no built dashboard "
-            "(src/kiro_crew/static/dist/index.html) — run Pull+Build first; "
-            "cutover without a built dist serves a broken dashboard"
-        )}
+
+    def _validate_artifacts_sync() -> tuple[str, str] | None:
+        """Check the CLI binary and built dist on the executor thread.
+
+        Returns ``(code, error)`` when a required artifact is absent or
+        non-executable, ``None`` when both are present and the binary is
+        executable.  Running off the event loop prevents a slow or
+        network-backed filesystem from stalling all gateway requests.
+        """
+        if not kcbin.is_file():
+            return ("missing_venv", (
+                f"{real.name} has no .venv/bin/kirocrew — Provision it first "
+                "(row menu \u2192 Provision) before making it live"
+            ))
+        # A present-but-non-executable binary is worse than a missing one: the
+        # drop-in gets written and the old gateway is stopped, but the
+        # replacement can never start (systemd ExecStart requires +x) — leaving
+        # NO gateway running.  Gate on the exec bit with a DISTINCT, actionable
+        # code.
+        if not os.access(kcbin, os.X_OK):
+            return ("venv_not_executable", (
+                f"{real.name} has a non-executable .venv/bin/kirocrew — run "
+                "`chmod +x` on it or re-Provision the worktree before making "
+                "it live (a non-executable binary stops the live gateway but "
+                "cannot start the replacement, leaving no gateway running)"
+            ))
+        if not dist_index.is_file():
+            return ("missing_dist", (
+                f"{real.name} has no built dashboard "
+                "(src/kiro_crew/static/dist/index.html) — run Pull+Build "
+                "first; cutover without a built dist serves a broken dashboard"
+            ))
+        return None
+
+    # Early probe: surface an obvious missing-artifact error before reaching
+    # the plan or the lock.  Not authoritative — a concurrent provision or
+    # rebuild can change these artifacts between this check and the cutover
+    # lock below.  The authoritative re-validation happens inside the lock.
+    _loop = asyncio.get_running_loop()
+    artifact_err = await _loop.run_in_executor(
+        subprocess_executor(), _validate_artifacts_sync
+    )
+    if artifact_err is not None:
+        code, msg = artifact_err
+        return {"ok": False, "code": code, "error": msg}
 
     try:
         plan = _make_live_plan(real, kcbin, svc=svc if can_restart else None,
@@ -5719,6 +5742,16 @@ async def _make_live(path: str, dry_run: bool = False,
                 "a cutover has been scheduled; the gateway is restarting — "
                 "retry after it comes back"
             )}
+        # Re-validate artifacts inside the lock: a concurrent provision or
+        # rebuild may have changed the binary or dist between the early probe
+        # above and now.  The cutover commits the exact state on disk at this
+        # moment, so these are the artifacts it actually stages.
+        artifact_err = await _loop.run_in_executor(
+            subprocess_executor(), _validate_artifacts_sync
+        )
+        if artifact_err is not None:
+            code, msg = artifact_err
+            return {"ok": False, "code": code, "error": msg}
         # Snapshot the prior live target BEFORE staging so a failed cutover can
         # be rolled back — a persisted pointer would otherwise silently activate
         # on the NEXT unrelated restart. Staging itself is atomic (temp file +
