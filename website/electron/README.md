@@ -93,18 +93,16 @@ Notes:
 - The result is an assisted (non-one-click, per-user) NSIS installer,
   `KiroCrew Setup <version>.exe` (nightly builds:
   `KiroCrew Nightly Setup <version>.exe`), in `website/electron/dist/`.
-- Its borderless 1280×860 composition follows the Windows light/dark app theme
-  and fits proportionally inside the available work area. The upper field uses
-  the shipped app mark and centered Kiro Crew name; a
-  high-contrast frosted-glass panel combines current/all-user scope, destination,
-  desktop-shortcut and Windows-startup choices. Selecting all users switches to
-  Program Files and requests UAC; current user remains the no-UAC default.
+- It uses a normal Windows 11 setup window and native title bar. The assisted
+  flow is welcome → install scope → ready → native extraction progress → finish.
+  Two large radio choices select current user or all users; the ready page shows
+  the destination plus desktop-shortcut and Windows-startup choices. Selecting
+  all users switches to Program Files and requests UAC; current user remains the
+  no-UAC default.
 - Functional labels and controls stay native and cover electron-builder's 26
-  bundled installer languages. Twelve theme-paired 24-bit whole-scene frames
-  give all eight characters the opening screen's staggered entrance, with a calm
-  bob on the custom pages and a one-time entrance before native extraction; no
-  browser or WebView is embedded. The installer uses a still frame when the
-  Windows animation-effects accessibility setting is disabled.
+  bundled installer languages. Explicit light/dark colors keep text, fields and
+  progress readable, while compact sidebar/header artwork carries the app mark
+  without hiding translated copy or replacing Windows installer chrome.
 
 See `../../docs/guides/windows-install.md` for the CI-built installer and the
 current Windows support status.

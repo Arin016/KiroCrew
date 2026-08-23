@@ -35,16 +35,13 @@ Current status:
   `win.signtoolOptions.publisherName`, so a mis-signed publish would break every
   client's update at once rather than degrade quietly — which is why the publish
   lane verifies the signature before the bytes become immutable.
-- **Full-window assisted installer, per user by default** — the themed setup
-  surface combines install scope, destination, desktop-shortcut and Windows
-  startup choices on one frosted-glass page. It follows the Windows light/dark
-  app theme, fits the full composition proportionally inside the available work
-  area, keeps every functional label and control native (including all 26 bundled
-  installer languages), and replays all eight Kiro characters with the opening
-  animation's staggered entrance. The custom pages continue a calm bob, while
-  the native extraction page plays the entrance once before its
-  progress bar advances. Turning off animation effects in Windows keeps the
-  characters still on every page.
+- **Windows 11-style assisted installer, per user by default** — setup opens as
+  a normal Windows wizard with a native title bar. Its sequence is
+  welcome → install scope → ready → native extraction progress → finish. The
+  scope page offers two large radio choices; the ready page shows the install
+  path plus desktop-shortcut and Windows-startup choices. Functional labels and
+  controls stay native and cover all 26 bundled installer languages. Explicit
+  light/dark colors keep copy, fields and progress readable in either app theme.
   New installs default to the current user and a desktop shortcut. Starting
   Kiro Crew with Windows is an explicit opt-in; both checkboxes can be changed
   before installing. A current-user install needs no UAC prompt. Choosing "all
@@ -65,12 +62,10 @@ Current status:
   missing even though its `.exe` is untouched. Either mode leaves
   the Kiro Crew home alone (`deleteAppDataOnUninstall` stays false, and
   `~/.kiro/crew` is outside the install directory).
-- **Guided Kiro Crew artwork** — the upper brand field uses the shipped app mark
-  and leaves only “Kiro Crew” in the center. The lower glass plane is
-  deliberately text-free artwork, so native fonts and longer translations sit
-  above it without being obscured. Both themes use WCAG-AA control colors; the
-  raster glass is also the visual fallback where Windows 11's system backdrop
-  is unavailable.
+- **Restrained Kiro Crew artwork** — the compact native NSIS sidebar/header use
+  the shipped app mark and pale brand shapes. No decorative bitmap sits behind
+  translated copy, so longer labels cannot be obscured. Both themes use
+  WCAG-AA text colors and retain Windows' own control and keyboard behavior.
 - **Uninstall removes the app and its caches, and keeps your data.** Removed:
   the install directory, the Start Menu and desktop shortcuts, the uninstall
   registry key, this channel's “start with Windows” Run entry,
