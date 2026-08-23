@@ -273,17 +273,22 @@ async def test_remove_refuses_when_branch_oid_diverged():
     """Squash-safe race guard: branch OID != PR headRefOid -> refuse removal."""
     import kiro_crew.apps.builtins.dev_fleet.server as mod
 
+    full_head = "a" * 40
+    cache = AsyncMock(return_value={"state": "MERGED"})
+    git = AsyncMock(return_value=full_head)
     with patch.object(mod, "_find_worktree", new_callable=AsyncMock,
                       return_value=({"path": "/fake/wt", "branch": "feat-x", "is_main": False}, None)), \
          patch.object(mod, "_real_dirty", new_callable=AsyncMock, return_value=False), \
-         patch.object(mod, "_pr_status_cached", new_callable=AsyncMock, return_value={"state": "MERGED"}), \
+         patch.object(mod, "_pr_status_cached", cache), \
          patch.object(mod, "_own_commits_count", new_callable=AsyncMock, return_value=3), \
-         patch.object(mod, "_git", new_callable=AsyncMock, return_value="aaa1111"), \
-         patch.object(mod, "_fetch_pr_head_oid", new_callable=AsyncMock, return_value="bbb2222"), \
+         patch.object(mod, "_git", git), \
+         patch.object(mod, "_fetch_pr_head_oid", new_callable=AsyncMock, return_value="b" * 40), \
          patch.object(mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"):
         result = await mod._worktree_remove("feat-x", force=False)
     assert result["ok"] is False
     assert "OID diverged" in result["error"]
+    git.assert_any_await("/fake/wt", "rev-parse", "HEAD")
+    cache.assert_awaited_once_with("feat-x", full_head)
 
 
 @pytest.mark.asyncio
@@ -5983,19 +5988,22 @@ async def test_pr_query_one_carries_title_and_hides_body():
     payload = json.dumps([{
         "number": 42, "state": "OPEN",
         "url": "https://github.com/o/r/pull/42", "isDraft": False,
-        "title": "My PR title", "body": "Fixes #7",
+        "title": "My PR title", "body": "Fixes #7", "headRefOid": "a" * 40,
     }])
     with patch.object(mod, "_run_cmd", new_callable=AsyncMock, return_value=(0, payload, "")):
         pr = await mod._pr_query_one("o/r", "feat/x")
     assert pr is not None
     assert pr["title"] == "My PR title"
     assert pr["_body"] == "Fixes #7"
+    assert pr["_head_oid"] == "a" * 40
     assert "body" not in pr  # moved to internal _body
+    assert "headRefOid" not in pr
     redacted = mod._redact_pr(pr)
     assert redacted["title"] == "My PR title"
     assert redacted["number"] == 42
     assert "_body" not in redacted  # internal fields dropped from payload
     assert "_repo" not in redacted
+    assert "_head_oid" not in redacted
 
 
 # --- _build_context: parses PR body + commits, builds links ---

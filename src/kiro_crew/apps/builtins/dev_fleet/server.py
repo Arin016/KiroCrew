@@ -1450,7 +1450,7 @@ async def _pr_query_one(owner_repo: str, branch: str) -> dict | None:
     # dropped from the payload by _redact_pr (which skips `_`-prefixed keys).
     rc, stdout, _ = await _run_cmd(
         ["gh", "pr", "list", "--repo", owner_repo, "--head", branch,
-         "--json", "number,state,url,isDraft,title,body", "--state", "all", "--limit", "1"],
+         "--json", "number,state,url,isDraft,title,body,headRefOid", "--state", "all", "--limit", "1"],
         timeout=15,
     )
     if rc != 0:
@@ -1462,6 +1462,7 @@ async def _pr_query_one(owner_repo: str, branch: str) -> dict | None:
         return None
     if pr is not None:
         pr["_repo"] = owner_repo
+        pr["_head_oid"] = pr.pop("headRefOid", None)
         if "body" in pr:
             pr["_body"] = pr.pop("body") or ""
     return pr
@@ -1529,8 +1530,17 @@ async def _fetch_pr_head_oid(branch: str, repo: str | None = None) -> str | None
         return None
 
 
-async def _pr_status_cached(branch: str) -> dict | None:
-    """Return cached PR status for a branch."""
+async def _pr_status_cached(branch: str, head_oid: str | None = None) -> dict | None:
+    """Return cached PR status for a branch.
+
+    *head_oid* is the full current worktree HEAD commit.  When provided and
+    the cached entry records a MERGED verdict whose stored head OID
+    differs from *head_oid*, the entry is treated as stale and a fresh lookup is
+    performed.  This prevents a permanently-cached MERGED result from surviving
+    a branch name being reused for a new head commit.  Callers that do not have
+    the head OID readily available may omit *head_oid*; the cache then degrades
+    to the previous behaviour (MERGED is terminal, non-MERGED expires via TTL).
+    """
     if not branch or branch == BASE_BRANCH:
         return None
     now = time.time()
@@ -1539,10 +1549,37 @@ async def _pr_status_cached(branch: str) -> dict | None:
         # Only MERGED is permanently terminal — a CLOSED PR can be reopened,
         # so its cache entry must expire via the normal TTL.
         is_terminal = (ent.get("data") or {}).get("state") == "MERGED"
-        if is_terminal or (now - ent["ts"]) < _PR_TTL:
+        if is_terminal:
+            # Invalidate a MERGED entry when the caller supplies a head OID
+            # that differs from the one recorded at cache-write time.  A changed
+            # head means the branch was reused for new work; the old MERGED
+            # verdict no longer describes the current commits.
+            cached_head = ent.get("cached_head")
+            if head_oid and cached_head != head_oid:
+                # Head changed (or entry was written without a head OID) —
+                # fall through to a fresh fetch below.
+                pass
+            else:
+                return ent.get("data")
+        elif (now - ent["ts"]) < _PR_TTL:
             return ent.get("data")
     data = await _fetch_pr_status(branch)
-    _PR_CACHE[branch] = {"data": data, "ts": time.time()}
+    if (
+        data
+        and data.get("state") == "MERGED"
+        and head_oid
+        and data.get("_head_oid") != head_oid
+    ):
+        # GitHub may return the old merged PR when a branch name is reused
+        # before a replacement PR exists. A local head contained in the PR
+        # head is still fully shipped (for example, remote commits landed
+        # before merge); only a divergent head means this verdict is stale.
+        pr_head_oid = data.get("_head_oid")
+        if not pr_head_oid or not await _head_contained_in_pr(
+            _repo(), head_oid, pr_head_oid
+        ):
+            data = None
+    _PR_CACHE[branch] = {"data": data, "ts": time.time(), "cached_head": head_oid}
     return data
 
 
@@ -1889,11 +1926,13 @@ async def _git(
 
 async def _git_info(path: str) -> dict:
     info: dict = {
-        "branch": None, "head": None, "dirty": False,
+        "branch": None, "head": None, "head_oid": None, "dirty": False,
         "ahead": 0, "behind": 0, "last_updated_at": None,
     }
     info["branch"] = await _git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    info["head"] = await _git(path, "rev-parse", "--short=7", "HEAD")
+    full_head = await _git(path, "rev-parse", "HEAD")
+    info["head_oid"] = full_head
+    info["head"] = full_head[:7] if full_head else None
     st = await _git(path, "status", "--porcelain")
     if st is not None:
         info["dirty"] = len(st) > 0
@@ -2171,7 +2210,7 @@ async def _build_fleet() -> dict:
         branch = wt.get("branch")
         is_main = wt.get("is_main", False)
         g = await _git_info(path)
-        pr = (await _pr_status_cached(branch)) if branch else None
+        pr = (await _pr_status_cached(branch, g.get("head_oid"))) if branch else None
         name = Path(path).name if not is_main else BASE_BRANCH
 
         # Pod status (best-effort)
@@ -2330,7 +2369,7 @@ async def _worktree_detail(name: str) -> dict:
     branch = wt.get("branch")
     is_main = wt.get("is_main", False)
     g = await _git_info(path)
-    pr = (await _pr_status_cached(branch)) if branch else None
+    pr = (await _pr_status_cached(branch, g.get("head_oid"))) if branch else None
     own_commits = await _own_commits_count(path)
 
     remote = await _upstream_remote()
@@ -2979,7 +3018,8 @@ async def _worktree_remove_locked(
                 if dirty else "cannot verify worktree state (git status failed)"
             )}
 
-    pr = (await _pr_status_cached(branch)) if branch else None
+    _rm_head_oid = (await _git(path, "rev-parse", "HEAD")) if branch else None
+    pr = (await _pr_status_cached(branch, _rm_head_oid)) if branch else None
     own = await _own_commits_count(path)
 
     if not force and not _is_pr_merged(pr):
@@ -3931,7 +3971,10 @@ async def _prunable(path: str, branch: str | None) -> dict:
     The race guard in _worktree_remove handles the edge case of commits pushed
     after the PR was merged by comparing branch OID to the PR's headRefOid.
     """
-    pr = (await _pr_status_cached(branch)) if branch else None
+    # Resolve the full HEAD once so cache invalidation cannot alias distinct
+    # commits that share an abbreviated prefix. Reuse it for the merge guard.
+    head_oid = (await _git(path, "rev-parse", "HEAD")) if branch else None
+    pr = (await _pr_status_cached(branch, head_oid)) if branch else None
     own = await _own_commits_count(path)
     dirty = await _real_dirty(path)
     try:
@@ -3947,14 +3990,13 @@ async def _prunable(path: str, branch: str | None) -> dict:
         # Same squash-safe race guard removal enforces: commits pushed AFTER
         # the merge mean the branch OID diverged from the PR head — surface it
         # at preview time instead of letting the candidate fail every run.
-        oid = await _git(path, "rev-parse", "HEAD")
         pr_oid = await _fetch_pr_head_oid(branch, repo=(pr or {}).get("_repo")) if branch else None
-        if not oid or not pr_oid:
+        if not head_oid or not pr_oid:
             # Cannot verify the squash-safe guard: removal would refuse this
             # anyway, so never present it as a candidate (fail-closed verdict
             # keeps preview and execution consistent).
             return {**base, "ok": False, "code": "merged_unverified"}
-        if not await _head_contained_in_pr(path, oid, pr_oid):
+        if not await _head_contained_in_pr(path, head_oid, pr_oid):
             return {**base, "ok": False, "code": "merged_new_commits"}
         return {**base, "ok": True, "code": "merged"}
     if own == 0 and not dirty:
