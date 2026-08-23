@@ -5421,7 +5421,8 @@
       "stopped": "parado",
       "pin_crew": "Fixar {{name}} no cabeçalho",
       "unpin_crew": "Desafixar {{name}}",
-      "pinned_no_room": "fixado, sem espaço no cabeçalho"
+      "pinned_no_room": "fixado, sem espaço no cabeçalho",
+      "keep_tab_order_fixed": "Manter a ordem das abas"
     },
     "instancesViewport": {
       "connecting": "Conectando…",
