@@ -3314,9 +3314,28 @@ class TestAutoApplyUpdateVenvPath:
         call_count = [0]
 
         async def _fake_exec(*args, **kwargs):
-            call_count[0] += 1
             proc = AsyncMock()
             proc.kill = MagicMock()
+            # Diverged-checkout guard (issue #5163): route the `git rev-list`
+            # count by subcommand and report a fast-forward-only count
+            # (behind>0, ahead==0) so the guard passes through to the reset
+            # path this test asserts, without disturbing the positional
+            # numbering below.
+            # Diverged-checkout guard (issue #5163): the guard also reads HEAD
+            # (git rev-parse HEAD, no --abbrev-ref) before the probe and again
+            # before the reset, refusing if it moved. Return a STABLE sha both
+            # times so head_before == head_now and the reset proceeds.
+            if "rev-parse" in args and "--abbrev-ref" not in args:
+                proc.communicate = AsyncMock(return_value=(b"deadbeefcafe\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            if "rev-list" in args:
+                proc.communicate = AsyncMock(return_value=(b"0\t3\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            call_count[0] += 1
             if call_count[0] == 1:
                 # branch detection → mainline
                 proc.communicate = AsyncMock(return_value=(b"mainline\n", b""))
@@ -3915,9 +3934,28 @@ class TestAutoApplyUpdateResetPath:
         call_count = [0]
 
         async def _fake_exec(*args, **kwargs):
-            call_count[0] += 1
             proc = AsyncMock()
             proc.kill = MagicMock()
+            # The diverged-checkout guard (issue #5163) runs `git rev-list
+            # --count --left-right` after the diff. Route it by subcommand so
+            # it does not disturb the positional numbering below; return a
+            # fast-forward-only count (behind>0, ahead==0) so the guard passes
+            # through to the existing reset behaviour this test asserts.
+            # Diverged-checkout guard (issue #5163): the guard also reads HEAD
+            # (git rev-parse HEAD, no --abbrev-ref) before the probe and again
+            # before the reset, refusing if it moved. Return a STABLE sha both
+            # times so head_before == head_now and the reset proceeds.
+            if "rev-parse" in args and "--abbrev-ref" not in args:
+                proc.communicate = AsyncMock(return_value=(b"deadbeefcafe\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            if "rev-list" in args:
+                proc.communicate = AsyncMock(return_value=(b"0\t3\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            call_count[0] += 1
             if call_count[0] == 1:
                 # branch detection → mainline
                 proc.communicate = AsyncMock(return_value=(b"mainline\n", b""))
@@ -4029,9 +4067,23 @@ class TestAutoApplyUpdateResetPath:
         call_count = [0]
 
         async def _fake_exec(*args, **kwargs):
-            call_count[0] += 1
             proc = AsyncMock()
             proc.kill = MagicMock()
+            # Diverged-checkout guard (issue #5163): route HEAD reads (stable
+            # sha, so the guard sees no movement) and the ahead/behind probe
+            # (fast-forward-only: behind>0, ahead==0) by subcommand so this
+            # test's positional diff=call#3 semantics are preserved.
+            if "rev-parse" in args and "--abbrev-ref" not in args:
+                proc.communicate = AsyncMock(return_value=(b"deadbeefcafe\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            if "rev-list" in args:
+                proc.communicate = AsyncMock(return_value=(b"0\t3\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            call_count[0] += 1
             proc.communicate = AsyncMock(return_value=(b"mainline\n", b""))
             # diff --quiet reports changes; everything else, INCLUDING the
             # core-dep repair, succeeds.
@@ -4075,9 +4127,26 @@ class TestAutoApplyUpdateResetPath:
         call_count = [0]
 
         async def _fake_exec(*args, **kwargs):
-            call_count[0] += 1
             proc = AsyncMock()
             proc.kill = MagicMock()
+            # Diverged-checkout guard (issue #5163): route the `git rev-list`
+            # count by subcommand, reporting a fast-forward-only count so the
+            # guard passes through to the reset path this test exercises.
+            # Diverged-checkout guard (issue #5163): the guard also reads HEAD
+            # (git rev-parse HEAD, no --abbrev-ref) before the probe and again
+            # before the reset, refusing if it moved. Return a STABLE sha both
+            # times so head_before == head_now and the reset proceeds.
+            if "rev-parse" in args and "--abbrev-ref" not in args:
+                proc.communicate = AsyncMock(return_value=(b"deadbeefcafe\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            if "rev-list" in args:
+                proc.communicate = AsyncMock(return_value=(b"0\t3\n", b""))
+                proc.returncode = 0
+                proc.wait = AsyncMock(return_value=0)
+                return proc
+            call_count[0] += 1
             if call_count[0] == 1:
                 proc.communicate = AsyncMock(return_value=(b"mainline\n", b""))
                 proc.returncode = 0

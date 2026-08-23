@@ -35,7 +35,7 @@ import webbrowser
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from aiohttp import web
 from slack_sdk.socket_mode.websockets import SocketModeClient as WSSocketModeClient
@@ -8197,6 +8197,29 @@ class GatewayOrchestrator:
         except Exception:
             logger.debug("Update check failed", exc_info=True)
 
+    async def _git_head_sha(self, proj: str) -> Optional[str]:
+        """Return the current HEAD commit SHA of *proj*, or None if unresolved.
+
+        Used to fail closed: an unresolvable HEAD is treated as unsafe by the
+        divergence guard rather than allowing a destructive reset to proceed.
+        """
+        try:
+            head_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "rev-parse",
+                "HEAD",
+                cwd=proj,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(head_proc.communicate(), timeout=10)
+            if head_proc.returncode == 0 and out:
+                sha = out.decode(errors="replace").strip()
+                return sha or None
+        except (OSError, asyncio.TimeoutError, ValueError):
+            pass
+        return None
+
     async def _auto_apply_update(self) -> None:
         """Auto-apply: fetch, reset to remote, rebuild frontend, pip install, restart.
 
@@ -8290,6 +8313,86 @@ class GatewayOrchestrator:
                     self.dashboard_state.clear_update_progress()
                 return
 
+            # Refuse to hard-reset a checkout that carries committed local
+            # work. This is the most privileged apply path (the mandatory
+            # version-floor trigger gates only on `can_apply`, bypassing the
+            # update check's can_fast_forward verdict), so a developer checkout
+            # with local commits ahead of origin/<branch> — diverged
+            # (ahead>0 AND behind>0) or ahead-only (ahead>0, behind==0, e.g. a
+            # detached HEAD inferred as `mainline`) — would otherwise have that
+            # work silently `git reset --hard` away. Mirror the
+            # fast-forward-only rule: only a fast-forward (behind>0, ahead==0)
+            # or fully in-sync (ahead==0, behind==0) checkout resets; ANY
+            # positive ahead count is refused.
+            #
+            # Fail CLOSED: if the ahead/behind probe cannot be run or its output
+            # cannot be parsed into exactly two non-negative integers, refuse
+            # rather than fall through to the destructive reset — an
+            # unverifiable state is treated as unsafe. HEAD is captured here and
+            # the reset below is pinned to it, so a commit created between this
+            # probe and the reset cannot be discarded unseen.
+            head_before = await self._git_head_sha(proj)
+            ahead = behind = None
+            count_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "rev-list",
+                "--count",
+                "--left-right",
+                f"HEAD...origin/{branch}",
+                cwd=proj,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            count_out, _ = await asyncio.wait_for(count_proc.communicate(), timeout=10)
+            if count_proc.returncode == 0 and count_out:
+                try:
+                    ahead_s, behind_s = count_out.decode().split()
+                    a, b = int(ahead_s), int(behind_s)
+                    if a >= 0 and b >= 0:
+                        ahead, behind = a, b
+                except (ValueError, UnicodeDecodeError):
+                    ahead = behind = None
+
+            if ahead is None or behind is None:
+                # Unverifiable divergence state — refuse the destructive reset.
+                logger.warning(
+                    "Auto-update refused: could not verify divergence against "
+                    "origin/%s (rev-list rc=%s) — not resetting",
+                    branch,
+                    count_proc.returncode,
+                )
+                if self.dashboard_state:
+                    self.dashboard_state.push_update_progress(
+                        "failed",
+                        f"Update refused: could not verify whether the local "
+                        f"checkout has diverged from origin/{branch}. Resolve "
+                        f"manually to avoid discarding local commits.",
+                    )
+                return
+
+            if ahead > 0:
+                logger.warning(
+                    "Auto-update refused: checkout on %s has local commits "
+                    "(%d ahead, %d behind origin/%s) — not resetting",
+                    branch,
+                    ahead,
+                    behind,
+                    branch,
+                )
+                if self.dashboard_state:
+                    detail = (
+                        f"diverged from origin/{branch} "
+                        f"({ahead} ahead, {behind} behind)"
+                        if behind > 0
+                        else f"is ahead of origin/{branch} ({ahead} ahead)"
+                    )
+                    self.dashboard_state.push_update_progress(
+                        "failed",
+                        f"Update refused: local checkout {detail}. "
+                        f"Resolve manually to avoid discarding local commits.",
+                    )
+                return
+
             # Warn if local tracked-file edits will be discarded
             status_proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -8308,6 +8411,28 @@ class GatewayOrchestrator:
                 ]
                 if tracked:
                     logger.warning("Auto-update: discarding local tracked-file changes in %s", proj)
+
+            # Bind the reset to the HEAD the divergence probe validated. A
+            # commit landing between the probe and the reset would not be
+            # reflected in the ahead/behind counts, so if HEAD moved, refuse
+            # rather than discard an unverified commit.
+            head_now = await self._git_head_sha(proj)
+            if head_before is None or head_now is None or head_now != head_before:
+                logger.warning(
+                    "Auto-update refused: HEAD changed during preflight on %s "
+                    "(%s → %s) — not resetting",
+                    branch,
+                    (head_before or "?")[:12],
+                    (head_now or "?")[:12],
+                )
+                if self.dashboard_state:
+                    self.dashboard_state.push_update_progress(
+                        "failed",
+                        f"Update refused: the checkout changed while preparing "
+                        f"the update on origin/{branch}. Retry once the tree is "
+                        f"stable.",
+                    )
+                return
 
             # Hard reset to remote — discards local tracked-file edits,
             # untracked files (task specs, notes) are preserved.
