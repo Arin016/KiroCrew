@@ -460,6 +460,17 @@ describe('PinnedMessagesPanel', () => {
     // on keydowns targeting itself (e.target === e.currentTarget check)
     expect(defaultProps.onJumpToMessage).not.toHaveBeenCalled()
   })
+
+  it('actions row reveals on keyboard focus (focus-within) — WCAG 2.4.7', () => {
+    // The actions row must be visible when any child button receives focus so that
+    // keyboard users can see and operate the controls they have tabbed onto.
+    render(<PinnedMessagesPanel {...defaultProps} />)
+    const actionRows = screen.getAllByTestId('pin-actions')
+    // Row must carry focus-within:opacity-100 so CSS reveals it on child focus
+    actionRows.forEach(row => {
+      expect(row.className).toContain('focus-within:opacity-100')
+    })
+  })
 })
 
 // === Slot-bound paging guard (regression: deferred page response must not contaminate another slot) ===
