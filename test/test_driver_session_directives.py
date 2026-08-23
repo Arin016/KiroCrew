@@ -19,7 +19,11 @@ These tests lock the three halves of the fix:
 * **Channel applier boundary** — ``apply_session_directive`` with ``slot=None``
   (the channel-caller shape) applies the monitor trio on a nudge-able channel
   session and keeps refusing the ``_DASHBOARD_ONLY_DIRECTIVES``, including when
-  the session key would pass ``has_dashboard_surface``.
+  the session key would pass ``has_dashboard_surface``. ``set_project`` was
+  deliberately moved OUT of the dashboard-only set by #3543 (any user-facing
+  surface may retarget its own slot): with a slot it applies on a channel
+  session, and the slot-less TurnDriver shape gets an explicit clean refusal
+  (there is no slot to retarget) instead of the pre-guard ``AttributeError``.
 * **Consumer wiring** — ``build_directive_consumer`` funnels into the shared
   applier with the dispatcher's live ``dashboard_state`` when present, and a
   fail-closed ``sessions``-backed stand-in when not (the Slack shape).
@@ -496,26 +500,30 @@ class TestChannelApplierBoundary:
         assert [c["outcome"] for c in directive_calls] == ["denied"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind", ["set_project", "suggest_followup", "ask_question"])
+    @pytest.mark.parametrize("kind", ["suggest_followup", "ask_question"])
     async def test_dashboard_only_directives_refused_on_channel_transport(
         self, kind, no_dashboard_tabs
     ):
         """SECURITY INVARIANT (#4540): _DASHBOARD_ONLY_DIRECTIVES stay DENIED
         for non-dashboard sessions — the channel consumer must not widen the
-        gate."""
+        gate. ``set_project`` is deliberately NOT parametrized here: #3543
+        removed it from the dashboard-only set (any user-facing surface may
+        retarget its own slot); its channel-transport semantics are pinned by
+        the ``test_set_project_*`` cases below — do not "restore" it."""
         state = _ChannelDirectiveState(sessions=_ChannelSessions("x"))
-        result = await apply_session_directive(
-            state, None, "slack:1755000000.123456", kind, {"project": "/tmp"}
-        )
+        result = await apply_session_directive(state, None, "slack:1755000000.123456", kind, {})
         assert result.startswith("Error:")
         assert "only works from a dashboard chat session" in result
 
     @pytest.mark.asyncio
-    async def test_dashboard_only_refused_for_slotless_caller_even_with_open_tab(self):
+    @pytest.mark.parametrize("kind", ["suggest_followup", "ask_question"])
+    async def test_dashboard_only_refused_for_slotless_caller_even_with_open_tab(self, kind):
         """A channel-born session CAN have an open dashboard tab
         (has_dashboard_surface True), but a slot-less channel turn still must
         not drive a slot-targeted effect — the effect targets the SLOT and this
-        turn holds none. Guards the slot=None tightening."""
+        turn holds none. Guards the slot=None tightening. ``set_project`` left
+        this parametrize with #3543 (no longer dashboard-only); its slot-less
+        refusal is pinned separately below."""
         from kiro_crew import session_surface
 
         session_key = "slack:1755000000.777"
@@ -526,13 +534,100 @@ class TestChannelApplierBoundary:
                 _ChannelDirectiveState(sessions=_ChannelSessions("x")),
                 None,
                 session_key,
-                "set_project",
-                {"project": "/tmp"},
+                kind,
+                {},
             )
         finally:
             session_surface.set_dashboard_surfaced(before)
         assert result.startswith("Error:")
         assert "only works from a dashboard chat session" in result
+
+    @pytest.mark.asyncio
+    async def test_set_project_applies_on_channel_transport_with_slot(
+        self, no_dashboard_tabs, tmp_path
+    ):
+        """Post-#3543 semantics: a channel session key passes the user-surface
+        gate, so a channel-born turn that DOES hold a slot (the chat_runner
+        shape, e.g. a Slack mirror riding a dashboard slot) retargets that
+        slot's project — even with no dashboard tab open. The history-reset
+        flag is load-bearing: it is what cold-starts the retargeted transcript
+        (and with ``linked_session_key`` empty it derives from ``slot.key``,
+        the channel-key fallback branch of ``effective_session_key``)."""
+        import os
+
+        session_key = "slack:1755000000.123456"
+
+        class _Slot:
+            key = session_key
+            linked_session_key = ""
+            project = ""
+            _pending_reset_history_key = None
+
+        class _State:
+            pushes = 0
+
+            def push_slots_update(self):
+                self.pushes += 1
+
+        slot, state = _Slot(), _State()
+        result = await apply_session_directive(
+            state, slot, session_key, "set_project", {"project": str(tmp_path)}
+        )
+        assert "Project set to" in result
+        assert slot.project == os.path.realpath(str(tmp_path))
+        assert slot._pending_reset_history_key
+        assert state.pushes == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tab_open", [False, True], ids=["no-tab", "open-tab"])
+    @pytest.mark.parametrize(
+        "args", [{"project": "/tmp"}, {"clear": True}], ids=["set-path", "clear"]
+    )
+    async def test_set_project_slotless_channel_caller_gets_clean_refusal(
+        self, args, tab_open, monkeypatch
+    ):
+        """The channel TurnDriver always passes slot=None: set_project passes
+        the user-surface gate there but has no slot to retarget. The applier
+        must answer with an explicit refusal — not the swallowed
+        ``AttributeError: 'NoneType' ...`` it crashed with before the guard —
+        audited as ``denied``, and must mutate nothing (the clear path writes
+        slot state before validation, so it is covered too). Pinned for BOTH
+        tab states: the guard is independent of the surface predicates, and an
+        open dashboard tab (has_dashboard_surface True) must not resurrect the
+        mutation path for a turn that holds no slot."""
+        from kiro_crew import session_surface
+
+        calls: list[dict] = []
+
+        class _SelSpy:
+            def log_tool_invocation(self, **kw):
+                calls.append(kw)
+
+        monkeypatch.setattr("kiro_crew.sel.sel", lambda: _SelSpy())
+
+        class _State:
+            pushes = 0
+
+            def push_slots_update(self):
+                self.pushes += 1
+
+        session_key = "slack:1755000000.123456"
+        state = _State()
+        before = session_surface.dashboard_surfaced_keys()
+        session_surface.set_dashboard_surfaced({session_key} if tab_open else ())
+        try:
+            result = await apply_session_directive(
+                state, None, session_key, "set_project", dict(args)
+            )
+        finally:
+            session_surface.set_dashboard_surfaced(before)
+        assert result.startswith("Error:")
+        assert "holds no slot" in result
+        assert "Nothing was changed" in result
+        assert "NoneType" not in result  # the clean refusal, not the old crash
+        assert state.pushes == 0  # fail closed: no slot push, no state written
+        directive_calls = [c for c in calls if c.get("source") == "mcp-directive"]
+        assert [c["outcome"] for c in directive_calls] == ["denied"]
 
 
 # ── build_directive_consumer wiring ──────────────────────────────────────────
