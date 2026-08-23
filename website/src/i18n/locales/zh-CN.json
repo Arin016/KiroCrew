@@ -8040,6 +8040,7 @@
         "no_pinned_messages": "还没有置顶消息。把鼠标移到聊天中的某条消息上，点击图钉图标即可保存到这里。",
         "message_unavailable": "此置顶消息在已加载的历史记录中不再可用。",
         "pin_failed": "无法置顶消息，请重试。",
+        "pin_limit_reached": "已达到置顶消息上限——请取消置顶一条消息以添加新的。",
         "unpin_failed": "无法取消置顶消息，请重试。",
         "you": "你",
         "assistant": "助手",

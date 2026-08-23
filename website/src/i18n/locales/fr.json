@@ -8250,6 +8250,7 @@
         "no_pinned_messages": "Aucun message épinglé. Survolez un message dans la conversation et cliquez sur l’icône d’épingle pour l’enregistrer ici.",
         "message_unavailable": "Ce message épinglé n’est plus disponible dans l’historique chargé.",
         "pin_failed": "Impossible d’épingler le message. Réessayez.",
+        "pin_limit_reached": "Limite d’épingles atteinte — désépinglez un message pour en ajouter un autre.",
         "unpin_failed": "Impossible de désépingler le message. Réessayez.",
         "you": "Toi",
         "assistant": "Assistant",

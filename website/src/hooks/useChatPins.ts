@@ -1,7 +1,22 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { PIN_PREVIEW_INPUT_MAX_CHARS, pinsApi, type ChatPin, type PinMessageBody } from '../api/pins'
+import { PIN_PREVIEW_INPUT_MAX_CHARS, pinsApi, type ChatPin, type PinApiError, type PinMessageBody } from '../api/pins'
 import { secureRandomId } from '../utils/secureId'
+
+/**
+ * The backend `code` from a pins API failure, or undefined for anything else.
+ * Lives HERE rather than in api/pins so the hook keeps zero new runtime
+ * imports from that module — several test files replace '../api/pins' with a
+ * partial factory mock, and an imported helper those mocks omit would make
+ * this hook's error handling throw inside onError.
+ */
+export function pinErrorCode(err: unknown): string | undefined {
+  if (err instanceof Error && 'code' in err) {
+    const code = (err as PinApiError).code
+    return typeof code === 'string' ? code : undefined
+  }
+  return undefined
+}
 
 const pinQueryKey = (slotKey: string | undefined) => ['chat-pins', slotKey] as const
 
@@ -25,7 +40,7 @@ type UnpinMutation = { id: string; slotKey: string }
 export function useChatPins(slotKey: string | undefined) {
   const qc = useQueryClient()
   const queryKey = useMemo(() => pinQueryKey(slotKey), [slotKey])
-  const [error, setError] = useState<'pin' | 'unpin' | null>(null)
+  const [error, setError] = useState<'pin' | 'pin_limit' | 'unpin' | null>(null)
   const clearError = useCallback(() => setError(null), [])
 
   /**
@@ -83,7 +98,8 @@ export function useChatPins(slotKey: string | undefined) {
           (old ?? []).filter(p => p.id !== ctx.optimisticId),
         )
       }
-      setError('pin')
+      const code = pinErrorCode(_err)
+      setError(code === 'pin_limit_reached' ? 'pin_limit' : 'pin')
     },
     onSuccess: (real, _body, ctx) => {
       if (!ctx) return

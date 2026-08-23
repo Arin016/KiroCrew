@@ -5453,6 +5453,7 @@
         "no_pinned_messages": "No pinned messages yet. Hover a message in the chat and click the pin icon to save it here.",
         "message_unavailable": "This pinned message is no longer available in the loaded history.",
         "pin_failed": "Could not pin the message. Try again.",
+        "pin_limit_reached": "Pin limit reached — unpin a message to add another.",
         "unpin_failed": "Could not unpin the message. Try again.",
         "you": "You",
         "assistant": "Assistant",

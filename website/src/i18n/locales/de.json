@@ -8145,6 +8145,7 @@
         "no_pinned_messages": "Noch keine angehefteten Nachrichten. Zeige auf eine Nachricht im Chat und klicke auf das Stecknadel-Symbol, um sie hier zu speichern.",
         "message_unavailable": "Diese angeheftete Nachricht ist im geladenen Verlauf nicht mehr verfügbar.",
         "pin_failed": "Die Nachricht konnte nicht angeheftet werden. Versuche es erneut.",
+        "pin_limit_reached": "Pin-Limit erreicht — Hefte eine Nachricht ab, um eine weitere hinzuzufügen.",
         "unpin_failed": "Die Nachricht konnte nicht gelöst werden. Versuche es erneut.",
         "you": "Du",
         "assistant": "Assistent",

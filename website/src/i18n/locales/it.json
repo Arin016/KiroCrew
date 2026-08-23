@@ -8250,6 +8250,7 @@
         "no_pinned_messages": "Nessun messaggio fissato. Passa il cursore su un messaggio nella chat e fai clic sull’icona della puntina per salvarlo qui.",
         "message_unavailable": "Questo messaggio fissato non è più disponibile nella cronologia caricata.",
         "pin_failed": "Impossibile fissare il messaggio. Riprova.",
+        "pin_limit_reached": "Limite di messaggi fissati raggiunto — rimuovi un messaggio fissato per aggiungerne un altro.",
         "unpin_failed": "Impossibile rimuovere il messaggio fissato. Riprova.",
         "you": "Tu",
         "assistant": "Assistente",

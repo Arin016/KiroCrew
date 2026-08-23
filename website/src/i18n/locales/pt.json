@@ -8250,6 +8250,7 @@
         "no_pinned_messages": "Ainda não há mensagens fixadas. Passe o cursor sobre uma mensagem no chat e clique no ícone de alfinete para salvá-la aqui.",
         "message_unavailable": "Esta mensagem fixada não está mais disponível no histórico carregado.",
         "pin_failed": "Não foi possível fixar a mensagem. Tente novamente.",
+        "pin_limit_reached": "Limite de mensagens fixadas atingido — desafixe uma mensagem para adicionar outra.",
         "unpin_failed": "Não foi possível desafixar a mensagem. Tente novamente.",
         "you": "Você",
         "assistant": "Assistente",

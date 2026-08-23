@@ -5,17 +5,30 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement, type ReactNode } from 'react'
 import { useChatPins } from '../hooks/useChatPins'
 import { PinnedMessagesPanel } from '../pages/chat/PinnedMessagesPanel'
-import { PIN_PREVIEW_INPUT_MAX_CHARS, type ChatPin } from '../api/pins'
+import { PIN_PREVIEW_INPUT_MAX_CHARS, type ChatPin, type PinApiError } from '../api/pins'
+import { pinErrorCode } from '../hooks/useChatPins'
 
-// Mock the pins API
-vi.mock('../api/pins', () => ({
-  PIN_PREVIEW_INPUT_MAX_CHARS: 4096,
-  pinsApi: {
-    list: vi.fn(),
-    create: vi.fn(),
-    remove: vi.fn(),
-  },
-}))
+/** Build the plain-Error-with-code shape pinsApi.create throws. */
+function pinError(message: string, code?: string): PinApiError {
+  const err: PinApiError = new Error(message)
+  err.code = code
+  return err
+}
+
+// Mock the pins API. The hook branches structurally on the error's `code`
+// property via its own module-local pinErrorCode helper, so the mock needs no
+// extra re-exports to keep the hook's error handling working.
+vi.mock('../api/pins', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/pins')>()
+  return {
+    PIN_PREVIEW_INPUT_MAX_CHARS: actual.PIN_PREVIEW_INPUT_MAX_CHARS,
+    pinsApi: {
+      list: vi.fn(),
+      create: vi.fn(),
+      remove: vi.fn(),
+    },
+  }
+})
 
 // Mock i18n
 vi.mock('../i18n/t', () => ({
@@ -153,6 +166,54 @@ describe('useChatPins', () => {
     await waitFor(() => expect(result.current.pins).toHaveLength(1))
     expect(result.current.pins[0].id).toBe('pin-1')
     expect(result.current.error).toBe('pin')
+  })
+
+  it('pinMessage sets pin_limit error when API returns 409 pin_limit_reached', async () => {
+    const { result } = renderHook(() => useChatPins('slot-abc'), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.pins).toHaveLength(1))
+
+    ;(pinsApi.create as ReturnType<typeof vi.fn>).mockRejectedValue(
+      pinError('Pin create failed: 409', 'pin_limit_reached'),
+    )
+
+    await act(async () => {
+      try {
+        await result.current.pinMessage({ mid: 'm-limit-pin', message_ts: 'ts-limit', role: 'user', preview: 'test' })
+      } catch { /* expected */ }
+    })
+
+    await waitFor(() => expect(result.current.pins).toHaveLength(1))
+    expect(result.current.error).toBe('pin_limit')
+  })
+
+  it('pinMessage sets generic pin error for non-limit API failures (e.g. 500)', async () => {
+    const { result } = renderHook(() => useChatPins('slot-abc'), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.pins).toHaveLength(1))
+
+    ;(pinsApi.create as ReturnType<typeof vi.fn>).mockRejectedValue(
+      pinError('Pin create failed: 500', 'persist_failed'),
+    )
+
+    await act(async () => {
+      try {
+        await result.current.pinMessage({ mid: 'm-server-error', message_ts: 'ts-err', role: 'user', preview: 'test' })
+      } catch { /* expected */ }
+    })
+
+    await waitFor(() => expect(result.current.pins).toHaveLength(1))
+    expect(result.current.error).toBe('pin')
+  })
+
+  it('pinErrorCode extracts the backend code structurally', () => {
+    expect(pinErrorCode(pinError('Pin create failed: 409', 'pin_limit_reached'))).toBe('pin_limit_reached')
+    expect(pinErrorCode(pinError('Pin create failed: 500'))).toBeUndefined()
+    expect(pinErrorCode(new Error('plain'))).toBeUndefined()
+    expect(pinErrorCode('not an error')).toBeUndefined()
+    expect(pinErrorCode(undefined)).toBeUndefined()
+    // A non-string code (e.g. a Node errno number) is not a pins API code.
+    const errno = new Error('x') as Error & { code?: unknown }
+    errno.code = 42
+    expect(pinErrorCode(errno)).toBeUndefined()
   })
 
   it('unpinMessage optimistically removes, rolls back on error', async () => {

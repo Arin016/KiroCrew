@@ -5880,7 +5880,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     void unpinById(id).catch(() => {})
   }, [unpinById])
   const pinStatus = pinNotice ?? (chatPinsError
-    ? i18nT(chatPinsError === 'pin' ? 'pages.chat.pins.pin_failed' : 'pages.chat.pins.unpin_failed')
+    ? i18nT(chatPinsError === 'pin' ? 'pages.chat.pins.pin_failed' : chatPinsError === 'pin_limit' ? 'pages.chat.pins.pin_limit_reached' : 'pages.chat.pins.unpin_failed')
     : null)
   const dismissPinStatus = useCallback(() => {
     setPinNotice(null)
