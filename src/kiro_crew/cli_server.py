@@ -1231,17 +1231,47 @@ def _update(force: bool = False) -> None:
     print("\n✅ Kiro Crew updated!")
     print(f"\n{DATA_WARNING}\n")
 
-    # Re-install agent config so new denied commands take effect.
-    # Run as subprocess since the current process has old code loaded.
+    _refresh_agent_config(proj)
+
+
+def _refresh_agent_config(proj: str) -> None:
+    """Re-install agent config so new denied commands take effect.
+
+    Runs as a subprocess since the current process has old code loaded. The
+    refresh is best-effort: the update itself has already succeeded, so any
+    failure here downgrades to a warning telling the operator to re-run setup.
+
+    Two hardening properties this call site must keep:
+
+    * ``stdin`` is ``DEVNULL``. With ``capture_output=True`` the child's
+      output is piped into a buffer nobody displays until the call returns,
+      so any prompt it asks is invisible — and with an inherited terminal it
+      would block silently until the timeout. EOF on stdin makes a prompt
+      return immediately instead of hanging (``_input_or_skip`` takes its
+      ``_SetupAborted`` path, which setup treats as a clean skip; a bare
+      ``input()`` gets ``EOFError``), structurally, without relying on every
+      prompt in setup to guard itself with an isatty check.
+    * ``TimeoutExpired`` is caught. It is raised, not returned, so without a
+      handler a slow refresh would traceback out of ``kirocrew update`` right
+      after the success banner printed.
+    """
     print("  🔒 Refreshing agent config…")
-    r = subprocess.run(
-        [sys.executable, "-m", "kiro_crew", "setup", "--agent-only"],
-        cwd=proj,
-        capture_output=True,
-        timeout=30,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-        **UTF8_TEXT,
-    )
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "kiro_crew", "setup", "--agent-only"],
+            cwd=proj,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            **UTF8_TEXT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logging.getLogger(__name__).warning(
+            "agent-only config refresh timed out after %ss; skipping (best-effort)", exc.timeout
+        )
+        print("  ⚠️  Agent config refresh timed out — run: kirocrew setup --agent-only")
+        return
     if r.returncode == 0:
         print("  ✅ Agent config refreshed (deniedCommands + hooks updated)")
     else:
