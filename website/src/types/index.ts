@@ -877,6 +877,11 @@ export interface ChatMessage {
 
 export interface SubagentActivity {
   id: string; task: string; agent: string
+  /** Model the live session actually resolved to serve, '' when unknown. Folded
+   *  from the `model` field on the `subagent_spawn`/`subagent_done`/snapshot WS
+   *  frames; shown beside the agent pill in the Subagents panel so a model-pinned
+   *  run's real model is visible (#3582). */
+  model?: string
   status: 'pending' | 'running' | 'tool' | 'done' | 'error' | 'stopped'
   streaming: string; lastTool: string
   startedAt: number; elapsed: number; error?: string

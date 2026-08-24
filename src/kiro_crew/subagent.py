@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 from kiro_crew import platform_compat
 from kiro_crew.agent_discovery import cached_project_agent_names, list_agents
-from kiro_crew.config.loader import KiroCrewConfig
+from kiro_crew.config.loader import DEFAULT_MODEL, KiroCrewConfig
 from kiro_crew.constants import SUBAGENT_COMPLETION_PREFIX
 from kiro_crew.context import (
     CONTEXT_GROUP_LESSONS,
@@ -439,6 +439,31 @@ def _resolve_injection_timeout() -> float:
 
 
 INJECTION_TIMEOUT = _resolve_injection_timeout()
+
+
+def _resolved_model_of(client: object) -> str:
+    """The model id *client*'s live session actually resolved to serve, or ``""``.
+
+    Reads the provider's PUBLIC ``served_model`` accessor (never private
+    ``_client`` internals, which are free to move) — the same contract the
+    poisoned-conversation canary and ``AcpProvider.served_model`` use. Both
+    provider shapes are covered: ``AcpSessionProvider.served_model`` prefers the
+    explicit ``set_model`` and falls back to the ``session/new|load`` response's
+    ``currentModelId`` (so a session on the backend-selected DEFAULT is still
+    readable at spawn), while the raw ``AcpClient`` reports ``_resolved_model_id``
+    once the backend has answered (known after the first turn on the CC path).
+
+    The ``DEFAULT_MODEL`` (``"auto"``) sentinel — "let the backend pick", not yet
+    resolved — is filtered to ``""`` (unknown/inconclusive) so a caller never
+    renders it as if it were a real model, and callers must treat ``""`` as
+    "don't show", never as a wildcard. Never raises — an unreadable or
+    duck-typed client (test doubles) yields ``""``.
+    """
+    try:
+        model = str(getattr(client, "served_model", "") or "").strip()
+    except Exception:
+        return ""
+    return "" if model == DEFAULT_MODEL else model
 
 
 def _subagent_default_model() -> str:
@@ -1186,6 +1211,24 @@ class SubagentInfo:
     _raw_task: str = ""  # unredacted task for kiro-cli execution prompt
     # CC-specific overrides (ignored for ACP)
     model: str = ""
+    # The model id the live session ACTUALLY resolved to serve, read back from
+    # the provider's public ``served_model`` accessor. Distinct from ``model``,
+    # which is only the REQUESTED pin (often "" ⇒ provider default): the ACP
+    # backend reports the served id even on the default, and a routing/config/
+    # availability downgrade makes the two differ. "" means unknown/inconclusive
+    # (never a wildcard) — the ACP session/new response fills it at spawn, while
+    # the CC/raw path only knows it after the first turn, so it is refreshed at
+    # completion too. Surfaced on the subagent WS frames and completion meta so a
+    # model-pinned review's actual model is auditable (issue #3582).
+    resolved_model: str = ""
+    # The EFFECTIVE requested model — the per-spawn pin (``model``) OR, when that
+    # is empty, the ``agent.role_models['subagent']`` config pin (AGENTS.md names
+    # the config pin as *the* way to pin a subagent model). This is the side the
+    # downgrade comparison must use: a config-pinned run served a different model
+    # is exactly the "unverifiable pin" this feature exists to catch, and keying
+    # off the bare per-spawn ``model`` would miss it (Design review on #3582).
+    # "" ⇒ no pin (the provider default). Resolved once at spawn.
+    requested_model: str = ""
     # Per-call reasoning-effort override (spawn_run ``reasoning_effort``).
     # Wins over the ``role_efforts['subagent']`` pin; ``""`` defers to it.
     # Like ``model``, a non-empty value forces the dedicated-process path.
@@ -1748,6 +1791,8 @@ class SubagentManager:
                 outcome=OUTCOME_INTERRUPTED,
                 task=task_preview,
                 note="orphaned by gateway restart",
+                requested_model=str(state.get("requested_model") or ""),
+                resolved_model=str(state.get("resolved_model") or ""),
             )
         else:
             msg = (
@@ -1761,6 +1806,8 @@ class SubagentManager:
                 outcome=OUTCOME_FAILED,
                 task=task_preview,
                 note="lost to gateway restart",
+                requested_model=str(state.get("requested_model") or ""),
+                resolved_model=str(state.get("resolved_model") or ""),
             )
 
         # Redact before any delivery path (injection or Slack DM)
@@ -2446,6 +2493,11 @@ class SubagentManager:
                 "outcome": info.outcome,
                 "task": _redact(info.task),
                 "agent": _redact(info.agent),
+                # The model actually served (issue #3582). By the terminal
+                # report this is the authoritative value on every provider — the
+                # CC/raw path has completed at least one turn, so its
+                # ``_resolved_model_id`` is populated (refreshed in ``_run``).
+                "model": info.resolved_model,
                 "result": _done_result(info.result),
             },
         )
@@ -5345,6 +5397,11 @@ class SubagentManager:
         # that role is unpinned the helper returns "" so we omit the kwarg and
         # keep deferring to the provider's configured default, exactly as before.
         eff_model = info.model or _subagent_default_model()
+        # Record the EFFECTIVE pin (per-spawn OR the role_models['subagent']
+        # config pin) as the requested side of the downgrade comparison — keying
+        # off the bare per-spawn ``model`` would miss a config-pinned run served a
+        # different model (Design review on #3582).
+        info.requested_model = eff_model
         if eff_model:
             extra_kwargs["model"] = eff_model
         # Sub-agent reasoning effort (per-call override -> role_efforts['subagent']
@@ -5494,8 +5551,41 @@ class SubagentManager:
         child_escalation_limit = max(turn_limit * 3, 60)
         # Reports inherited agent (not just info.agent) so telemetry shows
         # the actual agent used for this subagent session.
+        #
+        # Read back the model the live session actually resolved to serve, so
+        # the panel shows what ran rather than only what was requested (issue
+        # #3582). Best-effort at spawn: the ACP session/new response already
+        # carries the served id (readable now, even on the backend default),
+        # while the raw CC path only knows it after the first turn — so this is
+        # refreshed authoritatively at completion below. Only overwrite a prior
+        # non-empty value with another non-empty one, so a spawn-time read that
+        # succeeded is never clobbered back to "" by a transient later miss.
+        _spawn_model = _resolved_model_of(client)
+        if _spawn_model:
+            info.resolved_model = _spawn_model
+        # Persist provenance to disk BEFORE the spawn event so a gateway restart
+        # in the window between the event and the later session_id state write
+        # cannot lose it — orphan recovery reads these from disk (GPT review on
+        # #3582). Off-loop (to_thread): update_state does a synchronous fsync, so
+        # a slow FS must not freeze the gateway/heartbeat. Best-effort — a
+        # persistence hiccup must not block the spawn.
+        try:
+            await asyncio.to_thread(
+                update_state,
+                info.id,
+                requested_model=info.requested_model,
+                resolved_model=info.resolved_model,
+            )
+        except Exception:
+            logger.debug("Failed to persist model provenance for %s", info.id, exc_info=True)
         await self._fire_event(
-            "subagent_spawn", info, {"task": _redact(info.task), "agent": agent or ""}
+            "subagent_spawn",
+            info,
+            {
+                "task": _redact(info.task),
+                "agent": agent or "",
+                "model": info.resolved_model,
+            },
         )
         # Stream results to disk for orchestrated chat.
 
@@ -5516,6 +5606,11 @@ class SubagentManager:
             state_update: dict[str, object] = {
                 "session_id": session_id,
                 "provider": provider_type,
+                # Persist the resolved/requested models so orphan-recovery
+                # completions (which rebuild the record from disk, not memory)
+                # can still show provenance (Design suggestion on #3582).
+                "resolved_model": info.resolved_model,
+                "requested_model": info.requested_model,
                 # keep marks this run's session files as resume material: the
                 # orphan reconciler and tombstone pruner skip file deletion
                 # for keep runs (restart-safe — read from disk, not memory).
@@ -5669,6 +5764,29 @@ class SubagentManager:
             if not event.runtime_global:
                 await self._touch_activity(info)
             if event.kind == EVENT_TEXT_CHUNK:
+                # The CC/raw provider only learns its served model once the
+                # backend answers the first turn — by the first text chunk that
+                # has happened, so refresh here. Runs once (guarded on a still-
+                # empty value) and stays cheap: covers every downstream exit
+                # path (normal, turn_limit, child-escalation, cancel) without
+                # threading the live client through each. Never overwrites a good
+                # spawn-time read with "".
+                if not info.resolved_model:
+                    _live_model = _resolved_model_of(client)
+                    if _live_model:
+                        info.resolved_model = _live_model
+                        # Persist the CC-path refinement so a restart after the
+                        # first turn still recovers the served model. Off-loop
+                        # (to_thread): synchronous fsync must not block the loop
+                        # (GPT review on #3582).
+                        try:
+                            await asyncio.to_thread(
+                                update_state, info.id, resolved_model=_live_model
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to persist refined model for %s", info.id, exc_info=True
+                            )
                 result_text += event.text
                 write_result_chunk(info.id, event.text)
                 redacted = _redact(event.text)

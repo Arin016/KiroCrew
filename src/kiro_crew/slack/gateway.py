@@ -6303,6 +6303,8 @@ class GatewayOrchestrator:
                 outcome=single_outcome,
                 agent_name=info.agent or "",
                 task=task_text,
+                requested_model=info.requested_model or info.model or "",
+                resolved_model=info.resolved_model or "",
             )
 
             parent_key = info.parent_session_key
@@ -7314,6 +7316,8 @@ class GatewayOrchestrator:
                                 outcome=OUTCOME_FAILED,
                                 agent_name=info.agent or "",
                                 task=task_preview,
+                                requested_model=info.requested_model or info.model or "",
+                                resolved_model=info.resolved_model or "",
                             )
                         },
                     )

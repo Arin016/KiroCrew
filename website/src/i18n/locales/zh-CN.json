@@ -7926,6 +7926,8 @@
         "stopped": "已停止",
         "subagent": "子代理 {{label}}",
         "subagents": "子代理",
+        "model_label": "模型：{{model}}",
+        "model_downgraded": "请求 {{requested}}，实际 {{resolved}}",
         "waiting_for_output": "等待输出…",
         "waiting_to_start_queued_behind_the_concurrency_l": "等待开始 — 受并发上限限制正在排队",
         "workflows": "工作流",

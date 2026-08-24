@@ -8029,6 +8029,8 @@
         "stopped": "रुका हुआ",
         "subagent": "सबएजेंट {{label}}",
         "subagents": "सब-एजेंट",
+        "model_label": "मॉडल: {{model}}",
+        "model_downgraded": "अनुरोधित {{requested}}, प्रयुक्त {{resolved}}",
         "waiting_for_output": "आउटपुट की प्रतीक्षा…",
         "waiting_to_start_queued_behind_the_concurrency_l": "शुरू होने की प्रतीक्षा — समांतरता सीमा के कारण कतार में",
         "workflows": "वर्कफ़्लो",

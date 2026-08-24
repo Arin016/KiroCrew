@@ -8132,6 +8132,8 @@
         "stopped": "Arrestato",
         "subagent": "Subagente {{label}}",
         "subagents": "Subagenti",
+        "model_label": "Modello: {{model}}",
+        "model_downgraded": "Richiesto {{requested}}, servito {{resolved}}",
         "waiting_for_output": "In attesa dell'output…",
         "waiting_to_start_queued_behind_the_concurrency_l": "in attesa di avvio — in coda a causa del limite di concorrenza",
         "workflows": "Workflow",

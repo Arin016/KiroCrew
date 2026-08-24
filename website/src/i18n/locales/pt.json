@@ -8132,6 +8132,8 @@
         "stopped": "Interrompido",
         "subagent": "Subagente {{label}}",
         "subagents": "Subagentes",
+        "model_label": "Modelo: {{model}}",
+        "model_downgraded": "Solicitado {{requested}}, servido {{resolved}}",
         "waiting_for_output": "Aguardando a saída…",
         "waiting_to_start_queued_behind_the_concurrency_l": "aguardando para iniciar — na fila devido ao limite de simultaneidade",
         "workflows": "Workflows",

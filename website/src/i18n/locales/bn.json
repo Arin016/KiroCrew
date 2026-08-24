@@ -8029,6 +8029,8 @@
         "stopped": "থামানো হয়েছে",
         "subagent": "সাবএজেন্ট {{label}}",
         "subagents": "সাবএজেন্ট",
+        "model_label": "মডেল: {{model}}",
+        "model_downgraded": "অনুরোধ {{requested}}, ব্যবহৃত {{resolved}}",
         "waiting_for_output": "আউটপুটের অপেক্ষায়…",
         "waiting_to_start_queued_behind_the_concurrency_l": "শুরুর অপেক্ষায় — কনকারেন্সি সীমার পেছনে সারিতে আছে",
         "workflows": "ওয়ার্কফ্লো",
