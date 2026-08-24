@@ -181,8 +181,8 @@ SUPPRESS_RE = re.compile(r"#\s*lockdown-ok\s*:\s*(?P<reason>\S.*)$")
 #: one, so an allowlist entry would quietly widen into a whole-function waiver.
 KNOWN_UNCONVERTED: dict[str, tuple[str, str]] = {
     # Classified by #5346 -- the sites #5307's third acceptance criterion left
-    # untriaged. The two snapshot ones are a shutil.copy2 into a final
-    # destination, so they need copy-to-temp + restrict + replace rather than a
+    # untriaged. The remaining snapshot one is a shutil.copy2 into a final
+    # destination, so it needs copy-to-temp + restrict + replace rather than a
     # one-line atomic_write swap.
     #
     # #5285's six sites were here until main converted them mid-review; the
