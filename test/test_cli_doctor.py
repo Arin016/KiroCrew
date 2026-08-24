@@ -302,6 +302,69 @@ class TestTrustRoot:
         assert "⚠" not in out
 
 
+class TestStrictIdentity:
+    """Doctor names the live strict-identity source, or the missing one.
+
+    The failure this surfaces is otherwise silent-per-call: a warm-pool
+    session (macOS/Windows) calling a strict tool on an unpooled server with
+    a broken trust root gets 'cannot verify which session is calling' with
+    no hint at the topology cause.
+    """
+
+    class _Cfg:
+        class _GW:
+            def __init__(self, stubs):
+                self.stub_servers = stubs
+
+        def __init__(self, stubs):
+            self.mcp_gateway = self._GW(stubs)
+
+    def test_skipped_on_linux(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(cli_doctor._plat, "system", lambda: "Linux")
+        issues: list = []
+        cli_doctor._doctor_strict_identity(self._Cfg([]), issues)
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    def test_all_identity_servers_routed_is_healthy(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(cli_doctor._plat, "system", lambda: "Darwin")
+        issues: list = []
+        cli_doctor._doctor_strict_identity(
+            self._Cfg(list(cli_doctor._STRICT_IDENTITY_SERVERS)), issues
+        )
+        out = capsys.readouterr().out
+        assert "strict identity: ✅" in out and "caller injection" in out
+        assert issues == []
+
+    def test_unrouted_with_healthy_signing_is_covered_by_fallback(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        monkeypatch.setattr(cli_doctor._plat, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            cli_doctor, "signing_health", lambda: (True, tmp_path / "sel_hmac.key")
+        )
+        issues: list = []
+        cli_doctor._doctor_strict_identity(self._Cfg([]), issues)
+        out = capsys.readouterr().out
+        assert "strict identity: ✅" in out and "ancestor lookup" in out
+        assert issues == []
+
+    def test_unrouted_and_broken_signing_warns_and_names_servers(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        monkeypatch.setattr(cli_doctor._plat, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            cli_doctor, "signing_health", lambda: (False, tmp_path / "sel_hmac.key")
+        )
+        issues: list = []
+        cli_doctor._doctor_strict_identity(self._Cfg(["aws-mcp"]), issues)
+        out = capsys.readouterr().out
+        assert "⚠ strict identity" in out
+        assert "kirocrew-core" in out and "kirocrew-dashboard" in out
+        assert "cannot verify which session is calling" in out
+        assert len(issues) == 1
+
+
 class TestSwapTotalProbe:
     """``SwapTotal`` parsed from /proc/meminfo → KiB, or None when unreadable."""
 

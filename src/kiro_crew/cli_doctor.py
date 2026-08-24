@@ -919,6 +919,62 @@ def _doctor_trust_root() -> None:
     print("               restart the gateway if another process relocated it.")
 
 
+#: Builtin MCP servers that resolve STRICT session identity
+#: (``mcp_core._resolve_session_key_strict``) for state-mutating tools —
+#: session control, folders, the work ledger, monitor loops, cron origin,
+#: computer use. Kept in sync with the resolver's importers.
+_STRICT_IDENTITY_SERVERS = (
+    "kirocrew-core",
+    "kirocrew-dashboard",
+    "kirocrew-computer",
+    "kirocrew-cron",
+)
+
+
+def _doctor_strict_identity(cfg: KiroCrewConfig, issues: list[str]) -> None:
+    """Warn when strict session-identity tools have no working identity source.
+
+    On macOS/Windows every dashboard session is served by a warm-pool runtime
+    spawn, which by design carries neither ``KIROCREW_SESSION_KEY`` nor
+    ``KIROCREW_HOST_PID`` in the environment. A strict-identity server then
+    resolves the caller from exactly one of two places: gatewayd's per-call
+    caller injection (only for servers in ``mcp_gateway.stub_servers``) or
+    the signature-verified ancestor lookup (which needs a healthy signing
+    trust root). When a server is unpooled AND signing is broken, every
+    strict tool on it fails closed with "cannot verify which session is
+    calling" — silently, per call. This check turns that silence into one
+    doctor line.
+
+    Linux is skipped: the sandbox launcher exports ``KIROCREW_HOST_PID``
+    there, so the env source works regardless of pooling or signing.
+    """
+    if _plat.system() not in ("Darwin", "Windows"):
+        return
+    try:
+        pooled = set(cfg.mcp_gateway.stub_servers)
+    except Exception:
+        pooled = set()
+    unpooled = [s for s in _STRICT_IDENTITY_SERVERS if s not in pooled]
+    if not unpooled:
+        print("  strict identity: ✅ gateway caller injection (all identity servers routed)")
+        return
+    ok, _key_path = signing_health()
+    if ok:
+        print("  strict identity: ✅ signed-sidecar ancestor lookup covers unrouted servers")
+        return
+    names = ", ".join(unpooled)
+    print(f"  ⚠ strict identity: no working identity source for {names}.")
+    _print_wrapped(
+        "These servers are not in mcp_gateway.stub_servers (no gateway caller "
+        "injection) and the signing trust root is unhealthy (the verified "
+        "ancestor lookup fails closed), so session-control, folder, ledger, "
+        "monitor and cron tools will be refused with 'cannot verify which "
+        "session is calling'. Fix the trust root above, or route the servers "
+        "from MCP Management."
+    )
+    issues.append(f"strict identity: no identity source for {names}")
+
+
 _INDENT = "               "
 
 
@@ -2256,6 +2312,7 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
     _doctor_data_home()
     _doctor_path_launcher()
     _doctor_trust_root()
+    _doctor_strict_identity(cfg, issues)
 
     # ── Agents dir janitor (orphaned atomic-write temps + stale backups) ──
     _doctor_agents_janitor(issues, cfg.agent.sweep_agents_backups)

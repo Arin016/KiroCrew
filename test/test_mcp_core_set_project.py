@@ -53,12 +53,15 @@ class TestResolveSessionKeyStrict:
         monkeypatch.setenv("KIROCREW_SESSION_KEY", "dashboard:slot-B")
         assert mcp_core._resolve_session_key_strict() == "dashboard:slot-B"
 
-    def test_returns_empty_when_only_pid_walk_would_match(self, monkeypatch):
-        """Lenient resolver would walk /proc and find a session_pid_*.txt;
-        strict returns "" so the caller can refuse."""
+    def test_returns_empty_when_only_pid_walk_would_match(self, monkeypatch, tmp_path):
+        """Lenient resolver would walk /proc open-endedly and find a
+        session_pid_*.txt; strict returns "" when no VERIFIED mapping exists
+        within the bounded ancestor hops (config dir isolated to an empty
+        tmp_path so the host machine's real mappings cannot leak in)."""
         monkeypatch.delenv("KIROCREW_SESSION_KEY", raising=False)
         monkeypatch.delenv("KIROCREW_HOST_PID", raising=False)
-        assert mcp_core._resolve_session_key_strict() == ""
+        with patch.object(mcp_core, "config_dir", return_value=tmp_path):
+            assert mcp_core._resolve_session_key_strict() == ""
 
     def test_env_var_wins_over_host_pid(self, monkeypatch, tmp_path):
         """When both identities are present the env var is authoritative."""
@@ -183,6 +186,83 @@ class TestResolveSessionKeyStrict:
             session_pid_sig, "verify_session_pid", side_effect=OSError("boom")
         ):
             assert mcp_core._resolve_session_key_strict() == ""
+
+
+# ─────────────────────── verified ancestor lookup (source 3) ────────────────
+
+
+class TestVerifiedAncestorLookup:
+    """Strict source 3: bounded, signature-verified ancestor lookup.
+
+    Covers the warm-pool + unpooled-server topology (macOS/Windows) where
+    neither env source exists and no gateway caller is injected. The contract
+    under test: a VERIFIED mapping within ``_STRICT_ANCESTOR_HOPS`` resolves;
+    anything else — beyond the bound, unsigned, or absent — fails closed.
+    """
+
+    def _publish(self, tmp_path, pid: int, session_key: str) -> None:
+        from kiro_crew import session_pid_sig
+
+        (tmp_path / "sel_hmac.key").write_bytes(b"k" * 32)
+        with patch.object(session_pid_sig, "config_dir", return_value=tmp_path), \
+             patch.object(
+                 session_pid_sig,
+                 "sel_hmac_key_path",
+                 return_value=tmp_path / "sel_hmac.key",
+             ):
+            session_pid_sig.publish_session_pid(pid, session_key)
+
+    def _strict(self, tmp_path) -> str:
+        from kiro_crew import session_pid_sig
+
+        with patch.object(session_pid_sig, "config_dir", return_value=tmp_path), \
+             patch.object(
+                 session_pid_sig,
+                 "sel_hmac_key_path",
+                 return_value=tmp_path / "sel_hmac.key",
+             ), patch.object(mcp_core, "config_dir", return_value=tmp_path):
+            return mcp_core._resolve_session_key_strict()
+
+    def _chain(self, monkeypatch, *pids: int) -> None:
+        """Fake the process tree: getppid() -> pids[0] -> pids[1] -> ..."""
+        monkeypatch.delenv("KIROCREW_SESSION_KEY", raising=False)
+        monkeypatch.delenv("KIROCREW_HOST_PID", raising=False)
+        monkeypatch.setattr(os, "getppid", lambda: pids[0])
+        links = {pids[i]: pids[i + 1] for i in range(len(pids) - 1)}
+        monkeypatch.setattr(mcp_core, "_get_ppid", lambda p: links.get(p, 0))
+
+    def test_verified_parent_mapping_accepted(self, monkeypatch, tmp_path):
+        """Hop 1: the direct parent owns a signed mapping — accepted."""
+        self._chain(monkeypatch, 7001, 7002)
+        self._publish(tmp_path, 7001, "dashboard:warm-slot")
+        assert self._strict(tmp_path) == "dashboard:warm-slot"
+
+    def test_verified_grandparent_mapping_accepted(self, monkeypatch, tmp_path):
+        """Hop 2 (the measured topology: server -> worker -> host) — accepted."""
+        self._chain(monkeypatch, 7001, 7002, 7003)
+        self._publish(tmp_path, 7002, "dashboard:warm-slot-2")
+        assert self._strict(tmp_path) == "dashboard:warm-slot-2"
+
+    def test_mapping_beyond_hop_bound_refused(self, monkeypatch, tmp_path):
+        """Hop 3 is where a parent slot's host could live — never reached."""
+        self._chain(monkeypatch, 7001, 7002, 7003, 7004)
+        self._publish(tmp_path, 7003, "dashboard:parent-slot")
+        assert self._strict(tmp_path) == ""
+
+    def test_unsigned_near_mapping_blocks_hop_skip(self, monkeypatch, tmp_path):
+        """A forged unsigned .txt at hop 1 must fail closed, NOT be skipped
+        in favour of a legitimately-signed mapping at hop 2 — hop-skipping
+        would let a same-uid forger steer resolution."""
+        self._chain(monkeypatch, 7001, 7002, 7003)
+        self._publish(tmp_path, 7002, "dashboard:legit-slot")
+        # Forge: bare .txt with no sidecar at the NEAR hop.
+        (tmp_path / "session_pid_7001.txt").write_text("dashboard:forged-slot")
+        assert self._strict(tmp_path) == ""
+
+    def test_no_mappings_anywhere_returns_empty(self, monkeypatch, tmp_path):
+        self._chain(monkeypatch, 7001, 7002, 7003)
+        (tmp_path / "sel_hmac.key").write_bytes(b"k" * 32)
+        assert self._strict(tmp_path) == ""
 
 
 # ───────────────────────────── set_project tool ─────────────────────────────

@@ -616,11 +616,59 @@ def _resolve_session_key() -> str:
     return ""
 
 
-def _resolve_session_key_strict() -> str:
-    """Resolve the session key, refusing PID-walked and unsigned identities.
+# Maximum ancestor hops for the strict resolver's verified fallback
+# (:func:`_resolve_verified_ancestor_key`). The spawn topology places an MCP
+# server exactly two processes below the kiro-cli host pid the gateway keys
+# ``session_pid_<pid>.txt`` by (server -> kiro-cli worker -> kiro-cli host).
+# A parent slot's host always sits ABOVE the calling server's own host chain
+# — a subagent's MCP server has the subagent's own worker and host between
+# itself and anything of the parent's — so this bound, not the signature, is
+# what keeps a subagent from resolving its parent's identity: the parent's
+# sidecar is legitimately signed and would verify if the walk reached it.
+_STRICT_ANCESTOR_HOPS = 2
 
-    Like ``_resolve_session_key`` but drops the ``/proc`` ancestor walk.
-    Two identity sources are accepted:
+
+def _resolve_verified_ancestor_key() -> str:
+    """Bounded, signature-verified ancestor lookup (strict source 3).
+
+    Covers the topology none of the other strict sources reach: a warm-pool
+    runtime spawn (``acp/runtime.py`` injects neither ``KIROCREW_SESSION_KEY``
+    nor ``KIROCREW_HOST_PID`` — the pool pre-spawns before any session
+    exists) serving an UNPOOLED server (no gatewayd per-call caller). On
+    macOS/Windows that combination previously had no identity source at all,
+    so every strict tool failed closed even though the gateway had published
+    a valid signed mapping for the session's host pid at claim time
+    (``messaging/identity.py`` ``publish_turn_identity``).
+
+    Two rules distinguish this from the lenient resolver's open-ended walk:
+
+    * **Bounded to ``_STRICT_ANCESTOR_HOPS``** — the calling server's own
+      host is within the bound; a parent slot's host never is (see the
+      constant's comment for the topology argument).
+    * **Stops at the first pid that owns a mapping at all** — if the nearest
+      ``session_pid_<pid>.txt`` fails signature verification, fail closed
+      rather than skipping past it: hop-skipping would let a forged unsigned
+      file at the near hop redirect resolution toward a legitimately-signed
+      far hop that is not this process's host.
+    """
+    from kiro_crew.session_pid_sig import read_session_pid_txt, verify_session_pid
+
+    cfg = config_dir()
+    pid = os.getppid()
+    for _ in range(_STRICT_ANCESTOR_HOPS):
+        if pid <= 1:
+            return ""
+        if read_session_pid_txt(pid, cfg):
+            return verify_session_pid(str(pid))
+        pid = _get_ppid(pid)
+    return ""
+
+
+def _resolve_session_key_strict() -> str:
+    """Resolve the session key, refusing open-ended PID walks and unsigned identities.
+
+    Like ``_resolve_session_key`` but drops the open-ended ``/proc`` ancestor
+    walk. Two identity sources are accepted:
 
     1. The gateway-injected ``KIROCREW_SESSION_KEY`` env var.
     2. The direct ``KIROCREW_HOST_PID`` -> ``session_pid_<pid>.txt``
@@ -639,14 +687,24 @@ def _resolve_session_key_strict() -> str:
        in every sandboxed dashboard session even though the session is
        fully identified.
 
-    Returns ``""`` when only the ``/proc`` ancestor WALK would have
-    matched, or when the sidecar is missing/invalid. The walk stays
-    excluded: a subagent spawned via ``spawn_run`` lives under the
-    parent slot's process tree, so walking ancestors from its MCP-core
-    child silently resolves to the parent — which would let the
-    subagent mutate state on the wrong slot. Read-only callers (audit,
-    telemetry) keep the lenient resolver where misattribution is
-    harmless.
+    Returns ``""`` when only the OPEN-ENDED ``/proc`` ancestor WALK would
+    have matched, or when a sidecar is missing/invalid. The open-ended walk
+    stays excluded: a subagent spawned via ``spawn_run`` lives under the
+    parent slot's process tree, so walking ancestors without a bound from
+    its MCP-core child silently resolves to the parent — which would let
+    the subagent mutate state on the wrong slot. Read-only callers (audit,
+    telemetry) keep the lenient resolver where misattribution is harmless.
+
+    Source 3 (accepted LAST, only when the above are all absent): the
+    bounded, signature-verified ancestor lookup
+    (:func:`_resolve_verified_ancestor_key`). This is what gives the
+    warm-pool + unpooled-server topology (macOS/Windows, server not in
+    ``mcp_gateway.stub_servers``) an identity source at all — before it,
+    that combination failed closed on every strict tool despite the gateway
+    having published a valid signed mapping for the session. It is NOT the
+    excluded walk: it is hop-bounded so a parent slot's host is structurally
+    out of reach, and every accepted key must carry a verifying HMAC
+    sidecar.
 
     Source 0 (accepted BEFORE both of the above): the gateway-injected
     per-call caller context. In the pooled topology gatewayd strips any
@@ -671,6 +729,10 @@ def _resolve_session_key_strict() -> str:
             from kiro_crew.session_pid_sig import verify_session_pid
 
             return verify_session_pid(host_pid)
+    except Exception:
+        pass
+    try:
+        return _resolve_verified_ancestor_key()
     except Exception:
         pass
     return ""
