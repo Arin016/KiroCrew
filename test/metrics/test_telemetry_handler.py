@@ -289,6 +289,148 @@ def test_aggregate_cumulative_detects_counter_reset_on_pid_reuse(tmp_path: Path)
     assert rows and rows[0]["total"] == 30.0
 
 
+def _cumulative_metric(points: list[tuple[int, float]]) -> dict:
+    return {
+        "name": "kirocrew.process.cpu.seconds",
+        "data": {
+            "aggregation_temporality": 2,
+            "is_monotonic": True,
+            "data_points": [
+                {"attributes": {}, "value": v, "time_unix_nano": ts} for ts, v in points
+            ],
+        },
+    }
+
+
+def _identity_line(metrics: list, identity: str | None) -> str:
+    """One export-cycle line, optionally stamped like the local exporter.
+
+    The attribute key is spelled literally on purpose: it pins the WIRE format
+    already sitting in shards on disk, so renaming the schema constant cannot
+    silently orphan every stamped shard.
+    """
+    rm: dict = {"scope_metrics": [{"metrics": metrics}]}
+    if identity is not None:
+        rm["resource"] = {"attributes": {"kirocrew.process.start_time": identity}}
+    return json.dumps({"resource_metrics": [rm]})
+
+
+def test_aggregate_cumulative_identity_splits_reused_pid_without_a_value_drop(tmp_path: Path):
+    """A changed identity is a process boundary even when no value drop exists.
+
+    The value heuristic's one blind spot: PID reuse where the new process's
+    FIRST snapshot (150) already exceeds the old process's max (140), so no
+    drop is ever observed and the two lifetimes merge into one stream —
+    reporting 175-100=75, which credits the 140→150 gap between the processes
+    as if it were observed activity. The resource-level identity makes the
+    boundary deterministic: each process is its own stream with its own
+    window-relative baseline, (140-100) + (175-150) = 65.
+    """
+    shard = tmp_path / "metrics-2026-08-21-1234.jsonl"
+    shard.write_text(
+        _identity_line([_cumulative_metric([(100, 100.0), (200, 140.0)])], "111")
+        + "\n"
+        + _identity_line([_cumulative_metric([(300, 150.0), (400, 175.0)])], "222")
+        + "\n",
+        encoding="utf-8",
+    )
+    result = _aggregate([shard])
+    rows = [o for o in result["other"] if o["name"] == "kirocrew.process.cpu.seconds"]
+    assert rows and rows[0]["total"] == 65.0
+
+
+def test_aggregate_cumulative_same_identity_stitches_across_provider_rebuild(tmp_path: Path):
+    """An unchanged identity keeps rebuild segments in ONE stream.
+
+    A telemetry off/on toggle rebuilds the provider in-process; the rebuilt
+    exporter stamps the SAME module-cached token, so its re-emitted snapshots
+    join the existing stream and stay idempotent no-ops — 150-100=50, never a
+    doubled total and never a fresh baseline per rebuild.
+    """
+    shard = tmp_path / "metrics-2026-08-21-1234.jsonl"
+    shard.write_text(
+        _identity_line([_cumulative_metric([(100, 100.0), (200, 140.0)])], "111")
+        + "\n"
+        + _identity_line([_cumulative_metric([(300, 140.0), (400, 150.0)])], "111")
+        + "\n",
+        encoding="utf-8",
+    )
+    result = _aggregate([shard])
+    rows = [o for o in result["other"] if o["name"] == "kirocrew.process.cpu.seconds"]
+    assert rows and rows[0]["total"] == 50.0
+
+
+def test_aggregate_cumulative_identity_stream_treats_a_drop_as_garbage_not_reset(tmp_path: Path):
+    """Within one identity, a value below the running max is never banked.
+
+    One identity is one OS process, whose observable counters are monotonic —
+    so a lower sample is shard garbage. Banking it as a reset would count the
+    pre-drop segment AND the recovery: 140+150-100=190 for a stream whose real
+    in-window growth is 150-100=50.
+    """
+    shard = tmp_path / "metrics-2026-08-21-1234.jsonl"
+    shard.write_text(
+        _identity_line(
+            [_cumulative_metric([(100, 100.0), (200, 140.0), (300, 5.0), (400, 150.0)])],
+            "111",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = _aggregate([shard])
+    rows = [o for o in result["other"] if o["name"] == "kirocrew.process.cpu.seconds"]
+    assert rows and rows[0]["total"] == 50.0
+
+
+def test_aggregate_cumulative_non_string_identity_reads_as_identity_less(tmp_path: Path):
+    """A malformed identity type must not mint a stream or mute the heuristic.
+
+    The exporter only ever writes a string token. A corrupt shard carrying a
+    number/list/object there would, if stringified, create an identity-keyed
+    stream and silently disable reset banking — turning a genuine 100→10→30
+    reset (30 of activity) into max-baseline arithmetic (0). Non-strings read
+    as identity-less, so the value heuristic still banks the reset.
+    """
+    line = {
+        "resource_metrics": [
+            {
+                "resource": {"attributes": {"kirocrew.process.start_time": 12345}},
+                "scope_metrics": [
+                    {"metrics": [_cumulative_metric([(100, 100.0), (200, 10.0), (300, 30.0)])]}
+                ],
+            }
+        ]
+    }
+    shard = tmp_path / "metrics-2026-08-21-1234.jsonl"
+    shard.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    result = _aggregate([shard])
+    rows = [o for o in result["other"] if o["name"] == "kirocrew.process.cpu.seconds"]
+    assert rows and rows[0]["total"] == 30.0
+
+
+def test_aggregate_cumulative_legacy_lines_keep_the_value_heuristic(tmp_path: Path):
+    """Identity-less shards aggregate bit-for-bit as before, alongside stamped ones.
+
+    The legacy stream (no resource field, written before the identity existed)
+    still banks on a value drop — baseline 100, reset to 10, growth to 30 ⇒ 30
+    — while an identity-carrying stream from another process contributes its
+    own window-relative delta (175-150=25). Streams add: 55.
+    """
+    legacy = tmp_path / "metrics-2026-08-21-1234.jsonl"
+    legacy.write_text(
+        _identity_line([_cumulative_metric([(100, 100.0), (200, 10.0), (300, 30.0)])], None) + "\n",
+        encoding="utf-8",
+    )
+    stamped = tmp_path / "metrics-2026-08-21-5678.jsonl"
+    stamped.write_text(
+        _identity_line([_cumulative_metric([(400, 150.0), (500, 175.0)])], "222") + "\n",
+        encoding="utf-8",
+    )
+    result = _aggregate([legacy, stamped])
+    rows = [o for o in result["other"] if o["name"] == "kirocrew.process.cpu.seconds"]
+    assert rows and rows[0]["total"] == 55.0
+
+
 def test_aggregate_cumulative_totals_are_shard_order_independent(tmp_path: Path):
     """Reset detection runs on time-ordered samples, not shard file order.
 

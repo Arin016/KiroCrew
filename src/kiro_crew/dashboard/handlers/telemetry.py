@@ -52,6 +52,7 @@ from kiro_crew.dashboard.handlers.usage import (
 from kiro_crew.dashboard.state import NEW_SESSION_TITLE
 from kiro_crew.hooks import validate_file_path
 from kiro_crew.metrics.provider import TELEMETRY_ENV_VAR, env_pin
+from kiro_crew.metrics.schema import RESOURCE_ATTR_PROCESS_START_TIME
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -591,8 +592,8 @@ def _iter_export_cycles(
 
 def _iter_metric_points(
     shard_paths: list[Path],
-) -> Iterator[tuple[str, dict[str, Any], str, str, dict[str, Any]]]:
-    """Yield ``(name, data point, shard day, shard pid, data block)`` per point.
+) -> Iterator[tuple[str, dict[str, Any], str, str, str, dict[str, Any]]]:
+    """Yield ``(name, data point, shard day, shard pid, identity, data block)``.
 
     Every ``kirocrew.*`` data point is yielded; the name filter is load-bearing
     rather than defensive. One meter carries all three namespaces the recorder
@@ -601,26 +602,37 @@ def _iter_metric_points(
     Dropping the other two here is what keeps them out of :func:`_other_series`,
     whose rows the startup panel renders as core metrics.
 
+    ``identity`` is the writing process's resource-level start-time token
+    (``RESOURCE_ATTR_PROCESS_START_TIME``, stamped by the local exporter), or
+    ``""`` for legacy shards written before the field existed — the scope level
+    is still pure OTLP grouping and stays unread. Tolerate-garbage applies
+    twice: a resource whose shape is not the exporter's dict form, AND a token
+    that is not a string (the exporter only ever writes strings), both read as
+    identity-less rather than raising or minting a spurious identity — a
+    stringified garbage value would silently disable the legacy reset
+    heuristic for that stream.
+
     The metric-level ``data`` block rides along because a Sum's block carries
     ``aggregation_temporality``/``is_monotonic`` while a Gauge's carries neither
     — the scalar branch of :func:`_aggregate` classifies on it.
     """
     for obj, shard_day, shard_pid in _iter_export_cycles(shard_paths):
-        # resource -> scope -> metric is pure OTLP grouping; nothing below reads
-        # the resource or the scope.
-        metrics = (
-            m
-            for rm in obj.get("resource_metrics", []) or []
-            for sm in rm.get("scope_metrics", []) or []
-            for m in sm.get("metrics", []) or []
-        )
-        for metric in metrics:
-            name = metric.get("name") or ""
-            if not name.startswith("kirocrew."):
-                continue
-            data = metric.get("data") or {}
-            for dp in data.get("data_points", []) or []:
-                yield name, dp, shard_day, shard_pid, data
+        for rm in obj.get("resource_metrics", []) or []:
+            resource = rm.get("resource")
+            res_attrs = resource.get("attributes") if isinstance(resource, dict) else None
+            identity = ""
+            if isinstance(res_attrs, dict):
+                raw = res_attrs.get(RESOURCE_ATTR_PROCESS_START_TIME)
+                if isinstance(raw, str):
+                    identity = raw
+            for sm in rm.get("scope_metrics", []) or []:
+                for metric in sm.get("metrics", []) or []:
+                    name = metric.get("name") or ""
+                    if not name.startswith("kirocrew."):
+                        continue
+                    data = metric.get("data") or {}
+                    for dp in data.get("data_points", []) or []:
+                        yield name, dp, shard_day, shard_pid, identity, data
 
 
 def _daily_series(daily: dict[str, dict[str, _Hist]]) -> list[dict[str, Any]]:
@@ -676,7 +688,7 @@ def _other_series(
 
 
 def _cumulative_series(
-    other_cum: dict[str, dict[tuple[str, str], list[tuple[int, float]]]],
+    other_cum: dict[str, dict[tuple[str, str, str], list[tuple[int, float]]]],
 ) -> list[dict[str, Any]]:
     """Window-relative totals for CUMULATIVE sums, name-sorted.
 
@@ -694,30 +706,46 @@ def _cumulative_series(
       process that started in-window loses at most the activity before its
       first export cycle — under-reporting, never over-reporting.
 
-    Within a sorted stream, counter-RESET detection still applies: a value
-    dropping below its own segment max marks a process boundary (PID reuse,
-    restart), banking the finished segment; re-emitted snapshots >= the max are
-    no-ops, so provider rebuilds (telemetry off/on) stay idempotent. Stream
-    total = banked segments + live segment - baseline (never negative: the
-    baseline is a member of the first segment, so that segment's max bounds
-    it); cross-process total = sum over streams.
+    Streams are keyed by (shard PID, process identity, attrs). The identity is
+    the resource-level start-time token the exporter stamps
+    (``RESOURCE_ATTR_PROCESS_START_TIME``), so a PID reused by a new process
+    lands in a NEW stream deterministically — each process contributes its own
+    window-relative delta even when the reuser's first snapshot already exceeds
+    the predecessor's maximum, the one shape the value heuristic below cannot
+    see. An unchanged identity across provider rebuilds (telemetry off/on)
+    stitches the rebuild segments into one stream. Within an identity-keyed
+    stream a value below the running maximum is shard garbage, never a reset:
+    one identity is one OS process, whose observable counters are monotonic,
+    and banking a garbage drop would double-count the recovery.
+
+    The value-below-segment-max RESET heuristic applies ONLY to identity-less
+    streams (legacy shards written before the field existed, or platforms
+    whose start-time read is unavailable): a drop marks a process boundary,
+    banking the finished segment; re-emitted snapshots >= the max are no-ops,
+    so provider rebuilds stay idempotent. Either way, stream total = banked
+    segments + live segment - baseline (never negative: the baseline is a
+    member of the first segment, so that segment's max bounds it);
+    cross-process total = sum over streams.
     """
     out: list[dict[str, Any]] = []
     for name in sorted(other_cum):
         cum_attrs: dict[str, float] = {}
         cum_total = 0.0
-        for (_, csig), samples in other_cum[name].items():
+        for (_, identity, csig), samples in other_cum[name].items():
             ordered = sorted(samples, key=lambda t: t[0])
             baseline = ordered[0][1]
-            banked = 0.0
-            seg: float | None = None
-            for _, val in ordered:
-                if seg is not None and val < seg:
-                    banked += seg
-                    seg = val
-                else:
-                    seg = val if seg is None else max(seg, val)
-            cval = banked + (seg or 0.0) - baseline
+            if identity:
+                cval = max(val for _, val in ordered) - baseline
+            else:
+                banked = 0.0
+                seg: float | None = None
+                for _, val in ordered:
+                    if seg is not None and val < seg:
+                        banked += seg
+                        seg = val
+                    else:
+                        seg = val if seg is None else max(seg, val)
+                cval = banked + (seg or 0.0) - baseline
             if csig:
                 cum_attrs[csig] = cum_attrs.get(csig, 0.0) + cval
             else:
@@ -809,16 +837,19 @@ def _aggregate(shard_paths: list[Path]) -> dict[str, Any]:
     # concurrently — collapsing them on timestamp alone would show whichever
     # process exported last as "the" process state.
     other_gauge: dict[str, dict[tuple[str, str], tuple[int, float]]] = {}
-    # CUMULATIVE sums (observable counters): per (pid, attrs) stream, buffer
-    # (time_unix_nano, value) samples during the scan. The reduction —
-    # timestamp ordering, counter-RESET detection, window-relative baseline —
-    # happens in _cumulative_series once the scan is done, because shard
-    # iteration order is not chronological and reset detection is only sound
-    # on a time-ordered stream.
-    other_cum: dict[str, dict[tuple[str, str], list[tuple[int, float]]]] = {}
+    # CUMULATIVE sums (observable counters): per (pid, process-identity,
+    # attrs) stream, buffer (time_unix_nano, value) samples during the scan.
+    # The identity is the resource-level start-time token, so a reused PID
+    # starts a NEW stream deterministically ("" for legacy shards, which
+    # reduce under the value heuristic). The reduction — timestamp ordering,
+    # counter-RESET detection, window-relative baseline — happens in
+    # _cumulative_series once the scan is done, because shard iteration order
+    # is not chronological and reset detection is only sound on a time-ordered
+    # stream.
+    other_cum: dict[str, dict[tuple[str, str, str], list[tuple[int, float]]]] = {}
     turn = _Hist()
 
-    for name, dp, shard_day, shard_pid, data in _iter_metric_points(shard_paths):
+    for name, dp, shard_day, shard_pid, identity, data in _iter_metric_points(shard_paths):
         attrs = dp.get("attributes") or {}
         is_hist = "bucket_counts" in dp
         if name == _STARTUP_METRIC and is_hist:
@@ -875,9 +906,9 @@ def _aggregate(shard_paths: list[Path]) -> dict[str, Any]:
             # accumulate across cycles. CUMULATIVE sums (observable counters:
             # CPU seconds, GC stats) re-emit a process-lifetime snapshot every
             # cycle, so summing them would multiply by cycle count — they are
-            # buffered per (PID, attrs) stream and reduced window-relative
-            # after the scan (_cumulative_series). Gauges keep the newest
-            # sample per attribute set.
+            # buffered per (PID, identity, attrs) stream and reduced
+            # window-relative after the scan (_cumulative_series). Gauges keep
+            # the newest sample per attribute set.
             is_sum = "aggregation_temporality" in data or "is_monotonic" in data
             try:
                 # OTel JSON: DELTA=1, CUMULATIVE=2. Same chokepoint contract
@@ -894,7 +925,9 @@ def _aggregate(shard_paths: list[Path]) -> dict[str, Any]:
                     # it the stream baseline, resurrecting the
                     # lifetime-as-window-total bug on one corrupt record.
                     continue
-                other_cum.setdefault(name, {}).setdefault((shard_pid, key), []).append((ts, val))
+                other_cum.setdefault(name, {}).setdefault((shard_pid, identity, key), []).append(
+                    (ts, val)
+                )
             elif is_sum:
                 rec = other_ctr.setdefault(name, {"total": 0.0, "by_attr": {}})
                 rec["total"] += val

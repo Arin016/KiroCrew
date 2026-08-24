@@ -177,10 +177,14 @@ def test_observable_counters_survive_provider_rebuild(tmp_path):
     provider, and telemetry consent changes rebuild the provider in-process —
     the first post-rebuild collection would re-emit the process-lifetime total
     as one giant delta. With CUMULATIVE export each cycle re-emits the running
-    snapshot, and the aggregator reduces the (PID, attrs) stream time-ordered
-    and window-relative, so two providers writing to the same shard (an off/on
-    toggle) still aggregate to the in-window activity: never a doubled 250,
-    never the four export cycles summed (500), and never the raw lifetime
+    snapshot, and the aggregator reduces the (PID, process-identity, attrs)
+    stream time-ordered and window-relative — both providers run in THIS
+    process, so the exporter stamps the same module-cached identity on every
+    record and the segments stitch into one stream (on a platform without a
+    start-time read the records carry no identity and the value heuristic
+    stitches them identically). Two providers writing to the same shard (an
+    off/on toggle) still aggregate to the in-window activity: never a doubled
+    250, never the four export cycles summed (500), and never the raw lifetime
     snapshot — the stream's first sample (100) is the baseline, so the growth
     to 150 reports as 50.
     """
