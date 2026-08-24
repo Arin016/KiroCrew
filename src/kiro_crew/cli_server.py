@@ -86,6 +86,7 @@ from kiro_crew.session import SessionManager
 from kiro_crew.skill_usage import register_skill_read_observer
 from kiro_crew.skills import SkillsLoader
 from kiro_crew.slack.gateway import run_gateway
+from kiro_crew.subprocess_utf8 import UTF8_TEXT
 from kiro_crew.taskrunner import TaskRunner
 from kiro_crew.vector_memory import VectorMemoryStore
 
@@ -1026,8 +1027,8 @@ def _update(force: bool = False) -> None:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=proj,
         capture_output=True,
-        text=True,
         timeout=10,
+        **UTF8_TEXT,
     )
     if branch_result.returncode != 0:
         print("❌ Could not determine current branch")
@@ -1052,8 +1053,8 @@ def _update(force: bool = False) -> None:
         ["git", "fetch", "origin", branch],
         cwd=proj,
         capture_output=True,
-        text=True,
         timeout=60,
+        **UTF8_TEXT,
     )
     if result.returncode != 0:
         print(f"  ❌ git fetch failed:\n{result.stderr.strip()}")
@@ -1153,8 +1154,8 @@ def _update(force: bool = False) -> None:
         ["git", "status", "--porcelain"],
         cwd=proj,
         capture_output=True,
-        text=True,
         timeout=10,
+        **UTF8_TEXT,
     )
     tracked_changes = [
         line for line in status.stdout.strip().splitlines() if not line.startswith("??")
@@ -1196,8 +1197,8 @@ def _update(force: bool = False) -> None:
         ["git", "reset", "--hard", f"origin/{branch}"],
         cwd=proj,
         capture_output=True,
-        text=True,
         timeout=10,
+        **UTF8_TEXT,
     )
     if result.returncode != 0:
         print(f"  ❌ git reset failed:\n{result.stderr.strip()}")
@@ -1242,8 +1243,9 @@ def _update(force: bool = False) -> None:
         [sys.executable, "-m", "kiro_crew", "setup", "--agent-only"],
         cwd=proj,
         capture_output=True,
-        text=True,
         timeout=30,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        **UTF8_TEXT,
     )
     if r.returncode == 0:
         print("  ✅ Agent config refreshed (deniedCommands + hooks updated)")
