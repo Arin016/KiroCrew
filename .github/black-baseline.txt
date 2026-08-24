@@ -430,7 +430,6 @@ test/conftest.py
 test/fake_mcp_app_server.py
 test/metrics/test_context_blocks.py
 test/metrics/test_context_occupancy.py
-test/metrics/test_context_trace.py
 test/metrics/test_cost_breakdown.py
 test/metrics/test_gateway_http_metrics.py
 test/metrics/test_generation_disclosure.py

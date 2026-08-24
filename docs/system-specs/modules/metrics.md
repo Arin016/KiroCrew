@@ -663,10 +663,35 @@ growing conversation it is surfaced as **"Not measured"** (never "Kiro built-in"
 and always tagged an estimate — it is not a claim that the bytes are Kiro's or
 unremovable. Rows
 predating the field carry no `ctx_blocks` and are skipped, not zero-filled, so
-the trace starts where the recording does. `handlers/telemetry.py::api_context_trace`
+the trace starts where the recording does. Each turn also carries the row's
+`credits` and `duration_ms` when the shard recorded usable numbers (same
+drop-the-field-not-the-row rule as `TURN_USAGE_FIELDS`): injection and billing
+live on the same shard row, so the trace returns both in one walk rather than
+making the panel re-join through the usage-turns reader what was never apart.
+The chat Activity panel renders them as a per-turn credits column that appears
+only when at least one traced turn carries billing — pre-recorder history stays
+three columns instead of growing an all-dash one.
+`handlers/telemetry.py::api_context_trace`
 serves it as `GET /api/telemetry/context-trace?slot=<session key>` (`400` when
 `slot` is missing or blank), independent of the `telemetry.enabled` switch since
-these rows are always written.
+these rows are always written. The endpoint is **dashboard-only**: unlike
+`/api/usage/turns` this reader has no row-ownership model, and its rows carry
+the turn's billing, so an app caller is refused outright with the standard
+indistinguishable `404` (`code: not_found`) and the refusal is SEL-audited
+(deny-by-default, App Kit §5.2) — an app that needs its own turns' billing has
+`/api/usage/turns`.
+
+**Row-timestamp parsing has one owner.** `usage._parse_row_dt` is the single
+spelling for reading a stored row timestamp (`Z` rewritten to `+00:00` for
+py3.10's `fromisoformat`; a naive stamp left naive so a caller's
+`.timestamp()` reads it in local time); `_parse_row_ts` derives the epoch form,
+and every shard/row reader in the module (`slot_spend`, `context_occupancy`,
+`cost_breakdown`, `slot_turn_usage`, the token-history and transcript-day
+readers) resolves timestamps through them. Two readers of the same rows must
+not disagree about which rows a window contains. `_usage_number` is likewise
+the one guard for copying a numeric field out of a row (bool is not a count;
+ints are accepted directly because `math.isfinite` would overflow on an
+oversized int; a non-finite float is dropped).
 
 **Per-turn usage rows for one session.** `usage.slot_turn_usage(slot, days)` is
 the per-turn drill-down under `slot_spend`'s aggregate: one row per turn with
@@ -696,7 +721,11 @@ decision is SEL-logged — including a malformed request's refusal — and SEL
 plus the enablement probe run off-loop. The window is enforced **per row**,
 not only per shard file (the oldest shard in a window covers a whole day);
 a row whose timestamp cannot be parsed is excluded — accounting excludes
-what it cannot date. Dashboard users (empty request app) read any slot.
+what it cannot date. Dashboard users (empty request app) read any slot; the
+Telemetry panel's Spend table is the dashboard consumer — each session row
+expands into its per-turn rows through this endpoint, which is where a
+mid-session model switch or a single runaway turn becomes visible (an average
+hides both).
 **Stamping boundary:** rows are stamped at the two write sites that can run
 app-owned work — the dashboard chat runner (the slot's `_app`) and the
 subagent completion path (`info.app`, an app-dispatched subagent's spend).

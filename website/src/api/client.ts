@@ -1839,6 +1839,11 @@ export const api = {
   // telemetry main switch: the usage rows it reads are always written.
   telemetryContextTrace: (slot: string) =>
     fetch('/api/telemetry/context-trace?slot=' + encodeURIComponent(slot)).then(j),
+  /** Per-turn usage rows for one session — the Spend table's drill-down.
+   *  Same always-written row store as the context trace; the dashboard reads
+   *  every row (the endpoint's app-ownership filter applies to app callers). */
+  usageTurns: (slot: string) =>
+    fetch('/api/usage/turns?slot=' + encodeURIComponent(slot)).then(j),
   /** Intent summary for the chat summary panel.
    *
    *  Read-only: it never triggers generation. Summaries are produced at turn end

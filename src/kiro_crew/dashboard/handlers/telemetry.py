@@ -1087,8 +1087,29 @@ async def api_context_trace(request: web.Request) -> web.Response:
 
     Independent of the telemetry main switch: the usage rows this reads are
     always written, so the trace works with OTEL collection off.
+
+    Dashboard-only. Unlike ``/api/usage/turns`` this reader has no row-ownership
+    model, and its rows carry the turn's billing — so an app caller is refused
+    outright (deny-by-default, App Kit §5.2) rather than handed an arbitrary
+    slot's data. The 404 is indistinguishable from an unknown route on purpose,
+    and the refusal is SEL-audited like every app-caller decision.
     """
+    request_app = str(request.get("app", "") or "")
     slot = (request.query.get("slot") or "").strip()
+    if request_app:
+
+        def _audit_denied() -> None:
+            _sel_mod.sel().log_api_access(
+                caller=request_app,
+                operation="context_trace",
+                outcome="denied",
+                source="app_isolation",
+                resources=f"slot={slot or '(missing)'}",
+                error="dashboard-only endpoint",
+            )
+
+        await asyncio.to_thread(_audit_denied)
+        return web.json_response({"error": "not found", "code": "not_found"}, status=404)
     if not slot:
         return web.json_response({"error": "slot is required", "code": "slot_required"}, status=400)
     trace = await asyncio.to_thread(context_trace, slot, _WINDOW_DAYS)
