@@ -248,7 +248,6 @@ src/kiro_crew/dashboard/handlers/taskrunner.py
 src/kiro_crew/dashboard/handlers/terminal.py
 src/kiro_crew/dashboard/handlers/themes.py
 src/kiro_crew/dashboard/handlers/tunnel.py
-src/kiro_crew/dashboard/handlers/usage.py
 src/kiro_crew/dashboard/handlers/webapp_preview.py
 src/kiro_crew/dashboard/handlers/weixin_qr.py
 src/kiro_crew/dashboard/handlers_channel.py
