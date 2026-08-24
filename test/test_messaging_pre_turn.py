@@ -243,7 +243,20 @@ class TestPreTurnRatchet:
         # obstacle -- its _handle_busy mirrors webex's, so migration looks
         # mechanical -- but it is still a behaviour change that gets its own
         # review, not a rider in a main-red unblock (#5448).
-        exempt = {"telegram", "discord", "teams", "slack", "weixin", "wecom", "whatsapp"}
+        # feishu likewise drives the busy-check/rotate/latch sequence inside
+        # its own dispatcher (is_busy -> maybe_rotate -> clear_awaiting), so
+        # migrating it onto the helper is a behaviour change that needs its
+        # own review.
+        exempt = {
+            "telegram",
+            "discord",
+            "teams",
+            "slack",
+            "weixin",
+            "wecom",
+            "whatsapp",
+            "feishu",
+        }
         rostered = {d.channel_type for d in builtin_channel_descriptors()}
         unaccounted = rostered - set(_PRE_TURN_CHANNELS) - exempt
         assert not unaccounted, (
