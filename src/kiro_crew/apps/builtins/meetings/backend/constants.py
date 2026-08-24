@@ -107,6 +107,7 @@ CALENDAR_CACHE_FILE = "calendar-cache.json"
 SESSION_META_FILE = "session.json"
 TASKS_FILE = "tasks.json"
 TRANSCRIPT_FILE = "transcript.jsonl"
+TRANSLATIONS_FILE = "translations.json"
 
 # Durable transcript entry sources. Speech is a finalized STT segment; typed is
 # a line submitted through the broadcast bar.
@@ -191,3 +192,50 @@ VALID_REVIEW_STATES = (REVIEW_PENDING, REVIEW_ARCHIVED, REVIEW_PUSHED)
 TASK_PRIORITIES = ("high", "medium", "low")
 DEFAULT_TASK_PRIORITY = "medium"
 TASK_STATES = ("open", "done")
+
+# ── live translation ────────────────────────────────────────────────────────
+
+# Target languages for live transcript translation, as ``(code, label)``.
+#
+# The label is the language's own endonym and is deliberately NOT translated:
+# a picker of target languages is the one place where every option should be
+# readable to whoever wants that option. Same rationale as the dashboard's own
+# UI-language picker.
+#
+# A curated list rather than every code a model might manage: each entry is a
+# promise that the translation is worth reading, and it is the set MeetNote
+# shipped. The empty string is not a member — see DEFAULT_TRANSLATION_LANG.
+TRANSLATION_LANGS: tuple[tuple[str, str], ...] = (
+    ("en", "English"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("zh", "中文 (简体)"),
+    ("zh-TW", "中文 (繁體)"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("pt", "Português"),
+    ("it", "Italiano"),
+    ("ru", "Русский"),
+)
+
+TRANSLATION_LANG_CODES: frozenset[str] = frozenset(code for code, _ in TRANSLATION_LANGS)
+
+#: Off. Live translation costs one model call per spoken line, so it is opt-in —
+#: a default-on feature would bill every meeting for something most do not need.
+DEFAULT_TRANSLATION_LANG = ""
+
+#: Lines waiting to be translated before the OLDEST are dropped.
+#:
+#: Translation runs one line at a time behind live speech, so a slow model builds
+#: a backlog. Dropping is the right failure: the panel is a live aid, and a
+#: translation that arrives ten minutes late is worth less than keeping up with
+#: what is being said now. Transcription and the agents are never affected —
+#: they do not wait on this queue.
+MAX_TRANSLATION_BACKLOG = 40
+
+#: Translated lines retained in ``translations.json``.
+#:
+#: Trimmed from the front when exceeded. Line numbers stay monotonic, so a client
+#: polling with ``since`` is unaffected by trimming — it only loses scroll-back.
+MAX_TRANSLATION_LINES = 2000

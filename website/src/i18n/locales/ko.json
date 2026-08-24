@@ -2860,6 +2860,7 @@
         "highlight_3": "반복되는 음성 인식 오류를 도메인 사전으로 한 번 고치면 이후 모든 회의에서 올바르게 인식됩니다",
         "highlight_4": "등록 전에 추출된 액션 아이템을 검토합니다 — 불필요한 것은 보관하고 나머지는 등록하세요",
         "highlight_5": "교체 가능한 작업·캘린더 제공자: 로컬 작업 원장과 iCalendar (.ics) 리더를 기본 제공하며, 조직이 자체 제공자를 등록할 수 있습니다",
+        "highlight_6": "회의가 진행되는 동안 전사를 다른 언어로 한 줄씩 읽을 수 있습니다",
         "page_label": "회의"
       },
       "meeting": {
@@ -2870,6 +2871,7 @@
         "ended": "종료됨",
         "live": "진행 중",
         "loadFailed": "이 회의를 열 수 없습니다",
+        "moreActions": "추가 작업",
         "noAgents": "활성화된 에이전트 없음",
         "noAgentsHint": "위쪽 바에서 하나를 켜거나 프리셋을 선택하세요.",
         "pause": "일시 중지",
@@ -2879,6 +2881,7 @@
         "retryAgents": "재시도",
         "start": "시작",
         "toggleTasks": "액션 아이템",
+        "toggleTranslation": "번역",
         "unpause": "재개"
       },
       "pillBar": {
@@ -2902,17 +2905,6 @@
         "high": "높음",
         "low": "낮음",
         "medium": "보통"
-      },
-      "transcript": {
-        "empty": "아직 기록이 없습니다",
-        "emptyHintLive": "회의가 진행되면 확정된 음성이 여기에 표시됩니다.",
-        "emptyHintRecorded": "이 회의에는 기록된 내용이 없습니다.",
-        "full": "기록 용량이 가득 찼습니다. 새로운 음성과 브로드캐스트는 더 이상 기록되거나 에이전트에게 전송되지 않습니다.",
-        "jumpToLatest": "최신 내용으로 이동",
-        "live": "실시간",
-        "regionLabel": "회의 기록",
-        "title": "기록",
-        "typed": "입력됨"
       },
       "review": {
         "allDone": "검토 완료",
@@ -2990,7 +2982,10 @@
         "taskProviderTitle": "작업 제공자",
         "termFailed": "해당 수정 항목을 추가할 수 없습니다.",
         "termIncomplete": "인식된 내용과 올바른 표기를 입력하세요.",
-        "title": "회의 설정"
+        "title": "회의 설정",
+        "translationHelp": "발화된 각 줄을 다른 언어로 번역해 회의 중 사이드 패널에 표시합니다. 한 줄마다 모델 호출이 한 번 발생하므로 기본적으로 꺼져 있습니다.",
+        "translationOff": "끄기",
+        "translationTitle": "실시간 번역"
       },
       "taskSidebar": {
         "add": "항목 추가",
@@ -3005,6 +3000,27 @@
         "quickAddPlaceholder": "액션 아이템 추가…",
         "title": "액션 아이템",
         "unassigned": "미할당"
+      },
+      "transcript": {
+        "empty": "아직 기록이 없습니다",
+        "emptyHintLive": "회의가 진행되면 확정된 음성이 여기에 표시됩니다.",
+        "emptyHintRecorded": "이 회의에는 기록된 내용이 없습니다.",
+        "full": "기록 용량이 가득 찼습니다. 새로운 음성과 브로드캐스트는 더 이상 기록되거나 에이전트에게 전송되지 않습니다.",
+        "jumpToLatest": "최신 내용으로 이동",
+        "live": "실시간",
+        "regionLabel": "회의 기록",
+        "title": "기록",
+        "typed": "입력됨"
+      },
+      "translation": {
+        "close": "번역 닫기",
+        "dropped": "따라잡기 위해 일부 줄을 건너뛰었습니다.",
+        "empty": "아직 번역된 내용이 없습니다",
+        "emptyHint": "발화가 있으면 여기에 줄이 표시됩니다.",
+        "lineFailed": "이 줄을 번역할 수 없습니다.",
+        "loading": "불러오는 중…",
+        "pending": "따라잡는 중…",
+        "title": "번역"
       },
       "widgetType": {
         "chat": "채팅",

@@ -30,6 +30,10 @@ from typing import Any
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import store
 from kiro_crew.apps.builtins.meetings.backend.domain.dictionary import DomainDictionary
+from kiro_crew.apps.builtins.meetings.backend.domain.translate import (
+    TranslationQueue,
+    run_oneshot_translation,
+)
 from kiro_crew.llm_helpers import ToolApprovalPolicy, stream_and_collect
 from kiro_crew.security import redact
 from kiro_crew.sel import sel
@@ -445,6 +449,12 @@ class MeetingSession:
     #: mid-conversation with nothing to say a turn was lost — the exact silent gap
     #: the marker exists to prevent.
     init_dropped_recipients: set[str] = field(default_factory=set)
+    #: Data root override, threaded through so the translation worker's writes land
+    #: in the test tmp dir rather than the real app data dir.
+    root: Any = None
+    #: Live transcript translation, or None when no target language is configured
+    #: (the default). Not an ``AgentQueue``: see ``domain/translate.py``.
+    translations: "TranslationQueue | None" = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         config = self.config if self.config is not None else store.read_config()
@@ -459,6 +469,18 @@ class MeetingSession:
         self.agents[k.TASK_EXTRACTOR_ID] = self._make_queue(
             k.TASK_EXTRACTOR_ID, k.TASK_EXTRACTOR_AGENT
         )
+        # Live translation, only when a target language is configured. Built here
+        # rather than lazily so the language is fixed for the meeting: changing it
+        # mid-flight would interleave two languages in one panel.
+        language = str(config.get("translation_language") or "")
+        if language in k.TRANSLATION_LANG_CODES and self.sessions is not None:
+            sessions = self.sessions
+            self.translations = TranslationQueue(
+                meeting_id=self.meeting_id,
+                language=language,
+                runner=lambda prompt: run_oneshot_translation(sessions, prompt),
+                root=self.root,
+            )
 
     def _make_queue(self, agent_id: str, agent: str) -> AgentQueue:
         return AgentQueue(
@@ -504,6 +526,13 @@ class MeetingSession:
         prepared = self._prepare_line(text)
         if not prepared:
             return 0
+        # Translated from the DICTIONARY-CORRECTED text, and from inside the same
+        # noise gate the agents get: the corrections exist because speech-to-text
+        # mangles project nouns, and a mangled noun mistranslates into something
+        # unrecognisable. Enqueueing never blocks or raises, and the count below
+        # deliberately does not include it — `dispatched` means "agents reached".
+        if self.translations is not None:
+            self.translations.enqueue(text)
         accepted = 0
         for name in self._recipient_names():
             self.agents[name].enqueue(prepared)
@@ -617,9 +646,26 @@ class MeetingSession:
         for queue in self.agents.values():
             await queue.flush_now()
 
+    def cancel_translations(self) -> None:
+        """Drop pending translation work.
+
+        Deliberately NOT part of ``flush_all``: the agent flush exists to save
+        transcript that would otherwise be lost from the notes, whereas a pending
+        translation is a live reading aid for a meeting that has just ended.
+        Waiting on up to a backlog's worth of model calls would make shutdown slow
+        to produce something nobody is looking at.
+        """
+        if self.translations is not None:
+            self.translations.clear()
+
     def cancel_all(self) -> None:
         for queue in self.agents.values():
             queue.cancel()
+        # Every teardown path reaches here (``drain_and_clear`` composes ``clear``,
+        # which calls this), so cancelling translations here rather than at each
+        # call site is what makes it impossible to leave a worker running against a
+        # meeting that is gone.
+        self.cancel_translations()
 
     def resume_all(self) -> list[str]:
         resumed: list[str] = []

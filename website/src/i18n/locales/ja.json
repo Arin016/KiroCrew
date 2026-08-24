@@ -2860,6 +2860,7 @@
         "highlight_3": "ドメイン辞書で音声テキスト変換の誤りを一度修正すると、その後のすべての会議で修正されます",
         "highlight_4": "抽出したアクションアイテムを確認してからファイリング—ノイズはアーカイブし、残りをファイル",
         "highlight_5": "プラグ可能なタスクとカレンダープロバイダ。ローカルタスク台帳とiCalendar(.ics)リーダーが付属し、組織は独自のものを登録できます",
+        "highlight_6": "ミーティングの進行中に、文字起こしを別の言語で 1 行ずつ読み返せます",
         "page_label": "会議"
       },
       "meeting": {
@@ -2870,6 +2871,7 @@
         "ended": "終了",
         "live": "ライブ",
         "loadFailed": "この会議を開くことができませんでした",
+        "moreActions": "その他の操作",
         "noAgents": "有効なエージェントなし",
         "noAgentsHint": "上部のバーで1つを有効にするか、プリセットを選択してください。",
         "pause": "一時停止",
@@ -2879,6 +2881,7 @@
         "retryAgents": "再試行",
         "start": "開始",
         "toggleTasks": "アクションアイテム",
+        "toggleTranslation": "翻訳",
         "unpause": "再開"
       },
       "pillBar": {
@@ -2902,17 +2905,6 @@
         "high": "高",
         "low": "低",
         "medium": "中"
-      },
-      "transcript": {
-        "empty": "文字起こしはまだありません",
-        "emptyHintLive": "会議が進むと、確定した発言がここに表示されます。",
-        "emptyHintRecorded": "この会議では文字起こしが記録されませんでした。",
-        "full": "文字起こしが上限に達しました。新しい音声や一斉送信は記録されず、エージェントにも送信されません。",
-        "jumpToLatest": "最新に移動",
-        "live": "ライブ",
-        "regionLabel": "会議の文字起こし",
-        "title": "文字起こし",
-        "typed": "入力"
       },
       "review": {
         "allDone": "すべてレビュー完了",
@@ -2990,7 +2982,10 @@
         "taskProviderTitle": "タスクプロバイダ",
         "termFailed": "その修正を追加できませんでした。",
         "termIncomplete": "聞こえた内容と正しい内容を入力してください。",
-        "title": "ミーティング設定"
+        "title": "ミーティング設定",
+        "translationHelp": "発話された各行を別の言語に翻訳し、ミーティング中にサイドパネルへ表示します。1 行につき 1 回のモデル呼び出しが発生するため、デフォルトではオフです。",
+        "translationOff": "オフ",
+        "translationTitle": "ライブ翻訳"
       },
       "taskSidebar": {
         "add": "追加",
@@ -3005,6 +3000,27 @@
         "quickAddPlaceholder": "アクションアイテムを追加…",
         "title": "アクションアイテム",
         "unassigned": "未割当"
+      },
+      "transcript": {
+        "empty": "文字起こしはまだありません",
+        "emptyHintLive": "会議が進むと、確定した発言がここに表示されます。",
+        "emptyHintRecorded": "この会議では文字起こしが記録されませんでした。",
+        "full": "文字起こしが上限に達しました。新しい音声や一斉送信は記録されず、エージェントにも送信されません。",
+        "jumpToLatest": "最新に移動",
+        "live": "ライブ",
+        "regionLabel": "会議の文字起こし",
+        "title": "文字起こし",
+        "typed": "入力"
+      },
+      "translation": {
+        "close": "翻訳を閉じる",
+        "dropped": "追いつくために一部の行がスキップされました。",
+        "empty": "まだ翻訳はありません",
+        "emptyHint": "発話されると、ここに行が表示されます。",
+        "lineFailed": "この行を翻訳できませんでした。",
+        "loading": "読み込み中…",
+        "pending": "追いついています…",
+        "title": "翻訳"
       },
       "widgetType": {
         "chat": "チャット",

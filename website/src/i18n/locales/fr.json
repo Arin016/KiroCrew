@@ -2972,6 +2972,7 @@
         "highlight_3": "Corrige une seule fois les erreurs récurrentes de reconnaissance vocale grâce à un dictionnaire métier, et toutes les réunions suivantes les écrivent correctement",
         "highlight_4": "Relis les actions extraites avant tout enregistrement — archive le bruit, enregistre le reste",
         "highlight_5": "Fournisseurs de tâches et d’agenda enfichables : un registre de tâches local et un lecteur iCalendar (.ics) sont fournis, et une organisation peut enregistrer les siens",
+        "highlight_6": "Relis la transcription ligne par ligne dans une autre langue pendant que la réunion se déroule",
         "page_label": "Réunions",
         "use_case_1": "Capture une réunion en direct pendant que des agents parallèles produisent la transcription, les notes structurées, le diagramme et la revue des actions à mener.",
         "configuration_1": "Autorise le navigateur à accéder au microphone pour la capture en direct ; configure éventuellement dans les paramètres un chemin ou une URL iCalendar, le registre local des tâches, les rôles d'agent et les termes de correction vocale."
@@ -2984,6 +2985,7 @@
         "ended": "Terminée",
         "live": "En cours",
         "loadFailed": "Impossible d’ouvrir cette réunion",
+        "moreActions": "Plus d'actions",
         "noAgents": "Aucun agent activé",
         "noAgentsHint": "Activez-en un dans la barre ci-dessus, ou choisissez un préréglage.",
         "pause": "Mettre en pause",
@@ -2993,6 +2995,7 @@
         "retryAgents": "Réessayer",
         "start": "Démarrer",
         "toggleTasks": "Actions à suivre",
+        "toggleTranslation": "Traduction",
         "unpause": "Reprendre"
       },
       "pillBar": {
@@ -3016,17 +3019,6 @@
         "high": "Haute",
         "low": "Basse",
         "medium": "Moyenne"
-      },
-      "transcript": {
-        "empty": "Aucune transcription pour le moment",
-        "emptyHintLive": "Les paroles finalisées apparaîtront ici au fil de la réunion.",
-        "emptyHintRecorded": "Aucune transcription n’a été enregistrée pour cette réunion.",
-        "full": "La transcription est pleine. Les nouvelles paroles et diffusions ne seront plus enregistrées ni envoyées aux agents.",
-        "jumpToLatest": "Aller au plus récent",
-        "live": "En direct",
-        "regionLabel": "Transcription de la réunion",
-        "title": "Transcription",
-        "typed": "Saisi"
       },
       "review": {
         "allDone": "Tout est passé en revue",
@@ -3108,7 +3100,10 @@
         "taskProviderTitle": "Fournisseur de tâches",
         "termFailed": "Impossible d’ajouter cette correction.",
         "termIncomplete": "Saisissez ce qui a été entendu et ce qu’il faudrait lire.",
-        "title": "Réglages des réunions"
+        "title": "Réglages des réunions",
+        "translationHelp": "Traduit chaque ligne prononcée dans une autre langue, affichée dans un panneau latéral pendant la réunion. Consomme un appel au modèle par ligne, elle est donc désactivée par défaut.",
+        "translationOff": "Désactivée",
+        "translationTitle": "Traduction en direct"
       },
       "taskSidebar": {
         "add": "Ajouter",
@@ -3125,6 +3120,27 @@
         "quickAddPlaceholder": "Ajouter une action…",
         "title": "Actions à suivre",
         "unassigned": "Non attribuée"
+      },
+      "transcript": {
+        "empty": "Aucune transcription pour le moment",
+        "emptyHintLive": "Les paroles finalisées apparaîtront ici au fil de la réunion.",
+        "emptyHintRecorded": "Aucune transcription n’a été enregistrée pour cette réunion.",
+        "full": "La transcription est pleine. Les nouvelles paroles et diffusions ne seront plus enregistrées ni envoyées aux agents.",
+        "jumpToLatest": "Aller au plus récent",
+        "live": "En direct",
+        "regionLabel": "Transcription de la réunion",
+        "title": "Transcription",
+        "typed": "Saisi"
+      },
+      "translation": {
+        "title": "Traduction",
+        "close": "Fermer la traduction",
+        "empty": "Rien de traduit pour l'instant",
+        "emptyHint": "Les lignes apparaissent ici au fil de la conversation.",
+        "loading": "Chargement…",
+        "lineFailed": "Impossible de traduire cette ligne.",
+        "pending": "Rattrapage en cours…",
+        "dropped": "Certaines lignes ont été ignorées pour suivre le rythme."
       },
       "widgetType": {
         "chat": "Discussion",

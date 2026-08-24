@@ -1842,6 +1842,7 @@
         "highlight_3": "Correct recurring speech-to-text mistakes once with a domain dictionary and every later meeting gets them right",
         "highlight_4": "Review extracted action items before anything is filed — archive the noise, file the rest",
         "highlight_5": "Pluggable task and calendar providers: ships a local task ledger and an iCalendar (.ics) reader, and an organization can register its own",
+        "highlight_6": "Read the transcript back line by line in another language while the meeting runs",
         "page_label": "Meetings",
         "use_case_1": "Capture a live meeting while parallel agents build the transcript, structured notes, diagram, and action-item review.",
         "configuration_1": "Allow browser microphone access for live capture; optionally configure an iCalendar path or URL, the local task ledger, agent roles, and speech-correction terms in Settings."
@@ -1854,6 +1855,7 @@
         "ended": "Ended",
         "live": "Live",
         "loadFailed": "Could not open this meeting",
+        "moreActions": "More actions",
         "noAgents": "No agents enabled",
         "noAgentsHint": "Turn one on in the bar above, or pick a preset.",
         "pause": "Pause",
@@ -1863,6 +1865,7 @@
         "retryAgents": "Retry",
         "start": "Start",
         "toggleTasks": "Action items",
+        "toggleTranslation": "Translation",
         "unpause": "Resume"
       },
       "pillBar": {
@@ -1965,7 +1968,10 @@
         "taskProviderTitle": "Task provider",
         "termFailed": "Could not add that correction.",
         "termIncomplete": "Enter what was heard and what it should say.",
-        "title": "Meetings settings"
+        "title": "Meetings settings",
+        "translationHelp": "Translate each spoken line into another language, shown in a side panel during the meeting. Costs one model call per line, so it is off by default.",
+        "translationOff": "Off",
+        "translationTitle": "Live translation"
       },
       "taskSidebar": {
         "add": "Add",
@@ -1981,6 +1987,16 @@
         "quickAddPlaceholder": "Add an action item…",
         "title": "Action items",
         "unassigned": "Unassigned"
+      },
+      "translation": {
+        "title": "Translation",
+        "close": "Close translation",
+        "empty": "Nothing translated yet",
+        "emptyHint": "Lines appear here as they are spoken.",
+        "loading": "Loading…",
+        "lineFailed": "Could not translate this line.",
+        "pending": "Catching up…",
+        "dropped": "Some lines were skipped to keep up."
       },
       "widgetType": {
         "chat": "Chat",
