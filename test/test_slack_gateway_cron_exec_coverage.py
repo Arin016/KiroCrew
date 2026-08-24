@@ -1432,7 +1432,12 @@ def _message_arm_sessions() -> MagicMock:
 def _channel_transport() -> MagicMock:
     """A MessagingTransport double whose only job is to record outbound sends."""
     transport = MagicMock()
-    transport.capabilities = MagicMock(max_message_chars=4096)
+    # ``max_message_bytes=0`` explicitly: a bare MagicMock attribute is a child
+    # OBJECT, not a number, so ``chunk_for_transport`` cannot compare it and the
+    # send never happens. 0 = not byte-capped, which is the character path these
+    # tests are about (Webex is the byte-capped one). Same reason the fakes in
+    # test_cross_surface_mirror.py and test_chat_runner_coverage.py declare it.
+    transport.capabilities = MagicMock(max_message_chars=4096, max_message_bytes=0)
     transport.send_message = AsyncMock(return_value="m1")
     transport.resolve_configured_target = AsyncMock(return_value=None)
     return transport

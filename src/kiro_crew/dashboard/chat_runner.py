@@ -185,6 +185,7 @@ from kiro_crew.llm_helpers import (
 )
 from kiro_crew.mcp_discovery import kirocrew_managed_names
 from kiro_crew.members import record_activity
+from kiro_crew.messaging.display_safety import redact_for_display
 from kiro_crew.messaging.identity import publish_turn_identity
 from kiro_crew.messaging.link import (
     CHAT_TYPE_DIRECT,
@@ -192,7 +193,7 @@ from kiro_crew.messaging.link import (
     parse_session_key,
     telemetry_channel_of,
 )
-from kiro_crew.messaging.split import split_markdown_safe
+from kiro_crew.messaging.renderer import chunk_for_transport
 from kiro_crew.metrics.events import TURN_TIMEOUT_CAUSE, emit_counter
 from kiro_crew.metrics.provider import get_recorder
 from kiro_crew.platform import redact_via_context
@@ -3016,19 +3017,27 @@ async def _deliver_cross_surface_reply(state: Any, session_key: str, assistant_t
         return
     link, transport = target
     # Redact through the canonical egress shim so a loaded companion's extra
-    # credential/token regexes apply (not just the OSS baseline).
-    text = redact_via_context(assistant_text)
+    # credential/token regexes apply (not just the OSS baseline) -- wrapped in the
+    # DISPLAY-form floor for the reason spelled out at the Slack leg's own
+    # chokepoint (``slack/gateway.py``): this leg does not pass a RENDERER, and a
+    # renderer is where a turn normally gets that floor. A literal-only scan lets a
+    # markdown-collapse credential (``AKIA**...**``, which the client reassembles
+    # whole on screen) reach the channel. ``redact_via_context`` stays the redactor
+    # rather than the neutral ``display_safe``, because it is context-aware and the
+    # shared sink's default pair would silently drop that.
+    text, _ = redact_for_display(assistant_text, redact_via_context)
     # Split on the channel's max message length so a long reply mirrors in full
     # rather than being hard-truncated by the transport (Telegram caps at 4096,
     # and its client slices at that width), matching the Slack leg's chunking.
     #
-    # Fence-safe, not fixed-width: a blind slice through a code block leaves part
-    # two with no opener, so every line in it reads as prose and a channel's
-    # dialect converter rewrites the `**`, `#` and `- ` INSIDE the code. Cron log
-    # and diff dumps are exactly that shape. The shared splitter seals each chunk
-    # with a synthetic closer and reopens the next with the original opener line,
-    # so each part stands alone and no channel needs to re-derive it.
-    parts = split_markdown_safe(text, transport.capabilities.max_message_chars)
+    # ``chunk_for_transport`` measures in the transport's OWN unit -- bytes for a
+    # byte-capped channel (Webex), chars otherwise -- and is fence-safe on both
+    # paths: a blind slice through a code block leaves part two with no opener, so
+    # every line in it reads as prose and a channel's dialect converter rewrites
+    # the `**`, `#` and `- ` INSIDE the code. Cron log and diff dumps are exactly
+    # that shape. The shared splitter seals each chunk with a synthetic closer and
+    # reopens the next with the original opener line, so each part stands alone.
+    parts = chunk_for_transport(text, transport.capabilities)
     try:
         for part in parts:
             await transport.send_message(link.channel_id, part, thread_id=link.thread_id)
@@ -3088,8 +3097,14 @@ def _prepare_mirror_msg(raw_user_message: str) -> str:
     egress shim so a loaded companion's extra credential/token regexes apply.
     The shim's standalone fallback is the OSS baseline ``security.redact``, so a
     standalone host keeps the previous redaction behaviour.
+
+    Scanned in DISPLAY form as well, like the assistant leg above and the Slack
+    chokepoint: this echo goes to a channel without passing a renderer, and a
+    credential the user typed with markdown between its halves is whole once the
+    client renders the markup away.
     """
-    return redact_via_context((raw_user_message or "")[:500])
+    safe, _ = redact_for_display((raw_user_message or "")[:500], redact_via_context)
+    return safe
 
 
 def _flush_segment(
