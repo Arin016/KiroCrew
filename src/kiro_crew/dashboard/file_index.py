@@ -12,11 +12,19 @@ from kiro_crew.security import is_sensitive_path
 
 logger = logging.getLogger(__name__)
 
-# Dot-prefixed dirs (.kirocrew, .kiro, .aim, .git) are already excluded by
-# the ``not d.startswith(".")`` guard in _walk(), so only non-dot dirs here.
+# Directory names that are neither offered as @-mention candidates nor
+# descended into: build/dependency noise nobody references.
 _SKIP_DIRS = frozenset({
     "node_modules", "__pycache__", "venv",
     "dist", "build", "env", "out", "target",
+})
+
+# Dot-prefixed directories are OFFERED as candidates (e.g. .github, .kiro,
+# .claude) but never descended into. These specific dot-dirs are the exception:
+# they are pure tooling/VCS noise, so they are excluded from candidacy too.
+_SKIP_DOT_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".cache", ".venv", ".tox", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache",
 })
 
 _REFRESH_SECS = 30
@@ -120,12 +128,28 @@ class FileIndex:
         # a dismissed consent dialog would be re-triggered on every refresh --
         # which is how one prompt becomes a recurring stream of them.
         for dirpath, dirnames, filenames in os.walk(self.root):
+            # Directory candidates OFFERED to the picker: dot-prefixed dirs are
+            # included (a user references .github/.kiro/.claude), but build/VCS
+            # noise (_SKIP_DIRS, _SKIP_DOT_DIRS) is not. TCC-gated folders are
+            # pruned so scoring them never pops a consent dialog.
+            dir_candidates = platform_compat.tcc_prune_walk_dirs(
+                self.root,
+                dirpath,
+                [
+                    d for d in dirnames
+                    if d not in _SKIP_DIRS
+                    and not (d.startswith(".") and d in _SKIP_DOT_DIRS)
+                ],
+            )
+            # DESCENT is separate: never walk INTO a dot-dir (its contents are
+            # not offered) or a skip-dir. This must stay pruned independently of
+            # the candidate list above, or the two purposes collide (#5677).
             dirnames[:] = platform_compat.tcc_prune_walk_dirs(
                 self.root,
                 dirpath,
                 [d for d in dirnames if not d.startswith(".") and d not in _SKIP_DIRS],
             )
-            for dname in dirnames:
+            for dname in dir_candidates:
                 if len(entries) >= _MAX_ENTRIES:
                     truncated = True
                     break

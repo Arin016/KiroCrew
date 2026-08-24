@@ -67,6 +67,52 @@ class TestFileIndex:
             idx.stop()
 
     @pytest.mark.asyncio
+    async def test_dot_prefixed_dirs_are_offered_as_candidates(self, tmp_path):
+        """A dot-prefixed directory (.github, .kiro) is a valid @-mention target.
+
+        The prune of ``dirnames`` stops ``os.walk`` descending into dot-dirs, but
+        it must not also stop the directory itself from being OFFERED as a search
+        candidate -- that was the bug in #5677 (the directory was never scored).
+        """
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".kiro").mkdir()
+        idx = FileIndex(str(tmp_path))
+        await idx.start()
+        try:
+            all_names = {e[1] for e in idx._entries}
+            assert ".github" in all_names
+            assert ".kiro" in all_names
+            # And they are reachable by the picker, dot typed or not.
+            assert any(r["name"] == ".github" for r in idx.search(".github", _scorer))
+            assert any(r["name"] == ".github" for r in idx.search("github", _scorer))
+        finally:
+            idx.stop()
+
+    @pytest.mark.asyncio
+    async def test_dot_dirs_offered_but_not_descended(self, tmp_path):
+        """Offering a dot-dir must not descend into it or offer noise dot-dirs.
+
+        ``.github`` is offered but its contents are not walked (dot-dirs are not
+        descended), while ``.git`` and other noise dirs stay excluded entirely.
+        """
+        gh = tmp_path / ".github"
+        gh.mkdir()
+        (gh / "hello_inner.py").write_text("x")  # inside a dot-dir: not descended
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "hello_obj").write_text("g")
+        idx = FileIndex(str(tmp_path))
+        await idx.start()
+        try:
+            all_names = {e[1] for e in idx._entries}
+            assert ".github" in all_names  # the dir itself is a candidate
+            assert "hello_inner.py" not in all_names  # but we did not descend
+            assert ".git" not in all_names  # noise dot-dir stays excluded
+            assert "hello_obj" not in all_names
+        finally:
+            idx.stop()
+
+    @pytest.mark.asyncio
     async def test_search_returns_empty_for_no_match(self, tmp_path):
         _populate(tmp_path)
         idx = FileIndex(str(tmp_path))

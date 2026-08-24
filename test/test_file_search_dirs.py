@@ -47,8 +47,10 @@ def _populate(tmp_path):
     (nested / "leaf.py").write_text("z")
     # An empty directory: proof dirs are walked, not derived from file paths.
     (tmp_path / "widgetsempty").mkdir()
-    # Excluded: dot-prefixed and skip-listed dirs
+    # A dot-prefixed dir is now OFFERED as a candidate (#5677), but its
+    # contents are still not descended into and skip-listed dirs stay excluded.
     (tmp_path / ".widgetshidden").mkdir()
+    (tmp_path / ".widgetshidden" / "widgetsburied.py").write_text("h")
     nm = tmp_path / "node_modules"
     nm.mkdir()
     (nm / "widgetsdep").mkdir()
@@ -112,13 +114,18 @@ class TestFileIndexDirs:
             idx.stop()
 
     @pytest.mark.asyncio
-    async def test_index_excludes_hidden_and_skip_dirs(self, tmp_path):
+    async def test_index_offers_dot_dirs_but_excludes_skip_dirs(self, tmp_path):
         _populate(tmp_path)
         idx = FileIndex(str(tmp_path))
         await idx.start()
         try:
             names = {r["name"] for r in idx.search("widgets", _scorer, 50, "dirs")}
-            assert ".widgetshidden" not in names
+            # #5677: a dot-prefixed dir is now a valid candidate...
+            assert ".widgetshidden" in names
+            # ...but its contents are still not descended into.
+            all_names = {e[1] for e in idx._entries}
+            assert "widgetsburied.py" not in all_names
+            # Skip-listed dirs and their contents stay excluded.
             assert "widgetsdep" not in names
             assert "node_modules" not in names
         finally:
@@ -228,14 +235,16 @@ class TestApiFileSearchDirs:
             assert kinds == {"dir", "file"}
 
     @pytest.mark.asyncio
-    async def test_walk_fallback_excludes_hidden_and_skip_dirs(self, tmp_path, mock_sel):
+    async def test_walk_fallback_offers_dot_dirs_but_excludes_skip_dirs(self, tmp_path, mock_sel):
         _populate(tmp_path)
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.get(
                 f"/api/file-search?q=widgets&kinds=dirs&project={tmp_path}"
             )
             names = {r["name"] for r in (await resp.json())["results"]}
-            assert ".widgetshidden" not in names
+            # #5677: dot-prefixed dir offered; skip-listed content excluded.
+            assert ".widgetshidden" in names
+            assert "widgetsburied.py" not in names  # dot-dir not descended
             assert "widgetsdep" not in names
 
     @pytest.mark.asyncio
@@ -380,3 +389,32 @@ class TestApiFileSearchDirs:
             f"walk descended {calls['n']} directories of {levels + 1} -- the "
             "dirs-visited ceiling did not stop the traversal"
         )
+
+    @pytest.mark.asyncio
+    async def test_dot_dirs_offered_via_walk_fallback(self, tmp_path, mock_sel):
+        """The filesystem-walk fallback offers dot-prefixed directories too.
+
+        #5677: the walk pruned ``dirnames`` for descent AND used the same pruned
+        list as the directory candidate set, so ``.github``/``.kiro`` were never
+        offered. They must now be reachable (dot typed or not) while ``.git`` and
+        other noise dirs stay excluded and dot-dir contents are not descended.
+        """
+        (tmp_path / ".github").mkdir()
+        gh_inner = tmp_path / ".github" / "widgets_inner.py"
+        gh_inner.write_text("x")  # inside a dot-dir: must not be descended
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "widgets_obj").write_text("g")  # noise dot-dir: excluded
+
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.get(f"/api/file-search?q=.github&project={tmp_path}")
+            names_dotted = [r["name"] for r in (await resp.json())["results"]]
+            resp = await client.get(f"/api/file-search?q=github&project={tmp_path}")
+            names_plain = [r["name"] for r in (await resp.json())["results"]]
+
+        assert ".github" in names_dotted, "dot-dir not offered when the dot is typed"
+        assert ".github" in names_plain, "dot-dir not offered when the dot is omitted"
+        # .git stays excluded; dot-dir contents are not descended.
+        assert ".git" not in names_dotted and ".git" not in names_plain
+        assert "widgets_inner.py" not in names_dotted
+        assert "widgets_obj" not in names_dotted

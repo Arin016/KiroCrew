@@ -2353,7 +2353,9 @@ async def api_file_search(request: web.Request) -> web.Response:
             return web.json_response({"results": trimmed, "root": safe_roots[0]})
 
     # Fallback: walk filesystem per request
-    # Dot-prefixed dirs (.kirocrew, .kiro, .aim) excluded by startswith(".") guard below.
+    # Dot-prefixed dirs are OFFERED as @-mention candidates (e.g. .github,
+    # .kiro) but never descended into. The dotted entries below (.git, .cache,
+    # .venv) are pure noise, so they stay excluded from candidacy too.
     skip_dirs = {
         ".git", "node_modules", "__pycache__", ".cache", ".venv", "venv",
         "dist", "build", "env", "out", "target",
@@ -2432,6 +2434,16 @@ async def api_file_search(request: web.Request) -> web.Response:
                 # Bounds the traversal; the per-kind counters stop advancing once
                 # their kind is done.
                 dirs_visited += 1
+                # Directory candidates OFFERED to the picker include dot-dirs
+                # (.github/.kiro); only build/VCS noise in skip_dirs is dropped.
+                dir_candidates = [d for d in dirnames if d not in skip_dirs]
+                if not scoped:
+                    dir_candidates = platform_compat.tcc_prune_walk_dirs(
+                        root_dir, dirpath, dir_candidates
+                    )
+                # DESCENT is separate: never walk INTO a dot-dir or skip-dir.
+                # Keeping this prune independent of dir_candidates is the #5677
+                # fix -- the same pruned list must not serve both purposes.
                 pruned = [
                     d for d in dirnames
                     if not d.startswith(".") and d not in skip_dirs
@@ -2442,7 +2454,7 @@ async def api_file_search(request: web.Request) -> web.Response:
                 # Files first: under a tight scan budget the file candidates are
                 # the ones that survive.
                 _collect("file", dirpath, filenames, root_dir)
-                _collect("dir", dirpath, dirnames, root_dir)
+                _collect("dir", dirpath, dir_candidates, root_dir)
                 if _full():
                     break
         return found["file"] + found["dir"]
