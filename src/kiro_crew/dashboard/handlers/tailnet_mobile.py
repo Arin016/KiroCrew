@@ -633,12 +633,14 @@ async def api_tailnet_mobile_qr(request: web.Request) -> web.Response:
     try:
 
         image = await asyncio.to_thread(render_qr_data_uri, url)
-    except Exception as exc:
+    except Exception:
         logger.debug("tailnet mobile QR encode failed", exc_info=True)
         _audit(request, "tailnet.mobile.qr", "denied", "encode-failed")
+        # Detail is in the server log above; the client body (rendered verbatim
+        # into a localized UI) gets a generic message.
         return web.json_response(
             {
-                "error": f"Could not render the QR code: {exc}",
+                "error": "Could not render the QR code",
                 "code": "encode_failed",
             },
             status=500,

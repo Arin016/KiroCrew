@@ -738,14 +738,16 @@ async def api_memory_embedding_model(request: web.Request) -> web.Response:
 
     try:
         store = await _get_vector_store_async(state)
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
+    except Exception:  # noqa: BLE001 - surfaced to the caller, not swallowed
         # Acquire the store BEFORE begin_apply(). If this raised after the
         # progress tracker was armed, is_active() would stay true for the rest of
         # the process lifetime and every later apply would 409 while the card
         # polled an indeterminate bar forever.
         logger.warning("Embedding model apply: vector store unavailable", exc_info=True)
+        # Detail is in the server log above; the client body (rendered verbatim
+        # into a localized UI) gets a generic message.
         return web.json_response(
-            {"ok": False, "error": f"vector memory is unavailable: {exc}",
+            {"ok": False, "error": "vector memory is unavailable",
              "code": "vector_store_unavailable"},
             status=503,
         )
