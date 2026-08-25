@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Coroutine, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, TypeVar
 
 from aiohttp import web
 
@@ -1870,101 +1870,6 @@ def _side_effect_reason(segment: str) -> str:
     return ""
 
 
-def _elided_shell_construct(cmd: str) -> str:
-    """Reason *cmd* carries a construct bash REMOVES but ``shlex`` keeps.
-
-    Every operand rule in this module reads `shlex.split`'s token list and
-    assumes it is the argv the program receives. Two shell constructs break that
-    assumption by DELETING words rather than rewriting them, and `shlex` has no
-    concept of either — it hands them back as ordinary tokens:
-
-        git branch injected # --list      shlex: [… 'injected', '#', '--list']
-                                          bash:  git branch injected
-        git branch injected <<< --list    shlex: [… 'injected', '<<<', '--list']
-                                          bash:  git branch injected
-
-    In both, the `--list` this module reads never reaches git. It flips
-    `_GIT_REF_LIST_FLAGS` on, the bare `injected` is reclassified from "creates a
-    ref" to "a pattern", and the segment auto-approves — while bash creates the
-    ref. Measured against real git: `git branch injected # --list`,
-    `git tag forged # --list` and `git branch injected <<< --list` each created
-    the ref, so this is a live auto-approval bypass rather than a parse curiosity.
-
-    Refused as a CLASS rather than repaired. Repairing it means deciding what
-    bash would have deleted — i.e. reimplementing shell word removal on top of
-    the quoting rules `shlex` already models differently — and an earlier
-    revision of this fix tried exactly that and reopened the bypass it closed:
-    reproducing the comment made this scanner keep going after the `#`, and a
-    lone `'` inside comment TEXT (`echo x # don't`) then leaked quote state
-    across the newline, so the next line's forged `# --list` was never removed
-    and `git branch evil # --list` auto-approved again. Refusing on the FIRST
-    hit has no "afterwards" to get wrong. A read-only command needs neither
-    construct, and a refused command falls through to the human approval prompt.
-
-    Every way this scanner can disagree with bash therefore costs a prompt
-    rather than an approval. It is deliberately wider than bash in places —
-    `str.isspace()` accepts separators bash does not (U+00A0), and ANSI-C
-    `$'…\''` quoting is not modelled — and in this direction that is a false
-    refusal, never a false approval.
-
-    Quote-aware on purpose, so it costs no ordinary read. Both constructs are
-    shell syntax only when unquoted, and the common false positives are exactly
-    the quoted and non-word-initial spellings:
-
-        grep '#include' file        `#` inside quotes is data
-        git log --grep=#123         `#` mid-word is not a comment to bash
-        grep "<div>" file           `<` inside quotes is data
-
-    A backslash escape is honoured for the same reason (`grep \\# file`).
-
-    Two costs, stated rather than hidden, and asserted in the tests:
-
-    * An ordinary trailing comment is refused (`git status # note`,
-      `ls -la # list files`). Agent-emitted bash carries one often, so this is
-      the larger everyday cost of the two — a real auto-approve-rate loss, taken
-      knowingly because the alternative above is a live bypass.
-    * An unquoted input redirect is refused even where it is genuinely harmless
-      (`wc -l < file`, `grep pattern < file`), since what makes it dangerous is
-      the token-list divergence, not the direction of the data.
-    """
-    quote: str | None = None
-    # Start-of-string counts as a word boundary: bash reads a leading `#` as a
-    # comment, so `# git status` is an empty command rather than a read.
-    at_word_start = True
-    i = 0
-    n = len(cmd)
-    while i < n:
-        ch = cmd[i]
-        if quote is not None:
-            # Inside double quotes a backslash still escapes; inside single
-            # quotes it is literal, exactly as a shell reads it.
-            if ch == "\\" and quote == '"' and i + 1 < n:
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            i += 1
-            at_word_start = False
-            continue
-        if ch == "\\" and i + 1 < n:
-            # An escaped character is data, including an escaped `#` or `<`.
-            i += 2
-            at_word_start = False
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            at_word_start = False
-            continue
-        if ch == "#" and at_word_start:
-            return "a comment deletes the rest of the line, which `shlex` keeps"
-        if ch == "<":
-            return "an input redirect removes words that `shlex` keeps"
-        at_word_start = ch.isspace()
-        i += 1
-    return ""
-
-
 def _classify_bash(cmd: str) -> str:
     """Single source of truth for read-only bash classification.
 
@@ -1976,13 +1881,6 @@ def _classify_bash(cmd: str) -> str:
     """
     if not cmd.strip():
         return "empty command"
-    # Runs on the RAW command, before any splitting: a comment elides to the end
-    # of the line regardless of the `&&` / `;` boundaries the regex split below
-    # believes in, so `git status && git branch injected # --list` has to be
-    # caught here rather than per-segment.
-    elided = _elided_shell_construct(cmd)
-    if elided:
-        return f"unsafe shell pattern: {elided}"
     # Strip discard-only redirects (output sinks / stderr-merge) before the
     # unsafe-shell check; they are read-only but contain '>' / '&'.
     scrubbed = _DEVNULL_REDIR_RE.sub(" ", cmd)
@@ -2984,7 +2882,8 @@ class _ChatSlot:
         "created_at",
         "messages",
         "total_messages",
-        "task",
+        "_task",
+        "_turn_generation",
         "event",
         "_pending",
         "_pending_consumers",
@@ -3143,7 +3042,11 @@ class _ChatSlot:
         self._source_links_revision = 0
         self._source_links_cache: tuple[tuple[int, int], list[dict]] | None = None
         self.total_messages: int = 0  # lifetime count (survives trimming)
-        self.task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._task: asyncio.Task[Any] | None = None
+        # Monotonic publication history for turn ownership. ``task`` returns to
+        # None after teardown, so consumers that span awaits cannot distinguish
+        # "stayed idle" from "ran and finished" by comparing task references.
+        self._turn_generation: int = 0
         self.event = asyncio.Event()
         self._pending: list[dict[str, str]] = []
         # Number of readers currently treating ``_pending`` as their delivery
@@ -3155,7 +3058,7 @@ class _ChatSlot:
         # purge never runs again for that slot, so the rows it declined to drop
         # outlive every consumer and the leak survives its own fix.
         self._pending_release_deferred: bool = False
-        self._queue: list[dict[str, str]] = []  # [{"id": uuid, "content": str}, ...]
+        self._queue: list[dict[str, Any]] = []  # [{"id": uuid, "content": str}, ...]
         # Newest enqueue instant, read only while ``_queue`` is non-empty — see
         # ``_note_enqueue``.
         self._last_enqueue_ts: str = ""
@@ -4281,7 +4184,14 @@ class _ChatSlot:
 
     # ── Queue helpers (dict-based queue items) ──
 
-    def queue_append(self, content: str, kind: str = "", meta: dict | None = None) -> str:
+    def queue_append(
+        self,
+        content: str,
+        kind: str = "",
+        meta: dict | None = None,
+        *,
+        directive_user_origin: bool = False,
+    ) -> str:
         """Append a message to the queue. Returns the generated queue ID.
 
         ``kind`` is a structural origin tag (e.g. ``"synthetic_recovery"`` for
@@ -4294,6 +4204,10 @@ class _ChatSlot:
         row whose facts were computed at enqueue time (a sub-agent completion's
         structured header — see gateway ``_subagent_done``) keeps them instead of
         forcing the drain to re-derive them from the prose.
+
+        ``directive_user_origin`` is fail-closed provenance for effects that may
+        mutate the owning session. Only authenticated human entry points set it;
+        absent and automation-created entries remain false through queue merges.
         """
         qid = uuid.uuid4().hex[:12]
         # dict[str, Any]: the base entry is all strings, but ``meta`` adds a dict
@@ -4301,6 +4215,8 @@ class _ChatSlot:
         item: dict[str, Any] = {"id": qid, "content": content, "kind": kind}
         if meta:
             item["meta"] = meta
+        if directive_user_origin:
+            item["_directive_user_origin"] = True
         self._queue.append(item)
         self._note_enqueue()
         return qid
@@ -4327,6 +4243,9 @@ class _ChatSlot:
         kind: str = "",
         payload: str = "",
         meta: dict | None = None,
+        on_consumed: Callable[[bool], None] | None = None,
+        on_irreversibly_consumed: Callable[[], Awaitable[None] | None] | None = None,
+        directive_user_origin: bool = False,
     ) -> str:
         """Insert a message at a specific queue position. Returns the queue ID.
 
@@ -4334,16 +4253,33 @@ class _ChatSlot:
         is the orthogonal question of whether the TEXT is runner-authored, read by
         ``is_synthetic_payload_item``; a recovery entry that replays the user's own
         message shares the recovery kind but is not machine speech.
+
+        The consumption callbacks and directive provenance are process-local state
+        for an automatic retry. They follow the exact queue entry through reordering
+        and repeated retries, but queue snapshots expose only id/content and gateway
+        restart deliberately drops them so the durable producer can recover the
+        still-pending delivery.
         """
         qid = uuid.uuid4().hex[:12]
-        entry: dict[str, Any] = {"id": qid, "content": content, "kind": kind, "payload": payload}
+        item: dict[str, Any] = {
+            "id": qid,
+            "content": content,
+            "kind": kind,
+            "payload": payload,
+        }
         if meta:
-            entry["meta"] = dict(meta)
-        self._queue.insert(index, entry)
+            item["meta"] = dict(meta)
+        if on_consumed is not None:
+            item["_on_consumed"] = on_consumed
+        if on_irreversibly_consumed is not None:
+            item["_on_irreversibly_consumed"] = on_irreversibly_consumed
+        if directive_user_origin:
+            item["_directive_user_origin"] = True
+        self._queue.insert(index, item)
         self._note_enqueue()
         return qid
 
-    def queue_pop(self, index: int = 0) -> dict[str, str]:
+    def queue_pop(self, index: int = 0) -> dict[str, Any]:
         """Pop a queue item by index. Returns {"id": ..., "content": ...}."""
         return self._queue.pop(index)
 
@@ -4414,14 +4350,30 @@ class _ChatSlot:
                 return item["content"]
         return None
 
-    def queue_edit_by_id(self, queue_id: str, content: str) -> bool:
+    def queue_edit_by_id(
+        self,
+        queue_id: str,
+        content: str,
+        *,
+        directive_user_origin: bool = False,
+    ) -> bool:
         """Replace the content of a queue item by ID. Returns True if found.
 
-        Order is preserved — only the content of the matching item changes.
+        Order and identity are preserved. Directive provenance follows the
+        editor because replacement text may contain a directive that the
+        original author never supplied. Automatic recovery entries are immutable:
+        their consumption callbacks settle the exact content that failed, so moving
+        those callbacks onto replacement text would settle the wrong delivery.
         """
         for item in self._queue:
             if item["id"] == queue_id:
+                if "_on_consumed" in item or "_on_irreversibly_consumed" in item:
+                    return False
                 item["content"] = content
+                if directive_user_origin:
+                    item["_directive_user_origin"] = True
+                else:
+                    item.pop("_directive_user_origin", None)
                 return True
         return False
 
@@ -4439,6 +4391,16 @@ class _ChatSlot:
                 self._queue.insert(0, self._queue.pop(i))
                 return True
         return False
+
+    @property
+    def task(self) -> asyncio.Task[Any] | None:
+        return self._task
+
+    @task.setter
+    def task(self, value: asyncio.Task[Any] | None) -> None:
+        if value is not None and value is not self._task:
+            self._turn_generation += 1
+        self._task = value
 
     @property
     def running(self) -> bool:
@@ -5155,6 +5117,13 @@ class DashboardState:
         # lifecycle matches the gateway instance.
         self.resource_pressure_notifier = ResourcePressureNotifier(self.notification_bus)
         self._slots: dict[str, _ChatSlot] = {}
+        # Process-local Spec Builder outbox claims, keyed by directory + delivery.
+        # Directory scope matters because aliases use different slots for the same
+        # files; durable status remains owned by the app's decision ledger.
+        self._spec_decision_deliveries_inflight: set[tuple[str, str]] = set()
+        # Consumed claims whose durable finalization failed remain blocked from
+        # redispatch while a later Spec Builder detail poll retries the ledger write.
+        self._spec_decision_deliveries_consumed: set[tuple[str, str]] = set()
         # Slot keys that EXIST but are deliberately absent from ``_slots`` while
         # they are being built (see ``session_transfer``'s import path, which
         # retracts a slot so it is unreachable until its transcript and context
