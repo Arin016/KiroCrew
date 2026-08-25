@@ -9394,6 +9394,7 @@
       "status": "Statut",
       "test": "Tester",
       "test_result": "Résultat du test",
+      "test_failed": "Échec du test",
       "timeout": "Délai d'expiration",
       "total": "Total",
       "total_runs": "Exécutions totales",

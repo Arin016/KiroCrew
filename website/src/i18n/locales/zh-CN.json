@@ -9138,6 +9138,7 @@
       "status": "状态",
       "test": "测试",
       "test_result": "测试结果",
+      "test_failed": "测试失败",
       "timeout": "超时",
       "total": "总计",
       "total_runs": "运行总次数",

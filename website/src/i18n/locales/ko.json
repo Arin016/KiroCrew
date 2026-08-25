@@ -9138,6 +9138,7 @@
       "status": "상태",
       "test": "테스트",
       "test_result": "테스트 결과",
+      "test_failed": "테스트 실패",
       "timeout": "제한 시간",
       "total": "합계",
       "total_runs": "총 실행 횟수",

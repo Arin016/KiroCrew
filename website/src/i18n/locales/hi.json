@@ -9266,6 +9266,7 @@
       "status": "स्थिति",
       "test": "टेस्ट करें",
       "test_result": "टेस्ट का नतीजा",
+      "test_failed": "परीक्षण विफल",
       "timeout": "टाइमआउट",
       "total": "कुल",
       "total_runs": "कुल रन",

@@ -9394,6 +9394,7 @@
       "status": "Estado",
       "test": "Probar",
       "test_result": "Resultado de la prueba",
+      "test_failed": "Prueba fallida",
       "timeout": "Tiempo de espera",
       "total": "Total",
       "total_runs": "Ejecuciones totales",

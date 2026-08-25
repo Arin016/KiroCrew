@@ -3480,7 +3480,8 @@
       "total_runs": "Total Runs",
       "matcher_placeholder_regex": "Matcher (regex, e.g. \\b(auth|login)\\b)",
       "matcher_placeholder_contains": "Matcher (contains, e.g. deploy|release)",
-      "skills_inert_warning": "These skills can't fire on this configuration: {{skills}}. To save, switch to UserPromptSubmit or AgentSpawn without a command — or remove the skills."
+      "skills_inert_warning": "These skills can't fire on this configuration: {{skills}}. To save, switch to UserPromptSubmit or AgentSpawn without a command — or remove the skills.",
+      "test_failed": "Test failed"
     },
     "kiroCrewAgentsPage": {
       "a_unique_identifier_for_this_workspace_agents_re": "A unique identifier for this workspace. Agents reference workspaces by name.",

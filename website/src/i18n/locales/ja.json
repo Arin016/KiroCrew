@@ -9138,6 +9138,7 @@
       "status": "ステータス",
       "test": "テスト",
       "test_result": "テスト結果",
+      "test_failed": "テストに失敗しました",
       "timeout": "タイムアウト",
       "total": "合計",
       "total_runs": "総実行回数",

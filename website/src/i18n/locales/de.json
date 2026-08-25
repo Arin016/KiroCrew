@@ -9266,6 +9266,7 @@
       "status": "Status",
       "test": "Testen",
       "test_result": "Testergebnis",
+      "test_failed": "Test fehlgeschlagen",
       "timeout": "Timeout",
       "total": "Gesamt",
       "total_runs": "Ausführungen gesamt",
