@@ -353,6 +353,64 @@ skills/crons/MCP registration overwrite in place.
 
 Writer: `apps/bridges.py::reconcile_enabled_app_resources`.
 
+### 7.1 A hung startup lifecycle hook is bounded at the dispatch boundary
+
+`LifecycleDispatcher` invokes startup hooks **serially** in lexicographic app-name
+order, so one hook that never returns would stall the whole loop and keep the
+gateway from ever reaching readiness. An awaited startup coroutine is therefore
+bounded by a per-hook deadline (`lifecycle._HOOK_TIMEOUT_SEC`, 30s). The task
+is registered in the dispatcher-owned map keyed by app immediately when it is
+created, before the dispatcher first awaits it, so parent cancellation cannot
+orphan live work during the pre-deadline window. A completion observer retrieves
+its result and removes proven-terminal ownership. On deadline expiry the same
+owned task remains tracked while startup continues; the dispatcher does not wait
+indefinitely for it to settle and does not cancel it. Cancelling an asyncio task
+awaiting `asyncio.to_thread` makes the wrapper terminal while its worker thread
+still executes app code, so any observed child cancellation records a
+process-lifetime residual marker before releasing the task reference. The timeout
+is treated as a hook failure (the app is marked degraded and the event is
+SEL-recorded with `outcome="timeout"`), and startup **continues with the remaining
+apps**. The deadline is a safety net against a hang, not a performance budget,
+which is why it is generous.
+
+The per-app ownership is also a teardown contract. Dashboard disable, local or
+registry install, update, uninstall, and registry replacement perform a bounded
+ownership preflight and return a retryable refusal without mutating app state when
+retained startup execution cannot be proven stopped. Trust withdrawal also remains
+bounded, but if the hook continues executing, teardown fails and revocation leaves
+the trust grant in place for a retry rather than claiming the app stopped while its
+code remains live. In that failure case an app-declared `on_shutdown` is skipped:
+it is unbounded third-party code and must not overlap the still-running startup
+hook against partially initialized state.
+
+Normal recovery is to retry after retained startup execution exits. If a startup
+hook is permanently wedged, the operator must **stop the gateway completely**,
+run `kirocrew app disable <name>` while no gateway process can execute app code,
+and then restart the gateway. The CLI command only writes `enabled=false` to
+installed-app metadata; it is not runtime teardown and must not be run against a
+live gateway as evidence that old app code stopped. The disabled app is skipped
+on the next startup, allowing the operator to repair or remove it without
+re-entering the wedged hook.
+
+Graceful gateway shutdown sweeps retained startup ownership for **every enabled
+app**, including apps with no `on_shutdown` declaration. All ownership checks
+start concurrently and are non-blocking: ownership that is already terminal
+permits that app's shutdown hook, while active or residual startup work skips only
+the affected hook fail-closed. The sweep consumes none of the gateway's remaining
+10-second cooperative shutdown window, preserving time for unaffected app hooks
+after the existing bounded slot-history save; the service manager's separate
+10-second signal margin is not hook-execution time. An app's `on_shutdown` is
+invoked in reverse lexicographic order only after that app's startup ownership
+settled; otherwise the hook is skipped rather than running concurrently against
+partially initialized state. Once an `on_shutdown` hook is invoked, it is
+intentionally not detached at the deadline: the task still owns its `AppContext`
+capabilities, so teardown awaits it to completion. The startup deadline governs
+**async hooks only**: a synchronous hook returns before the
+`asyncio.iscoroutine` check and runs to completion outside the timeout; a
+successful async startup hook that returns within the deadline is unaffected.
+
+Writer: `apps/lifecycle.py::LifecycleDispatcher._invoke`.
+
 ## 8. An app's EventBus only exists with a real broadcast function
 
 `build_app_context` returns `events=None` when `broadcast_fn` is None, and

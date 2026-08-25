@@ -439,10 +439,12 @@ def app_lifecycle_lock(name: str) -> LoopBoundLock:
 # ---------------------------------------------------------------------------
 
 
-def install_app(source: str | Path) -> AppResult:
+def install_app(
+    source: str | Path, *, expected_name: str | None = None
+) -> AppResult:
     """Install an app from a local directory path.
 
-    1. Validate manifest
+    1. Validate manifest and any caller-pinned app identity
     2. Copy to ``~/.kiro/crew/apps/{name}/``
     3. Write ``installed.json``
 
@@ -473,6 +475,24 @@ def install_app(source: str | Path) -> AppResult:
 
     manifest = AppManifest.from_json_file(source / APP_MANIFEST_FILENAME)
     name = manifest.name
+    if expected_name is not None and name != expected_name:
+        detail = (
+            f"app identity changed during install: expected {expected_name!r}, "
+            f"found {name!r}"
+        )
+        sel().log_api_access(
+            caller="app_install",
+            operation="install",
+            outcome="failed",
+            resources=f"source={source!s}",
+            error=detail,
+        )
+        return AppResult(
+            ok=False,
+            name=name,
+            error=detail,
+            error_code="app_identity_changed",
+        )
     dest = app_dir(name)
 
     # Guard against path traversal in manifest name
