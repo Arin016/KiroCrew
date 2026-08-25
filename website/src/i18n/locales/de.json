@@ -10528,6 +10528,8 @@
     },
     "schedulePage": {
       "actions": "Aktionen",
+      "owning_session_help": "Ein Job ohne besitzende Sitzung ist für cron_list im Chat unsichtbar und wird über diese Seite oder die CLI verwaltet.",
+      "owning_session_tooltip": "Besitzende Sitzung: {{key}}",
       "view_calendar": "Kalender",
       "view_executions": "Ausführungen",
       "view_list": "Liste",

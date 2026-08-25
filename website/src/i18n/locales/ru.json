@@ -10800,6 +10800,8 @@
     },
     "schedulePage": {
       "actions": "Действия",
+      "owning_session_help": "Задача без сессии-владельца невидима для cron_list в чате и управляется с этой страницы или через CLI.",
+      "owning_session_tooltip": "Сессия-владелец: {{key}}",
       "view_calendar": "Календарь",
       "view_executions": "Запуски",
       "view_list": "Список",

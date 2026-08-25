@@ -10528,6 +10528,8 @@
     },
     "schedulePage": {
       "actions": "कार्रवाई",
+      "owning_session_help": "बिना स्वामी सत्र वाला जॉब चैट में cron_list को दिखाई नहीं देता और इसे इस पेज या CLI से प्रबंधित किया जाता है।",
+      "owning_session_tooltip": "स्वामी सत्र: {{key}}",
       "view_calendar": "कैलेंडर",
       "view_executions": "निष्पादन",
       "view_list": "सूची",

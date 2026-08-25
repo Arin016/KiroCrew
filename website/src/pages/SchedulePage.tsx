@@ -807,7 +807,7 @@ export default function SchedulePage() {
                     because "no owning session" is the fact that explains why a
                     job is invisible to cron_list in chat — a blank line would
                     hide exactly the state this line exists to show. */}
-                <TableCell className="truncate text-text-strong" title={`${j.name} · ${j.session_key || i18nT('pages.schedulePage.no_owning_session')}`}>
+                <TableCell className="truncate text-text-strong" title={`${j.name} · ${j.session_key ? i18nT('pages.schedulePage.owning_session_tooltip', { key: j.session_key }) : i18nT('pages.schedulePage.no_owning_session')}`}>
                   <span className="block truncate">{j.name}</span>
                   {j.session_key
                     ? <span className="block truncate text-[11px] font-mono font-normal text-muted">{j.session_key}</span>
@@ -1178,13 +1178,22 @@ function JobDetailDialog({ job, prefill, prefillWrites, agents, defaultAgent, on
             )}
             {/* The row's owner line truncates; here the full key is readable.
                 The ownerless copy stays italic-vs-mono distinguishable, same
-                treatment as the table row. */}
+                treatment as the table row. The helper sentence renders ONLY in
+                the ownerless state: it explains that state's consequence (the
+                job is invisible to cron_list in chat) and remedy, and under a
+                live key the same sentence would read as a warning about the
+                job in front of the reader. aria-describedby ties it to the
+                value so a screen reader hears it as a hint, not a second
+                label. */}
             {job && (
               <div className="flex flex-col gap-1.5">
                 <div className="text-[12px] text-muted font-medium">{i18nT('pages.schedulePage.owning_session')}</div>
                 {job.session_key
                   ? <code className="text-[12px] font-mono break-all text-text">{job.session_key}</code>
-                  : <span className="text-sm italic text-muted">{i18nT('pages.schedulePage.no_owning_session')}</span>}
+                  : <>
+                      <span className="text-sm italic text-muted" aria-describedby="owning-session-help">{i18nT('pages.schedulePage.no_owning_session')}</span>
+                      <span id="owning-session-help" className="text-[12px] text-muted">{i18nT('pages.schedulePage.owning_session_help')}</span>
+                    </>}
               </div>
             )}
           </>

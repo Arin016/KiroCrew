@@ -10664,6 +10664,8 @@
     },
     "schedulePage": {
       "actions": "Actions",
+      "owning_session_help": "Une tâche sans session propriétaire est invisible pour cron_list dans le chat et se gère depuis cette page ou la CLI.",
+      "owning_session_tooltip": "Session propriétaire : {{key}}",
       "view_calendar": "Calendrier",
       "view_executions": "Exécutions",
       "view_list": "Liste",

@@ -10392,6 +10392,8 @@
     },
     "schedulePage": {
       "actions": "アクション",
+      "owning_session_help": "所有セッションのないジョブはチャットの cron_list に表示されず、このページまたは CLI から管理します。",
+      "owning_session_tooltip": "所有セッション：{{key}}",
       "view_calendar": "カレンダー",
       "view_executions": "実行履歴",
       "view_list": "リスト",

@@ -10664,6 +10664,8 @@
     },
     "schedulePage": {
       "actions": "Azioni",
+      "owning_session_help": "Un job senza sessione proprietaria è invisibile a cron_list nella chat e viene gestito da questa pagina o dalla CLI.",
+      "owning_session_tooltip": "Sessione proprietaria: {{key}}",
       "view_calendar": "Calendario",
       "view_executions": "Esecuzioni",
       "view_list": "Elenco",

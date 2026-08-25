@@ -10392,6 +10392,8 @@
     },
     "schedulePage": {
       "actions": "操作",
+      "owning_session_help": "没有所属会话的任务对聊天中的 cron_list 不可见，只能在本页面或 CLI 中管理。",
+      "owning_session_tooltip": "所属会话：{{key}}",
       "view_calendar": "日历",
       "view_executions": "执行记录",
       "view_list": "列表",

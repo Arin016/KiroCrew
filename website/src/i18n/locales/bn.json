@@ -10528,6 +10528,8 @@
     },
     "schedulePage": {
       "actions": "অ্যাকশন",
+      "owning_session_help": "মালিক সেশন ছাড়া কোনো জব চ্যাটের cron_list-এ দেখা যায় না এবং এই পৃষ্ঠা বা CLI থেকে পরিচালিত হয়।",
+      "owning_session_tooltip": "মালিক সেশন: {{key}}",
       "view_calendar": "ক্যালেন্ডার",
       "view_executions": "এক্সিকিউশন",
       "view_list": "তালিকা",
