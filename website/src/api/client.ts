@@ -2370,6 +2370,15 @@ export const api = {
     post('/api/connections/mint', { slug }).then(j) as Promise<{ ok: boolean; slug: string; state: string; token: string }>,
   connectionsMintState: (slug: string) =>
     fetch(`/api/connections/mint?slug=${encodeURIComponent(slug)}`).then(j) as Promise<ConnectionMintState>,
+  // Warm the approval URLs for every candidate provider at once, so the tab a
+  // Connect click opens is not left on a placeholder while a cold mint runs. The
+  // backend route lands in the pre-mint slice (N2b); until it does this answers
+  // 404, which `j` turns into a rejected promise — hence the caller's
+  // fire-and-forget `.catch()`. Verified silent: `checkSessionExpired` acts only
+  // on a 403 carrying `X-Auth-Required`, so a 404 raises no banner and touches
+  // no UI.
+  connectionsPremint: () =>
+    post('/api/connections/premint').then(j) as Promise<{ ok: boolean; preminting: string[] }>,
   // Authorization verdict + first-connect time per visible provider. Additive to
   // the mint feed above; never mints.
   connectionsStatus: () =>

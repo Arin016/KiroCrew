@@ -60,6 +60,17 @@ export default [
       // the module may contain ONLY paint data, so the filename IS the
       // boundary and its consumer (FolderGlyph.tsx) stays fully covered.
       'src/components/folderColorPaint.ts',
+      // The placeholder document written into the tab a Connect click opens:
+      // doctype, meta, style and element literals handed to `document.write`,
+      // plus the CSS that paints them. Every word a person reads arrives already
+      // translated through `ApprovalTabCopy` and is escaped on the way in. Same
+      // named-boundary idiom as `folderColorPaint.ts` above — the module may
+      // contain ONLY markup, and its caller (`oneClickTab.ts`, and the page that
+      // supplies the copy) stays fully covered here.
+      //
+      // Stated as a false-negative class, per this file's convention: copy added
+      // to this module will not be reported. Keep it markup-only.
+      'src/pages/connections/approvalTabDocument.ts',
       // Pierre's shared render configuration: injected stylesheet text
       // (`unsafeCSS` templates of selectors, lengths and `var(--…)` references),
       // theme ids the library matches on, and an extension→grammar map. None of

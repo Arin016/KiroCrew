@@ -33,6 +33,7 @@ const mcpCustomUpdate = vi.fn()
 const mcpOAuthRelay = vi.fn()
 const connectionsMint = vi.fn()
 const connectionsMintState = vi.fn()
+const connectionsPremint = vi.fn()
 const connectionsStatus = vi.fn()
 const connectionsCancel = vi.fn()
 const connectionsDisconnect = vi.fn()
@@ -48,6 +49,7 @@ vi.mock('../api/client', () => ({
     mcpOAuthRelay: (...a: unknown[]) => mcpOAuthRelay(...a),
     connectionsMint: (...a: unknown[]) => connectionsMint(...a),
     connectionsMintState: (...a: unknown[]) => connectionsMintState(...a),
+    connectionsPremint: (...a: unknown[]) => connectionsPremint(...a),
     connectionsStatus: (...a: unknown[]) => connectionsStatus(...a),
     connectionsCancel: (...a: unknown[]) => connectionsCancel(...a),
     connectionsDisconnect: (...a: unknown[]) => connectionsDisconnect(...a),
@@ -139,6 +141,9 @@ beforeEach(() => {
   connectionsMintState.mockReset().mockResolvedValue({
     slug: 'notion', state: 'minting', token: 'tok1',
   })
+  // The approval-URL warm-up fired on mount of the Services panel. Mocked here
+  // only so it exists: these cases assert on the mint the click starts.
+  connectionsPremint.mockReset().mockResolvedValue({ ok: true, preminting: [] })
   // Authorization axis: empty by default, so the reachability-derived card states
   // these tests assert on are unchanged by the status feed.
   connectionsStatus.mockReset().mockResolvedValue({ schema_version: 1, connections: [] })
@@ -175,6 +180,19 @@ describe('the provider gallery', () => {
     // GitHub is in the registry but has not passed the launch gate.
     expect(screen.queryByRole('heading', { name: 'GitHub' })).not.toBeInTheDocument()
     expect(screen.getByText(`${CONNECTION_PROVIDERS.length} available`)).toBeInTheDocument()
+  })
+
+  it('renders the ported GitLab mark on a real GitLab card', async () => {
+    // The logo, its `ProviderLogo` map entry and the provider itself have to land
+    // together or one of them is dead weight. `registry.ts` does not enumerate
+    // providers -- it filters `registry.json` on the launch gate -- so this asserts
+    // the whole chain: gitlab passes that gate, gets a card, and that card paints
+    // the brand mark rather than falling back to its lettered tile.
+    mount()
+
+    const gitlab = await waitFor(() => card('gitlab'))
+    expect(within(gitlab).getByRole('heading', { name: 'GitLab' })).toBeInTheDocument()
+    expect(within(gitlab).getByTestId('provider-logo-gitlab')).toBeInTheDocument()
   })
 
   it('shows an unconnected provider its docs link and a Connect button', async () => {
@@ -413,6 +431,57 @@ describe('a connected provider', () => {
       'The stored grant was kept because another server uses the same endpoint.',
     )
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('keeps a completed disconnect\'s facts once the surviving entry fails its probe', async () => {
+    // These two are the SAME situation, not independent: `entryRemoved: false`
+    // means the entry under this name points at a different endpoint, so it fails
+    // its probe and the card lands on needs-attention. Suppressing the success
+    // feedback there dropped BOTH composed clauses and the Revoke link, leaving a
+    // partially-applied Disconnect reporting nothing at all -- the dishonesty class
+    // this span already spent two review rounds removing.
+    mcpServers.mockResolvedValue(connected)
+    connectionsDisconnect.mockResolvedValue({
+      ok: true,
+      disconnected: 'notion',
+      grantRemoved: true,
+      grantSurviving: [],
+      entryRemoved: false,
+      grantSharedWith: [],
+    })
+    mount()
+
+    fireEvent.click(await waitFor(() => within(card('notion')).getByRole('button', { name: /Disconnect/ })))
+
+    // The entry that was left alone points elsewhere, so the re-read `disconnect`
+    // invalidates finds it failing its probe and the card moves to needs-attention.
+    mcpServers.mockResolvedValue([server({ status: 'error' })])
+    await waitFor(() => expect(card('notion').getAttribute('data-state')).toBe('needs-attention'))
+
+    const note = await screen.findByRole('status')
+    expect(note).toHaveTextContent('was left alone')
+    // And the way to finish the job is still on screen.
+    expect(within(note).getByRole('link', { name: /Revoke at Notion/ })).toBeTruthy()
+  })
+
+  it('still drops a bare health-check success under a needs-attention banner', async () => {
+    // The suppression's actual target, kept: "Connection is healthy" beside a
+    // banner saying the provider rejected the connection is two contradictory
+    // answers on one card. A disconnect note carries a revoke link; this does not.
+    mcpServers.mockResolvedValue(connected)
+    mcpProbe.mockResolvedValue(connected)
+    mount()
+
+    fireEvent.click(await waitFor(() => within(card('notion')).getByRole('button', { name: /^Test$/ })))
+    await waitFor(() => expect(within(card('notion')).getByText(/Connection is healthy/)).toBeTruthy())
+
+    // The provider now rejects it: the stale success must go.
+    mcpServers.mockResolvedValue([server({ status: 'error' })])
+    mcpProbe.mockResolvedValue([server({ status: 'error' })])
+    fireEvent.click(within(card('notion')).getByRole('button', { name: /^Test$/ }))
+
+    await waitFor(() => expect(card('notion').getAttribute('data-state')).toBe('needs-attention'))
+    expect(within(card('notion')).queryByText(/Connection is healthy/)).toBeNull()
   })
 
   it('reports the kept entry alongside the kept grant, never "Entry removed"', async () => {

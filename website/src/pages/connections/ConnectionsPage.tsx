@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
@@ -21,6 +21,17 @@ import { fmtDate } from '../../i18n/format'
 import { Badge, Btn, ContentSkeleton, SearchInput } from '../../components/ui'
 import McpTab from '../overview/McpTab'
 import ProviderLogo from './ProviderLogo'
+import {
+  APPROVAL_TAB_TIMEOUT_MS,
+  PENDING_TAB_POLL_MS,
+  approvalTabOutcome,
+  closeApprovalTab,
+  failApprovalTab,
+  navigateApprovalTab,
+  openApprovalTab,
+  resolveApprovalTab,
+  type ApprovalTab,
+} from './oneClickTab'
 import {
   CONNECTION_PROVIDERS,
   serverForConnection,
@@ -191,6 +202,55 @@ export function mintOutcome(
       return { clearWait: true, probe: false, error: false }
     default:
       return MINT_WAIT_HELD
+  }
+}
+
+
+/**
+ * The placeholder tab's view of one connect attempt.
+ *
+ * Derived from `mintOutcome` rather than re-reading `mint.state`, so the token
+ * fence and the mint-state table stay in ONE place. Two facts the mint row alone
+ * cannot carry are folded in:
+ *
+ *  - `flow.completed` — the attempt succeeded by another route: the chat banner
+ *    reported the grant, or the probe now answers `ok`. Without it a connect that
+ *    succeeded without ever producing a `granted` row would leave the tab waiting
+ *    out its deadline and then claim the approval page had failed.
+ *  - `flow.failed` — the banner reported a refusal, which the mint row need not
+ *    have observed.
+ *  - `flow.bannerUrl` — the approval URL from this attempt's own `mcp_oauth`
+ *    banner. A SECOND, independent source for the one fact the tab exists to
+ *    consume: the banner arrives over the gateway's socket and is not gated on
+ *    this document having focus, while the mint poll is. `withMintedUrl` already
+ *    hands the same URL to the card, so the tab reading only the mint row was the
+ *    two surfaces disagreeing about a URL both had. The mint row still WINS when
+ *    it has one — it is the row this tab's own POST started.
+ *
+ * A cleared wait that is not a grant collapses to one terminal fact: a mint that
+ * ran and failed, one that expired, and a row a sibling tab replaced are all
+ * "no verdict is ever coming for THIS tab", which for a placeholder is a failure
+ * rather than something to keep waiting on.
+ */
+export function approvalTabView(
+  mint: ConnectionMintState | undefined,
+  pending: PendingConnect | undefined,
+  flow: { completed?: boolean; failed?: boolean; bannerUrl?: string } = {},
+): { oauthUrl: string; granted: boolean; mintFailed: boolean } {
+  const outcome = mintOutcome(mint, pending)
+  return {
+    // Only a `waiting` row holds a URL a redirect can still be redeemed against
+    // — the same rule `withMintedUrl` applies to the card's link — and it is
+    // sanitized HERE, before the decision rather than after it. A URL this page
+    // would refuse to navigate to must not read as "the mint answered": that
+    // releases the tab from tracking and then declines to move it, orphaning a
+    // placeholder nothing is left to resolve. Filtered here it reads as "still no
+    // URL", so the tab waits and then fails gracefully.
+    oauthUrl: mint?.state === 'waiting'
+      ? safeApprovalUrl(mint.oauth_url || '')
+      : safeApprovalUrl(flow.bannerUrl || ''),
+    granted: !!flow.completed || outcome.probe,
+    mintFailed: !!flow.failed || (outcome.clearWait && !outcome.probe),
   }
 }
 
@@ -445,7 +505,13 @@ function ConnectionCard({
         </span>
       </header>
 
-      <p className="mb-2.5 mt-1.5 min-w-0 text-[12.5px] text-muted" title={valueProp}>
+      {/* Clamped to two lines: the blurbs differ in length and an unclamped one
+          pushed its card's action row out of line with its neighbours. The full
+          text stays reachable as the hover title. */}
+      <p
+        className="mb-2.5 mt-1.5 min-w-0 line-clamp-2 text-[12.5px] leading-snug text-muted"
+        title={valueProp}
+      >
         {valueProp}
       </p>
 
@@ -475,9 +541,15 @@ function ConnectionCard({
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {approvalUrl ? (
-                <a href={approvalUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent-hover">
-                  {t('pages.connectionsPage.reopen_approval')} <ExternalLink className="w-3 h-3" aria-hidden="true" />
-                </a>
+                // Demoted to a fallback: the click already opened a tab and
+                // pointed it here. This is the way through when the browser
+                // blocked that tab, or the user closed it by accident.
+                <span className="inline-flex flex-wrap items-center gap-1.5 text-[12px] text-muted">
+                  {t('pages.connectionsPage.approval_tab_fallback')}
+                  <a href={approvalUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 font-medium text-muted underline hover:text-text">
+                    {t('pages.connectionsPage.reopen_approval')} <ExternalLink className="w-3 h-3" aria-hidden="true" />
+                  </a>
+                </span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-[12px] text-muted" aria-live="polite">
                   <Loader2 className="w-3 h-3 animate-spin motion-reduce:animate-none" aria-hidden="true" />
@@ -591,7 +663,22 @@ function ConnectionCard({
         )}
       </div>
 
-      {feedback && (
+      {/* A needs-attention verdict outranks an earlier success: the banner says the
+          provider rejected this connection, so leaving "Connection is healthy"
+          underneath it puts two contradictory answers on one card. An error
+          message is kept, since it agrees with the banner and usually adds detail.
+
+          `!feedback.revoke` is what keeps this honest, and it is not a detail. A
+          completed Disconnect ALWAYS carries the revoke link, and its
+          `entryRemoved: false` outcome and a probe reporting `error` are the SAME
+          situation: the surviving entry points at a different endpoint, so it fails
+          its probe and the card lands here. Suppressing on state alone therefore
+          dropped the composed grant+entry clauses AND the way to finish the job,
+          leaving a partially-applied Disconnect reporting nothing — the dishonesty
+          this span already spent two review rounds removing (see the clause
+          composition in `disconnect`). Only a bare success with no revoke link —
+          the health check — is a contradiction worth hiding. */}
+      {feedback && !(state === 'needs-attention' && feedback.kind === 'success' && !feedback.revoke) && (
         <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={`mt-3 text-[11px] ${feedback.kind === 'error' ? 'text-danger' : 'text-ok'}`}>
           {feedback.text}
           {feedback.revoke && (
@@ -623,10 +710,38 @@ function ConnectionCard({
  * still removing every way to actually connect a provider.
  */
 export default function ConnectionsPage({ servicesEnabled = false }: { servicesEnabled?: boolean } = {}) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<'services' | 'mcp-servers'>('services')
   const [search, setSearch] = useState('')
+  /** Placeholder tabs a Connect gesture opened, keyed by provider, waiting to be
+   *  pointed at an approval URL. The ref is authoritative — the click writes it
+   *  before React re-renders — and `pendingTabCount` exists only to re-render so
+   *  the mint poll tightens to its pending cadence at once. */
+  const pendingTabsRef = useRef<Record<string, ApprovalTab>>({})
+  const [pendingTabCount, setPendingTabCount] = useState(0)
+  /** Per-slug `setTimeout` handles bounding how long a placeholder tab waits.
+   *  A REAL timer is required rather than a deadline evaluated inside the mint
+   *  poll: react-query stops polling when the window loses focus — which the
+   *  placeholder tab itself causes — so a tab whose mint never answered would
+   *  never be re-examined and would sit on the placeholder indefinitely. */
+  const tabDeadlinesRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const syncPendingTabCount = useCallback(
+    () => setPendingTabCount(Object.keys(pendingTabsRef.current).length),
+    [],
+  )
+  const releasePendingTab = useCallback((slug: string): ApprovalTab | undefined => {
+    const timer = tabDeadlinesRef.current[slug]
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      delete tabDeadlinesRef.current[slug]
+    }
+    const tab = pendingTabsRef.current[slug]
+    if (!tab) return undefined
+    delete pendingTabsRef.current[slug]
+    syncPendingTabCount()
+    return tab
+  }, [syncPendingTabCount])
   /** Pending connect attempts. `kind` decides Cancel semantics (only a
    *  cancelled *new* connect uninstalls the entry it just created); `sinceTs`
    *  fences off stale `mcp_oauth` banners left over from an earlier grant of
@@ -693,12 +808,116 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       return next
     },
     enabled: waitingSlugs.length > 0,
-    refetchInterval: MINT_POLL_MS,
+    // A waiting placeholder tab is the tightest case: the user is staring at a
+    // blank tab, and every poll interval is added latency before it can be
+    // pointed at the approval page.
+    refetchInterval: pendingTabCount > 0 ? PENDING_TAB_POLL_MS : MINT_POLL_MS,
+    // And that tab is precisely what makes this document `hidden`, which react-query
+    // reads as "nobody is looking" and uses to skip every interval refetch
+    // (`focusManager.isFocused()` is `visibilityState !== 'hidden'`). Without this
+    // opt-in the only fetch is the initial one, which answers `minting` with no URL:
+    // the tab is never pointed anywhere and dies at its deadline, making one click
+    // worse than the two it replaced. Scoped to a pending tab so a merely
+    // backgrounded dashboard still costs nothing.
+    refetchIntervalInBackground: pendingTabCount > 0,
     // A mint row is only valid for the attempt that produced it. Cached across an
     // inactive window it would be replayed on the next Connect for the same
     // provider, flashing a previous attempt's URL that no listener can redeem.
     gcTime: 0,
   })
+
+  /** Point a waiting placeholder tab at the approval URL, or give it a terminal
+   *  message and let it close. Called from the mint-settlement effect below so it
+   *  reads the same snapshot the wait is settled from. */
+  const resolvePendingTab = useCallback((
+    slug: string,
+    view: { oauthUrl: string; granted: boolean; mintFailed: boolean },
+    settled: boolean,
+  ) => {
+    const tab = pendingTabsRef.current[slug]
+    if (!tab) return
+    if (tab.window.closed) {
+      // The user closed it; the card keeps its fallback link.
+      releasePendingTab(slug)
+      return
+    }
+    const outcome = approvalTabOutcome(view, Date.now() - tab.openedAt)
+    if (outcome === 'wait') {
+      // Nothing for this tab YET — unless the page is settling the wait on this
+      // same pass, in which case there is nothing for it EVER: the mint poll
+      // stops with the wait, so no URL can still arrive. Close it quietly rather
+      // than leaving it to the deadline, which would report the approval page as
+      // failed for a flow the card has already resolved. Silent on purpose: no
+      // grant was proven, so "already authorized" would be a lie, and no failure
+      // happened either — the card is what carries the verdict.
+      if (settled) {
+        releasePendingTab(slug)
+        closeApprovalTab(tab)
+      }
+      return
+    }
+    releasePendingTab(slug)
+    // A navigate that does not take (the tab went away under the poll) falls
+    // through to the failure path rather than silently doing nothing.
+    if (outcome === 'navigate' && navigateApprovalTab(tab, view.oauthUrl)) return
+    if (outcome === 'granted') {
+      resolveApprovalTab(tab, {
+        title: t('pages.connectionsPage.approval_tab_granted_title'),
+        message: t('pages.connectionsPage.approval_tab_granted'),
+        lang: i18n.language,
+      })
+      return
+    }
+    failApprovalTab(tab, {
+      title: t('pages.connectionsPage.approval_tab_failed_title'),
+      message: t('pages.connectionsPage.approval_tab_failed'),
+      lang: i18n.language,
+    })
+    // A `fail` the mint row explains (`mintFailed`) is already reported on the
+    // card by the settlement effect below, in its own more specific words — a
+    // generic "the approval page could not be prepared" written here replaced
+    // that reason with a vaguer one. A `fail` from the DEADLINE has no such
+    // reporter: nothing answered at all, so the card gets it here or nowhere.
+    //
+    // The deadline timer reaches the same conclusion at the same instant, and
+    // either order is safe: both release the tab first, so the loser finds
+    // nothing to release and exactly one message lands.
+    if (view.mintFailed) return
+    setFeedback(current => ({
+      ...current,
+      [slug]: { kind: 'error', text: t('pages.connectionsPage.approval_page_failed') },
+    }))
+  }, [releasePendingTab, t, i18n.language])
+
+  // Every placeholder tab this page still holds dies with the page. Only
+  // UN-NAVIGATED placeholders are tracked — a tab already pointed at a consent
+  // page was released on the way there — so this closes tabs that are still
+  // showing "preparing the approval page" and which nothing is left to resolve,
+  // never the user's live consent page. Its deadline timer goes too, rather than
+  // firing `setFeedback` on a component that no longer exists. Cleanup only: a
+  // per-render version would cancel the deadline of a tab still legitimately
+  // waiting.
+  useEffect(() => () => {
+    for (const timer of Object.values(tabDeadlinesRef.current)) clearTimeout(timer)
+    tabDeadlinesRef.current = {}
+    for (const tab of Object.values(pendingTabsRef.current)) closeApprovalTab(tab)
+    pendingTabsRef.current = {}
+  }, [])
+
+  // Warm the approval URLs the moment the gallery is on screen. A mint costs
+  // seconds (a runtime session spawn plus the provider's OAuth discovery), and
+  // the one-click tab opens inside the click gesture — so anything not already
+  // minted leaves that tab on a placeholder. The backend picks the candidates
+  // (configured, ungranted, unminted) and caps the fan-out. Fires once per mount
+  // of the Services panel, and tolerates the route being absent: it lands with
+  // the pre-mint slice (N2b), and until then this is a 404 nothing reads.
+  const prementedRef = useRef(false)
+  useEffect(() => {
+    if (!servicesEnabled || activeTab !== 'services') return
+    if (prementedRef.current) return
+    prementedRef.current = true
+    void api.connectionsPremint().catch(() => undefined)
+  }, [servicesEnabled, activeTab])
 
   useEffect(() => {
     // Decided BEFORE any setState: a state updater runs on a later render, so
@@ -712,9 +931,32 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       const server = serverForConnection(provider, servers)
       const fresh = effectiveOAuth(oauthByServer[provider.slug], pending)
       const outcome = mintOutcome(mintByServer[provider.slug], pending)
-      if (!(server?.status === 'ok' || fresh?.completed || fresh?.failed || outcome.clearWait)) {
-        continue
-      }
+      // The placeholder tab is resolved from the SAME snapshot, and BEFORE the
+      // wait is cleared below. Clearing it shrinks `waitingSlugs`, which stops
+      // the mint poll — and with `gcTime: 0` drops the row — so a tab resolved on
+      // a later commit would find no verdict left and would sit out its deadline
+      // reporting a failure for a flow that had actually settled.
+      //
+      // `completed` takes ONLY this attempt's own evidence. The obvious wider
+      // sources are both rejected, for the same reason: `server.status === 'ok'`
+      // is the tokenless probe's verdict about the ENDPOINT, and
+      // `live.grantPresent` is a ≤30s-polled "a grant artifact is on disk" — a
+      // PRE-ATTEMPT observation either way. Reconnect is the primary button on a
+      // needs-attention card, so `grantPresent: true` beside a failing entry is
+      // reachable, and reading it here painted "nothing to approve" and closed the
+      // tab on the very pass the card was still asking for consent. `mintOutcome`'s
+      // own `granted` row (via `outcome.probe`) is this attempt's verdict and is
+      // the only thing that may end the tab that way.
+      const settled = server?.status === 'ok' || fresh?.completed || fresh?.failed
+        || outcome.clearWait
+      resolvePendingTab(provider.slug, approvalTabView(mintByServer[provider.slug], pending, {
+        completed: fresh?.completed,
+        failed: fresh?.failed,
+        // Already staleness-fenced by `effectiveOAuth`, so a banner predating the
+        // click cannot supply a URL for it.
+        bannerUrl: fresh?.oauthUrl,
+      }), settled)
+      if (!settled) continue
       cleared.push(provider.slug)
       if (outcome.error) failedMints.push(provider.slug)
       if (outcome.probe) grantedMints.push(provider.slug)
@@ -756,7 +998,7 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
         return next
       })
     }
-  }, [servers, oauthByServer, mintByServer, locallyWaiting, queryClient, t])
+  }, [servers, oauthByServer, mintByServer, locallyWaiting, queryClient, t, resolvePendingTab])
 
   const filteredProviders = useMemo(() => {
     // Held feature: offer nothing. No card renders, so no Connect button and no
@@ -804,7 +1046,30 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
     }
   }
 
-  const connect = async (provider: ConnectionProvider, existing?: McpServer) => run(provider, 'connect', async () => {
+  /** Give up on a waiting placeholder tab: terminal message in the tab, and — only
+   *  when nothing else has explained it — an error on the card too.
+   *
+   *  `explainOnCard` is what keeps one message per failure. A mint that reached a
+   *  terminal state is already reported by the settlement effect below, and a
+   *  connect the gateway refused is already reported by `run`; writing here as
+   *  well replaced their specific reason with this generic one. Only the deadline
+   *  has no other voice: nothing answered at all, so nothing else will say so. */
+  const failPendingTab = (slug: string, explainOnCard: boolean) => {
+    const waiting = releasePendingTab(slug)
+    if (!waiting) return
+    failApprovalTab(waiting, {
+      title: t('pages.connectionsPage.approval_tab_failed_title'),
+      message: t('pages.connectionsPage.approval_tab_failed'),
+      lang: i18n.language,
+    })
+    if (!explainOnCard) return
+    setFeedback(current => ({
+      ...current,
+      [slug]: { kind: 'error', text: t('pages.connectionsPage.approval_page_failed') },
+    }))
+  }
+
+  const connectWithTab = async (provider: ConnectionProvider, existing?: McpServer) => run(provider, 'connect', async () => {
     // Snapshot the newest banner already observed for this server: anything
     // at or below this timestamp predates the attempt (same clock domain as
     // the banners themselves — see PendingConnect.sinceTs).
@@ -854,6 +1119,51 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
     }).catch(() => undefined)
     await queryClient.invalidateQueries({ queryKey: ['mcp-servers'] })
   })
+
+  /**
+   * Connect (and Reconnect). Opens the approval tab, then does the work.
+   *
+   * The `window.open` below is the FIRST statement and there is no `await` above
+   * it: a browser only grants a popup while the call is still attributable to the
+   * click. The approval URL is minted by a background runtime session and arrives
+   * seconds later over the mint poll, so opening the tab when the URL lands is
+   * opening it outside the gesture — which is what got it blocked and forced
+   * Connect to be a two-step "click, then click the link" flow. Never defer this.
+   */
+  const connect = async (provider: ConnectionProvider, existing?: McpServer) => {
+    const tab = openApprovalTab({
+      title: t('pages.connectionsPage.approval_tab_title'),
+      message: t('pages.connectionsPage.approval_tab_opening'),
+      lang: i18n.language,
+    })
+    if (tab) {
+      // A refused open (popup blocker, headless) is not an error: the card's
+      // fallback link still carries the user through, so only a real tab is
+      // tracked. A re-click supersedes its own earlier placeholder rather than
+      // orphaning it.
+      const superseded = releasePendingTab(provider.slug)
+      if (superseded) closeApprovalTab(superseded)
+      pendingTabsRef.current[provider.slug] = tab
+      // Bounded by a real timer rather than by the mint poll: the poll pauses
+      // while this tab holds focus, so nothing else would re-evaluate the
+      // deadline.
+      tabDeadlinesRef.current[provider.slug] = setTimeout(
+        // Nothing answered at all, so this is the one failure path with no other
+        // voice: the card gets the message here or not at all.
+        () => failPendingTab(provider.slug, true),
+        APPROVAL_TAB_TIMEOUT_MS,
+      )
+      syncPendingTabCount()
+    }
+    const started = await connectWithTab(provider, existing)
+    // The request that would have produced this tab's URL was refused, so no mint
+    // is running and no poll will ever answer this tab. Close it out now rather
+    // than leaving the user on a placeholder until the deadline — but leave the
+    // card alone: `run` has already put the gateway's own reason there, which is
+    // more use than a generic one.
+    if (!started) failPendingTab(provider.slug, false)
+    return started
+  }
 
   const disconnect = async (provider: ConnectionProvider, server: McpServer, cancelled = false) => run(provider, 'disconnect', async () => {
     // Cancel must NOT revoke, and this branch is load-bearing. A grant is keyed by
@@ -920,6 +1230,11 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
 
   const cancelConnection = async (provider: ConnectionProvider, server?: McpServer): Promise<boolean> => {
     const pending = locallyWaiting[provider.slug]
+    // Cancel is the user withdrawing the request the tab was opened for, so the
+    // tab goes with it — closed outright rather than given a terminal message,
+    // because they are already looking at the card they clicked Cancel on.
+    const abandoned = releasePendingTab(provider.slug)
+    if (abandoned) closeApprovalTab(abandoned)
     // Dispose the in-flight backend mint (its kiro-cli process, loopback listener
     // and ephemeral spec) whether or not we also uninstall the config below. This
     // is what main lacked: a cancelled reconnect or stateless wait dropped only

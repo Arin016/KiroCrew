@@ -5,6 +5,7 @@ import linearLogoUrl from './logos/linear.svg'
 import atlassianLogoUrl from './logos/atlassian.svg'
 import stripeLogoUrl from './logos/stripe.svg'
 import vercelLogoUrl from './logos/vercel.svg'
+import gitlabLogoUrl from './logos/gitlab.svg'
 
 /** Official provider brand marks for the Connections cards.
  *
@@ -19,9 +20,9 @@ import vercelLogoUrl from './logos/vercel.svg'
  *     `BrandGlyph` helper, so they inherit the card's text colour and stay
  *     legible in every theme (their brand art is near-black, which would
  *     disappear on a dark card).
- *   - FULL-COLOUR marks (Linear, Atlassian, Stripe) carry their identity in
- *     their own hues, so they render as a plain `<img>` and are never flattened
- *     to `currentColor`.
+ *   - FULL-COLOUR marks (Linear, Atlassian, Stripe, GitLab) carry their identity
+ *     in their own hues, so they render as a plain `<img>` and are never
+ *     flattened to `currentColor`.
  */
 
 /** Monochrome marks — CSS mask over `currentColor`. */
@@ -36,6 +37,7 @@ const COLOURED: Record<string, string> = {
   linear: linearLogoUrl,
   atlassian: atlassianLogoUrl,
   stripe: stripeLogoUrl,
+  gitlab: gitlabLogoUrl,
 }
 
 /** The provider's brand mark, or null for a slug we ship no mark for (the card
