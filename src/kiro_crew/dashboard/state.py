@@ -7055,6 +7055,20 @@ class DashboardState:
         except Exception:
             logger.warning("Failed to load cron folders", exc_info=True)
 
+    def _persist_cron_folders(self, folders: list[dict[str, Any]]) -> None:
+        """Atomically write ``folders`` to the cron-folders file.
+
+        Takes the list to persist explicitly so a caller can save a candidate
+        list before committing it to ``_cron_folders`` (see ``create_cron_folder``),
+        keeping in-memory state and disk from diverging mid-operation. Any
+        malformed entries preserved at load time (``_unparsed_cron_folder_entries``)
+        are appended, so a save cannot erase bytes a hand-edit left in a shape
+        the loader could not validate.
+        """
+        path = config_dir() / self._CRON_FOLDERS_FILE
+        unparsed = getattr(self, "_unparsed_cron_folder_entries", [])
+        self._atomic_write_json_strict(path, [*folders, *unparsed])
+
     def save_cron_folders(self) -> None:
         """Persist cron folder definitions to disk (atomic write).
 
@@ -7064,25 +7078,27 @@ class DashboardState:
         shape this loader could not validate. Raises on I/O failure so callers
         can surface a 500 to the client rather than silently losing the write.
         """
-        path = config_dir() / self._CRON_FOLDERS_FILE
-        unparsed = getattr(self, "_unparsed_cron_folder_entries", [])
-        payload: list[Any] = [*self._cron_folders, *unparsed]
-        self._atomic_write_json_strict(path, payload)
+        self._persist_cron_folders(self._cron_folders)
 
     def create_cron_folder(self, name: str, folder_id: str) -> dict:
         """Create a new cron folder and persist.
 
         Returns the created folder dict. Raises on persistence failure
-        (callers should surface a 500); in-memory state is rolled back.
+        (callers should surface a 500).
+
+        The folder is persisted BEFORE it is exposed in ``_cron_folders``: a
+        concurrent ``GET /api/cron-folders`` reads the live list, so appending
+        first and saving second would let a reader observe (and the frontend
+        render) a folder that a failed save then removes — a transient "ghost"
+        folder inconsistent with disk. Building the candidate list, persisting
+        it, and only then committing the reference means a reader sees either
+        the pre-create list or the durably-saved one, never an intermediate.
         """
         order = max((f["order"] for f in self._cron_folders), default=-1) + 1
         folder = {"id": folder_id, "name": name, "order": order}
-        self._cron_folders.append(folder)
-        try:
-            self.save_cron_folders()
-        except Exception:
-            self._cron_folders.pop()
-            raise
+        candidate = [*self._cron_folders, folder]
+        self._persist_cron_folders(candidate)
+        self._cron_folders = candidate
         return folder
 
     def rename_cron_folder(self, folder_id: str, name: str) -> dict | None:
