@@ -1565,7 +1565,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "section": "rules"
     },
     "label": "Your custom denies",
-    "description": "Add your own deny patterns (Python-compatible regex). These are enforced at Kiro Crew's PreToolUse gate alongside the built-in rules."
+    "description": "Add your own deny patterns (Python-compatible regex). These are enforced at {{productName}}'s PreToolUse gate alongside the built-in rules."
   },
   {
     "id": "shortcuts.enable-shortcuts",
