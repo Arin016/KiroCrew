@@ -2671,6 +2671,13 @@ class _ChatSlot:
         "_tool_stall_retries",
         "_tool_stall_exhausted_emitted",
         "_transient_5xx_retries",
+        "_fallback_candidate_idx",
+        "_fallback_walked",
+        "_active_fallback_model",
+        "_fallback_primary_model",
+        "_fallback_slot_model",
+        "_model_pick_gen",
+        "_fallback_pick_gen",
         "_posttoken_retry_used",
         "_prestream_exhausted_cycles",
         "_poisoned_reset_used",
@@ -2696,6 +2703,7 @@ class _ChatSlot:
         "_lock",
         "forked_from",
         "_fork_lock",
+        "_model_pick_lock",
         "_tab_id",
         "_channel_window_mtime",
         "_disk_older_count",
@@ -2986,6 +2994,33 @@ class _ChatSlot:
         # ConnectionReset) retries on the interactive stream path. Distinct
         # budget from prompt-busy / pipe-death; reset on a completed turn.
         self._transient_5xx_retries: int = 0
+        # Throttle-exhaustion model-fallback walk state (agent.fallback_model).
+        # _fallback_candidate_idx / _fallback_walked are PER-CYCLE (next chain
+        # position to try + candidates already tried this logical turn, for the
+        # chain-exhausted error story); both reset with the other retry budgets
+        # on a landed turn. _active_fallback_model / _fallback_primary_model are
+        # STICKY session state: set when a fallback swap lands, kept across
+        # turns until the start-of-turn restore probe moves the session back to
+        # the primary (deliberately NOT reset on turn completion).
+        self._fallback_candidate_idx: int = 0
+        self._fallback_walked: list[str] = []
+        self._active_fallback_model: str = ""
+        self._fallback_primary_model: str = ""
+        # Snapshot of slot.model taken when the fallback activated, used to heal
+        # slot.model if the automatic provider backfill wrote the fallback id
+        # into an empty slot while the fallback was active (slot.model is
+        # re-sent as a set_model override on resume, so leaving the fallback
+        # there would re-pin it after the primary recovered).
+        self._fallback_slot_model: str = ""
+        # Explicit model-pick generation. Bumped ONLY by the explicit set-model
+        # surfaces (single-slot pick, bulk switch, provider-switch clear) —
+        # never by the automatic provider backfill — so the fallback restore
+        # probe can tell a genuine user pick (drop sticky state, never
+        # override) from the backfill writing the served fallback into an
+        # unpinned slot (heal and restore). _fallback_pick_gen is the value
+        # snapshotted when the fallback activated.
+        self._model_pick_gen: int = 0
+        self._fallback_pick_gen: int = 0
         # One-shot guard for the post-token (text-only) transient retry: a turn
         # that has already streamed answer tokens may be re-prompted at most
         # ONCE on a transient 5xx (and only when no tool call fired). Reset on a
@@ -3078,6 +3113,12 @@ class _ChatSlot:
         self._lock = asyncio.Lock()
         self.forked_from: str | None = None  # parent slot key if this is a fork
         self._fork_lock: asyncio.Lock = asyncio.Lock()  # serialises concurrent forks on this slot
+        # Serialises explicit model-pick transactions (check → mutate → live
+        # switch → rollback) on this slot: picks interleaving at the set_model
+        # await could otherwise roll back each other's state. Deliberately NOT
+        # slot._lock, which guards message-window edits and must not be held
+        # across a multi-second network await.
+        self._model_pick_lock: asyncio.Lock = asyncio.Lock()
         self._tab_id: str = ""  # permanent tab identity for cross-restart session chaining
         # Transcript mtime the in-memory window was last brought up to date
         # against. Only meaningful for a slot bound to a channel session, whose

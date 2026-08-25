@@ -4048,32 +4048,81 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
     if reason:
         logger.warning("Slot %s model rejected: %s", name, reason)
         return web.json_response({"error": reason}, status=400)
-    if slot.model == model_name:
+    # One pick transaction at a time per slot (verifier finding on 84fc7961):
+    # two picks interleaving at the set_model await can roll back each other's
+    # state no matter how careful the rollback condition is — with two failed
+    # picks out of order, the later one restores the earlier one's already-
+    # refused model. Serialising the whole check → mutate → switch → rollback
+    # span makes each pick atomic; the CAS below stays as a backstop against
+    # any writer outside this lock.
+    async with slot._model_pick_lock:
+        if slot.model == model_name and not slot._active_fallback_model:
+            # Same-value pick: nothing to switch, but the user's EXPLICIT
+            # affirmation of this model must still be recorded — the fallback
+            # restore probe reads the pick generation, and without the bump a user
+            # who deliberately picks the very model the session fell back to (or
+            # that the backfill wrote) would have their choice silently overridden
+            # by the next restore probe.
+            #
+            # NOT taken while a fallback is actively serving the session: the pin
+            # may equal the displayed primary while the wire model is the
+            # fallback, so "nothing to switch" is false — the normal live-switch
+            # path below must run so the pick actually moves the session (review
+            # finding on 1a61ddcf: the early return stranded the session on the
+            # fallback while usage was attributed to the primary). The
+            # pick-the-fallback-itself case also flows through the live path,
+            # where the switch is a harmless same-model set and the pick-gen bump
+            # still protects the choice from the restore probe.
+            slot._model_pick_gen += 1
+            return web.json_response({"ok": True, "model": model_name})
+        session_key = _history_key_for(name)
+        provider = state.sessions.get_provider(session_key)
+        prior_model = slot.model
+        prior_pick_gen = slot._model_pick_gen
+        slot.model = model_name
+        # Explicit user pick: bump the pick generation so the model-fallback
+        # restore probe never overrides this choice (automatic backfill does NOT
+        # bump it).
+        slot._model_pick_gen += 1
+        try:
+            went_live = await _try_live_model_switch(name, slot, provider, model_name)
+        except AcpModelUnavailable as exc:
+            # The live session refused the pick as unavailable to this account. Roll
+            # the slot back so the picker keeps showing what is actually running, and
+            # answer 4xx — deliberately NOT the reset fallback below, which would
+            # destroy the conversation and cold-start on a different model while
+            # reporting success. Only the session that owns the advertised list gets
+            # to make this call, so there is no pre-emptive gate here to go stale.
+            # The pick generation rolls back WITH the model: a refused pick changed
+            # nothing, and leaving the bump in place would make the fallback
+            # restore probe read it as an explicit choice and silently abandon
+            # restoring the primary — the session would stay on the fallback with
+            # no card and no probe.
+            #
+            # COMPARE-AND-SWAP, not unconditional (local review finding on
+            # eb3cf067): handlers interleave at the await above, so a NEWER pick
+            # may have landed while this one was in flight. An unconditional
+            # rollback would erase that later pick's model AND its generation,
+            # making the restore probe treat it as nonexistent. Only restore when
+            # the state is still exactly ours (our bump, our model); the check and
+            # both writes are synchronous, so they are atomic on the event loop.
+            # Interleavings compose: a later pick's own rollback restores what IT
+            # observed, unwinding in LIFO order to a consistent state.
+            if slot._model_pick_gen == prior_pick_gen + 1 and slot.model == model_name:
+                slot.model = prior_model
+                slot._model_pick_gen = prior_pick_gen
+            logger.warning("Slot %s model rejected: %s", name, exc)
+            return web.json_response({"error": str(exc), "code": "model_unavailable"}, status=400)
+        if went_live:
+            _broadcast_context_reset(state, slot.key, provider)
+        else:
+            logger.info(
+                "Slot %s model switched to %r, resetting session", name, model_name or "auto"
+            )
+            await _reset_slot_session(state, slot, session_key)
+            _broadcast_context_reset(state, slot.key, None)
+        state.push_slots_update()
         return web.json_response({"ok": True, "model": model_name})
-    session_key = _history_key_for(name)
-    provider = state.sessions.get_provider(session_key)
-    prior_model = slot.model
-    slot.model = model_name
-    try:
-        went_live = await _try_live_model_switch(name, slot, provider, model_name)
-    except AcpModelUnavailable as exc:
-        # The live session refused the pick as unavailable to this account. Roll
-        # the slot back so the picker keeps showing what is actually running, and
-        # answer 4xx — deliberately NOT the reset fallback below, which would
-        # destroy the conversation and cold-start on a different model while
-        # reporting success. Only the session that owns the advertised list gets
-        # to make this call, so there is no pre-emptive gate here to go stale.
-        slot.model = prior_model
-        logger.warning("Slot %s model rejected: %s", name, exc)
-        return web.json_response({"error": str(exc), "code": "model_unavailable"}, status=400)
-    if went_live:
-        _broadcast_context_reset(state, slot.key, provider)
-    else:
-        logger.info("Slot %s model switched to %r, resetting session", name, model_name or "auto")
-        await _reset_slot_session(state, slot, session_key)
-        _broadcast_context_reset(state, slot.key, None)
-    state.push_slots_update()
-    return web.json_response({"ok": True, "model": model_name})
 
 
 async def api_chat_slots_model(request: web.Request) -> web.Response:
@@ -4125,23 +4174,31 @@ async def api_chat_slots_model(request: web.Request) -> web.Response:
         # user bypasses the ownership check.
         if not is_dashboard_user and slot._app != request_app:
             continue
-        if slot.model == model_name:
-            unchanged.append(name)
-            continue
-        if skip_running and slot.running:
-            skipped_running.append(name)
-            continue
-        # Reset before flipping the model and isolate per-slot failures: if the
-        # reset raises, leave slot.model untouched so the slot is never left on
-        # the new model with stale history (the model/history inconsistency), and a
-        # single failure doesn't abort the whole bulk switch.
-        try:
-            await _reset_slot_session(state, slot, _history_key_for(name))
-        except Exception:
-            logger.error("Bulk model switch: session reset failed for %s", name, exc_info=True)
-            failed.append(name)
-            continue
-        slot.model = model_name
+        # Same transaction lock as the single-slot pick (verifier finding on
+        # 9f182b0c): without it, a bulk select of a model that a single-slot
+        # pick is speculatively holding reads equality and reports the slot
+        # unchanged — then the single pick's failure rolls it back, leaving
+        # the bulk response claiming a model the slot does not have.
+        async with slot._model_pick_lock:
+            if slot.model == model_name:
+                unchanged.append(name)
+                continue
+            if skip_running and slot.running:
+                skipped_running.append(name)
+                continue
+            # Reset before flipping the model and isolate per-slot failures: if the
+            # reset raises, leave slot.model untouched so the slot is never left on
+            # the new model with stale history (the model/history inconsistency), and a
+            # single failure doesn't abort the whole bulk switch.
+            try:
+                await _reset_slot_session(state, slot, _history_key_for(name))
+            except Exception:
+                logger.error("Bulk model switch: session reset failed for %s", name, exc_info=True)
+                failed.append(name)
+                continue
+            slot.model = model_name
+            # Explicit pick (bulk): same generation bump as the single-slot pick.
+            slot._model_pick_gen += 1
         _broadcast_context_reset(state, slot.key, None)
         switched.append(name)
 
