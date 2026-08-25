@@ -2906,6 +2906,119 @@ class ScriptHook:
         )
 
 
+# ── Script hook output caps ──
+#
+# ``run_script_hook`` used to ``await proc.communicate(...)``, which buffers
+# BOTH pipes in memory until EOF: a buggy or hostile hook could emit unbounded
+# stdout/stderr and OOM (or stall) the gateway for every session before the
+# 500-char presentation limit was ever applied (#5442). We now drain each
+# stream incrementally and keep only the first ``_HOOK_STREAM_CAP_BYTES`` bytes,
+# while continuing to read (and discard) the rest so the child can never block
+# on a full pipe. The cap is generously above the 500-char field we surface, so
+# the retained prefix is always enough to decode and truncate for display, yet
+# small enough that a runaway hook cannot exhaust memory.
+_HOOK_STREAM_CAP_BYTES = 64 * 1024
+# Marker appended to a decoded stream when its raw bytes exceeded the cap, so
+# truncation is visible rather than silent.
+_HOOK_TRUNCATION_MARKER = "\n…[output truncated]"
+
+
+async def _read_capped_stream(
+    reader: "asyncio.StreamReader | None", cap: int
+) -> tuple[bytes, bool]:
+    """Drain *reader* fully, retaining at most *cap* bytes.
+
+    Returns ``(retained_bytes, truncated)``. Bytes beyond *cap* are read and
+    discarded so the child never blocks on a full OS pipe buffer (the deadlock
+    ``communicate`` avoided by buffering everything — we avoid it by consuming
+    everything, but only *keeping* a bounded prefix). Chunked reads keep peak
+    memory at roughly ``cap`` regardless of how much the child writes.
+    """
+    if reader is None:
+        return b"", False
+    retained = bytearray()
+    truncated = False
+    while True:
+        # A fixed read size bounds a single chunk; the loop bounds the total.
+        chunk = await reader.read(65536)
+        if not chunk:
+            break
+        if len(retained) < cap:
+            room = cap - len(retained)
+            retained.extend(chunk[:room])
+            if len(chunk) > room:
+                truncated = True
+        else:
+            # Already at cap — keep draining so the pipe drains, drop the bytes.
+            truncated = True
+    return bytes(retained), truncated
+
+
+def _decode_capped(raw: bytes, truncated: bool) -> str:
+    """Decode capped raw bytes, appending the truncation marker when clipped.
+
+    ``errors="replace"`` handles a multibyte sequence severed at the cap
+    boundary: the trailing partial code point becomes U+FFFD rather than raising
+    or silently dropping, so a UTF-8 stream clipped mid-character still decodes
+    to a stable, safe string.
+    """
+    text = raw.decode(errors="replace")
+    if truncated:
+        text += _HOOK_TRUNCATION_MARKER
+    return text
+
+
+async def _communicate_capped(
+    proc: "asyncio.subprocess.Process", stdin_data: bytes, cap: int
+) -> tuple[bytes, bool, bytes, bool]:
+    """Write *stdin_data*, then drain stdout and stderr concurrently under a cap.
+
+    Concurrent draining (vs. sequential) is required for the same reason
+    ``communicate`` reads both pipes at once: a child that fills stderr while we
+    are still reading stdout would deadlock if we did not consume stderr in
+    parallel. Returns ``(stdout, stdout_truncated, stderr, stderr_truncated)``.
+    """
+
+    async def _feed_stdin() -> None:
+        stdin = proc.stdin
+        if stdin is None:
+            return
+        try:
+            stdin.write(stdin_data)
+            await stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # The hook may exit without reading stdin; that is not our error.
+            pass
+        finally:
+            try:
+                stdin.close()
+            except Exception:
+                pass
+
+    stdin_task = asyncio.ensure_future(_feed_stdin())
+    stdout_task = asyncio.ensure_future(_read_capped_stream(proc.stdout, cap))
+    stderr_task = asyncio.ensure_future(_read_capped_stream(proc.stderr, cap))
+    try:
+        (stdout_b, stdout_trunc), (stderr_b, stderr_trunc) = await asyncio.gather(
+            stdout_task, stderr_task
+        )
+        await stdin_task
+        await proc.wait()
+    except BaseException:
+        # On timeout (CancelledError from wait_for) or any failure, cancel and
+        # OBSERVE every helper before returning control to the reap path. Merely
+        # calling cancel() leaves the StreamReader with an active waiter, so a
+        # cleanup read can raise "read() called while another coroutine is
+        # already waiting" and leak the process.
+        for task in (stdin_task, stdout_task, stderr_task):
+            task.cancel()
+        await asyncio.gather(
+            stdin_task, stdout_task, stderr_task, return_exceptions=True
+        )
+        raise
+    return stdout_b, stdout_trunc, stderr_b, stderr_trunc
+
+
 @dataclass
 class ScriptHookResult:
     """Result of executing a script hook."""
@@ -3088,8 +3201,14 @@ async def run_script_hook(
                 creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             )
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(input=stdin_data), timeout=hook.timeout
+            (
+                stdout_b,
+                stdout_trunc,
+                stderr_b,
+                stderr_trunc,
+            ) = await asyncio.wait_for(
+                _communicate_capped(proc, stdin_data, _HOOK_STREAM_CAP_BYTES),
+                timeout=hook.timeout,
             )
         finally:
             if cleanup_path:
@@ -3099,11 +3218,14 @@ async def run_script_hook(
                     pass
         elapsed = int((time.monotonic() - start) * 1000)
         exit_code = proc.returncode or 0
-        stderr_text = stderr_b.decode(errors="replace").strip()
-        # Redact the FULL stderr through the canonical companion-aware shim
-        # before truncating, so a credential straddling the 500-char boundary
-        # cannot leak as an unredacted fragment. The field surfaces on the
-        # dashboard and must not expose secrets (#4708).
+        stdout_text = _decode_capped(stdout_b, stdout_trunc).strip()
+        stderr_text = _decode_capped(stderr_b, stderr_trunc).strip()
+        # Redact the FULL (capped) stderr through the canonical companion-aware
+        # shim before truncating, so a credential straddling the 500-char
+        # boundary cannot leak as an unredacted fragment. The field surfaces on
+        # the dashboard and must not expose secrets (#4708). Memory is already
+        # bounded upstream by the byte cap (#5442), so redaction never sees an
+        # unbounded string.
         stderr_safe = redact_via_context(stderr_text)[:500] if stderr_text else ""
         hook.last_run = time.time()
         if exit_code == 2:
@@ -3120,7 +3242,7 @@ async def run_script_hook(
             hook_id=hook.id,
             hook_name=hook.name,
             event=hook.event,
-            stdout=stdout_b.decode(errors="replace").strip(),
+            stdout=stdout_text,
             stderr=stderr_text,
             exit_code=exit_code,
             duration_ms=elapsed,
@@ -3135,7 +3257,16 @@ async def run_script_hook(
                 # timeout path already runs on the event loop, so we never want
                 # to stall it further while taskkill.exe walks the tree
                 await platform_compat.kill_process_tree_async(proc.pid, platform_compat.SIGKILL)
-                await proc.communicate()
+                # Reap the killed tree WITHOUT re-buffering: a hook that timed
+                # out having already flooded its pipes must not be able to OOM
+                # us during cleanup (#5442). Drain both pipes concurrently under
+                # the same cap and discard; sequential reads can deadlock when
+                # residual data fills the other pipe.
+                await asyncio.gather(
+                    _read_capped_stream(proc.stdout, _HOOK_STREAM_CAP_BYTES),
+                    _read_capped_stream(proc.stderr, _HOOK_STREAM_CAP_BYTES),
+                )
+                await proc.wait()
         except Exception:
             pass
         elapsed = int((time.monotonic() - start) * 1000)
