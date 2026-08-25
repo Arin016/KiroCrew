@@ -772,6 +772,14 @@ export interface GovernancePolicyData {
    *  could not be read or parsed — enforcement is correct (fail-closed) but the
    *  operator should know the ceiling is synthetic, not intentional. */
   fallback_profiles?: string[]
+  /** Capability scopes a profile names that this build does not register —
+   *  typically scopes a companion edition adds, though a misspelled scope key
+   *  lands here too. Keyed by profile stem, sorted scope names as values;
+   *  present only for profiles carrying such scopes, and deliberately NOT
+   *  narrowed to the host profile — every loaded profile reports. Producer:
+   *  the governance security payload (PR #5544). Tolerated at load time and
+   *  inert in this build. */
+  unknown_profile_scopes?: Record<string, string[]>
   /** True when governance resolution failed — the viewer shows a soft notice. */
   unavailable: boolean
   scopes: GovernanceScope[]

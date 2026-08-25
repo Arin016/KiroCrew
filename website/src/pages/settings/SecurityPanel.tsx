@@ -12,7 +12,7 @@ import { api, ApiError, type DeniedCommandsData, type DeniedCommandRule, type De
 import { PostureDisclosureRow, CODE_BASE as POSTURE_CODE_BASE } from './PostureDisclosure'
 
 import { i18nT } from '../../i18n/t'
-import { fmtDateFields, fmtList, fmtTime, fmtTimeNumeric, toDate } from '../../i18n/format'
+import { fmtDateFields, fmtList, fmtTime, fmtTimeNumeric, toDate, compareText } from '../../i18n/format'
 import ErrorNotice from '../../components/ErrorNotice'
 /* ── Security feature registry ──
  *
@@ -1084,6 +1084,16 @@ function GovernancePolicyViewer() {
     })
   }, [data, byScope])
 
+  // Profiles naming capability scopes this build does not register — a
+  // companion edition's scopes (or a misspelled key), tolerated at load and
+  // inert here. Empty lists are filtered so a profile can never render a badge
+  // with nothing after it. Deliberately NOT memoized: compareText resolves the
+  // active language per call, and a useMemo whose deps exclude the language
+  // would keep the old sort order across a language switch.
+  const unknownScopeRows = Object.entries(data?.unknown_profile_scopes ?? {})
+    .filter(([, scopes]) => scopes.length > 0)
+    .sort(([a], [b]) => compareText(a, b))
+
   return (
     <SettingsSection title={i18nT('pages.settings.securityPanel.governance_policy')}>
       <SettingsCard>
@@ -1108,7 +1118,7 @@ function GovernancePolicyViewer() {
             <AlertTriangle size={14} className="lucide-inline text-warn shrink-0 mt-0.5" />
             <span className="text-[12px] text-muted leading-relaxed">{i18nT('pages.settings.securityPanel.governance_status_is_temporarily_unavailable_enf')}</span>
           </div>
-        ) : !data?.has_policy && !data?.profile ? (
+        ) : !data?.has_policy && !data?.profile && unknownScopeRows.length === 0 ? (
           <div className="flex items-start gap-2.5 py-3 mt-1 rounded-md bg-bg-elevated border border-border px-3">
             <ShieldCheck size={16} className="lucide-inline text-ok shrink-0 mt-0.5" />
             <div>
@@ -1145,6 +1155,31 @@ function GovernancePolicyViewer() {
                       rare state; demoted so the two sentences that matter are not
                       buried in a paragraph wall at 12px. */}
                   <div className="text-muted mt-1">{i18nT('pages.settings.securityPanel.profile_unusable_detail')}</div>
+                </div>
+              </div>
+            )}
+            {/* Profiles naming capability scopes this build does not register —
+                typically a companion edition's scopes, tolerated at load and
+                inert here. Rendered so a reader auditing a profile file can
+                account for every key it declares, not just the ones this build
+                enforces. Reachable even with no policy and no host profile: the
+                payload aggregates EVERY loaded profile (see client.ts), so the
+                no-policy branch above yields to this block when rows exist. */}
+            {unknownScopeRows.length > 0 && (
+              <div className="border-t border-border pt-2 mt-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-[.04em] text-muted">{i18nT('pages.settings.securityPanel.unknown_scopes_title')}</span>
+                  <InfoTip text={i18nT('pages.settings.securityPanel.unknown_scopes_tip')} />
+                </div>
+                <div className="mt-1 space-y-1">
+                  {unknownScopeRows.map(([stem, scopes]) => (
+                    <div key={stem} className="flex items-center gap-2 flex-wrap">
+                      <Badge variant="muted"><ListChecks size={11} className="lucide-inline" /> {stem}</Badge>
+                      {/* fmtList for the same reason as the profile_unusable
+                          block above: zh joins with 、 and no spaces. */}
+                      <span className="text-[11px] font-mono text-muted break-all">{fmtList(scopes, { type: 'unit' })}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}

@@ -4362,6 +4362,8 @@
         "profile_unusable_body": "A profile named below could not be loaded, so its surface is held at the policy fallback ceiling — deny-all unless a looser fallback is declared. Correct the file in the profiles folder of your Kiro Crew data home — it is reloaded automatically.",
         "profile_unusable_detail": "The file was unreadable, failed to parse, or extends a profile that is missing. A restart is only needed if the file is already valid for a newer build than the one running.",
         "profile_unusable_which": "Affected: {{profiles}}.",
+        "unknown_scopes_title": "Profile scopes not in this build",
+        "unknown_scopes_tip": "These profiles name capability scopes this build does not register — typically scopes a companion edition adds, though a misspelled scope key lands here too. They are skipped and have no effect in this build.",
         "disabling_all_built_in_denies_removes_kirocrew_s": "Disabling all built-in denies removes Kiro Crew’s protection against destructive and credential-exfiltration commands. Some commands may stay blocked by independent defense-in-depth controls (sensitive paths, IMDS, git-publish).",
         "enabled": "Enabled",
         "expand_category_rules": "Expand {{category}} rules",
