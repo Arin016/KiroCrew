@@ -1202,8 +1202,8 @@
     },
     "papyrus": {
       "workspace": {
-        "co_author_conflict_discard_button": "Discard edits",
-        "co_author_conflict_discard_title": "Discard unsaved edits?"
+        "co_author_conflict_discard_button": "Discard changes",
+        "co_author_conflict_discard_title": "Discard unsaved changes?"
       }
     }
   },
@@ -2622,7 +2622,7 @@
       "created_and_registered_profile": "Created + registered profile '{{name}}'.",
       "deploy_artifact": "Deploy {{name}}",
       "deployments_count": "Deployments ({{count}})",
-      "destroy_confirm": "DESTROY '{{name}}'? Permanently deletes bucket {{bucket}} and distribution {{distribution}}. Cannot be undone.",
+      "destroy_confirm": "Permanently deletes bucket {{bucket}} and distribution {{distribution}} for '{{name}}'. Cannot be undone.",
       "destroying": "Destroying '{{name}}' (CloudFront disable can take 5–15 min).",
       "error": "Error: {{error}}",
       "is_the_default_profile": "{{name}} is the default profile",
@@ -2640,13 +2640,13 @@
       "fullstack_also_requires_the_permissions_boundary": "Fullstack also requires the permissions-boundary policy below — create it BEFORE the first deploy (role creation is conditioned on it).",
       "make_default": "Make default",
       "not_reachable": "not reachable",
-      "recall_confirm": "Recall '{{name}}'? Empties bucket {{bucket}} (URL → 404, reversible). Edge caches may serve briefly; already-downloaded content can't be recalled.",
+      "recall_confirm": "Empties bucket {{bucket}} for '{{name}}' (URL → 404, reversible). Edge caches may serve briefly; already-downloaded content can't be recalled.",
       "recalled": "Recalled '{{name}}'.",
       "register": "Register",
       "registered_profile": "Registered profile '{{name}}'.",
       "remove_failed": "remove failed",
       "remove_from_registry": "Remove {{name}} from registry",
-      "remove_profile_confirm": "Remove '{{name}}' from the registry? Your ~/.aws/config is NOT touched.",
+      "remove_profile_confirm": "Removes '{{name}}' from the registry. Your ~/.aws/config is NOT touched.",
       "removed_from_registry_your_aws_config_is_untouche": "Removed from registry (your ~/.aws/config is untouched).",
       "unknown": "unknown",
       "unknown_2": "(unknown)",
