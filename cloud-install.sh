@@ -68,8 +68,8 @@ echo "  ${DIM}Platform: $OS $ARCH${RESET}"
 # --- 1. Python -------------------------------------------------------------
 step 1 "Python"
 PY=""
-for c in python3.12 python3.11 python3.10 python3; do
-    if has "$c" && "$c" -c 'import sys; assert sys.version_info>=(3,10)' 2>/dev/null; then PY="$c"; break; fi
+for c in python3.12 python3; do
+    if has "$c" && "$c" -c 'import sys; assert sys.version_info>=(3,12)' 2>/dev/null; then PY="$c"; break; fi
 done
 if [ -z "$PY" ]; then
     if [ "$OS" = "Darwin" ]; then
@@ -77,18 +77,19 @@ if [ -z "$PY" ]; then
         xcode-select --install 2>/dev/null || true
         warn "Finish the Xcode CLT install if prompted, then re-run this script."
     elif has apt-get; then $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip
-    elif has dnf; then $SUDO dnf install -y python3.11 python3.11-pip 2>/dev/null || $SUDO dnf install -y python3 python3-pip
+    elif has dnf; then $SUDO dnf install -y python3.12 python3.12-pip 2>/dev/null || $SUDO dnf install -y python3 python3-pip
     elif has yum; then $SUDO yum install -y python3 python3-pip
     elif has brew; then brew install python@3.12
     fi
-    # Re-probe with the same >=3.10 gate as above -- a bare existence check would
+    # Re-probe with the same >=3.12 gate as above -- a bare existence check would
     # wrongly latch onto a distro's default python3 (RHEL/CentOS 7 = 3.6,
-    # Amazon Linux 2023 = 3.9), which then fails later at pip/venv.
-    for c in python3.12 python3.11 python3.10 python3; do
-        if has "$c" && "$c" -c 'import sys; assert sys.version_info>=(3,10)' 2>/dev/null; then PY="$c"; break; fi
+    # Amazon Linux 2023 = 3.9, Ubuntu 22.04 = 3.10), which then fails later at
+    # pip/venv.
+    for c in python3.12 python3; do
+        if has "$c" && "$c" -c 'import sys; assert sys.version_info>=(3,12)' 2>/dev/null; then PY="$c"; break; fi
     done
 fi
-[ -n "$PY" ] || { warn "Python 3.10+ required. Install it and re-run."; exit 1; }
+[ -n "$PY" ] || { warn "Python 3.12+ required, and this distro's packages do not provide it. Install Python 3.12+ (e.g. 'curl https://mise.run | sh && mise use -g python@3.12') and re-run."; exit 1; }
 ok "$($PY --version 2>&1)"
 
 # --- 2. AWS CLI ------------------------------------------------------------

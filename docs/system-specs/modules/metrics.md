@@ -940,7 +940,7 @@ shape cannot be widened from a call site.
 |-------|---------|-----|
 | `id` | 32-char hex | Random UUID4. Dedup key for `COUNT(DISTINCT)`. |
 | `v` | `0.1.2` | Version adoption. **Release only** — every build stamp is stripped by `release()`. |
-| `py` | `3.12` | **Minor only.** Answers "when can the floor move off 3.10". |
+| `py` | `3.12` | **Minor only.** Answers "when can the floor move again" -- it is what retired the 3.10 leg. |
 | `dist` | `dmg` | Which install path users take. Clamped to a fixed set. Baked at build time (see below). |
 | `first_seen` | `1`/`0` | One bit → new-install and "launched once, never again" rate. |
 

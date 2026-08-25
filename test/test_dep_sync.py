@@ -117,18 +117,23 @@ def test_pyproject_is_read_with_a_parser_not_by_matching_text(repo):
     assert dep_sync.dependency_authority_moved(repo) is not None
 
 
-def test_text_fallback_also_survives_a_commented_header(repo, monkeypatch):
-    """The 3.10-without-tomli path has no parser, so its reader must not regress."""
-    monkeypatch.setattr(dep_sync, "_toml", None)
-    (repo / "pyproject.toml").write_text(
+def test_text_fallback_also_survives_a_commented_header():
+    """`_section` is still the reader for a pyproject `tomllib` cannot parse.
+
+    It is no longer reachable by having no TOML parser at all -- `tomllib` is
+    stdlib on every supported interpreter -- so this pins the reader directly:
+    `[project]   # trailing comment` is a valid header, and comparing the whole
+    line would read it as a different table and skip the body underneath.
+    """
+    text = (
         '[project]   # trailing comment\nname = "kirocrew"\n'
-        'requires-python = ">=3.13"\ndependencies = ["aiohttp"]\n',
-        encoding="utf-8",
+        'requires-python = ">=3.13"\ndependencies = ["aiohttp"]\n'
     )
 
-    assert dep_sync.project_table(repo) is None
-    assert dep_sync.requires_python(repo) == ">=3.13"
-    assert dep_sync.dependency_authority_moved(repo) is not None
+    body = dep_sync._section(text, "[project]")
+
+    assert 'requires-python = ">=3.13"' in body
+    assert 'name = "kirocrew"' in body
 
 
 def test_requires_python_is_read_from_the_working_tree(repo):

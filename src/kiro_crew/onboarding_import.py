@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import tomllib
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -23,14 +24,6 @@ from typing import Any, Iterator
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
 from zoneinfo import ZoneInfo
-
-try:
-    import tomllib as _toml
-except ImportError:  # pragma: no cover - Python 3.9/3.10 compatibility
-    try:
-        import tomli as _toml  # type: ignore[no-redef,import-not-found]
-    except ImportError:
-        _toml = None  # type: ignore[assignment]
 
 import yaml  # type: ignore[import-untyped]
 from croniter import croniter  # type: ignore[import-untyped]
@@ -1018,11 +1011,8 @@ def _read_toml(path: Path, anchor: Path, scan: _Scan) -> dict[str, Any]:
     content = _read_bytes(path, anchor, scan, "settings")
     if content is None:
         return {}
-    if _toml is None:
-        scan.diagnostic("settings", "toml_parser_unavailable", unsupported=True)
-        return {}
     try:
-        result = _toml.loads(content.decode("utf-8", errors="strict"))
+        result = tomllib.loads(content.decode("utf-8", errors="strict"))
     except ValueError:
         scan.diagnostic("settings", "invalid_config")
         return {}

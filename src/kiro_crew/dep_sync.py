@@ -79,22 +79,21 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
-
-try:  # pragma: no cover - exercised by whichever interpreter runs this
-    import tomllib as _toml
-except ImportError:  # Python 3.10, which this project still supports
-    try:
-        import tomli as _toml  # type: ignore[no-redef,import-not-found]
-    except ImportError:
-        _toml = None  # type: ignore[assignment]
-
 
 #: How a caller receives this module's own messages: ``(message, is_error)``.
 #: Positional rather than keyword so a caller can pass a plain two-argument
 #: function without importing anything from here.
 Emit = Callable[[str, bool], None]
+
+#: How this module reads one of the project's declaration files, BY NAME
+#: (``"pyproject.toml"``, ``"setup.cfg"``), returning ``None`` when it cannot be
+#: read. The seam exists so the same precedence logic can answer the question
+#: about the worktree (:func:`read_text`) or about a revision that is not checked
+#: out yet (:func:`blob_reader`) without either caller re-deriving it.
+Reader = Callable[[str], "str | None"]
 
 #: Characters that terminate the distribution name at the head of a PEP 508
 #: requirement (version specifier, extras bracket, marker separator, or the
@@ -251,6 +250,59 @@ def read_text(repo: Path, name: str) -> str | None:
         return None
 
 
+def read_text_from(repo: Path) -> Reader:
+    """The worktree :data:`Reader` -- :func:`read_text` bound to *repo*.
+
+    The default for every reader-taking function here, so "no reader given" means
+    "the worktree" in exactly one place instead of at each call site.
+    """
+    return lambda name: read_text(repo, name)
+
+
+def blob_reader(
+    repo: Path,
+    ref: str,
+    git_bin: str,
+    env: dict[str, str] | None = None,
+    timeout: float | None = 10,
+) -> Reader:
+    """A :data:`Reader` serving files as of *ref* rather than from the worktree.
+
+    For the one question that has to be asked BEFORE a merge: what does the
+    revision we are about to check out declare? The worktree cannot answer it --
+    it is still the old revision -- so the bytes come from the object database.
+
+    ``cat-file blob`` rather than ``git show``: ``show`` runs the repository's own
+    ``textconv``/smudge filters, which are programs the repo names in its own
+    config, and this module must not become a way to execute them. ``cat-file``
+    emits the stored bytes and applies no filter, so the read cannot exec.
+
+    *git_bin* is supplied by the caller rather than resolved here: this module is
+    snapshotted and run standalone, so it must not import the project's
+    trusted-git resolver -- and a bare ``"git"`` off ``PATH`` is exactly the shim
+    the callers already resolve around.
+    """
+
+    def _read(name: str) -> str | None:
+        try:
+            proc = subprocess.run(
+                [git_bin, "cat-file", "blob", f"{ref}:{name}"],
+                cwd=str(repo),
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        # Lossy on purpose: a declaration this module reads is ASCII, and a
+        # decode error must not be louder than the answer being unavailable.
+        return (proc.stdout or b"").decode("utf-8", errors="replace")
+
+    return _read
+
+
 def declared_requirements(repo: Path) -> list[str] | None:
     """The project's ``install_requires``, or ``None`` if it cannot be read.
 
@@ -319,7 +371,7 @@ def _dynamic_fields(project: str) -> set[str]:
     return {item.strip().strip("\"'") for item in match.group("items").split(",")}
 
 
-def requires_python(repo: Path) -> str | None:
+def requires_python(repo: Path, read: Reader | None = None) -> str | None:
     """The interpreter floor the checkout declares, from whichever file owns it.
 
     pyproject's ``[project].requires-python`` is read FIRST because setuptools
@@ -338,9 +390,10 @@ def requires_python(repo: Path) -> str | None:
     sentinel: "no floor declared" and "the floor could not be read" both mean the
     same thing to the caller, which is that this gate does not fire.
     """
-    text = read_text(repo, "pyproject.toml")
+    read = read or read_text_from(repo)
+    text = read("pyproject.toml")
     if text is not None:
-        table = project_table(repo)
+        table = project_table(repo, read)
         if table is not None:
             if "requires-python" not in _as_str_list(table.get("dynamic")):
                 spec = table.get("requires-python")
@@ -357,7 +410,7 @@ def requires_python(repo: Path) -> str | None:
                 )
                 if match:
                     return match.group("spec").strip() or None
-    text = read_text(repo, "setup.cfg")
+    text = read("setup.cfg")
     if text is None:
         return None
     cfg = configparser.ConfigParser()
@@ -465,6 +518,45 @@ def python_floor_breach(spec: str, version: tuple[int, int, int]) -> str | None:
     return f"{breached[0]}.{breached[1]}.{breached[2]}"
 
 
+def incoming_floor_breach(
+    repo: Path,
+    ref: str,
+    git_bin: str,
+    version: tuple[int, int, int],
+    env: dict[str, str] | None = None,
+    timeout: float | None = 10,
+) -> tuple[str, str] | None:
+    """``(spec, breached)`` when the revision at *ref* cannot run on *version*.
+
+    The pre-swap half of the check :func:`sync` already makes post-swap. Both ask
+    the same question of the same helper (:func:`python_floor_breach`); the only
+    difference is WHEN, and that difference is the whole point. `sync` runs after
+    the checkout has been replaced, so its refusal is accurate but late: the user
+    is left holding a tree their interpreter cannot import, and the next launch
+    fails on syntax or a missing stdlib module rather than on a message. Asked
+    here -- after the fetch, before the reset/pull -- the same answer costs the
+    user nothing but a skipped update, and the working install stays working.
+
+    Returns ``None`` when the revision is runnable, when it declares no floor, and
+    when the declaration cannot be read. That last case is deliberately
+    fail-OPEN, which is the opposite of most guards in this file, so it is worth
+    being explicit about why: this is not a security boundary and it removes no
+    existing protection -- :func:`sync`'s refusal still stands behind it. Failing
+    closed would instead invent a NEW way for updates to stop working (any repo
+    layout this reader cannot parse becomes un-updatable), trading a rare late
+    refusal for a common total block. The floor check is an improvement on the
+    timing of an existing refusal, and it should not be able to do more harm than
+    the thing it improves.
+    """
+    spec = requires_python(repo, blob_reader(repo, ref, git_bin, env, timeout))
+    if not spec:
+        return None
+    breached = python_floor_breach(spec, version)
+    if breached is None:
+        return None
+    return spec, breached
+
+
 def installed_package_origin(target_py: Path) -> str | None:
     """Where *target_py*'s venv resolves this project's package FROM.
 
@@ -532,7 +624,7 @@ def venv_not_mapped_to(origin: str | None, repo: Path) -> str | None:
     return None
 
 
-def project_table(repo: Path) -> dict[str, Any] | None:
+def project_table(repo: Path, read: Reader | None = None) -> dict[str, Any] | None:
     """pyproject's ``[project]`` table, PARSED, or ``None`` if it cannot be.
 
     Every question this module asks of pyproject -- where the requirements live,
@@ -543,19 +635,15 @@ def project_table(repo: Path) -> dict[str, Any] | None:
     trailing comment (``[project] # comment``). Those are not three bugs, they are
     one: a hand-rolled reader answering a question only a parser can answer.
 
-    So a parser answers it wherever one exists -- ``tomllib`` on 3.11+, ``tomli``
-    if the venv happens to carry it, exactly the ladder ``onboarding_import``
-    already uses. ``None`` means neither was importable (a 3.10 venv without
-    ``tomli``), and each caller then falls back to its text reader, which is
-    best-effort by nature; that residual is stated in the PR rather than hidden.
+    ``tomllib`` answers it: it is stdlib from 3.11 and the package floor is
+    >=3.12, so a parser is always available and the caller never has to fall
+    back to a best-effort text reader for want of one.
     """
-    if _toml is None:
-        return None
-    text = read_text(repo, "pyproject.toml")
+    text = (read or read_text_from(repo))("pyproject.toml")
     if text is None:
         return None
     try:
-        parsed = _toml.loads(text)
+        parsed = tomllib.loads(text)
     except Exception:
         # A pyproject this module cannot parse is not a pyproject it should guess
         # about; the caller's text reader is no better informed, so say so once.
@@ -567,9 +655,10 @@ def project_table(repo: Path) -> dict[str, Any] | None:
 def _section(toml_text: str, header: str) -> str:
     """The body of one top-level TOML table, by literal header line.
 
-    A regex read of one table, not a TOML parse: ``tomllib`` is 3.11+ and this
-    project supports 3.10, so a dependency-free read of two well-known tables is
-    preferred over adding a parser for it.
+    A regex read of one table, not a TOML parse. ``tomllib`` handles the healthy
+    case (see :func:`project_table`); this is the fallback for a pyproject the
+    parser REJECTS, where a dependency-free read of two well-known tables still
+    answers the one question the caller has.
     """
     lines = toml_text.splitlines()
     out: list[str] = []

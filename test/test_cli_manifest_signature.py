@@ -361,11 +361,13 @@ esac
     # whatever version-manager shim is installed. Those shims resolve their tool
     # installs under HOME, which this harness repoints at an empty temp dir, so
     # a shim wedges instead of answering and the probe ladder stalls. Shadow
-    # EVERY candidate in cli.sh's ladder, not just the running version: the
-    # ladder tries python3.12 first, so on a 3.10 or 3.11 host that entry still
-    # reaches a host shim -- and a stock macOS has no `timeout` to bound it. The
-    # names are aliases rather than version claims; the probe only asserts
-    # >=3.10, which the interpreter running these tests satisfies. It must stay
+    # EVERY candidate in cli.sh's ladder (the list below is a deliberate superset,
+    # so it keeps covering the ladder if a name is added back): the ladder tries
+    # python3.12 first, so on a host whose python3.12 is a shim that entry still
+    # reaches it -- and a stock macOS has no `timeout` to bound it. The names are
+    # aliases rather than version claims; the probe asserts >=3.12, which the
+    # interpreter running these tests satisfies BECAUSE the package floor is
+    # >=3.12 and CI runs the suite on it. It must stay
     # a REAL interpreter: cli.sh uses $PY for the signature and digest
     # verification under test, so a stub would make those assertions vacuous.
     for _name in ("python3.13", "python3.12", "python3.11", "python3.10", "python3"):

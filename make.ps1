@@ -44,7 +44,7 @@ $VenvPytest = Join-Path $VenvDir "Scripts\pytest.exe"
 # ensure-python.sh's MIN_MAJOR/MIN_MINOR rather than parsed: this script must
 # work before any interpreter is known to exist.
 $MinPyMajor = 3
-$MinPyMinor = 10
+$MinPyMinor = 12
 
 function Write-Step($msg) { Write-Host "  -> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  [ok] $msg" -ForegroundColor Green }
@@ -126,7 +126,7 @@ function Ensure-Python {
     # `py -3.12` before a bare `python`: the launcher reports real CPython
     # installs only, so it never hands back the Store alias stub.
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        foreach ($v in @("3.12", "3.11", "3.10", "3.13")) {
+        foreach ($v in @("3.12", "3.13")) {
             $probe = Invoke-Probe "py" @("-$v", "-c", "import sys; print(sys.executable)")
             if ($probe -and (Test-PythonUsable $probe)) {
                 $resolved = Resolve-PythonPath $probe
@@ -136,7 +136,7 @@ function Ensure-Python {
         }
     }
 
-    foreach ($name in @("python3.12", "python3.11", "python3.10", "python", "python3")) {
+    foreach ($name in @("python3.12", "python", "python3")) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
         if (-not $cmd) { continue }
         $path = $cmd.Source

@@ -37,7 +37,9 @@ temp dir and every relative path the workflows use (`.review-base-rules/...`,
 text to its absolute staged twin. A local review therefore cannot dirty the tree
 that Phase 3 is about to push.
 
-Stdlib only; Python 3.10+ (the package floor), like its sibling scripts.
+Stdlib only; Python 3.9+, like its sibling scripts -- deliberately below the
+package floor, since these run under whatever interpreter the contributor's
+shell resolves rather than the project venv.
 
 Usage:
     python3 local_review.py [--worktree PATH] [--base REF]

@@ -9271,6 +9271,49 @@ class GatewayOrchestrator:
                     self.dashboard_state.push_refresh("update_available")
                 return
 
+            # 5. The interpreter floor the TARGET declares. Checks 1-4 ask what
+            #    the reset would destroy; this one asks whether what it leaves
+            #    behind can still run. A revision that raises `requires-python`
+            #    above the interpreter serving this gateway installs nothing
+            #    useful: the reset lands, `dep_sync` refuses the venv it can no
+            #    longer build, and the execv at the end of this method restarts
+            #    into a tree whose imports fail. Refusing here keeps the working
+            #    install working and leaves the operator a `kirocrew update` where
+            #    a human sees the reason.
+            #
+            #    Read from `target` (the OID being reset to), not the worktree,
+            #    which is still the old revision and would answer the old floor.
+            #    Fail-open by construction -- an unreadable declaration lets the
+            #    update proceed exactly as it does today (see
+            #    `dep_sync.incoming_floor_breach`).
+            floor_breach = await asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(),
+                functools.partial(
+                    dep_sync.incoming_floor_breach,
+                    Path(proj),
+                    target,
+                    _git,
+                    sys.version_info[:3],
+                    _git_env,
+                ),
+            )
+            if floor_breach is not None:
+                floor_spec, floor_needed = floor_breach
+                logger.warning(
+                    "Auto-update: skipping — origin/%s requires Python %s but this "
+                    "gateway runs %s; the update would leave a checkout it cannot "
+                    "import. Provision Python %s or newer (`bash ensure-python.sh`), "
+                    "then run `kirocrew update`.",
+                    branch,
+                    floor_spec,
+                    ".".join(str(part) for part in sys.version_info[:3]),
+                    floor_needed,
+                )
+                if self.dashboard_state:
+                    self.dashboard_state.clear_update_progress()
+                    self.dashboard_state.push_refresh("update_available")
+                return
+
             # Hard reset to remote. Reached only with a clean tracked tree and no
             # untracked collisions, so it overwrites nothing the developer owns.
             reset = await asyncio.create_subprocess_exec(

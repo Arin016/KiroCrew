@@ -54,6 +54,7 @@ from kiro_crew.platform.update_capability import (
     derive_capability,
 )
 from kiro_crew.platform.update_governance import (
+    git_command_env,
     min_version,
     resolve_remote_url,
     update_blocked_reason,
@@ -64,7 +65,7 @@ from kiro_crew.platform.update_layout import detect_install_layout
 from kiro_crew.platform.update_layout import release_channel as _release_channel
 from kiro_crew.platform.update_layout import set_release_channel, wheel_update_command
 from kiro_crew.platform.update_provider import CommandProvider, resolve_provider
-from kiro_crew.platform_compat import reexec_python_module
+from kiro_crew.platform_compat import reexec_python_module, trusted_git_bin
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -1356,6 +1357,58 @@ async def api_update_apply(request: web.Request) -> web.Response:
             },
             status=409,
         )
+
+    # Can the interpreter running this gateway still IMPORT the revision it is
+    # about to check out? Asked here, while the working install is still intact.
+    #
+    # `dep_sync.sync()` asks the same question after the pull and refuses there
+    # too, but by then the tree has already been replaced: the refusal is a
+    # correct message attached to a broken checkout, and the next launch fails on
+    # a missing stdlib module rather than on that message. This is the same
+    # answer, one step earlier, where declining costs the user only the update.
+    #
+    # `sys.executable` is the right interpreter to judge: `_venv_pip_install`
+    # installs into it, and it is the one that will import the result.
+    #
+    # Fail-open by construction (see `incoming_floor_breach`): an unreadable
+    # declaration, or no trustworthy git, leaves the update to proceed exactly as
+    # it does today.
+    floor_git = trusted_git_bin()
+    if floor_git is not None:
+        breach = await asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(),
+            functools.partial(
+                dep_sync.incoming_floor_breach,
+                Path(proj),
+                "@{u}",
+                floor_git,
+                sys.version_info[:3],
+                git_command_env(),
+            ),
+        )
+        if breach is not None:
+            spec, breached = breach
+            running = ".".join(str(part) for part in sys.version_info[:3])
+            logger.warning(
+                "Update refused: incoming revision requires Python %s but this " "gateway runs %s",
+                spec,
+                running,
+            )
+            return web.json_response(
+                {
+                    "error": (
+                        f"This update requires Python {spec}, but Kiro Crew is running on "
+                        f"{running}. Updating would leave a checkout this interpreter "
+                        f"cannot import. Provision Python {breached} or newer (run "
+                        "`bash ensure-python.sh` in the checkout, or re-run the "
+                        "installer with `--managed-python`), then update again."
+                    ),
+                    "code": "python_floor_breach",
+                    "requires_python": spec,
+                    "running_python": running,
+                },
+                status=409,
+            )
 
     async def _apply() -> None:
         try:

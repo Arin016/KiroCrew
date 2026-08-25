@@ -7,11 +7,11 @@ name = "kirocrew"
 version = "0.5.0"
 description = "Personal AI agent that runs locally — chat via CLI, dashboard, desktop app, or messaging channels like Slack and Discord"
 readme = "README.md"
-# macOS (x86_64 + arm64) and Linux (x86_64 + aarch64), CPython 3.10-3.13.
+# macOS (x86_64 + arm64) and Linux (x86_64 + aarch64), CPython 3.12-3.13.
 # Must be declared in this [project] table: when it exists, setuptools reads
 # requires-python from here (not setup.cfg), and an absent value makes the
 # build backend raise SpecifierSet(None) -> TypeError during wheel builds.
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 # optional-dependencies must be listed here too: the extras live in setup.cfg
 # ([options.extras_require]), and once a [project] table exists setuptools
 # ignores setup.cfg metadata unless the field is declared dynamic. Omitting it
@@ -89,6 +89,12 @@ mypy_path = "src"
 # surface, while mypy otherwise selects typeshed from the developer's host and
 # reports guarded POSIX APIs as missing when this same command runs on Windows.
 platform = "linux"
+# Same reasoning for the interpreter: unpinned, mypy picks typeshed from whatever
+# Python runs it, so a contributor on an older interpreter gets a DIFFERENT
+# verdict than CI on stdlib signatures that changed (`shutil.rmtree`'s `onexc`
+# is the one that bit us). requires-python is >=3.12, so there is one series to
+# target and no reason to leave it to the host.
+python_version = "3.12"
 # See https://mypy.readthedocs.io/en/latest/config_file.html for more mypy options.
 
 # Enables the type-checker on the interior of functions without type annotations.

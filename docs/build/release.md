@@ -454,7 +454,7 @@ signed with a non-exportable RSA KMS key:
   "channel": "insider",
   "key_id": "sha256:<SubjectPublicKeyInfo DER digest>",
   "pub_date": "2026-07-18T06:15:00Z",
-  "python_requires": ">=3.10",
+  "python_requires": ">=3.12",
   "schema": "kirocrew-cli-artifact-manifest-v1",
   "sha256": "<wheel digest>",
   "signature": "<base64 RSA signature over canonical JSON without this field>",

@@ -195,9 +195,9 @@ if [ "$USE_MISE" -eq 0 ]; then
 info "Checking Python…"
 _py=""
 _find_python() {
-    for _candidate in python3.12 python3.11 python3.10 python3 python; do
+    for _candidate in python3.12 python3 python; do
         if has "$_candidate"; then
-            _ok=$("$_candidate" -c "import sys; print(int(sys.version_info >= (3, 10)))" 2>/dev/null || echo "0")
+            _ok=$("$_candidate" -c "import sys; print(int(sys.version_info >= (3, 12)))" 2>/dev/null || echo "0")
             if [ "$_ok" = "1" ]; then
                 _ver=$("$_candidate" -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')" 2>/dev/null)
                 _py="$_candidate"
@@ -218,28 +218,35 @@ if ! _find_python; then
         if ! _find_python; then
             warn "Xcode CLT install may be in progress (check the popup)"
             detail "After it finishes, re-run this installer"
-            die "Python 3.10+ required. Waiting for Xcode CLT to finish installing."
+            die "Python 3.12+ required. Waiting for Xcode CLT to finish installing."
         fi
     elif has apt-get; then
         info "Installing Python 3 via apt…"
         sudo apt-get update -qq >/dev/null 2>&1
         sudo apt-get install -y python3 python3-pip python3-venv >/dev/null 2>&1
-        _find_python || die "Python install failed. Run: sudo apt-get install -y python3 python3-venv"
+        _find_python || die "Python 3.12+ required, and apt does not provide it on this
+     release (Ubuntu 22.04 ships 3.10). Re-run with --mise to provision one, or
+     install Python 3.12+ yourself and re-run."
     elif has dnf; then
         info "Installing Python 3 via dnf…"
         sudo dnf install -y python3 python3-pip >/dev/null 2>&1
-        _find_python || die "Python install failed. Run: sudo dnf install -y python3"
+        _find_python || die "Python 3.12+ required, and dnf does not provide it on this
+     release (Amazon Linux 2023 ships 3.9). Re-run with --mise to provision one, or
+     install Python 3.12+ yourself and re-run."
     elif has yum; then
         info "Installing Python 3 via yum…"
         sudo yum install -y python3 python3-pip >/dev/null 2>&1
-        _find_python || die "Python install failed. Run: sudo yum install -y python3"
+        _find_python || die "Python 3.12+ required, and yum does not provide it on this
+     release (CentOS 7 ships 3.6). Re-run with --mise to provision one, or install
+     Python 3.12+ yourself and re-run."
     elif has brew; then
         info "Installing Python 3 via Homebrew…"
         brew install python@3.12 >/dev/null 2>&1 || true
         _find_python || die "Python install failed. Run: brew install python@3.12"
     else
-        die "Python 3.10+ required but not found and no package manager detected.
-     Install Python 3.10+ manually (https://www.python.org/downloads/) and re-run."
+        die "Python 3.12+ required but not found and no package manager detected.
+     Re-run with --mise to provision one, or install Python 3.12+ manually
+     (https://www.python.org/downloads/) and re-run."
     fi
 fi
 fi # USE_MISE -eq 0 (Python)

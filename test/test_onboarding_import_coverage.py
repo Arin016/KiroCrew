@@ -856,18 +856,6 @@ class TestHermesScheduleProjection:
 
 
 class TestFileReaders:
-    def test_a_missing_toml_parser_degrades_to_a_diagnostic(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        api = _api()
-        monkeypatch.setattr(api, "_toml", None)
-        scan = _scan(tmp_path)
-        config = scan.root / "config.toml"
-        config.write_text('model = "x"\n', encoding="utf-8")
-
-        assert api._read_toml(config, scan.root, scan) == {}
-        assert "toml_parser_unavailable" in _reasons(scan)
-
     def test_malformed_toml_is_a_diagnostic(self, tmp_path: Path) -> None:
         api = _api()
         scan = _scan(tmp_path)

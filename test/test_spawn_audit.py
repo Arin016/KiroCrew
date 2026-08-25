@@ -676,10 +676,11 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # dep_sync stands in for `pip install -e .` on a checkout whose console
         # script is locked, and it spawns the same shapes that step did:
         # `<target python> -c <fixed metadata/version probe>` and `<target python>
-        # -m pip install <requirements the merged revision declares>`. It spawns no
-        # git at all -- it runs after the merge, so it reads the declarations
-        # straight from the working tree. The interpreter is the target repo's own
-        # venv python (handed down, never resolved from PATH here); the repo comes
+        # -m pip install <requirements the merged revision declares>`. For that
+        # step it reads the declarations straight from the working tree, because it
+        # runs after the merge and the tree already IS the revision. The
+        # interpreter is the target repo's own venv python (handed down, never
+        # resolved from PATH here); the repo comes
         # from the operator-configured checkout, and the requirement specs are read
         # from that checkout's own declarations -- the same ones `pip install -e .`
         # would have read, so this adds no surface the step it replaces did not
@@ -707,6 +708,33 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "dep_sync.py::_probe_interpreter",
         "dep_sync.py::sync",
         "dep_sync.py::sync_or_reinstall",
+        # `blob_reader`'s inner `_read`: the one git spawn in this module, and the
+        # one read that happens BEFORE a merge rather than after it. The update
+        # paths have to know what floor the INCOMING revision declares while the
+        # worktree is still the old one, so this is `git cat-file blob
+        # <ref>:<name>`.
+        #
+        # `cat-file blob` is chosen over `git show` precisely to keep this benign:
+        # `show` runs the repository's own textconv/smudge filters, which are
+        # programs the repo names in its own config, whereas `cat-file` emits the
+        # stored bytes and applies no filter -- so this read cannot execute
+        # anything the repository supplies. Output is captured as BYTES and decoded
+        # explicitly, so it is not a text-mode spawn either.
+        #
+        # Nothing in the argv is agent-influenced: the binary is handed down by the
+        # caller from `platform_compat.trusted_git_bin()` (resolved OFF `PATH`, so
+        # a planted shim cannot answer), `<name>` is one of two literals this
+        # module spells itself (`pyproject.toml`, `setup.cfg`), and `<ref>` is
+        # either the constant `@{u}` or an OID the caller already resolved with
+        # `git rev-parse --verify`. `cwd` is the operator-configured checkout, the
+        # same one every other git call on those paths uses, and `env` is the
+        # caller's own neutralized `git_command_env()`.
+        #
+        # Not routed through `sandboxed_spawn_argv` because it CANNOT be: this
+        # module is snapshotted and executed standalone by `dev_fleet` (see its
+        # docstring), so importing `kiro_crew.sandbox` would break the path that
+        # copies it out of the tree and runs it by filename.
+        "dep_sync.py::_read",
         # Foreground last-resort restart (Make Live on hosts with no drivable
         # service manager): a detached `kirocrew restart --port <marker port>`,
         # fixed argv whose binary is validated (basenamed kirocrew, absolute,

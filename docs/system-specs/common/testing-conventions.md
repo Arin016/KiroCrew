@@ -790,11 +790,13 @@ stopping it propagating is the part that is never optional.
 
 ### 5. Absolute time budgets on instrumented runs
 
-Asserting a *duration* when the property under test is algorithmic **complexity**. CI enables
-coverage on one Python version only (`--cov` on 3.12, `--no-cov` on 3.10), and instrumentation
-multiplies the cost of every executed line — so the same un-regressed code measured ~1.7s of CPU
-bare and >5s under coverage, and one shard failed on 3.12 while passing on 3.10 **at the identical
-commit**. The tell is a timing test that splits by Python version rather than by machine load.
+Asserting a *duration* when the property under test is algorithmic **complexity**. CI runs the
+suite under coverage, and instrumentation multiplies the cost of every executed line — so the same
+un-regressed code measured ~1.7s of CPU bare and >5s under coverage. This was found the loud way
+while the matrix still carried a coverage-free 3.10 leg: one shard failed on 3.12 while passing on
+3.10 **at the identical commit**. That leg is gone, which removes the tell without removing the
+hazard — an absolute ceiling tuned on a bare run now fails on every shard at once rather than on
+one leg, so it reads as a real regression instead of a version split.
 
 `time.process_time` fixes only the other half: it removes co-tenant scheduling noise, but CPU time
 still includes the instrumentation, so an absolute ceiling stays version-dependent.

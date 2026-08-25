@@ -23,23 +23,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
-
-# `tomllib` is stdlib only from 3.11 (PEP 680), but this project supports 3.10.
-# The import must be guarded HERE rather than left to a caller: every builtin in
-# `BUILTIN_NAMES` is imported at gateway startup, and that loop only swallows a
-# `ModuleNotFoundError` naming the app package itself — a bare `import tomllib`
-# raises with `exc.name == "tomllib"`, so it re-raises and the WHOLE gateway
-# fails to start on 3.10, not just this default-disabled app. Same ladder as
-# `onboarding_import.py`.
-try:
-    import tomllib as _toml  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
-    try:
-        import tomli as _toml  # type: ignore[no-redef,import-not-found]
-    except ModuleNotFoundError:
-        _toml = None  # type: ignore[assignment]
 
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.atomic_write import atomic_write
@@ -87,19 +73,9 @@ class DomainDictionary:
         self._compiled = []
         if not path.is_file():
             return
-        if _toml is None:
-            # No TOML parser on this interpreter (3.10 without `tomli`). The
-            # module already contracts that an unreadable dictionary means "no
-            # corrections", so degrade the same way instead of raising.
-            logger.warning(
-                "meetings: no TOML parser available (Python < 3.11 without `tomli`); "
-                "the domain dictionary at %s is ignored",
-                path,
-            )
-            return
         try:
-            data = _toml.loads(path.read_text(encoding="utf-8"))
-        except (_toml.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
             logger.warning("meetings: failed to parse dictionary at %s: %s", path, exc)
             return
         self.load_terms(data.get("term", []))

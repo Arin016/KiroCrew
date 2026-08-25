@@ -342,7 +342,7 @@ errors in files you did not touch, and it MISSES Linux-only errors CI fails on.
 yet, so it reformats ~95,800 lines on top of whatever you changed and buries your
 diff. The gate above enforces black on every file *outside*
 [`.github/black-baseline.txt`](.github/black-baseline.txt) instead, so format only
-what you touched: `black --target-version py310 <the files you changed>`. If a
+what you touched: `black --target-version py312 <the files you changed>`. If a
 file you touched is listed in the baseline, formatting it is welcome but optional
 — do it in its own commit, and prune its line with
 `python3 scripts/check_black_formatting.py --update-baseline`.
@@ -406,7 +406,7 @@ Two traps are worth naming here because neither is visible when reading the test
 | Rule | Requirement |
 |---|---|
 | Line length | 100 chars (black configured) |
-| Python version | ≥ 3.10 (`from __future__ import annotations` for type hints) |
+| Python version | ≥ 3.12 (`from __future__ import annotations` for type hints) |
 | Imports | `import logging` + `logger = logging.getLogger(__name__)` |
 | Async | `asyncio` throughout; `async def` for all I/O |
 | Dataclasses | `@dataclass` for data containers |

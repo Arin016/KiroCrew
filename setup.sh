@@ -43,15 +43,16 @@ _check() {
 
 echo "── Step 1: Python ──"
 _py=""
-for _candidate in python3.12 python3.11 python3.10 python3; do
-    if _check "$_candidate" && "$_candidate" -c "import sys; assert sys.version_info >= (3,10)" 2>/dev/null; then
+for _candidate in python3.12 python3; do
+    if _check "$_candidate" && "$_candidate" -c "import sys; assert sys.version_info >= (3,12)" 2>/dev/null; then
         _py="$_candidate"
         break
     fi
 done
 if [ -z "$_py" ]; then
-    echo "  ❌ Python 3.10+ required but not found."
-    echo "     Install Python 3.10+ (https://www.python.org/downloads/) and re-run."
+    echo "  ❌ Python 3.12+ required but not found."
+    echo "     Install Python 3.12+ (https://www.python.org/downloads/) and re-run,"
+    echo "     or run 'bash ensure-python.sh' to provision one via mise."
     cd - > /dev/null 2>&1
     return 1 2>/dev/null || exit 1
 fi

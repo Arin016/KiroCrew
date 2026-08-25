@@ -36,7 +36,7 @@ Builds use plain `pip` + `npm`/Vite + `pytest`, driven by the repo-root
 
 | Requirement | Needed for | Floor |
 |-------------|------------|-------|
-| **Python** | Backend | `>= 3.10` (`requires-python` in `pyproject.toml`; `make build` provisions a 3.12 `.venv` by default) |
+| **Python** | Backend | `>= 3.12` (`requires-python` in `pyproject.toml`; `make build` provisions a 3.12 `.venv` by default) |
 | **Node.js + npm** | Building the dashboard | `20 \|\| >= 22` (`website/package.json` `engines`); `ensure-node.sh` targets 20, and drops to 16 on Amazon Linux 2 where newer official builds need a glibc that host does not have |
 | **`kiro-cli`** | Driving the LLM | Required; see below |
 
@@ -148,14 +148,14 @@ home (`~/.kiro/crew-venv`, override with `KIROCREW_VENV`) and symlinks
 data home, so no whole-home operation can ever delete the live interpreter. The
 selected channel is recorded to `~/.kiro/crew/channel`.
 
-If the host has no Python 3.10+, the installer provisions one itself instead of
+If the host has no Python 3.12+, the installer provisions one itself instead of
 touching the system: it downloads a SHA-256-pinned [uv](https://docs.astral.sh/uv/)
 binary (or uses an already-installed `uv` on `PATH`), then installs a
 [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
 CPython 3.12 into a user-owned directory beside the data home
 (`~/.kiro/crew-python`, override with `KIROCREW_PYTHON_DIR`). No package
 manager, no sudo, and the prebuilt interpreter runs on old-glibc distros
-(CentOS 7) whose base repos never reach 3.10. Pass `--managed-python` (or set
+(CentOS 7) whose base repos never reach 3.12. Pass `--managed-python` (or set
 `KIROCREW_MANAGED_PYTHON=1`) to always use the uv-provisioned interpreter and
 skip the system ones entirely — useful when the system Python is fragile or
 version-managed. The choice is sticky: it is recorded in the data home
@@ -208,7 +208,7 @@ venv puts its executables in `.venv\Scripts\`, and the macOS-only
 
 Both targets bootstrap their toolchain first (`ensure-node.sh`,
 `ensure-python.sh`) and fall back to whatever is on `PATH` if that fails. The
-backend target refuses to build a venv from an interpreter older than 3.10
+backend target refuses to build a venv from an interpreter older than 3.12
 rather than letting the install backtrack forever.
 
 `make.ps1` resolves the same toolchain but installs none of it: the bootstrap

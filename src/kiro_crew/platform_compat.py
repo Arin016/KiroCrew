@@ -3172,17 +3172,10 @@ def rmtree_force(path: str | os.PathLike) -> bool:
     one; the boolean is derived from the filesystem rather than from the hook,
     because a surviving file is the only thing that actually matters.
     """
-    # `onexc` replaced `onerror` in 3.12 and the old name warns; this project
-    # still supports 3.9+, so pick by capability rather than by version number.
-    kwarg = "onexc" if sys.version_info >= (3, 12) else "onerror"
-    if kwarg == "onerror":  # pragma: no cover - exercised on Python < 3.12
-
-        def _legacy(func: Any, target: str, exc_info: Any) -> None:
-            _clear_readonly_and_retry(func, target, exc_info[1])
-
-        shutil.rmtree(path, onerror=_legacy)
-    else:
-        shutil.rmtree(path, onexc=_clear_readonly_and_retry)  # type: ignore[call-arg]
+    # `onexc` replaced `onerror` in 3.12, and the old name emits a
+    # DeprecationWarning. The package floor is >=3.12, so `onexc` is always
+    # available and the capability probe this used to carry is dead.
+    shutil.rmtree(path, onexc=_clear_readonly_and_retry)
     return not os.path.exists(path)
 
 

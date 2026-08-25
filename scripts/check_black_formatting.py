@@ -68,14 +68,14 @@ DEFAULT_BASELINE = ROOT / ".github" / "black-baseline.txt"
 DEFAULT_TARGETS = ("src", "test")
 # Pinned so the gate cannot start disagreeing with the documented command when a
 # contributor's black defaults differ. Matches ci.yml and AGENTS.md.
-TARGET_VERSION = "py310"
+TARGET_VERSION = "py312"
 WOULD_REFORMAT = re.compile(r"^would reformat (.+)$")
 HEADER = """\
 # Files that are not black-clean yet. The gate requires every OTHER file to be
 # clean, so this list can only shrink.
 #
 # Do NOT add a path here to make a red gate green: a new offender means the file
-# needs `black --target-version py310 <path>`, not an exemption. The refresh
+# needs `black --target-version py312 <path>`, not an exemption. The refresh
 # command below only deletes lines, so it cannot add one for you.
 #
 # Refresh (after formatting something listed here):
