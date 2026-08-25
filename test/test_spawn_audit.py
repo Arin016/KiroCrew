@@ -699,6 +699,11 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # fixed-argv helper, _probe_interpreter, which is where their single
         # spawn now lives: `<target python> -I -X utf8 -c <fixed probe>` with a
         # neutral cwd, so the answer describes the venv instead of the caller.
+        # The doctor's venv deps check (cli_doctor._venv_deps_ok) and the STT
+        # scripts-dir probe (transcribe._python3_bin_dir) route through the
+        # same helper for the same reason: their argv is equally fixed, and an
+        # unisolated `python -c` would let a decoy on the caller's
+        # PYTHONPATH/CWD answer for the interpreter under test.
         "dep_sync.py::_probe_interpreter",
         "dep_sync.py::sync",
         "dep_sync.py::sync_or_reinstall",
@@ -1145,7 +1150,9 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "apple_speech/__init__.py::inventory",
         "apple_speech/__init__.py::start",
         "apple_speech/__init__.py::transcribe",
-        "transcribe.py::_python3_bin_dir",
+        # (`transcribe.py::_python3_bin_dir` is absent: its scripts-dir probe
+        # routes through `dep_sync.py::_probe_interpreter`, so an entry here
+        # would be stale.)
         "transcribe.py::_run_whisper_cli",
         "transcribe.py::_transcribe_aws",
         # JSON-Schema ``pattern`` validation for MCP app→gateway tool-call args

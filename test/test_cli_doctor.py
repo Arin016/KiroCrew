@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1637,3 +1639,104 @@ class TestWhatsAppSection:
 
         source = inspect.getsource(cli_doctor._doctor)
         assert "_doctor_whatsapp(cfg, issues)" in source
+
+
+class TestVenvDepsProbe:
+    """The deps probe answers for the VENV, never the doctor's own process.
+
+    ``python -c`` puts the child's CWD at ``sys.path[0]`` and inherits
+    ``PYTHONPATH``, so an unisolated probe imports whatever decoy package
+    sits on either route -- making the doctor's verdict describe the
+    caller's environment instead of the venv under test (the false-healthy
+    the isolated ``dep_sync._probe_interpreter`` closes). The decoys here
+    raise on import: a probe that can still see them fails against an
+    interpreter that genuinely serves the real modules, so each test proves
+    the route is closed in a way that does not depend on which direction the
+    decoy lies in. The probe children run a fixed read-only import with the
+    cwd the code under test pins (the interpreter's own bin dir) -- nothing
+    is written, so the tmp-cwd rule for file-creating children does not
+    apply, and pointing them at ``tmp_path`` would test nothing.
+    """
+
+    _DEP_NAMES = ("websockets", "slack_sdk", "aiohttp")
+
+    def _plant_raising_decoys(self, root: Path) -> Path:
+        decoy = root / "decoy-path"
+        for name in self._DEP_NAMES:
+            pkg = decoy / name
+            pkg.mkdir(parents=True)
+            (pkg / "__init__.py").write_text(
+                "raise ImportError('decoy package imported')", encoding="utf-8"
+            )
+        return decoy
+
+    def test_decoy_on_pythonpath_is_invisible_to_the_probe(self, tmp_path, monkeypatch) -> None:
+        """PYTHONPATH entries rank ahead of site-packages, so an unisolated
+        probe imports the raising decoys and misreports this healthy
+        interpreter as missing its deps."""
+        decoy = self._plant_raising_decoys(tmp_path)
+        monkeypatch.setenv("PYTHONPATH", str(decoy))
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is True
+
+    def test_decoy_in_the_callers_cwd_is_invisible_to_the_probe(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The second route: the caller's CWD lands at ``sys.path[0]`` for an
+        unisolated ``python -c``, ranking the decoys above site-packages."""
+        decoy = self._plant_raising_decoys(tmp_path)
+        monkeypatch.chdir(decoy)
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is True
+
+    def test_missing_modules_still_report_missing(self, monkeypatch) -> None:
+        """Isolation must not soften the verdict: a probe exiting nonzero is
+        exactly the missing-deps answer the doctor section exists to show."""
+        monkeypatch.setattr(
+            cli_doctor.dep_sync,
+            "_probe_interpreter",
+            lambda *a, **k: subprocess.CompletedProcess(args=[], returncode=1),
+        )
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is False
+
+    def test_a_wedged_interpreter_reports_missing(self, monkeypatch) -> None:
+        """A hung venv python must surface as a deps failure, not hang the
+        operator's doctor run or escape as a traceback."""
+
+        def _hang(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="python", timeout=5)
+
+        monkeypatch.setattr(cli_doctor.dep_sync, "_probe_interpreter", _hang)
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is False
+
+    def test_an_unspawnable_interpreter_reports_missing(self, tmp_path) -> None:
+        assert cli_doctor._venv_deps_ok(tmp_path / "no-such-venv" / "python") is False
+
+    def test_the_probe_asks_the_venv_for_all_three_core_deps(self, monkeypatch) -> None:
+        """Pins the probe's question itself: the decoy tests above pass any
+        probe that ignores PYTHONPATH, including one that stopped importing a
+        module the gateway needs."""
+        seen: dict = {}
+
+        def record(target_py, code, timeout=None):
+            seen.update(target=target_py, code=code, timeout=timeout)
+            return subprocess.CompletedProcess(args=[], returncode=0)
+
+        monkeypatch.setattr(cli_doctor.dep_sync, "_probe_interpreter", record)
+
+        assert cli_doctor._venv_deps_ok(Path("/v/bin/python")) is True
+        assert seen["code"] == "import websockets, slack_sdk, aiohttp"
+        assert seen["target"] == Path("/v/bin/python")
+        assert seen["timeout"] == 5
+
+    def test_the_probe_is_wired_into_the_doctor_run(self) -> None:
+        """Guards the call site: every other test drives the helper directly,
+        so a deleted call would leave them green while the doctor silently
+        skipped the check. ``_doctor()`` spawns subprocesses and calls
+        ``sys.exit``, so its source is read rather than run."""
+        import inspect
+
+        source = inspect.getsource(cli_doctor._doctor)
+        assert "_venv_deps_ok(venv_py)" in source

@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from kiro_crew import __version__ as _mc_version
-from kiro_crew import agent_state, diagnostics, platform_compat, sandbox
+from kiro_crew import agent_state, dep_sync, diagnostics, platform_compat, sandbox
 from kiro_crew._bootstrap import _source_checkout_root
 from kiro_crew.acp import kas_assets, kas_auth
 from kiro_crew.acp.client import KIRO_CLI_BIN
@@ -1953,6 +1953,26 @@ def _doctor_whatsapp(cfg: KiroCrewConfig, issues: list[str]) -> None:
     print(f"  dm policy:   {wa.dm_policy}")
 
 
+def _venv_deps_ok(venv_py: Path) -> bool:
+    """True when *venv_py* ITSELF can import the gateway's core dependencies.
+
+    Routed through :func:`dep_sync._probe_interpreter` (``-I -X utf8`` plus a
+    neutral ``cwd``) because the question is about the venv, not the process
+    asking: an unisolated ``python -c`` puts the doctor's CWD at
+    ``sys.path[0]`` and inherits ``PYTHONPATH``, so a decoy package on either
+    route makes the check answer for the caller -- reporting the modules
+    available in a venv that cannot actually serve them, a false-healthy from
+    the diagnostic whose job is to catch exactly that install.
+    """
+    try:
+        proc = dep_sync._probe_interpreter(
+            venv_py, "import websockets, slack_sdk, aiohttp", timeout=5
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
+
+
 def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False) -> None:
     """Verify KiroCrew setup — check dependencies, config, credentials, connectivity.
 
@@ -2288,14 +2308,9 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
             print(f"  python:      ❌ venv python broken: {exc}")
             issues.append("venv python")
         else:
-            try:
-                subprocess.run(
-                    [str(venv_py), "-c", "import websockets, slack_sdk, aiohttp"],
-                    capture_output=True,
-                    timeout=5,
-                ).check_returncode()
+            if _venv_deps_ok(venv_py):
                 print("  deps:        ✅ websockets, slack_sdk, aiohttp available")
-            except Exception:
+            else:
                 print("  deps:        ❌ missing modules (websockets/slack_sdk/aiohttp)")
                 issues.append("python deps")
     else:
