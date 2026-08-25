@@ -4777,6 +4777,10 @@ class DashboardState:
         self._context_snapshots_flush_lock = threading.Lock()
         self._folders: list[dict[str, Any]] = []  # project folder definitions
         self._cron_folders: list[dict[str, Any]] = []  # cron job folder groupings
+        # Malformed cron_folders.json entries dropped at load time, kept verbatim
+        # so save_cron_folders round-trips them back instead of erasing bytes it
+        # could not parse (mirrors the hooks store's unparsed-entry preservation).
+        self._unparsed_cron_folder_entries: list[Any] = []
         self._chat_pins: list[dict[str, Any]] = []  # pinned chat messages
         # Serializes pin mutation + persistence so concurrent requests cannot
         # interleave snapshots and replace chat_pins.json out of order.
@@ -6965,10 +6969,13 @@ class DashboardState:
         """Load cron folder definitions from disk.
 
         Validates the loaded shape: the file must contain a JSON array of
-        folder objects. Anything else (a hand-edited ``{}``, a string, or
-        malformed entries) is discarded with a warning instead of being
-        assigned verbatim — a non-list value would flow to the frontend
-        and crash grouping (``folders.map is not a function``).
+        folder objects. A non-list root (a hand-edited ``{}``, a string) is
+        ignored wholesale — it would crash frontend grouping
+        (``folders.map is not a function``). Individual malformed entries are
+        dropped from the active list but kept verbatim in
+        ``_unparsed_cron_folder_entries`` so the next ``save_cron_folders``
+        round-trips them back to disk rather than silently erasing a user's
+        hand-edited-but-typo'd folder (mirrors the hooks store's contract).
         """
         path = config_dir() / self._CRON_FOLDERS_FILE
         try:
@@ -6981,35 +6988,45 @@ class DashboardState:
                         type(loaded).__name__,
                     )
                     return
-                valid = [
-                    f
-                    for f in loaded
-                    if isinstance(f, dict)
-                    and isinstance(f.get("id"), str)
-                    and f.get("id")
-                    and isinstance(f.get("name"), str)
-                    and f.get("name")
-                    and isinstance(f.get("order"), (int, float))
-                    and not isinstance(f.get("order"), bool)
-                ]
-                if len(valid) != len(loaded):
+
+                def _is_valid(f: Any) -> bool:
+                    return (
+                        isinstance(f, dict)
+                        and isinstance(f.get("id"), str)
+                        and bool(f.get("id"))
+                        and isinstance(f.get("name"), str)
+                        and bool(f.get("name"))
+                        and isinstance(f.get("order"), (int, float))
+                        and not isinstance(f.get("order"), bool)
+                    )
+
+                valid = [f for f in loaded if _is_valid(f)]
+                unparsed = [f for f in loaded if not _is_valid(f)]
+                if unparsed:
                     logger.warning(
-                        "Dropped %d malformed entr(ies) while loading %s",
-                        len(loaded) - len(valid),
+                        "Preserving %d malformed entr(ies) while loading %s "
+                        "(kept verbatim, not active)",
+                        len(unparsed),
                         self._CRON_FOLDERS_FILE,
                     )
                 self._cron_folders = valid
+                self._unparsed_cron_folder_entries = unparsed
         except Exception:
             logger.warning("Failed to load cron folders", exc_info=True)
 
     def save_cron_folders(self) -> None:
         """Persist cron folder definitions to disk (atomic write).
 
-        Raises on I/O failure so callers can surface a 500 to the client
-        rather than silently losing the write.
+        Writes the active folders plus any malformed entries preserved at load
+        time (``_unparsed_cron_folder_entries``), so a save triggered by an
+        unrelated folder operation cannot erase bytes a hand-edit left in a
+        shape this loader could not validate. Raises on I/O failure so callers
+        can surface a 500 to the client rather than silently losing the write.
         """
         path = config_dir() / self._CRON_FOLDERS_FILE
-        self._atomic_write_json_strict(path, self._cron_folders)
+        unparsed = getattr(self, "_unparsed_cron_folder_entries", [])
+        payload: list[Any] = [*self._cron_folders, *unparsed]
+        self._atomic_write_json_strict(path, payload)
 
     def create_cron_folder(self, name: str, folder_id: str) -> dict:
         """Create a new cron folder and persist.

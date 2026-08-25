@@ -379,10 +379,12 @@ class TestCronFoldersPersistence:
             fresh.load_cron_folders()
             assert fresh._cron_folders == [], f"shape {bad!r} should be ignored"
 
-    def test_load_drops_malformed_entries(self, tmp_path, monkeypatch):
+    def test_load_keeps_malformed_entries_inactive(self, tmp_path, monkeypatch):
         """Non-dict entries and entries with a missing/invalid id, name, or
-        order are dropped; valid entries survive. A non-string ``name`` would
-        render as a React child and crash the Schedule page."""
+        order are excluded from the ACTIVE folder list (a non-string ``name``
+        would render as a React child and crash the Schedule page) but are
+        preserved verbatim in ``_unparsed_cron_folder_entries`` so a later save
+        does not erase them."""
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path, raising=False)
         (tmp_path / "cron_folders.json").write_text(
             json.dumps(
@@ -405,8 +407,68 @@ class TestCronFoldersPersistence:
         )
         fresh = DashboardState.__new__(DashboardState)
         fresh._cron_folders = []
+        fresh._unparsed_cron_folder_entries = []
         fresh.load_cron_folders()
+        # Only well-formed entries are active.
         assert [f["id"] for f in fresh._cron_folders] == ["good1", "good2"]
+        # Every malformed entry is preserved verbatim (10 of the 12 above).
+        assert len(fresh._unparsed_cron_folder_entries) == 10
+        assert "not-a-dict" in fresh._unparsed_cron_folder_entries
+
+    def test_malformed_entry_survives_a_subsequent_save(self, tmp_path, monkeypatch):
+        """Regression: a hand-edited file with a typo'd entry must NOT lose that
+        entry when an unrelated folder operation triggers a save. Previously the
+        malformed entry was dropped in-memory and the next save erased its bytes.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path, raising=False)
+        path = tmp_path / "cron_folders.json"
+        # User hand-edits the file and typos "order" as "oder" on one folder.
+        path.write_text(
+            json.dumps(
+                [
+                    {"id": "aaa", "name": "Backups", "order": 0},
+                    {"id": "bbb", "name": "Reports", "oder": 1},  # malformed
+                    {"id": "ccc", "name": "Alerts", "order": 2},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        state = DashboardState.__new__(DashboardState)
+        state._cron_folders = []
+        state._unparsed_cron_folder_entries = []
+        state.load_cron_folders()
+        assert [f["id"] for f in state._cron_folders] == ["aaa", "ccc"]
+
+        # An unrelated folder operation persists — the malformed entry must ride along.
+        state.create_cron_folder("NewFolder", "ddd")
+
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        ids_and_raw = [f.get("id") if isinstance(f, dict) else f for f in on_disk]
+        # The typo'd "Reports" folder is still on disk, not erased.
+        assert "bbb" in ids_and_raw
+        malformed = next(f for f in on_disk if isinstance(f, dict) and f.get("id") == "bbb")
+        assert malformed == {"id": "bbb", "name": "Reports", "oder": 1}
+        # And the valid + newly created folders are all present.
+        assert {"aaa", "ccc", "ddd"}.issubset(
+            {f["id"] for f in on_disk if isinstance(f, dict) and "order" in f}
+        )
+
+    def test_no_unparsed_entries_leaves_payload_clean(self, tmp_path, monkeypatch):
+        """When nothing was malformed, the persisted file is exactly the active
+        folder list — no empty/sentinel padding leaks in."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path, raising=False)
+        path = tmp_path / "cron_folders.json"
+        path.write_text(
+            json.dumps([{"id": "aaa", "name": "Backups", "order": 0}]), encoding="utf-8"
+        )
+        state = DashboardState.__new__(DashboardState)
+        state._cron_folders = []
+        state._unparsed_cron_folder_entries = []
+        state.load_cron_folders()
+        assert state._unparsed_cron_folder_entries == []
+        state.create_cron_folder("NewFolder", "ddd")
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert [f["id"] for f in on_disk] == ["aaa", "ddd"]
 
     def test_save_raises_on_write_failure(self, tmp_path, monkeypatch):
         """save_cron_folders propagates I/O errors (not swallowed)."""
