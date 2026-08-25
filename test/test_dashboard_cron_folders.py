@@ -20,6 +20,7 @@ from kiro_crew.dashboard.handlers.cron import (
     api_cron_folders_update,
 )
 from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.validation import MAX_SHORT_STRING
 
 
 @pytest.fixture(autouse=True)
@@ -160,6 +161,33 @@ class TestCronFoldersUpdate:
         assert resp.status == 404
 
     @pytest.mark.asyncio
+    async def test_rename_rejects_oversized_folder_id(self, tmp_path):
+        """An over-long URL path folder_id is rejected with 400 before any
+        lock/thread/state work — parity with the body-param guard on the job
+        routes."""
+        state = _make_state(tmp_path)
+        state.rename_cron_folder = MagicMock(return_value=None)
+        request = _request(
+            state,
+            body={"name": "X"},
+            match_info={"folder_id": "a" * (MAX_SHORT_STRING + 1)},
+        )
+        resp = await api_cron_folders_update(request)
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "invalid_folder_id"
+        state.rename_cron_folder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rename_rejects_empty_folder_id(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.rename_cron_folder = MagicMock(return_value=None)
+        request = _request(state, body={"name": "X"}, match_info={"folder_id": ""})
+        resp = await api_cron_folders_update(request)
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "invalid_folder_id"
+        state.rename_cron_folder.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_rename_save_failure_returns_500_and_rolls_back(self, tmp_path):
         """When persistence fails on rename, returns 500."""
         state = _make_state(tmp_path)
@@ -192,6 +220,28 @@ class TestCronFoldersDelete:
         request = _request(state, match_info={"folder_id": "nope"})
         resp = await api_cron_folders_delete(request)
         assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_oversized_folder_id(self, tmp_path):
+        """An over-long URL path folder_id is rejected with 400 before any
+        lock/thread/state work — parity with the body-param guard."""
+        state = _make_state(tmp_path)
+        state.delete_cron_folder = MagicMock(return_value=False)
+        request = _request(state, match_info={"folder_id": "a" * (MAX_SHORT_STRING + 1)})
+        resp = await api_cron_folders_delete(request)
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "invalid_folder_id"
+        state.delete_cron_folder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_empty_folder_id(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.delete_cron_folder = MagicMock(return_value=False)
+        request = _request(state, match_info={"folder_id": ""})
+        resp = await api_cron_folders_delete(request)
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "invalid_folder_id"
+        state.delete_cron_folder.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_clears_folder_id_via_state_method(self, tmp_path):
