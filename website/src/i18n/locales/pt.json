@@ -10936,6 +10936,18 @@
       "truncated_showing_first_200kb": "… truncado (mostrando os primeiros 200KB) …",
       "no_archives_with_compaction_hint": "Nenhum arquivamento. Os arquivamentos são criados quando os arquivos de sessão são rotacionados (>2MB) ou compactados. A compactação automática é controlada por <settingRef/>."
     },
+    "sessionFlow": {
+      "title": "Fluxo da sessão",
+      "header_meta": "{{subs}} subagentes · {{running}} em execução",
+      "main_label": "Esta sessão",
+      "turns_count": "{{count}} turnos",
+      "status_running": "em execução",
+      "status_done": "concluído",
+      "status_error": "encerrado",
+      "tool_count": "{{count}} ferramentas",
+      "unknown_agent": "subagente",
+      "stalled": "travado"
+    },
     "sessionStorage": {
       "age_option_many": "Há mais de {{days}} dias — {{count}} sessões · {{size}}",
       "age_option_one": "Há mais de {{days}} dias — {{count}} sessão · {{size}}",

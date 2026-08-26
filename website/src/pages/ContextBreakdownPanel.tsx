@@ -4,6 +4,8 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { fmtNumber, fmtPercent, fmtUnit } from '../i18n/format'
 import { i18nT } from '../i18n/t'
+import type { SubagentActivity } from '../types'
+import { SessionFlow } from './SessionFlow'
 
 /**
  * One turn's injection record, as GET /api/telemetry/context-trace returns it.
@@ -121,8 +123,9 @@ export function rampShade(rank: number, count: number): { fill: string; fg: stri
 }
 
 /** Stable colour per label, ranked by WHOLE-SESSION size so a block keeps one
- *  shade across every row. */
-function buildColorMap(totals: Record<string, number>): Map<string, { fill: string; fg: string }> {
+ *  shade across every row. Exported so the Session Flow header colours its
+ *  per-node context bars identically to the per-turn rows below. */
+export function buildColorMap(totals: Record<string, number>): Map<string, { fill: string; fg: string }> {
   const grouped = groupBlocks(totals)
   const ranked = Object.entries(grouped)
     .filter(([label]) => label !== USER_LABEL)
@@ -542,7 +545,16 @@ function ContextBreakdownCard({ trace }: { trace: ContextTrace }) {
  *  per-turn drill-down — it made the reader pick a session before the view could
  *  say anything.
  */
-export function ContextBreakdownTab({ slot }: { slot: string }) {
+export function ContextBreakdownTab({
+  slot,
+  subagents,
+}: {
+  slot: string
+  /** The live sub-agent map (from `selectSlotSubagents`), passed through so the
+   *  Session Flow header can draw this session's spawn tree. Optional: a caller
+   *  with no subagent state renders the per-turn panel alone. */
+  subagents?: Record<string, SubagentActivity>
+}) {
   const { data, isLoading } = useQuery<ContextTrace>({
     queryKey: ['context-trace', slot],
     queryFn: () => api.telemetryContextTrace(slot),
@@ -553,6 +565,7 @@ export function ContextBreakdownTab({ slot }: { slot: string }) {
 
   return (
     <div className="h-full overflow-auto p-3">
+      <SessionFlow trace={data} subagents={subagents ?? {}} />
       <ContextBreakdownPanel trace={data} isLoading={isLoading} />
     </div>
   )

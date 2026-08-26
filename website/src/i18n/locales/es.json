@@ -10936,6 +10936,18 @@
       "truncated_showing_first_200kb": "… truncado (se muestran los primeros 200KB) …",
       "no_archives_with_compaction_hint": "No hay archivos. Los archivos se crean cuando los ficheros de sesión se rotan (>2MB) o se compactan. La compactación automática se controla mediante <settingRef/>."
     },
+    "sessionFlow": {
+      "title": "Flujo de la sesión",
+      "header_meta": "{{subs}} subagentes · {{running}} en curso",
+      "main_label": "Esta sesión",
+      "turns_count": "{{count}} turnos",
+      "status_running": "en curso",
+      "status_done": "listo",
+      "status_error": "terminado",
+      "tool_count": "{{count}} herramientas",
+      "unknown_agent": "subagente",
+      "stalled": "estancado"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_many": "Más de {{days}} días — {{count}} sesiones · {{size}}",

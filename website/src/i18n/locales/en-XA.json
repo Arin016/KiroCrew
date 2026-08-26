@@ -10456,6 +10456,18 @@
       "no_matches_for_query": "[Ñø ɱàţçĥèş ƒøŕ \"{{query}}\". ················]",
       "truncated_showing_first_200kb": "[… ţŕùñçàţèð (şĥøẁìñğ ƒìŕşţ 200ĶƁ) … ··················]"
     },
+    "sessionFlow": {
+      "title": "[Şèşşìøñ Ƒĺøẁ ···········]",
+      "header_meta": "[{{subs}} şùƀ-àğèñţş · {{running}} ŕùññìñğ ···············]",
+      "main_label": "[Ţĥìş şèşşìøñ ···········]",
+      "turns_count": "[{{count}} ţùŕñş ·········]",
+      "status_running": "[ŕùññìñğ ···········]",
+      "status_done": "[ðøñè ······]",
+      "status_error": "[èñðèð ········]",
+      "tool_count": "[{{count}} ţøøĺş ·········]",
+      "unknown_agent": "[şùƀ-àğèñţ ··············]",
+      "stalled": "[şţàĺĺèð ···········]"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "[Øĺðèŕ ţĥàñ {{days}} ðàýş — {{count}} şèşşìøñ · {{size}} ·····················]",

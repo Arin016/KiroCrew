@@ -11087,6 +11087,18 @@
       "truncated_showing_first_200kb": "... обрезано (показаны первые 200KB) ...",
       "no_archives_with_compaction_hint": "Архивов нет. Архивы создаются при ротации файлов сессий (>2MB) или их сжатии. Автоматическое сжатие управляется через <settingRef/>."
     },
+    "sessionFlow": {
+      "title": "Ход сессии",
+      "header_meta": "{{subs}} субагентов · {{running}} активно",
+      "main_label": "Эта сессия",
+      "turns_count": "{{count}} ходов",
+      "status_running": "активно",
+      "status_done": "готово",
+      "status_error": "завершено",
+      "tool_count": "{{count}} инструментов",
+      "unknown_agent": "субагент",
+      "stalled": "застрял"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_few": "Старше {{days}} дней — {{count}} сессии · {{size}}",

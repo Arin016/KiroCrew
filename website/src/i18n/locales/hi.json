@@ -10785,6 +10785,18 @@
       "truncated_showing_first_200kb": "… छोटा किया गया (पहले 200KB दिखाए जा रहे हैं) …",
       "no_archives_with_compaction_hint": "कोई आर्काइव नहीं। सत्र फ़ाइलें रोटेट (>2MB) या कॉम्पैक्ट होने पर आर्काइव बनाए जाते हैं। स्वतः-संघनन <settingRef/> द्वारा नियंत्रित होता है।"
     },
+    "sessionFlow": {
+      "title": "सेशन फ़्लो",
+      "header_meta": "{{subs}} सब-एजेंट · {{running}} चल रहे",
+      "main_label": "यह सेशन",
+      "turns_count": "{{count}} टर्न",
+      "status_running": "चल रहा",
+      "status_done": "पूर्ण",
+      "status_error": "समाप्त",
+      "tool_count": "{{count}} टूल",
+      "unknown_agent": "सब-एजेंट",
+      "stalled": "रुका हुआ"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "{{days}} दिन से पुराने — {{count}} सत्र · {{size}}",

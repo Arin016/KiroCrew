@@ -10634,6 +10634,18 @@
       "truncated_showing_first_200kb": "… 잘림 (처음 200KB만 표시) …",
       "no_archives_with_compaction_hint": "아카이브가 없습니다. 아카이브는 세션 파일이 순환(>2MB)되거나 압축될 때 생성됩니다. 자동 압축은 <settingRef/>에 의해 제어됩니다."
     },
+    "sessionFlow": {
+      "title": "세션 흐름",
+      "header_meta": "하위 에이전트 {{subs}}개 · 실행 중 {{running}}개",
+      "main_label": "이 세션",
+      "turns_count": "{{count}}턴",
+      "status_running": "실행 중",
+      "status_done": "완료",
+      "status_error": "종료됨",
+      "tool_count": "도구 {{count}}개",
+      "unknown_agent": "하위 에이전트",
+      "stalled": "멈춤"
+    },
     "sessionStorage": {
       "age_option_other": "{{days}}일 이상 경과 — 세션 {{count}}개 · {{size}}",
       "back_to_disk": "시스템 · 성능 › 디스크",

@@ -10936,6 +10936,18 @@
       "truncated_showing_first_200kb": "… tronqué (affichage des premiers 200KB) …",
       "no_archives_with_compaction_hint": "Aucune archive. Les archives sont créées lorsque les fichiers de session sont rotés (>2MB) ou compactés. La compaction automatique est contrôlée par <settingRef/>."
     },
+    "sessionFlow": {
+      "title": "Flux de session",
+      "header_meta": "{{subs}} sous-agents · {{running}} en cours",
+      "main_label": "Cette session",
+      "turns_count": "{{count}} tours",
+      "status_running": "en cours",
+      "status_done": "terminé",
+      "status_error": "arrêté",
+      "tool_count": "{{count}} outils",
+      "unknown_agent": "sous-agent",
+      "stalled": "bloqué"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_many": "Plus de {{days}} jours — {{count}} sessions · {{size}}",

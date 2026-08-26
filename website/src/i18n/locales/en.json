@@ -6996,6 +6996,18 @@
       "select_an_archive_to_view_its_contents": "Select an archive to view its contents.",
       "no_archives_with_compaction_hint": "No archives. Archives are created when session files are rotated (>2MB) or compacted. Auto-compaction is controlled by <settingRef/>."
     },
+    "sessionFlow": {
+      "title": "Session Flow",
+      "header_meta": "{{subs}} sub-agents · {{running}} running",
+      "main_label": "This session",
+      "turns_count": "{{count}} turns",
+      "status_running": "running",
+      "status_done": "done",
+      "status_error": "ended",
+      "tool_count": "{{count}} tools",
+      "unknown_agent": "sub-agent",
+      "stalled": "stalled"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "Older than {{days}} days — {{count}} session · {{size}}",

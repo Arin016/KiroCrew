@@ -10936,6 +10936,18 @@
       "truncated_showing_first_200kb": "… troncato (mostrati i primi 200 KB) …",
       "no_archives_with_compaction_hint": "Nessun archivio. Gli archivi vengono creati quando i file di sessione vengono ruotati (>2 MB) o compattati. La compattazione automatica è controllata da <settingRef/>."
     },
+    "sessionFlow": {
+      "title": "Flusso della sessione",
+      "header_meta": "{{subs}} subagenti · {{running}} in corso",
+      "main_label": "Questa sessione",
+      "turns_count": "{{count}} turni",
+      "status_running": "in corso",
+      "status_done": "completato",
+      "status_error": "terminato",
+      "tool_count": "{{count}} strumenti",
+      "unknown_agent": "subagente",
+      "stalled": "bloccato"
+    },
     "sessionStorage": {
       "age_option_many": "Più di {{days}} giorni — {{count}} sessioni · {{size}}",
       "age_option_one": "Più di {{days}} giorni — {{count}} sessione · {{size}}",

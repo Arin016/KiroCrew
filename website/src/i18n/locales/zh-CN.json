@@ -10634,6 +10634,18 @@
       "truncated_showing_first_200kb": "…已截断（仅显示前 200KB）…",
       "no_archives_with_compaction_hint": "暂无归档。归档在会话文件轮转（>2MB）或压缩时创建。自动压缩由 <settingRef/> 控制。"
     },
+    "sessionFlow": {
+      "title": "会话流程",
+      "header_meta": "{{subs}} 个子代理 · {{running}} 个运行中",
+      "main_label": "本会话",
+      "turns_count": "{{count}} 轮",
+      "status_running": "运行中",
+      "status_done": "完成",
+      "status_error": "已结束",
+      "tool_count": "{{count}} 个工具",
+      "unknown_agent": "子代理",
+      "stalled": "停滞"
+    },
     "sessionStorage": {
       "age_option_other": "超过 {{days}} 天 — {{count}} 个会话 · {{size}}",
       "back_to_disk": "系统 · 性能 › 磁盘",

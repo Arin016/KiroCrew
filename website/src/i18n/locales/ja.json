@@ -10634,6 +10634,18 @@
       "truncated_showing_first_200kb": "… 切り詰め（最初の 200KB を表示）…",
       "no_archives_with_compaction_hint": "アーカイブはありません。セッションファイルがローテーション（>2MB）またはコンパクト化されるときに作成されます。自動コンパクションは <settingRef/> で制御されます。"
     },
+    "sessionFlow": {
+      "title": "セッションフロー",
+      "header_meta": "サブエージェント {{subs}} 件 · 実行中 {{running}} 件",
+      "main_label": "このセッション",
+      "turns_count": "{{count}} ターン",
+      "status_running": "実行中",
+      "status_done": "完了",
+      "status_error": "終了",
+      "tool_count": "ツール {{count}} 件",
+      "unknown_agent": "サブエージェント",
+      "stalled": "停滞"
+    },
     "sessionStorage": {
       "age_option_other": "{{days}} 日以上前 — {{count}} セッション · {{size}}",
       "back_to_disk": "システム · パフォーマンス › ディスク",
