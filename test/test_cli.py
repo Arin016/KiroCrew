@@ -4059,6 +4059,38 @@ class TestConfigDirOverride:
         assert "xoxb-test" in env_file.read_text(encoding="utf-8")
         assert not list(tmp_path.glob("*.tmp"))  # failure leaves no temp residue
 
+    def test_setup_slack_tokens_aborts_when_shared_env_lock_is_held(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The Slack setup writer serializes on the SAME .env.lock the importer
+        and the dashboard credential writers use, so it aborts (rather than
+        racing the importer's commit and clobbering it) when another writer
+        holds the lock — and leaves .env untouched."""
+        import os as os_mod
+
+        import kiro_crew.cli_setup as cs
+        from kiro_crew import platform_compat as pc
+        from kiro_crew.secrets.migrate import _env_lock_path
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("EXISTING=1\n", encoding="utf-8")
+        monkeypatch.setattr("kiro_crew.cli_setup.env_path", lambda: env_file)
+        inputs = iter(["y", "xapp-test", "xoxb-test", "U12345"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        # Simulate another writer (e.g. `kirocrew secrets import`) holding the
+        # shared advisory lock.
+        lock_path = _env_lock_path(env_file)
+        held_fd = os_mod.open(lock_path, os_mod.O_CREAT | os_mod.O_RDWR, 0o600)
+        assert pc.try_acquire_lock(held_fd, exclusive=True)
+        try:
+            cs._setup_slack_tokens()  # must not raise
+            # .env is untouched — the aborted save did not write the tokens.
+            assert env_file.read_text(encoding="utf-8") == "EXISTING=1\n"
+        finally:
+            pc.release_lock(held_fd)
+            os_mod.close(held_fd)
+
 
 class TestSetupChannelGating:
     """`kirocrew setup` runs the Slack steps only with --slack.
