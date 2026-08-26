@@ -5000,6 +5000,9 @@
     }
   },
   "utils": {
+    "agentSwitchFeedback": {
+      "turn_in_flight": "A turn is running — try again when it finishes."
+    },
     "cronUtils": {
       "create": "Create",
       "save": "Save",
