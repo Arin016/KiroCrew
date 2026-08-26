@@ -130,6 +130,7 @@ import { skillsCacheStaleTime } from '../lib/skillsCache'
 import ProjectSkillsTrustDialog from './ProjectSkillsTrustDialog'
 import { matchFileToken, matchSkillToken, replaceTokenAtCaret } from './composerTokens'
 import { useStopEscapeHatch } from '../hooks/useStopEscapeHatch'
+import { useMeasuredHeight } from '../hooks/useMeasuredHeight'
 
 import { i18nT } from '../i18n/t'
 import { fmtDateFields, fmtPercent } from '../i18n/format'
@@ -139,14 +140,6 @@ const INPUT_MIN_H = 44
 const INPUT_DEFAULT_MAX_H = 140
 const INPUT_PREFILL_MAX_H = 320
 const INPUT_DRAG_MIN_H = 93
-const FILE_PREVIEW_H = 81 // h-16 (64px) + py-2 (16px) + border-t (1px)
-/** Same strip once any staged image carries a resize pill: the pill sits in flow
- *  under its thumbnail, so the tallest chip grows by gap-0.5 (2px) + the pill's
- *  own 18px. Keep in sync with ResizeBadge and FilePreviewStrip. */
-const FILE_PREVIEW_H_RESIZED = 101
-/** Height of the staged-session-reference strip: one chip row (py-1 + 12px text
- *  ≈ 26px) + py-2 (16px) + border-t (1px). Keep in sync with SessionRefStrip. */
-const SESSION_REF_STRIP_H = 43
 const INPUT_DRAG_MAX_RATIO = 0.5
 const INPUT_HEIGHT_LS_KEY = 'mc-input-height'
 /**
@@ -576,7 +569,7 @@ function ResizeBadge({ resize }: { resize: ResizeInfo }) {
  *  effect on every render (a fresh [] literal changes deps each time). */
 const NO_DIRS: string[] = []
 
-function FilePreviewStrip({ files, dirs = NO_DIRS, resizedInfo, onRemove, onRemoveDir }: { files: string[]; dirs?: string[]; resizedInfo?: Record<string, ResizeInfo>; onRemove?: (path: string) => void; onRemoveDir?: (path: string) => void }) {
+function FilePreviewStrip({ files, dirs = NO_DIRS, resizedInfo, onRemove, onRemoveDir, rootRef }: { files: string[]; dirs?: string[]; resizedInfo?: Record<string, ResizeInfo>; onRemove?: (path: string) => void; onRemoveDir?: (path: string) => void; rootRef?: (node: HTMLDivElement | null) => void }) {
   const [attachScroller, edges, remeasure] = useScrollEdges<HTMLDivElement>()
   // Chips are added and removed while the strip stays mounted (a paste, a
   // remove), and the scroller keeps its own box through those changes, so the
@@ -590,10 +583,8 @@ function FilePreviewStrip({ files, dirs = NO_DIRS, resizedInfo, onRemove, onRemo
     // The wrapper exists for the edge cues: absolutely-positioned children of
     // the scroller itself would travel with the scrolled content, so the fades
     // anchor to a non-scrolling parent, same shape as the sibling strips.
-    <div className="relative">
-      {/* NOTE: rendered height must match FILE_PREVIEW_H / FILE_PREVIEW_H_RESIZED,
-          update them together.
-          items-start, not items-end: a chip carrying a resize pill is taller than a
+    <div className="relative" ref={rootRef}>
+      {/* items-start, not items-end: a chip carrying a resize pill is taller than a
           plain one, and bottom-alignment would spend that difference staggering the
           THUMBNAILS (the thing being compared) instead of letting the pills hang. */}
       <div ref={attachScroller} data-testid="preview-strip" className="flex gap-2 px-4 py-2 border-t border-border bg-chrome/50 overflow-x-auto items-start" data-image-scope="">
@@ -2361,14 +2352,9 @@ function ChatInput({
     e.target.value = '' // reset so same file can be re-selected
   }, [onUploadFiles])
 
-  // The preview strip renders for folder references too, so height
-  // compensation must key off both staged families — otherwise a dirs-only
-  // strip appears with no wrapper expansion and eats into the textarea.
-  const hasFiles = pendingFiles.length > 0 || pendingDirs.length > 0
-  // A resize pill makes the strip taller, so the compensation has to know about
-  // it — otherwise the extra row eats into the textarea.
-  const hasResizedFile = pendingFiles.some(p => IMG_EXT.test(p) && !!resizedInfo?.[p])
   const hasSessionRefs = pendingSessions.length > 0
+  const [fileStripRef, fileStripH] = useMeasuredHeight<HTMLDivElement>()
+  const [sessionStripRef, sessionStripH] = useMeasuredHeight<HTMLDivElement>()
   /** True when the composer holds something a send would carry.
    *
    *  Hoisted because the hold-to-talk gate has to agree with the send button, and
@@ -2614,13 +2600,31 @@ function ChatInput({
   const voiceModePlaceholder = voiceModeAvailable && !voiceHoldMode && !composerHasDraft && !placeholder
     ? i18nT('components.chatInput.send_a_message_or_tap_the_mic_for_voice')
     : ''
-  /** Combined height of every strip currently stacked above the textarea. The
+  /** Combined height of every strip currently stacked above the textarea,
+   *  MEASURED rather than predicted from the strips' Tailwind classes. The
    *  manual-resize floor and the transient height adjustment below both work off
    *  this total, so adding a strip can never leave one of them counting only
-   *  attachments. */
-  const stripH = (hasFiles ? (hasResizedFile ? FILE_PREVIEW_H_RESIZED : FILE_PREVIEW_H) : 0)
-    + (hasSessionRefs ? SESSION_REF_STRIP_H : 0)
-  const prevStripH = useRef(stripH)
+   *  attachments.
+   *
+   *  Each strip reports 0 while unmounted, so the sum needs no per-strip
+   *  booleans: an absent strip reserves nothing by construction. That also
+   *  retires the `hasResizedFile` special case — a chip carrying a resize pill
+   *  is simply taller when measured, instead of needing a second predicted
+   *  height, which is how the third constant came to exist in the first place.
+   */
+  const stripH = fileStripH + sessionStripH
+  /** Whether `stripH` describes what is actually on screen right now.
+   *
+   *  A measured height arrives one commit AFTER the strip mounts: the ref
+   *  callback cannot read a box that has not been laid out yet. Without this
+   *  gate the settling 0 -> 81 reads as "a strip appeared" and the transient
+   *  adjustment below inflates a persisted manual height by the strip's height
+   *  on every mount that already had something staged. Waiting for a mounted
+   *  strip to report a non-zero box makes the first value a BASELINE rather
+   *  than a change. */
+  const stripsMounted = pendingFiles.length > 0 || pendingDirs.length > 0 || hasSessionRefs
+  const stripHSettled = stripsMounted ? stripH > 0 : stripH === 0
+  const prevStripH = useRef<number | null>(null)
   const dragMinH = INPUT_DRAG_MIN_H + stripH
   const dragMinHRef = useRef(dragMinH)
   dragMinHRef.current = dragMinH
@@ -2629,11 +2633,14 @@ function ChatInput({
   // rather than a per-strip boolean keeps the arithmetic correct when both
   // strips change in the same commit (e.g. send clears files and refs at once).
   useLayoutEffect(() => {
+    if (!stripHSettled) return
     const prev = prevStripH.current
     prevStripH.current = stripH
-    if (prev === stripH) return
+    // `null` is the first settled reading: there is no previous state to have
+    // moved from, so it establishes the baseline instead of adjusting.
+    if (prev === null || prev === stripH) return
     setManualHeight(h => h !== null ? Math.max(INPUT_DRAG_MIN_H, h + (stripH - prev)) : h)
-  }, [stripH])
+  }, [stripH, stripHSettled])
 
   return (
     // 'input-area' is a stable theming hook — see website/docs/theming-contract.md
@@ -3025,8 +3032,8 @@ function ChatInput({
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        <SessionRefStrip refs={pendingSessions} onRemove={onRemoveSessionRef} />
-        <FilePreviewStrip files={pendingFiles} dirs={pendingDirs} resizedInfo={resizedInfo} onRemove={onRemoveFile} onRemoveDir={onRemoveDir} />
+        <SessionRefStrip refs={pendingSessions} onRemove={onRemoveSessionRef} rootRef={sessionStripRef} />
+        <FilePreviewStrip files={pendingFiles} dirs={pendingDirs} resizedInfo={resizedInfo} onRemove={onRemoveFile} onRemoveDir={onRemoveDir} rootRef={fileStripRef} />
 
         {/* Cancel cue for the hold gesture. Rendered above the dictation panel so
             the drop zone is genuinely UP from the thumb, and only while a press is
