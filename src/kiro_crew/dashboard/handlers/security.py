@@ -47,10 +47,21 @@ from pathlib import Path
 
 from aiohttp import web
 
-from kiro_crew.apps.execution import APP_NAME_RE, builtin_app_names, trusted_app_names
+from kiro_crew.apps.execution import (
+    APP_NAME_RE,
+    _repository_grant_denied_for_binding,
+    builtin_app_names,
+    trusted_app_names,
+)
 from kiro_crew.apps.manager import disable_app, get_app, list_apps
 from kiro_crew.apps.official_catalog import CatalogUnavailable
-from kiro_crew.apps.registry import get_registry_app
+from kiro_crew.apps.registry import (
+    _entry_git_url,
+    _git_target_is_unsupported,
+    _normalize_git_target,
+    get_registry_app,
+    resolve_installed_trust_repository,
+)
 from kiro_crew.apps.routes import app_lifecycle_lock
 from kiro_crew.apps.teardown import teardown_app_runtime
 from kiro_crew.config.loader import (
@@ -799,6 +810,33 @@ def _trusted_list_raw(agent_raw: dict) -> list[str]:
     return [a for a in raw if isinstance(a, str) and a]
 
 
+def _trusted_local_list_raw(agent_raw: dict) -> list[str]:
+    """Explicit local grant markers from the raw base config, junk dropped."""
+    raw = agent_raw.get("apps_trusted_local", [])
+    if not isinstance(raw, list):
+        return []
+    return [a for a in raw if isinstance(a, str) and a]
+
+
+def _trusted_repositories_raw(agent_raw: dict) -> dict[str, str]:
+    """Credential-free repository bindings from the raw base config."""
+    raw = agent_raw.get("apps_trusted_repositories", {})
+    if not isinstance(raw, dict):
+        return {}
+    repositories: dict[str, str] = {}
+    for name, repository in raw.items():
+        if not isinstance(name, str) or not name or not isinstance(repository, str):
+            continue
+        # Never turn an unsupported legacy identity into a valid base-URL grant
+        # as a side effect of mutating an unrelated app's settings.
+        if _git_target_is_unsupported(repository):
+            continue
+        normalized = _normalize_git_target(repository)
+        if normalized:
+            repositories[name] = normalized
+    return repositories
+
+
 def build_trusted_apps_snapshot() -> dict:
     """Compute the snapshot returned by every trusted-apps endpoint.
 
@@ -821,7 +859,47 @@ def build_trusted_apps_snapshot() -> dict:
     """
     agent = KiroCrewConfig.load().agent
     stored = set(_trusted_list(agent))
-    effective = trusted_app_names()
+    syntactically_effective = trusted_app_names()
+    # A legacy name-only grant is no longer an execution grant for code known to
+    # come from a repository. Classify it with the same resolver used by runtime
+    # admission so the Security panel never displays a fail-closed grant as fully
+    # trusted. The name stays in ``ineffective`` and can still be revoked or
+    # replaced through the existing endpoints.
+    raw_repositories = getattr(agent, "apps_trusted_repositories", {})
+    if not isinstance(raw_repositories, dict):
+        raw_repositories = {}
+    raw_local = getattr(agent, "apps_trusted_local", [])
+    local_bindings = set(raw_local) if isinstance(raw_local, list) else set()
+    effective = set()
+    for name in syntactically_effective:
+        binding = raw_repositories.get(name, "")
+        binding = binding.strip() if isinstance(binding, str) else ""
+        repository: str | None = None
+        # A repository grant is intentionally usable before the app is installed.
+        # In that state there is no installed provenance to compare, so resolve the
+        # same authoritative row install will consume. A rebind or catalog failure
+        # moves the name to ``ineffective`` without reflecting either coordinate.
+        if binding and get_app(name) is None:
+            try:
+                entry = get_registry_app(name)
+                entry_url = _entry_git_url(entry) if entry else ""
+                repository = (
+                    ""
+                    if _git_target_is_unsupported(entry_url)
+                    else _normalize_git_target(entry_url)
+                )
+            except CatalogUnavailable:
+                repository = ""
+        if (
+            _repository_grant_denied_for_binding(
+                name,
+                binding=binding,
+                local_binding=name in local_bindings,
+                repository=repository,
+            )
+            is None
+        ):
+            effective.add(name)
     return {
         "apps": sorted(stored & effective),
         "ineffective": sorted(stored - effective),
@@ -867,7 +945,12 @@ class TrustSettingOverlayOwned(Exception):
         )
 
 
-_TRUST_SETTING_NAMES = ("apps_trusted", "apps_allow_third_party")
+_TRUST_SETTING_NAMES = (
+    "apps_trusted",
+    "apps_trusted_local",
+    "apps_trusted_repositories",
+    "apps_allow_third_party",
+)
 
 
 def _overlay_owned_trust_settings() -> list[str]:
@@ -1018,6 +1101,49 @@ async def api_trusted_app_grant(request: web.Request) -> web.Response:
             status=400,
         )
 
+    # The repository is a consent proof, not authority: the server resolves the
+    # current target independently below. An empty body keeps local installed
+    # apps (which have no repository binding) compatible, while a malformed
+    # proof is refused before any config mutation.
+    body: object = {}
+    if request.can_read_body:
+        try:
+            body = await request.json()
+        except Exception:
+            _audit(request, operation=op, outcome="denied", resources=f"{name}=invalid_json")
+            return web.json_response(
+                {
+                    "error": "repository consent proof must be valid JSON",
+                    "code": "invalid_repository_consent",
+                },
+                status=400,
+            )
+    if not isinstance(body, dict):
+        body = {}
+    consent_raw = body.get("repository")
+    if consent_raw is not None and not isinstance(consent_raw, str):
+        _audit(request, operation=op, outcome="denied", resources=f"{name}=bad_repository")
+        return web.json_response(
+            {
+                "error": "repository consent proof must be a string",
+                "code": "invalid_repository_consent",
+            },
+            status=400,
+        )
+    if _git_target_is_unsupported(consent_raw or ""):
+        _audit(request, operation=op, outcome="denied", resources=f"{name}=bad_repository")
+        return web.json_response(
+            {
+                "error": (
+                    "repository consent proof contains an unsupported query or fragment "
+                    "or an ambiguous Git transport identity"
+                ),
+                "code": "invalid_repository_consent",
+            },
+            status=400,
+        )
+    consent_repository = _normalize_git_target(consent_raw or "")
+
     # Validation and the write must be ONE critical section, held against the
     # same per-app lock every other lifecycle transition takes. Uninstall's
     # grant-removal precondition and this handler's existence check are both
@@ -1036,16 +1162,28 @@ async def api_trusted_app_grant(request: web.Request) -> web.Response:
     async with app_lifecycle_lock(name):
         # Offloaded: both read from disk (installed.json + app.json; the registry
         # file and its cached external-index snapshots).
-        def _is_known_app() -> bool:
-            if get_app(name) is not None:
-                return True
+        def _known_app_repository() -> tuple[bool, str]:
+            installed = get_app(name)
+            if installed is not None:
+                try:
+                    return resolve_installed_trust_repository(installed)
+                except CatalogUnavailable:
+                    # A legacy registry install cannot safely degrade to a
+                    # name-only grant when its current source is unavailable.
+                    return False, ""
             try:
-                return get_registry_app(name) is not None
+                entry = get_registry_app(name)
             except CatalogUnavailable:
                 # Resolution was refused because the catalog could not be consulted.
                 # Treat as not-known: this gates an execution grant, so declining
                 # while the source cannot be confirmed is the safe direction.
-                return False
+                return False, ""
+            if entry is None:
+                return False, ""
+            entry_url = _entry_git_url(entry)
+            if _git_target_is_unsupported(entry_url):
+                return False, ""
+            return True, _normalize_git_target(entry_url)
 
         # Whether the app is INSTALLED right now, kept separate from "known". A
         # registry-only name is grantable on purpose (the install-consent flow grants
@@ -1054,7 +1192,8 @@ async def api_trusted_app_grant(request: web.Request) -> web.Response:
         # after the write is the race below.
         was_installed = await _run_off_loop(lambda: get_app(name) is not None)
 
-        if not await _run_off_loop(_is_known_app):
+        known, repository = await _run_off_loop(_known_app_repository)
+        if not known:
             _audit(request, operation=op, outcome="denied", resources=f"{name}=unknown")
             return web.json_response(
                 {
@@ -1062,6 +1201,28 @@ async def api_trusted_app_grant(request: web.Request) -> web.Response:
                     "code": "app_not_installed",
                 },
                 status=404,
+            )
+
+        # Bind the click to what the modal actually showed. The registry may
+        # legitimately publish both ``repo`` (display/legacy alias) and
+        # ``gitUrl`` (the effective clone URL); only the latter wins through
+        # ``_entry_git_url`` above. A stale or compromised client cannot replace
+        # that server-side result — it can only prove it displayed the same one.
+        # Compare even when one side is empty: an app changing between a local
+        # install and a repository-backed source is also a changed consent scope.
+        if consent_repository != repository:
+            reason = "missing_repository" if repository and not consent_repository else "repository_changed"
+            _audit(request, operation=op, outcome="denied", resources=f"{name}={reason}")
+            return web.json_response(
+                {
+                    "error": (
+                        "repository consent proof is required; refresh the app listing and review it"
+                        if reason == "missing_repository"
+                        else "app repository changed since the consent dialog was opened; refresh and review it"
+                    ),
+                    "code": "app_trust_repository_mismatch",
+                },
+                status=409,
             )
 
         # A builtin needs no grant (shipped package code is exempt at the gate), and
@@ -1089,6 +1250,19 @@ async def api_trusted_app_grant(request: web.Request) -> web.Response:
             if name not in current:
                 current.append(name)
             agent_raw["apps_trusted"] = current
+            repositories = _trusted_repositories_raw(agent_raw)
+            local_bindings = _trusted_local_list_raw(agent_raw)
+            if repository:
+                repositories[name] = repository
+                local_bindings = [a for a in local_bindings if a != name]
+            else:
+                # Re-granting a local app under a formerly registry-owned name
+                # must not retain a stale binding from that prior occupant.
+                repositories.pop(name, None)
+                if name not in local_bindings:
+                    local_bindings.append(name)
+            agent_raw["apps_trusted_local"] = local_bindings
+            agent_raw["apps_trusted_repositories"] = repositories
 
         try:
             await _mutate_agent_config(_mutate)
@@ -1136,6 +1310,12 @@ async def api_trusted_app_grant(request: web.Request) -> web.Response:
             agent_raw["apps_trusted"] = [
                 a for a in _trusted_list_raw(agent_raw) if a != name
             ]
+            repositories = _trusted_repositories_raw(agent_raw)
+            repositories.pop(name, None)
+            agent_raw["apps_trusted_local"] = [
+                a for a in _trusted_local_list_raw(agent_raw) if a != name
+            ]
+            agent_raw["apps_trusted_repositories"] = repositories
 
         try:
             await _mutate_agent_config(_undo)
@@ -1300,6 +1480,12 @@ async def api_trusted_app_revoke(request: web.Request) -> web.Response:
             agent_raw["apps_trusted"] = [
                 a for a in _trusted_list_raw(agent_raw) if a != name
             ]
+            repositories = _trusted_repositories_raw(agent_raw)
+            repositories.pop(name, None)
+            agent_raw["apps_trusted_local"] = [
+                a for a in _trusted_local_list_raw(agent_raw) if a != name
+            ]
+            agent_raw["apps_trusted_repositories"] = repositories
 
         try:
             await _mutate_agent_config(_mutate)
@@ -1567,7 +1753,7 @@ async def _stop_apps_running_on_blanket_trust(
         # requires a SHIPPED `app.json` to declare the name, and its own contract is
         # that `installed.json` is consulted only to REMOVE trust, never to widen
         # it. Reading `origin` here inverted exactly that rule.
-        granted = trusted_app_names()
+        granted = set(build_trusted_apps_snapshot()["apps"])
         builtins = builtin_app_names()
         return [
             app["name"]
