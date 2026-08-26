@@ -903,7 +903,6 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "dashboard/handlers/computer_use.py::_probe_permissions",
         "dashboard/handlers/core.py::_is_apple_silicon",
         "dashboard/handlers/core.py::_stt_prereq_commands",
-        "dashboard/handlers/core.py::_unusable",
         "dashboard/handlers/core.py::api_stt_install",
         "dashboard/handlers/files.py::_run",
         "dashboard/handlers/files.py::api_screenshot",

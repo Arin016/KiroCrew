@@ -23,7 +23,7 @@ from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
 import kiro_crew
-from kiro_crew import beacon, platform_compat
+from kiro_crew import beacon, dep_sync, platform_compat
 from kiro_crew.computer_use.types import MAX_SCREENSHOT_MAX_PX as _CU_MAX_SCREENSHOT_MAX_PX
 from kiro_crew.computer_use.types import MAX_TREE_NODES_LIMIT as _CU_MAX_TREE_NODES_LIMIT
 from kiro_crew.computer_use.types import MIN_SCREENSHOT_MAX_PX as _CU_MIN_SCREENSHOT_MAX_PX
@@ -46,7 +46,6 @@ from kiro_crew.effort import EFFORT_LEVELS
 from kiro_crew.executors import discovery_executor
 from kiro_crew.metrics import provider as _metrics_provider
 from kiro_crew.security_posture import build_posture_snapshot_async, posture_counts_async
-from kiro_crew.subprocess_utf8 import UTF8_TEXT
 from kiro_crew.transcribe import BREW_PATH_DIRS, ensure_ffmpeg_in_path, find_brew, is_available
 
 logger = logging.getLogger(__name__)
@@ -921,32 +920,35 @@ def _find_suitable_python() -> str | None:
     passed as the ``reject`` predicate so the resolver FALLS THROUGH to the next
     candidate when one fails them, rather than giving up: a free-threaded/pip-less
     interpreter winning the name race must not mask a usable later one.
+
+    Both probes run through :func:`dep_sync._probe_interpreter` (``-I``, neutral
+    cwd) because this predicate picks the INSTALL TARGET: each answer must
+    describe the candidate interpreter itself, never the process asking.
+    Unisolated children inherit ``PYTHONPATH`` and take the caller's CWD as
+    ``sys.path[0]``, so a ``sitecustomize.py`` on either route can edit
+    ``sys.version`` — vetoing every candidate or waving a genuinely
+    free-threaded build through — and probing pip with ``-m pip`` would IMPORT
+    AND EXECUTE whatever ``pip`` those routes resolve, running planted code and
+    forging the verdict at once. ``find_spec`` under ``-I`` answers "does this
+    interpreter's own site-packages have pip" without executing it.
     """
 
     def _unusable(p: str) -> bool:
         # True => skip this interpreter and keep searching. A probe failure
-        # (can't even run it) also counts as unusable.
+        # (non-zero exit, timeout, unrunnable interpreter) also counts as
+        # unusable: _probe_interpreter reports a failed child via returncode
+        # rather than raising, so translate that explicitly — falling through
+        # would hand the STT installer a pip-less interpreter.
         try:
-            # PYTHONIOENCODING pins the CHILD's emit side: piped stdout on
-            # Windows otherwise re-encodes with the ANSI code page, which the
-            # UTF-8 decode below cannot undo.
-            child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-            ver = subprocess.check_output(
-                [p, "-c", "import sys; print(sys.version)"],
-                timeout=5,
-                env=child_env,
-                **UTF8_TEXT,
-            )
-            if "free-threading" in ver:
+            ver = dep_sync._probe_interpreter(Path(p), "import sys; print(sys.version)", timeout=5)
+            if ver.returncode != 0 or "free-threading" in ver.stdout:
                 return True
-            subprocess.check_output(
-                [p, "-m", "pip", "--version"],
+            pip = dep_sync._probe_interpreter(
+                Path(p),
+                "import importlib.util as u; raise SystemExit(0 if u.find_spec('pip') else 1)",
                 timeout=5,
-                stderr=subprocess.DEVNULL,
-                env=child_env,
-                **UTF8_TEXT,
             )
-            return False
+            return pip.returncode != 0
         except Exception:
             return True
 
