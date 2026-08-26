@@ -840,6 +840,93 @@ describe('MarkdownPanel — preview find', () => {
   })
 })
 
+describe('MarkdownPanel — find scoping across mounted sibling tabs', () => {
+  const HIDDEN = { filePath: '/tmp/hidden.md', content: 'alpha hidden doc\n' }
+  const VISIBLE = { filePath: '/tmp/visible.md', content: 'alpha visible doc\n' }
+  const base = () => ({
+    onContentChange: vi.fn(),
+    onSave: vi.fn(async () => {}),
+    onClose: vi.fn(),
+    initialDiffMode: false,
+  })
+
+  /** Mount the hidden tab FIRST: document capture listeners fire in
+   *  registration order, so the oldest-mounted instance is the one positioned
+   *  to win the chord from inside its display:none subtree. */
+  function mountSiblings() {
+    return render(
+      <>
+        <div style={{ display: 'none' }} data-testid="hidden-tab">
+          <MarkdownPanel embedded active={false} {...HIDDEN} {...base()} />
+        </div>
+        <div data-testid="visible-tab">
+          <MarkdownPanel embedded active {...VISIBLE} {...base()} />
+        </div>
+      </>,
+      { wrapper },
+    )
+  }
+
+  it('routes Cmd/Ctrl+F to the visible tab, not the oldest-mounted hidden one', async () => {
+    mountSiblings()
+    await screen.findByText(/alpha visible doc/)
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    const inputs = await screen.findAllByLabelText('Find in document')
+    expect(inputs).toHaveLength(1)
+    expect(screen.getByTestId('visible-tab').contains(inputs[0])).toBe(true)
+  })
+
+  it('a hidden tab alone neither opens find nor swallows the chord, so chat-find still gets it', async () => {
+    render(
+      <div style={{ display: 'none' }}>
+        <MarkdownPanel embedded active={false} {...HIDDEN} {...base()} />
+      </div>,
+      { wrapper },
+    )
+    await screen.findByText(/alpha hidden doc/)
+    const ev = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true })
+    const stopSpy = vi.spyOn(ev, 'stopImmediatePropagation')
+    act(() => { document.dispatchEvent(ev) })
+    expect(ev.defaultPrevented).toBe(false)
+    expect(stopSpy).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Find in document')).toBeNull()
+  })
+
+  it('going inactive closes the find bar and releases the global highlight names', async () => {
+    const props = { ...VISIBLE, ...base() }
+    const view = render(<MarkdownPanel embedded active {...props} />, { wrapper })
+    await screen.findByText(/alpha visible doc/)
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    const input = await screen.findByLabelText('Find in document')
+    fireEvent.change(input, { target: { value: 'alpha' } })
+    await screen.findByText('1 of 1')
+    expect(highlightRegistry.has('mc-find-current')).toBe(true)
+    view.rerender(<MarkdownPanel embedded active={false} {...props} />)
+    await waitFor(() => expect(screen.queryByLabelText('Find in document')).toBeNull())
+    expect(highlightRegistry.has('mc-find')).toBe(false)
+    expect(highlightRegistry.has('mc-find-current')).toBe(false)
+  })
+
+  it('scopes pointer tracking per panel: the clicked sibling owns the chord', async () => {
+    // No `active` props here — this is any host with several always-active
+    // panels. The panel the user last clicked owns the chord; the other must
+    // pass on it rather than reading the sibling click as "in me".
+    render(
+      <>
+        <div data-testid="first"><MarkdownPanel embedded {...HIDDEN} {...base()} /></div>
+        <div data-testid="second"><MarkdownPanel embedded {...VISIBLE} {...base()} /></div>
+      </>,
+      { wrapper },
+    )
+    const target = await screen.findByText(/alpha visible doc/)
+    fireEvent.pointerDown(target)
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    const inputs = await screen.findAllByLabelText('Find in document')
+    expect(inputs).toHaveLength(1)
+    expect(screen.getByTestId('second').contains(inputs[0])).toBe(true)
+  })
+})
+
 describe('MarkdownPanel — inline comment highlights', () => {
   const FILE = '/tmp/notes.md'
   const BODY = 'alpha beta gamma\n'

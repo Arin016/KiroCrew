@@ -848,8 +848,11 @@ function McpAppTabBody({ tab, slot }: { tab: PanelTab; slot: string }) {
  * Rail visibility is a single app-wide preference; the rail only renders at
  * all when the chat has a project dir whose tree the backend serves.
  */
-function FileTabBody({ tab, projectDir, scrollMemoryKey, onContentChange, onDiskContent, onDiffModeChange, onFileSave, onFileOpen, onAddToContext, onClose, onSubmitComments, onRevealConsumed }: {
+function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange, onDiskContent, onDiffModeChange, onFileSave, onFileOpen, onAddToContext, onClose, onSubmitComments, onRevealConsumed }: {
   tab: PanelTab
+  /** Whether this tab is the visible one. Hidden tabs stay mounted
+   *  (display:none), so the panel needs this to cede Cmd/Ctrl+F. */
+  active: boolean
   projectDir?: string
   /** Cross-remount scroll identity (slot + tab id) — see `useScrollMemory`. */
   scrollMemoryKey?: string
@@ -876,6 +879,7 @@ function FileTabBody({ tab, projectDir, scrollMemoryKey, onContentChange, onDisk
     <MarkdownPanel
       ref={panelRef}
       embedded
+      active={active}
       filePath={tab.path || ''}
       content={tab.content || ''}
       scrollMemoryKey={scrollMemoryKey}
@@ -951,6 +955,7 @@ function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDi
     return (
       <FileTabBody
         tab={tab}
+        active={active}
         projectDir={projectDir}
         scrollMemoryKey={scrollMemoryKey}
         onContentChange={onContentChange}

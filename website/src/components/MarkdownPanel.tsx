@@ -43,9 +43,12 @@ const cssHighlights: { set(n: string, h: FindHighlight): void; delete(n: string)
     ? (CSS as unknown as { highlights?: { set(n: string, h: FindHighlight): void; delete(n: string): boolean } }).highlights
     : undefined
 const FIND_HL_SUPPORTED = !!FindHighlightCtor && !!cssHighlights
-// Global registry names. Assumes a single active markdown preview at a time
-// (the panel's findActiveRef already encodes that assumption); a second
-// concurrent preview find would share these names — a harmless visual overlap,
+// Global registry names, shared by every mounted panel. A multi-tab host keeps
+// hidden siblings mounted, so single ownership is enforced rather than assumed:
+// the `active` prop gates the Cmd/Ctrl+F capture handler to the visible panel,
+// a panel going inactive closes its find and releases these names, and
+// findActiveRef is scoped to each panel's own subtree. A second concurrent find
+// (two always-active hosts) would share the names — a harmless visual overlap,
 // never a crash.
 const FIND_HL_ALL = 'mc-find'
 const FIND_HL_CURRENT = 'mc-find-current'
@@ -193,6 +196,12 @@ interface Props {
   onDiffModeChange?: (diffMode: boolean) => void
   /** Render as a SidePanel tab body (fills parent, no resize handle/border). */
   embedded?: boolean
+  /** Whether this panel is the visible tab in a host that keeps hidden sibling
+   *  tabs mounted (display:none). `false` fully cedes the find surface: the
+   *  capture-phase Cmd/Ctrl+F handler never claims the chord and an open find
+   *  bar closes, releasing the global highlight names. Omitted by
+   *  single-instance hosts, which behave as always-active. */
+  active?: boolean
   /** File-browser rail (grip + tree column) rendered to the RIGHT of the
    *  content, under the shared full-width header — the file-tab body owns the
    *  rail's data and open handling; this panel only places it. */
@@ -831,7 +840,7 @@ export interface MarkdownPanelHandle {
   requestNavigate: (nav: (stillClean: () => boolean) => void) => void
 }
 
-export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPanel({ filePath, content, onContentChange, onDiskContent, onSave, onClose, liveWatch, onSubmitComments, onRefresh, reserveWidth, initialDiffMode, onDiffModeChange, embedded, savedBaseline, revealLine, onRevealConsumed, browserRail, railOpen, onRailToggle, scrollMemoryKey }: Props, ref) {
+export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPanel({ filePath, content, onContentChange, onDiskContent, onSave, onClose, liveWatch, onSubmitComments, onRefresh, reserveWidth, initialDiffMode, onDiffModeChange, embedded, active, savedBaseline, revealLine, onRevealConsumed, browserRail, railOpen, onRailToggle, scrollMemoryKey }: Props, ref) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
   const ime = useImeGuard()
   const qc = useQueryClient()
@@ -1011,13 +1020,17 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   const findRangesRef = useRef<Range[]>([])
   // Is this panel the region the cursor is in? Defaults true so Cmd+F right
   // after opening the doc searches the doc (the reported expectation). Flips
-  // based on where the last pointer-down landed.
+  // based on where the last pointer-down landed — tested against THIS panel's
+  // own find region (side-panel body or fullscreen body), never a global
+  // selector: with several panels mounted, a global test would read a click in
+  // a sibling panel as "in me" and let a hidden instance claim the chord.
   const findActiveRef = useRef(true)
+  const findRegionRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const onPointer = (e: Event) => {
-      const t = e.target as Element | null
-      findActiveRef.current = !!t?.closest?.('[data-mc-mdpanel]')
+      const t = e.target as Node | null
+      findActiveRef.current = !!(t && findRegionRef.current?.contains(t))
     }
     document.addEventListener('pointerdown', onPointer, true)
     return () => document.removeEventListener('pointerdown', onPointer, true)
@@ -1110,11 +1123,21 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   // the editor's own find takes over cleanly.
   useEffect(() => { if (editing || diffMode) closeFind() }, [editing, diffMode, closeFind])
 
+  // A panel that stops being the visible tab cedes the find surface: close the
+  // bar and release the global highlight names so the panel that IS visible
+  // (or chat-find) owns them.
+  useEffect(() => { if (active === false) closeFind() }, [active, closeFind])
+
   // Capture-phase Cmd+F: fires before ChatPage's bubble-phase chat-find. We
-  // only steal the key in markdown preview when this panel is the active
-  // region; otherwise we let it bubble (chat-find) or let the editor handle it.
+  // only steal the key in markdown preview when this panel is the visible tab
+  // AND the active region; otherwise we let it bubble (chat-find) or let the
+  // editor handle it. The `active` gate comes first: a hidden sibling tab is
+  // still mounted and its capture listener still fires, and if it claimed the
+  // chord, stopImmediatePropagation inside a display:none subtree would also
+  // suppress the chat-find fallback — nothing would open at all.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (active === false) return                          // hidden tab never claims the chord
       if (!hasCommandModifier(e) || e.key.toLowerCase() !== 'f') return
       if (editing || diffMode || !isMarkdown) return       // editor owns it; non-markdown skip
       if (!findActiveRef.current) return                    // cursor is in chat → let chat-find handle
@@ -1125,7 +1148,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [editing, diffMode, isMarkdown])
+  }, [active, editing, diffMode, isMarkdown])
 
   const findBar = findOpen ? (
     <div data-mc-mdpanel className="absolute top-2 right-3 z-30 flex items-center gap-1.5 bg-bg-elevated border border-border focus-within:border-accent rounded-lg shadow-md px-2.5 py-1.5 text-[13px]">
@@ -1732,7 +1755,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
           rail down in preview and leave it level everywhere else. Prose
           breathing room at the top belongs inside the scroll box. */}
       <div ref={splitRowRef} className={`relative flex-1 overflow-hidden -mx-5 -my-4 flex ${isMarkdown && !editing && !diffMode ? 'pl-4 pr-0' : ''}`}>
-        {!fullscreen && <div data-mc-mdpanel className="relative flex-1 min-w-0 min-h-0 flex flex-col">
+        {!fullscreen && <div ref={findRegionRef} data-mc-mdpanel className="relative flex-1 min-w-0 min-h-0 flex flex-col">
           {findBar}
           {/* Unsaved-changes banner: slides in from the top of the PREVIEW
               column only (the header keeps its height and the browser rail
@@ -1824,7 +1847,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
         {saveError && <div className="px-16 text-[11px] text-danger">{saveError}</div>}
         {isMarkdown && !editing && onSubmitComments && !hintDismissed && <div className="px-16"><CommentHint onDismiss={dismissHint} /></div>}
         {/* Body */}
-        <div data-mc-mdpanel className="relative flex-1 overflow-hidden min-h-0">
+        <div ref={findRegionRef} data-mc-mdpanel className="relative flex-1 overflow-hidden min-h-0">
           {findBar}
           <div ref={fullscreenBodyRef} className="h-full overflow-auto px-16 py-4">
             {zeroDiff && <ZeroDiffNotice onExitDiff={toggleDiffMode} />}
