@@ -969,8 +969,10 @@ function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDi
     return (
       <FolderPanel
         path={tab.path || ''}
+        projectDir={projectDir}
         onClose={onClose}
         onFileOpen={onFileOpen}
+        onAddToContext={onAddToContext}
         onPathChange={onPathChange}
       />
     )
