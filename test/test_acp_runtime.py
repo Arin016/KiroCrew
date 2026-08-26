@@ -5034,13 +5034,36 @@ async def test_send_command_redacts_output(monkeypatch):
 # ── Round-2 parity fixes: auth detection, exception translation, steer ──
 
 
-def test_saw_not_logged_in_detects_auth_failure():
-    """#1: AcpRuntime.saw_not_logged_in scans captured stderr for kiro-cli's
-    'not logged in' signal so a death can be surfaced as AcpAuthRequired."""
-    rt, _, _ = _make_runtime()
-    rt._stderr_lines = ["startup noise", "error: You are not logged in, please log in"]
+@pytest.mark.asyncio
+async def test_saw_not_logged_in_detects_auth_failure():
+    """#1: AcpRuntime.saw_not_logged_in reports kiro-cli's auth-failure signal on
+    stderr so a death can be surfaced as AcpAuthRequired.
+
+    Drives the real ``_drain_stderr`` rather than assigning ``_stderr_lines``
+    directly. The observation is now latched as each line arrives, because the
+    buffer is a 20-line ring and nothing asks about auth until a request has
+    already timed out -- by which point a chatty startup can have evicted the
+    line. ``_drain_stderr`` is the only production writer of that buffer, so
+    driving it is strictly closer to the real path than the previous assignment
+    was; the two assertions below are unchanged in intent.
+    """
+
+    class _Stderr:
+        def __init__(self, lines):
+            self._lines = [f"{ln}\n".encode() for ln in lines]
+
+        async def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+    async def _drain(lines):
+        rt, _, proc = _make_runtime()
+        proc.stderr = _Stderr(lines)
+        await rt._drain_stderr()
+        return rt
+
+    rt = await _drain(["startup noise", "error: You are not logged in, please log in"])
     assert rt.saw_not_logged_in() is True
-    rt._stderr_lines = ["ordinary stderr", "mcp server ready"]
+    rt = await _drain(["ordinary stderr", "mcp server ready"])
     assert rt.saw_not_logged_in() is False
 
 

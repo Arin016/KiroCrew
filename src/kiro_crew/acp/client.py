@@ -1054,10 +1054,13 @@ class AcpPromptBusy(AcpError):  # noqa: N818
     """
 
 
-# kiro-cli emits a "not logged in" banner on stderr when the user's session
-# has expired. Detected during spawn/prompt so we can raise AcpAuthRequired
-# (non-retryable) instead of churning through the retry ladder.
-_NOT_LOGGED_IN_RE = re.compile(r"not\s+logged\s+in", re.IGNORECASE)
+# Auth failure on stderr is detected during spawn/prompt so we can raise
+# AcpAuthRequired (non-retryable) instead of churning through the retry ladder.
+# The detector is `is_auth_failure_output` below; there is deliberately no
+# separate "not logged in" pattern here, because having one was the defect —
+# `_RE_SESSION_EXPIRED` already carries that wording alongside the rest of the
+# auth vocabulary, and a second narrower copy is what let the spawn path miss
+# every expiry that does not use the banner's exact words.
 _NOT_LOGGED_IN_MESSAGE = (
     "kiro-cli is not logged in. Run `kiro-cli login` in your terminal, " "then start a new chat."
 )
@@ -1160,6 +1163,34 @@ def _is_session_expired(haystack: str) -> bool:
         or _RE_SESSION_EXPIRED.search(haystack)
         or _RE_INVALID_BEARER.search(haystack)
     )
+
+
+def is_auth_failure_output(haystack: str) -> bool:
+    """True when free-form kiro-cli output reports an auth failure.
+
+    Companion to :func:`_is_session_expired` for output that is NOT a JSON-RPC
+    error frame — i.e. whatever the CLI writes to stderr while starting up. It is
+    the union of the two terminal auth families this module already recognises:
+    ``_is_session_expired`` (401/403, expiry wording, rejected bearer token) and
+    ``_RE_AUTH`` (the named service exceptions, which ``_is_session_expired``
+    deliberately leaves to ``_RE_AUTH``). Both are terminal for the same reason —
+    no retry refreshes a login — so for the single question "is this stderr an
+    auth problem" they belong together.
+
+    This exists because the two auth vocabularies had drifted apart by call path,
+    not by intent. Everything above was reachable only from the error-frame path;
+    the spawn / ``session/new`` path had its own detector matching the single
+    literal banner ``not logged in``. Real expiry output does not use that
+    wording — an expired bearer token produces ``AccessDeniedException: "Invalid
+    token"`` and ``the bearer token included in the request is invalid`` — so the
+    spawn path discarded an auth signal this module could already read, and the
+    operator got a 90-second timeout instead of a sign-in prompt.
+
+    Keeping one detector rather than widening the banner regex is the same
+    anti-drift argument the module makes for its other shared patterns: a second
+    vocabulary is what created the gap.
+    """
+    return bool(_RE_AUTH.search(haystack)) or _is_session_expired(haystack)
 
 
 # Account/plan capacity is EXHAUSTED — terminal. Distinct from a throttle: a
