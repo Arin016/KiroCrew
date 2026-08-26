@@ -65,8 +65,9 @@ _REMOTE_BIN_RE = re.compile(r"^[A-Za-z0-9._/~\- ]{0,512}\Z")
 # authoritative validation lives with the tunnel manager (validation.py).
 _SSM_TARGET_RE = re.compile(r"^(i|mi)-[a-f0-9]{8,17}\Z")
 # aws_profile: named profile in ~/.aws/config; conservative charset, no shell
-# metacharacters. Empty string means "default credential chain".
-_AWS_PROFILE_RE = re.compile(r"^[A-Za-z0-9_.\-]{0,128}\Z")
+# metacharacters. '+' is allowed for AWS SSO/Identity Center derived names.
+# Empty string means "default credential chain".
+_AWS_PROFILE_RE = re.compile(r"^[A-Za-z0-9_.+\-]{0,128}\Z")
 # aws_region: standard AWS region shape (e.g. us-east-1, eu-west-2). Empty
 # string means "use the profile's/environment's default region".
 _AWS_REGION_RE = re.compile(r"^[a-z]{2}(-gov)?-[a-z]+-\d{1,2}\Z|^\Z")
