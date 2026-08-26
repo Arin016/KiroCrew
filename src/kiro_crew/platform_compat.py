@@ -17,6 +17,7 @@ import io
 import logging
 import ntpath
 import os
+import platform
 import shutil
 import signal
 import stat
@@ -106,6 +107,29 @@ if IS_LINUX or IS_MACOS:
         _RENAME_NOREPLACE_FN = None
 
 RENAME_NOREPLACE_AVAILABLE: bool = _RENAME_NOREPLACE_FN is not None
+
+#: ARM machine strings as ``platform.machine()`` spells them on Windows.
+#: ``ARM64`` is what a native arm64 interpreter reports; ``AARCH64`` is accepted
+#: because that spelling reaches Windows through cross-built and MSYS/Cygwin
+#: Pythons. Compared case-folded, so the casing here is documentation only.
+_WINDOWS_ARM_MACHINES: frozenset[str] = frozenset({"arm64", "aarch64"})
+
+
+def is_windows_on_arm() -> bool:
+    """True when this interpreter is a NATIVE ARM64 process on Windows.
+
+    Deliberately a property of the running PROCESS, not of the host CPU, because
+    every caller cares about which wheel tags pip will accept here. Windows on ARM
+    runs x86-64 processes under emulation, and in one of those ``platform.machine()``
+    reports ``AMD64`` — correctly, since such an interpreter installs ``win_amd64``
+    wheels and works fine. A host-architecture probe would report ARM for that same
+    process and wrongly refuse a package that installs.
+
+    Keyed off :data:`IS_WINDOWS` rather than ``platform.system()`` so there is one
+    canonical Windows predicate in this module instead of two that can drift.
+    """
+    return IS_WINDOWS and platform.machine().casefold() in _WINDOWS_ARM_MACHINES
+
 
 # Portable signal constants — signal.SIGKILL is undefined on Windows.
 SIGKILL: int = getattr(signal, "SIGKILL", 9)

@@ -93,7 +93,12 @@ from kiro_crew.service import controller as service_controller
 from kiro_crew.service import linux as service_linux
 from kiro_crew.session_pid_sig import signing_health
 from kiro_crew.subprocess_utf8 import UTF8_TEXT
-from kiro_crew.transcribe import _find_parakeet_mlx, _find_whisper, ensure_ffmpeg_in_path
+from kiro_crew.transcribe import (
+    _faster_whisper_model,
+    _find_parakeet_mlx,
+    _find_whisper,
+    ensure_ffmpeg_in_path,
+)
 from kiro_crew.validation import _AGENT_NAME_RE
 
 logger = logging.getLogger(__name__)
@@ -2500,7 +2505,11 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
     print("\nSpeech-to-Text")
     stt_active = cfg.stt.enabled
     needs_whisper = stt_active and cfg.stt.provider == "whisper"
-    needs_ffmpeg = stt_active  # both providers use ffmpeg
+    # Every provider but ``faster`` shells out to something that needs the system
+    # ffmpeg; faster-whisper decodes in-process through PyAV's bundled copy, so
+    # reporting a missing ffmpeg as an ISSUE there would send the user to install a
+    # binary their configuration never calls.
+    needs_ffmpeg = stt_active and cfg.stt.provider != "faster"
 
     if not stt_active:
         print("  status:      ⏹ disabled (enable from dashboard → Overview → Slack)")
@@ -2588,6 +2597,40 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
             print("               Fix: pipx install parakeet-mlx  (Apple Silicon only)")
             if stt_fatal:
                 issues.append("parakeet-mlx")
+
+    # faster-whisper (CTranslate2) is installed on demand, not as a declared extra,
+    # so an unavailable library is the expected first-run state rather than a broken
+    # install. Windows on ARM is called out separately because no CTranslate2 wheel
+    # exists there at all — the install button cannot fix it, and telling the user to
+    # retry would waste their time instead of naming a provider that does work.
+    if stt_active and cfg.stt.provider == "faster":
+        if _faster_whisper_model() is not None:
+            print("  faster:      ✅ faster-whisper importable")
+        elif platform_compat.is_windows_on_arm():
+            # Deliberately NOT routed through ``stt_mark``/``stt_fatal``. That
+            # Windows downgrade exists because whisper and ffmpeg are absent from a
+            # stock Windows box yet trivially installable, so failing a first-run
+            # doctor over them is noise. This is the opposite case: ``faster`` is
+            # never the default, so reaching here means the user explicitly selected
+            # a provider that CANNOT be made to work on this machine. That is a real
+            # configuration fault, and the whole point of naming the alternatives is
+            # that the run should not exit 0 as if nothing were wrong.
+            print("  faster:      ❌ not available (Windows on ARM — no CTranslate2 wheel)")
+            print(
+                "               Alternatives: set stt.provider to 'whisper' "
+                "(local) or 'transcribe' (AWS)"
+            )
+            issues.append("faster-whisper: unavailable on Windows ARM")
+        else:
+            # The ordinary not-yet-installed state, which the install button DOES
+            # fix — so this one follows the platform convention like whisper above.
+            print(f"  faster:      {stt_mark} not installed")
+            print(
+                "               Install from dashboard → Settings → "
+                "Speech-to-Text, or: pip install faster-whisper"
+            )
+            if stt_fatal:
+                issues.append("faster-whisper")
 
     # ── Slack (optional) ──
     print("\nSlack Integration")

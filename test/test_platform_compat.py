@@ -140,6 +140,79 @@ class TestReexecPythonModule:
         assert "👻 restarted".encode() in result.stdout
 
 
+class TestWindowsOnArm:
+    """``is_windows_on_arm`` answers "will pip accept a win_amd64 wheel here?".
+
+    Callers use it to refuse a package that publishes no win-arm64 wheel, so the
+    predicate has to be a property of the running PROCESS rather than of the host
+    CPU — the two disagree under Windows' x86-64 emulation, and only the process
+    answer matches what pip does.
+    """
+
+    def test_true_for_a_native_arm64_interpreter(self, monkeypatch):
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        monkeypatch.setattr(pc.platform, "machine", lambda: "ARM64")
+        assert pc.is_windows_on_arm() is True
+
+    def test_accepts_the_aarch64_spelling(self, monkeypatch):
+        # Reaches Windows through cross-built and MSYS/Cygwin interpreters.
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        monkeypatch.setattr(pc.platform, "machine", lambda: "aarch64")
+        assert pc.is_windows_on_arm() is True
+
+    def test_case_is_irrelevant(self, monkeypatch):
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        monkeypatch.setattr(pc.platform, "machine", lambda: "aRm64")
+        assert pc.is_windows_on_arm() is True
+
+    def test_false_for_an_emulated_x86_64_interpreter(self, monkeypatch):
+        """The case a host-architecture probe would get WRONG.
+
+        Windows on ARM runs x86-64 processes under emulation, and such an
+        interpreter reports AMD64 and installs win_amd64 wheels perfectly well.
+        Reporting it as ARM would refuse a package that works.
+        """
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        monkeypatch.setattr(pc.platform, "machine", lambda: "AMD64")
+        assert pc.is_windows_on_arm() is False
+
+    def test_false_on_apple_silicon(self, monkeypatch):
+        # arm64 alone must not trip it: macOS and Linux both publish arm64 wheels
+        # for the packages this gate exists to refuse on Windows.
+        monkeypatch.setattr(pc, "IS_WINDOWS", False)
+        monkeypatch.setattr(pc.platform, "machine", lambda: "arm64")
+        assert pc.is_windows_on_arm() is False
+
+    def test_does_not_consult_machine_off_windows(self, monkeypatch):
+        """Short-circuits on the platform constant.
+
+        Keeps the predicate loop-safe for the dashboard's STT config GET, which
+        calls it inline rather than from the threaded probe block.
+        """
+        monkeypatch.setattr(pc, "IS_WINDOWS", False)
+        calls = []
+
+        def _machine():
+            calls.append(1)
+            return "arm64"
+
+        monkeypatch.setattr(pc.platform, "machine", _machine)
+        assert pc.is_windows_on_arm() is False
+        assert calls == []
+
+    def test_uses_the_modules_own_windows_predicate(self, monkeypatch):
+        """Keyed off IS_WINDOWS, not a second platform.system() call.
+
+        Two Windows predicates in one module can drift; this pins that there is
+        one. Flipping only IS_WINDOWS must flip the answer.
+        """
+        monkeypatch.setattr(pc.platform, "machine", lambda: "arm64")
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        assert pc.is_windows_on_arm() is True
+        monkeypatch.setattr(pc, "IS_WINDOWS", False)
+        assert pc.is_windows_on_arm() is False
+
+
 class TestFileLock:
     def test_exclusive_lock_round_trips(self, tmp_path):
         # The lock must acquire + release cleanly and run the body, on whatever

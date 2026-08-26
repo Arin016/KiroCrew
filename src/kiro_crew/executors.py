@@ -46,6 +46,16 @@ Three pools, deliberately split:
   work gets its OWN small pool so a burst of screenshots queues among ITSELF
   and can never occupy the :func:`maintenance_executor` workers the orphan
   sweeps need to recover from a wedge.
+* :func:`stt_executor` -- in-process speech-to-text inference
+  (:func:`kiro_crew.transcribe._run_faster_whisper_sync`).  Minutes of CPU per
+  call on a long recording, and the first call for a model size may block on a
+  multi-GB weight download inside the library's constructor.  It cannot share
+  :func:`subprocess_executor`: a ``run_in_executor`` future cannot be
+  cancelled, so a wedged model load would hold one of the eight PTY-teardown
+  workers indefinitely -- and those exist precisely so a teardown storm has
+  somewhere to go.  A caller that gives up on a timeout does NOT free the
+  thread, which is the whole reason this work needs a pool it can only starve
+  for itself.
 
 Long-term direction: this blocking work should move into a dedicated
 supervised process (the VS Code extension-host model), so a wedge there cannot
@@ -72,6 +82,7 @@ __all__ = [
     "discovery_executor",
     "embed_executor",
     "image_executor",
+    "stt_executor",
     "governance_executor",
     "cron_gate_executor",
     "CronGateTimeout",
@@ -211,6 +222,18 @@ _CRON_GATE_QUEUE_SHARE = 0.25
 # maintenance sweeps or head-of-line blocking any other pool's work.
 _MAX_IMAGE_WORKERS = 2
 
+# In-process STT inference is the longest-running work in this module: minutes of
+# CPU on a meeting-length recording, and the first call for a model size can block
+# on a multi-GB weight download inside the library's constructor.  TWO workers,
+# deliberately small for a reason the other pools do not share -- each in-flight
+# call holds a fully quantised model in RAM (up to ~GBs for large-v3), so the
+# worker count is a MEMORY ceiling, not just a CPU one.  Two lets a queued
+# recording start while one finishes; more would let concurrent dictations OOM a
+# small host.  Sizing it here rather than reusing the 8-worker subprocess pool is
+# the point: a wedged model load cannot be cancelled, so it must only ever be able
+# to starve other STT work.
+_MAX_STT_WORKERS = 2
+
 _lock = threading.Lock()
 _pool: ThreadPoolExecutor | None = None
 _subprocess_pool: ThreadPoolExecutor | None = None
@@ -218,6 +241,7 @@ _cron_pool: ThreadPoolExecutor | None = None
 _discovery_pool: ThreadPoolExecutor | None = None
 _embed_pool: ThreadPoolExecutor | None = None
 _image_pool: ThreadPoolExecutor | None = None
+_stt_pool: ThreadPoolExecutor | None = None
 _governance_pool: ThreadPoolExecutor | None = None
 _cron_gate_pool: ThreadPoolExecutor | None = None
 
@@ -319,6 +343,31 @@ def image_executor() -> ThreadPoolExecutor:
                 )
                 atexit.register(shutdown_maintenance_executor)
     return _image_pool
+
+
+def stt_executor() -> ThreadPoolExecutor:
+    """Return the process-wide STT inference pool, creating it on first use.
+
+    Threads are named ``mc-stt``.  Separate from :func:`subprocess_executor` for the
+    reason a started ``run_in_executor`` future cannot be cancelled: a wedged model
+    load (or a first-run weight download inside the library constructor) holds its
+    worker until the process exits, and on the PTY-teardown pool that would consume
+    one of the eight workers whose whole purpose is absorbing a teardown storm.
+    Here it can only starve other STT work, which is the containment we want.
+
+    Callers bound their own wait (``stt.timeout_secs``); that releases the CALLER,
+    never the thread — see :func:`kiro_crew.transcribe._transcribe_faster`.
+    """
+    global _stt_pool
+    if _stt_pool is None:
+        with _lock:
+            if _stt_pool is None:
+                _stt_pool = ThreadPoolExecutor(
+                    max_workers=_MAX_STT_WORKERS,
+                    thread_name_prefix="mc-stt",
+                )
+                atexit.register(shutdown_maintenance_executor)
+    return _stt_pool
 
 
 def embed_executor() -> ThreadPoolExecutor:
@@ -679,7 +728,7 @@ async def run_in_embed_pool(func: Callable[..., _T], /, *args: Any, **kwargs: An
 def shutdown_maintenance_executor() -> None:
     """Shut down all maintenance pools if they were created.  Idempotent."""
     global _pool, _subprocess_pool, _cron_pool, _discovery_pool, _embed_pool
-    global _governance_pool, _image_pool, _cron_gate_pool
+    global _governance_pool, _image_pool, _cron_gate_pool, _stt_pool
     with _lock:
         pool, _pool = _pool, None
         subprocess_pool, _subprocess_pool = _subprocess_pool, None
@@ -689,6 +738,7 @@ def shutdown_maintenance_executor() -> None:
         governance_pool, _governance_pool = _governance_pool, None
         image_pool, _image_pool = _image_pool, None
         cron_gate_pool, _cron_gate_pool = _cron_gate_pool, None
+        stt_pool, _stt_pool = _stt_pool, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
     if subprocess_pool is not None:
@@ -705,3 +755,5 @@ def shutdown_maintenance_executor() -> None:
         image_pool.shutdown(wait=False, cancel_futures=True)
     if cron_gate_pool is not None:
         cron_gate_pool.shutdown(wait=False, cancel_futures=True)
+    if stt_pool is not None:
+        stt_pool.shutdown(wait=False, cancel_futures=True)

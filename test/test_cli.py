@@ -258,6 +258,75 @@ class TestDoctor:
         assert f"  whisper:     {expected_mark} not found" in out
         assert f"  ffmpeg:      {expected_mark} not found" in out
 
+    @pytest.mark.parametrize(
+        "win_arm, expect_fatal_glyph, expect_alternatives",
+        [(True, True, True), (False, False, False)],
+        ids=["windows-arm-unfixable", "windows-x64-installable"],
+    )
+    def test_doctor_faster_windows_arm_is_fatal_even_on_windows(
+        self, tmp_path, capsys, monkeypatch, win_arm, expect_fatal_glyph, expect_alternatives
+    ):
+        """The `faster` win-arm arm deliberately does NOT follow ``stt_mark``.
+
+        That Windows downgrade exists because whisper and ffmpeg are absent from a
+        stock Windows box yet trivially installable, so failing a first-run doctor
+        over them is noise. This is the opposite case: `faster` is never the default,
+        so reaching it means the user explicitly selected a provider that CANNOT be
+        made to work here, and the run must not exit 0 as if nothing were wrong. The
+        ordinary not-installed arm (win_arm=False) still follows the convention,
+        because the install button does fix that one.
+        """
+        import kiro_crew.cli_doctor as _doc
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        agent_file = tmp_path / "kirocrew.json"
+        _healthy_agent_file(agent_file)
+        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
+        # Windows in BOTH arms: the point is what differs while IS_WINDOWS is true.
+        monkeypatch.setattr(_doc.platform_compat, "IS_WINDOWS", True)
+        monkeypatch.setattr(_doc.platform_compat, "is_windows_on_arm", lambda: win_arm)
+
+        def _cfg_with_faster() -> KiroCrewConfig:
+            cfg = KiroCrewConfig()
+            cfg.stt.enabled = True
+            cfg.stt.provider = "faster"
+            return cfg
+
+        monkeypatch.setattr(KiroCrewConfig, "load", classmethod(lambda cls: _cfg_with_faster()))
+        monkeypatch.setattr(_doc, "_find_whisper", lambda path=None: None)
+        monkeypatch.setattr(_doc, "ensure_ffmpeg_in_path", lambda: None)
+        # The library is absent, which is what routes into the two arms.
+        monkeypatch.setattr(_doc, "_faster_whisper_model", lambda: None)
+
+        with (
+            patch("kiro_crew.cli_doctor.shutil.which", side_effect=lambda b, **_k: f"/bin/{b}"),
+            patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
+            patch("kiro_crew.cli_doctor.subprocess.run", return_value=mock_run),
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no gateway")),
+            patch("kiro_crew.cli_doctor.is_local_only", return_value=True),
+            patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_crew.cli_doctor.probe_server", side_effect=_noop_probe_server),
+        ):
+            exited = False
+            try:
+                _doctor()
+            except SystemExit as e:
+                exited = bool(e.code)
+        out = capsys.readouterr().out
+        if expect_fatal_glyph:
+            assert "  faster:      ❌ not available (Windows on ARM" in out
+            # An unfixable configuration must fail the run even on Windows.
+            assert exited is True
+        else:
+            assert "  faster:      ⚠️  not installed" in out
+        if expect_alternatives:
+            # Naming the working providers IS the deliverable — a bare refusal
+            # leaves the user with no next step.
+            assert "stt.provider to 'whisper'" in out
+            assert "'transcribe'" in out
+        else:
+            assert "stt.provider to 'whisper'" not in out
+
     def test_doctor_reports_platform_boot_error_without_crashing(self, tmp_path, capsys):
         """A PlatformCompositionError from boot must be REPORTED by the doctor,
         not crash it — the doctor is the tool that diagnoses a broken setup, so

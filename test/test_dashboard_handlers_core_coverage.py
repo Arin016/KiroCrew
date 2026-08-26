@@ -754,7 +754,12 @@ class TestSttConfigEndpoint:
         # Streaming capability is served from the backend's own set so the
         # Settings UI gates on a CAPABILITY rather than a provider name.
         assert body["streaming_providers"] == ["transcribe", "apple"]
-        assert body["models"] == {"turbo": "~1.6 GB"}
+        # Tracks _STT_MODEL_SIZES (the PUT allowlist) rather than pinning one
+        # literal: the faster-whisper work widened the enum from `turbo` alone
+        # to the full Whisper size ladder, and a test pinned to yesterday's
+        # ladder fails on every legitimate widening.
+        assert body["models"] == core_mod._STT_MODEL_SIZES
+        assert "turbo" in body["models"]
         assert body["language_codes"][0] == "en-US"
         assert body["available"] is False
         assert body["prereqs"] == []
@@ -769,6 +774,21 @@ class TestSttConfigEndpoint:
         # Served independently of `available` so the UI can flag the .webm
         # remux gap even when the provider reads ready.
         assert isinstance(body["ffmpeg_missing"], bool)
+
+    @pytest.mark.asyncio
+    async def test_get_serves_faster_unsupported_for_pre_click_gating(self, monkeypatch):
+        """Mirrors `transcribe_unsupported`. Without this the Settings card can only
+        learn the platform is unsupported by pressing Install and reading a 400 — the
+        same dead end on every press, which is the failure this flag removes."""
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: True)
+        resp = await core_mod.api_stt_config(_req())
+        assert json.loads(resp.body)["faster_unsupported"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_reports_faster_supported_elsewhere(self, monkeypatch):
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: False)
+        resp = await core_mod.api_stt_config(_req())
+        assert json.loads(resp.body)["faster_unsupported"] is False
 
 
 # ── STT install endpoint ────────────────────────────────────────────────
@@ -862,6 +882,130 @@ class TestSttInstall:
         assert "boom" in body["error"]
         assert core_mod._stt_install_status["step"] == "error"
         assert fake_sel.log_api_access.call_args.kwargs["outcome"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_faster_is_refused_on_windows_on_arm(self, monkeypatch, fake_sel, stt_status):
+        """No CTranslate2 wheel exists for win-arm64 and there is no sdist either, so
+        pip fails while RESOLVING — naming a package the user never asked for. Refuse
+        up front with the alternatives instead of letting every press repeat it."""
+        core_mod._stt_install_status = {"step": "idle", "detail": "", "error": ""}
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"stt": {"provider": "faster"}}) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: True)
+        resp = await core_mod.api_stt_install(_req())
+        assert resp.status == 400
+        body = json.loads(resp.body)
+        assert body["code"] == "stt_unsupported_platform"
+        # The alternatives are the whole point — a bare refusal leaves the user stuck.
+        assert "whisper" in body["error"] and "transcribe" in body["error"]
+        # Must not strand the status machine in `starting`, or the 409 gate deadlocks.
+        assert core_mod._stt_install_status["step"] == "idle"
+        assert fake_sel.log_api_access.call_args.kwargs["outcome"] == "denied"
+
+    @pytest.mark.asyncio
+    async def test_windows_arm_refusal_never_spawns_the_shell(
+        self, monkeypatch, fake_sel, stt_status
+    ):
+        """The refusal has to be SERVER-SIDE, not a guard inside the generated script.
+
+        ``api_stt_install`` launches the script through ``bash -c``, which does not
+        exist on a stock native-Windows gateway — the run would die with
+        FileNotFoundError before executing a line. An in-script guard would therefore
+        be unreachable on precisely the platform it exists for, so assert no spawn is
+        even attempted.
+        """
+        core_mod._stt_install_status = {"step": "idle", "detail": "", "error": ""}
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"stt": {"provider": "faster"}}) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: True)
+        spawned = []
+
+        async def _spawn(*a, **_k):
+            spawned.append(a)
+            return _proc([b"Done.\n"])
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+        resp = await core_mod.api_stt_install(_req())
+        assert resp.status == 400
+        assert spawned == []
+
+    @pytest.mark.asyncio
+    async def test_platform_refusal_precedes_the_pip_channel_check(
+        self, monkeypatch, fake_sel, stt_status
+    ):
+        """Ordering is load-bearing: on win-arm a healthy pip channel would pass the
+        sibling gate and let the install proceed to a guaranteed failure. The
+        platform verdict must win, and its message is also the more actionable one."""
+        core_mod._stt_install_status = {"step": "idle", "detail": "", "error": ""}
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"stt": {"provider": "faster"}}) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: True)
+        # A working channel: without correct ordering this would fall through.
+        monkeypatch.setattr(core_mod, "_pip_install_channel_available", lambda: True)
+        resp = await core_mod.api_stt_install(_req())
+        assert json.loads(resp.body)["code"] == "stt_unsupported_platform"
+
+    @pytest.mark.asyncio
+    async def test_other_providers_are_unaffected_on_windows_on_arm(
+        self, monkeypatch, fake_sel, stt_status
+    ):
+        """The gate is scoped to `faster`. `whisper` has no CTranslate2 dependency, so
+        refusing it on win-arm would break a provider that works."""
+        core_mod._stt_install_status = {"step": "idle", "detail": "", "error": ""}
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"stt": {"provider": "whisper"}}) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: True)
+
+        async def _spawn(*_a, **_k):
+            return _proc([b"Done.\n"])
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+        resp = await core_mod.api_stt_install(_req())
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_faster_install_proceeds_on_a_supported_platform(
+        self, monkeypatch, fake_sel, stt_status
+    ):
+        core_mod._stt_install_status = {"step": "idle", "detail": "", "error": ""}
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"stt": {"provider": "faster"}}) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        monkeypatch.setattr(core_mod.platform_compat, "is_windows_on_arm", lambda: False)
+        monkeypatch.setattr(core_mod, "_pip_install_channel_available", lambda: True)
+        monkeypatch.setattr(core_mod, "_faster_whisper_model", lambda: object())
+
+        async def _spawn(*_a, **_k):
+            return _proc([b"Installing faster-whisper\n", b"Done.\n"])
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+        resp = await core_mod.api_stt_install(_req())
+        assert resp.status == 200
+        assert core_mod._stt_install_status["step"] == "done"
 
     @pytest.mark.asyncio
     async def test_install_timeout_kills_the_child(self, monkeypatch, fake_sel, stt_status) -> None:
