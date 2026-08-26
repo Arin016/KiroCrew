@@ -1427,7 +1427,35 @@ When the dashboard presents a tool approval prompt, users can now choose from th
 | `trust_base` | Session-scoped | Base command glob (e.g., `ls *` — trusts `ls` with any arguments) |
 | `yolo` | Global | All tools across all slots (existing behavior, now time-limited) |
 
-Trust patterns are stored per-slot as session-scoped fnmatch globs (`slot._trusted_patterns`). Pattern matching uses the ACTUAL command from `tool_input` (not the LLM-controlled display text) for security. For non-shell MCP tools without `tool_input`, `event.title` is used as it IS the provider-controlled tool name. Multi-command titles (e.g., `cat,wc`) generate patterns for each binary.
+Trust patterns are stored per-slot as session-scoped fnmatch globs
+(`slot._trusted_patterns`). For shell tools, both halves of the decision use the
+ACTUAL command from `tool_input`: the runner derives the pending grant scope
+from it, and later matching evaluates the next call against it. For non-shell
+tools with no structured input, both halves use the server/tool pair recovered
+by `toolCallId` from the preceding ACP `tool_call` frame's `_meta.kiro` cache.
+The UI retains the ACP-compatible `mcp__<server>__<tool>` display spelling, but
+durable trust uses a separate versioned key whose independently lowercased
+UTF-8 components are hex encoded. This makes the identity injective even when a
+server or tool contains `__`; the wire/display spelling is never authorization
+authority. Structured params remain attached to a repeated permission event;
+their presence disables canonical non-shell grantability and matching, so a
+same-`toolCallId` re-prompt cannot turn an argument-bearing call into an inputless
+one. A missing server/tool identity or a pre-upgrade pending card without the
+internal key fails closed for durable trust while ordinary Allow once and Reject
+remain available. Existing broad `*` trust retains its established semantics;
+legacy ambiguous exact MCP display patterns do not match the new internal keys.
+
+The `pattern` submitted by the dashboard is a consent proof, not authority: it
+must equal the server-derived field on the still-pending approval. Missing,
+underivable, redaction-changing, or stale/mismatched patterns return a typed 400
+without resolving the approval and are SEL-audited. Exact-command grants escape
+fnmatch metacharacters before storage, so trusting the literal command
+`rm *.tmp` does not also trust `rm secret.tmp`. Base grants are also derived
+server-side; assignment-prefixed bases such as `FOO=bar` are refused rather than
+becoming broad globs. Command parsing and matching live in the shared
+`trust_patterns.py` module so another approval surface consumes a command-shaped
+API instead of importing dashboard runner internals or fabricating a
+`Running: ...` title.
 
 ### SEL Audit Logging (`sel.py`)
 
