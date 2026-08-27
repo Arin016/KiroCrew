@@ -11551,7 +11551,11 @@
         "file_sessions_in_folder_desc": "Las sesiones nuevas de {{channel}} van a una carpeta de la barra lateral en vez de quedar sin archivar.",
         "session_folder_name": "Nombre de la carpeta",
         "session_folder_name_desc": "Se crea al guardar esta configuración, si todavía no existe.",
-        "shared_channels": "Canales compartidos"
+        "shared_channels": "Canales compartidos",
+        "sdk_missing": "Instalar el SDK de {{channel}}",
+        "sdk_missing_body": "El canal de {{channel}} necesita el paquete {{package}}, que no se instala de forma predeterminada. Ejecuta el comando de abajo en una terminal para añadirlo.",
+        "sdk_restart_after_install": "Después reinicia la puerta de enlace para iniciar el canal de {{channel}}.",
+        "sdk_install_unsupported": "El Python de esta puerta de enlace no puede instalar paquetes adicionales, así que {{package}} no se puede añadir aquí. Ejecuta la puerta de enlace desde un entorno de Python donde pip pueda instalarlo."
       },
       "browserPanel": {
         "use_builtin_label": "Usar el navegador integrado",

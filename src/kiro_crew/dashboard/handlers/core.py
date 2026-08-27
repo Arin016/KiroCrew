@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import hmac
-import importlib.util
 import json
 import logging
 import math
@@ -16,7 +15,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 from aiohttp import web
@@ -38,6 +36,10 @@ from kiro_crew.config.loader import (
     config_path,
 )
 from kiro_crew.context_management import RESULT_FILE_MAX_BYTES
+from kiro_crew.dashboard.handlers._shared import (
+    _pip_install_channel_available,
+    pip_extra_install_command,
+)
 from kiro_crew.dashboard.origin import check_host, is_direct_local_request
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.dashboard.stt_stream import _STREAMING_PROVIDERS
@@ -764,37 +766,6 @@ def _voice_extra_importable() -> bool:
     return True
 
 
-def _pip_install_channel_available() -> bool:
-    """True when ``<gateway python> -m pip install`` can plausibly succeed.
-
-    Three environments make that command a guaranteed dead end, and surfacing
-    it there recreates the press-and-nothing-changes failure this surface
-    exists to avoid:
-
-    - the desktop app's bundled interpreter (see
-      :func:`platform_compat.is_bundled_interpreter`): pip may exist, but a
-      pip install writes into the code-signed bundle — breaking launches and
-      updates — and is discarded on every app update;
-    - an interpreter without the ``pip`` module (uv tool installs, some
-      pipx layouts);
-    - a PEP 668 externally-managed interpreter (distro/brew pythons), where
-      pip refuses to install. Checked only outside a venv: inside one, pip
-      works and deliberately ignores the marker, so a venv returns True.
-    """
-    if platform_compat.is_bundled_interpreter():
-        return False
-    if importlib.util.find_spec("pip") is None:
-        return False
-    # PEP 668 applies to the environment pip would install into. Inside a venv
-    # pip deliberately ignores the marker, and `sysconfig.get_path("stdlib")`
-    # resolves to the BASE interpreter's directory — where distro/brew pythons
-    # place it — so checking it from a venv would misfire on the recommended
-    # install layout (venv on a Debian/Ubuntu/Homebrew python).
-    if sys.prefix != sys.base_prefix:
-        return True
-    return not (Path(sysconfig.get_path("stdlib")) / "EXTERNALLY-MANAGED").exists()
-
-
 def _ffmpeg_install_commands() -> list[str]:
     """Platform command(s) that put ffmpeg on PATH, or ``[]`` when it already is."""
     ensure_ffmpeg_in_path()
@@ -851,28 +822,7 @@ def _stt_prereq_commands(provider: str = "whisper") -> list[str]:
             # The command targets the gateway's own interpreter: the import
             # happens in-process, so a system python or ``--user`` install is
             # not importable here.
-            if os.name == "nt":
-                # The user's shell is unknowable here (they may paste this into
-                # PowerShell OR cmd), so the form must be SILENT-CORRUPTION-FREE
-                # in both, and PowerShell is the harder shell: a double-quoted
-                # string still expands ``$name`` and honours backtick escapes,
-                # and so does a bare unquoted token — both are legal path
-                # characters, so either form silently rewrites an interpreter
-                # under e.g. ``C:\tools\$python\...`` into a path that does not
-                # exist. Single quotes are PowerShell's LITERAL form (no
-                # expansion, no escapes, spaces included), with ``&`` invoking
-                # the quoted path, so the interpreter reaches pip byte-for-byte
-                # — including the all-users ``C:\Program Files\...`` layout an
-                # unquoted form cannot express. cmd performs no ``$`` or
-                # backtick processing at all and rejects the leading ``&``
-                # loudly ("... was unexpected"), so a cmd user gets a clear
-                # error to re-quote for, never a corrupted install. A literal
-                # single quote in the path is escaped by doubling, PowerShell's
-                # own rule.
-                exe = sys.executable.replace("'", "''")
-                cmds.append(f"& '{exe}' -m pip install kirocrew[voice]")
-            else:
-                cmds.append(f"{shlex.quote(sys.executable)} -m pip install 'kirocrew[voice]'")
+            cmds.append(pip_extra_install_command("voice"))
         # The non-streaming path remuxes the browser's .webm through ffmpeg, and
         # is_available() only logs a warning when ffmpeg is absent — this list
         # is the one user-visible surface for that gap.

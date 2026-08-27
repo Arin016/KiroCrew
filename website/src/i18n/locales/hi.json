@@ -11385,7 +11385,11 @@
         "file_sessions_in_folder_desc": "{{channel}} की नई सेशन साइडबार के एक फ़ोल्डर में जाती है, बिना फ़ोल्डर नहीं रहती।",
         "session_folder_name": "फ़ोल्डर का नाम",
         "session_folder_name_desc": "इन सेटिंग्स को सेव करने पर यह बन जाता है, अगर पहले से मौजूद न हो।",
-        "shared_channels": "साझा चैनल"
+        "shared_channels": "साझा चैनल",
+        "sdk_missing": "{{channel}} SDK इंस्टॉल करें",
+        "sdk_missing_body": "{{channel}} चैनल को {{package}} पैकेज की आवश्यकता है, जो डिफ़ॉल्ट रूप से इंस्टॉल नहीं होता। इसे जोड़ने के लिए नीचे दी गई कमांड टर्मिनल में चलाएँ।",
+        "sdk_restart_after_install": "इसके बाद {{channel}} चैनल शुरू करने के लिए गेटवे को पुनः आरंभ करें।",
+        "sdk_install_unsupported": "इस गेटवे का Python अतिरिक्त पैकेज इंस्टॉल नहीं कर सकता, इसलिए {{package}} यहाँ नहीं जोड़ा जा सकता। गेटवे को ऐसे Python परिवेश से चलाएँ जहाँ pip इंस्टॉल कर सके।"
       },
       "browserPanel": {
         "use_builtin_label": "बिल्ट-इन ब्राउज़र का उपयोग करें",

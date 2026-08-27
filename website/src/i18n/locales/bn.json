@@ -11385,7 +11385,11 @@
         "file_sessions_in_folder_desc": "{{channel}}-এর নতুন সেশন সাইডবারের একটি ফোল্ডারে যায়, ফোল্ডার ছাড়া থাকে না।",
         "session_folder_name": "ফোল্ডারের নাম",
         "session_folder_name_desc": "এই সেটিংস সেভ করলে এটি তৈরি হয়, যদি আগে থেকে না থাকে।",
-        "shared_channels": "শেয়ার করা চ্যানেল"
+        "shared_channels": "শেয়ার করা চ্যানেল",
+        "sdk_missing": "{{channel}} SDK ইনস্টল করুন",
+        "sdk_missing_body": "{{channel}} চ্যানেলের জন্য {{package}} প্যাকেজ প্রয়োজন, যা ডিফল্টভাবে ইনস্টল করা হয় না। এটি যোগ করতে নিচের কমান্ডটি টার্মিনালে চালান।",
+        "sdk_restart_after_install": "এরপর {{channel}} চ্যানেল চালু করতে গেটওয়ে পুনরায় শুরু করুন।",
+        "sdk_install_unsupported": "এই গেটওয়ের Python অতিরিক্ত প্যাকেজ ইনস্টল করতে পারে না, তাই এখানে {{package}} যোগ করা যাবে না। pip ইনস্টল করতে পারে এমন একটি Python পরিবেশ থেকে গেটওয়ে চালান।"
       },
       "browserPanel": {
         "use_builtin_label": "বিল্ট-ইন ব্রাউজার ব্যবহার করুন",

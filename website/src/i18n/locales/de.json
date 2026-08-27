@@ -11384,7 +11384,11 @@
         "file_sessions_in_folder_desc": "Neue {{channel}}-Sitzungen landen in einem Ordner in der Seitenleiste, statt ohne Ordner zu bleiben.",
         "session_folder_name": "Ordnername",
         "session_folder_name_desc": "Wird beim Speichern dieser Einstellungen angelegt, falls er noch nicht existiert.",
-        "shared_channels": "Gemeinsame Kanäle"
+        "shared_channels": "Gemeinsame Kanäle",
+        "sdk_missing": "{{channel}}-SDK installieren",
+        "sdk_missing_body": "Der {{channel}}-Kanal benötigt das Paket {{package}}, das nicht standardmäßig installiert wird. Führen Sie den Befehl unten in einem Terminal aus, um es hinzuzufügen.",
+        "sdk_restart_after_install": "Starten Sie anschließend das Gateway neu, um den {{channel}}-Kanal zu starten.",
+        "sdk_install_unsupported": "Das Python dieses Gateways kann keine zusätzlichen Pakete installieren, daher lässt sich {{package}} hier nicht hinzufügen. Führen Sie das Gateway in einer Python-Umgebung aus, in der pip installieren kann."
       },
       "browserPanel": {
         "use_builtin_label": "Integrierten Browser verwenden",

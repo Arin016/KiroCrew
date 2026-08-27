@@ -11218,7 +11218,11 @@
         "file_sessions_in_folder_desc": "新的 {{channel}} 会话会进入侧边栏的一个文件夹，而不是散落在外。",
         "session_folder_name": "文件夹名称",
         "session_folder_name_desc": "保存这些设置时若不存在会自动创建。",
-        "shared_channels": "共享频道"
+        "shared_channels": "共享频道",
+        "sdk_missing": "安装 {{channel}} SDK",
+        "sdk_missing_body": "{{channel}} 渠道需要 {{package}} 包，默认不会安装。请在终端运行下面的命令来安装它。",
+        "sdk_restart_after_install": "然后重启网关以启动 {{channel}} 渠道。",
+        "sdk_install_unsupported": "此网关的 Python 无法安装额外的包，因此无法在此添加 {{package}}。请从 pip 能够安装的 Python 环境中启动网关。"
       },
       "browserPanel": {
         "use_builtin_label": "使用内置浏览器",

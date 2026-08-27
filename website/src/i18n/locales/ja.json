@@ -11218,7 +11218,11 @@
         "file_sessions_in_folder_desc": "新しい{{channel}}のセッションを未整理のままにせず、サイドバーのフォルダーに入れます。",
         "session_folder_name": "フォルダー名",
         "session_folder_name_desc": "この設定を保存したときに、まだ存在しなければ作成されます。",
-        "shared_channels": "共有チャネル"
+        "shared_channels": "共有チャネル",
+        "sdk_missing": "{{channel}} SDK をインストール",
+        "sdk_missing_body": "{{channel}} チャンネルには {{package}} パッケージが必要ですが、既定ではインストールされません。下のコマンドをターミナルで実行して追加してください。",
+        "sdk_restart_after_install": "その後ゲートウェイを再起動して {{channel}} チャンネルを開始してください。",
+        "sdk_install_unsupported": "このゲートウェイの Python は追加パッケージをインストールできないため、ここでは {{package}} を追加できません。pip でインストールできる Python 環境からゲートウェイを実行してください。"
       },
       "browserPanel": {
         "use_builtin_label": "内蔵ブラウザーを使用する",

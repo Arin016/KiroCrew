@@ -520,6 +520,16 @@ export interface FeishuConfigData {
   soft_threshold_pct: number
   /** Sidebar folder this channel's sessions are filed into ("" = off, the default). */
   session_folder?: string
+  /**
+   * Whether lark-oapi (the optional [feishu] extra) is importable by the gateway
+   * process. False means the channel is skipped at boot however complete the
+   * rest of this config is.
+   */
+  sdk_installed?: boolean
+  /** False where a pip install cannot work: bundled app, no pip, PEP 668. */
+  sdk_install_supported?: boolean
+  /** Install command naming the gateway's OWN interpreter; "" when not useful. */
+  sdk_install_command?: string
 }
 
 /** Writable Feishu config fields sent to PUT /api/feishu/config. */

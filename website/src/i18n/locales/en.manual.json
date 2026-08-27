@@ -4350,7 +4350,11 @@
         "start_the_channel_at_gateway_startup": "Start the {{channel}} channel at gateway startup (requires a bot token).",
         "verified_with_channel_and_saved": "Verified with {{channel}} and saved. Restart the gateway to connect.",
         "where_to_find_the_bot_token": "Where to find the bot token",
-        "where_to_find_the_credential": "Where to find the {{label}}"
+        "where_to_find_the_credential": "Where to find the {{label}}",
+        "sdk_missing": "Install the {{channel}} SDK",
+        "sdk_missing_body": "The {{channel}} channel needs the {{package}} package, which is not installed by default. Run the command below in a terminal to add it.",
+        "sdk_restart_after_install": "Then restart the gateway to start the {{channel}} channel.",
+        "sdk_install_unsupported": "This gateway's Python cannot install extra packages, so {{package}} cannot be added here. Run the gateway from a Python environment where pip can install it."
       },
       "channelsPanel": {
         "checking": "Checking…",

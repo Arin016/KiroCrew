@@ -11551,7 +11551,11 @@
         "file_sessions_in_folder_desc": "Les nouvelles sessions {{channel}} arrivent dans un dossier de la barre latérale au lieu de rester non classées.",
         "session_folder_name": "Nom du dossier",
         "session_folder_name_desc": "Créé lors de l’enregistrement de ces paramètres, s’il n’existe pas encore.",
-        "shared_channels": "Canaux partagés"
+        "shared_channels": "Canaux partagés",
+        "sdk_missing": "Installer le SDK {{channel}}",
+        "sdk_missing_body": "Le canal {{channel}} nécessite le paquet {{package}}, qui n'est pas installé par défaut. Exécutez la commande ci-dessous dans un terminal pour l'ajouter.",
+        "sdk_restart_after_install": "Redémarrez ensuite la passerelle pour démarrer le canal {{channel}}.",
+        "sdk_install_unsupported": "Le Python de cette passerelle ne peut pas installer de paquets supplémentaires, donc {{package}} ne peut pas être ajouté ici. Lancez la passerelle depuis un environnement Python où pip peut l'installer."
       },
       "browserPanel": {
         "use_builtin_label": "Utiliser le navigateur intégré",

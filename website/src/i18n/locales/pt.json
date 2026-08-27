@@ -11550,7 +11550,11 @@
         "file_sessions_in_folder_desc": "As novas sessões do {{channel}} vão para uma pasta na barra lateral em vez de ficarem sem pasta.",
         "session_folder_name": "Nome da pasta",
         "session_folder_name_desc": "É criada ao salvar estas configurações, se ainda não existir.",
-        "shared_channels": "Canais compartilhados"
+        "shared_channels": "Canais compartilhados",
+        "sdk_missing": "Instalar o SDK do {{channel}}",
+        "sdk_missing_body": "O canal do {{channel}} precisa do pacote {{package}}, que não é instalado por padrão. Execute o comando abaixo em um terminal para adicioná-lo.",
+        "sdk_restart_after_install": "Depois reinicie o gateway para iniciar o canal do {{channel}}.",
+        "sdk_install_unsupported": "O Python deste gateway não consegue instalar pacotes adicionais, portanto {{package}} não pode ser adicionado aqui. Execute o gateway a partir de um ambiente Python onde o pip consiga instalá-lo."
       },
       "browserPanel": {
         "use_builtin_label": "Usar o navegador integrado",
