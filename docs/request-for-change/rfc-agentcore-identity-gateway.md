@@ -24,6 +24,18 @@ workload, vends tokens, and contributes the Gateway MCP endpoint. The
 public core grows generic, default-off seams so a standalone install
 stays byte-identical and never imports AWS.
 
+A fleet picks **exactly one** posture in `security_policy.json`, and
+that posture is what the copyable cloud **Policy.json pair** must
+match — the launcher document (`iam.policy_json()` / `kirocrew cloud
+iam-policy`) plus the instance-role fragment
+(`iam.agentcore_instance_policy_document`):
+
+- **`workload`** — a deployed Crew instance has an IAM identity and
+  can invoke Gateway at boot. No user login required to start.
+- **`login`** — only Gateway-approved MCP is vended. That catalog
+  **overrides Kiro's default MCP merge**. Tools stay absent until
+  the operator logs in.
+
 This is the **identity and credential** plane. It is not the sandbox /
 execution plane in the sibling AgentCore sandboxes design.
 
@@ -125,6 +137,14 @@ it calls Identity APIs.
   import, no new default-on egress, no Cognito/SSO reintroduction.
 - Fail closed. A missing companion, expired JWT, or Identity error
   denies the Gateway call. It does not fall back to a shared token.
+- Work with the existing cloud Policy.json pair: the launcher
+  document (`iam.policy_json`) and the instance permissions
+  boundary (`iam.boundary_policy_document`). A deployed Crew can
+  only reach Gateway when **both** the grant and the boundary
+  ceiling allow it.
+- Two exclusive postures (`workload` | `login`), selected by
+  `security_policy.json`. `login` withholds Kiro-global and
+  crew-store MCP at rebuild time, not only at the tool gate.
 
 ## Non-goals
 
@@ -144,6 +164,10 @@ it calls Identity APIs.
   `1`, matching `knowledge` / `dashboard` / `jail`.
 - A public `config.json` AgentCore block. Agent-writable config cannot
   be the trust root for workload name, gateway URL, or region.
+- Re-versioning the immutable `kirocrew-ec2-boundary` in place.
+  Widening that document is a new named boundary, opt-in at launch.
+- Running both postures at once. `workload` and `login` are
+  alternatives, not layers.
 
 ## Design
 
@@ -159,14 +183,15 @@ Kiro Crew gateway (local, ACP → kiro-cli)
         │     standalone AgentCore workload "kirocrew"
         │
         ├─ AgentIdentityProvider.vend_workload_access_token(principal)
-        │     Identity: GetWorkloadAccessTokenForJWT | ForUserId
+        │     Identity: GetWorkloadAccessToken*  (see posture)
         │     first-party token; never leaves the gateway process
         │
-        └─ AgentIdentityProvider.vend_gateway_inbound_token(principal)
-              user OIDC JWT (or companion-minted audience-bound JWT)
+        └─ inbound to AgentCore Gateway  (MCP)
+              posture=workload → instance IAM  (InvokeGateway)
+              posture=login    → user OIDC JWT after ensure-login
                     │
                     ▼
-         AgentCore Gateway  (MCP, CUSTOM_JWT)
+         AgentCore Gateway
                     │  Gateway's own workload token
                     ▼
          AgentCore Identity token vault
@@ -175,6 +200,10 @@ Kiro Crew gateway (local, ACP → kiro-cli)
          Gateway target (Slack, GitHub, internal API, MCP server)
 ```
 
+The diagram branches on `capabilities.agentcore.posture`. `workload`
+is the deployed-box path (IAM inbound, no login). `login` is the
+ensure-login path (CUSTOM_JWT, Gateway catalog only).
+
 Two tokens, two audiences, never interchangeable:
 
 | Token | Audience | Who mints it | Who holds it |
@@ -182,6 +211,216 @@ Two tokens, two audiences, never interchangeable:
 | Workload access token | AgentCore Identity APIs only | Identity (`GetWorkloadAccessToken*`) | Crew gateway process, in memory |
 | Gateway inbound JWT | Gateway `customJWTAuthorizer` | Companion IdP / SSO | Injected as `Authorization` on the Gateway MCP transport for that session |
 | Outbound resource token | Downstream API | Identity, **called by Gateway** | Gateway; Crew never sees it in v1 |
+
+### Two postures, one Policy.json
+
+The operator-facing document today is `iam.policy_json()` — the
+indented JSON the dashboard copies (`GET /api/cloud/iam-policy`) and
+`kirocrew cloud iam-policy` prints. It is the **launcher** policy
+(CloudFormation, tagged EC2, PassRole, SSM, source bucket, STS). It
+is **not** what the running instance can do.
+
+A deployed Crew process assumes the instance role. That role is
+capped by the content-fixed permissions boundary
+`kirocrew-ec2-boundary` (`iam.boundary_policy_document`): SSM-core +
+`s3:GetObject` on `kirocrew-src-<account>-*`. A boundary is a
+ceiling, not a grant. Adding `bedrock-agentcore:InvokeGateway` to
+the launcher Policy.json alone does nothing for a box that is
+already running: the boundary still denies it. The boundary is
+create-once and never re-versioned on purpose (a leaked launcher
+credential must not be able to `CreatePolicyVersion` it permissive).
+
+So "works with our Policy.json" means three documents stay in
+agreement, not one:
+
+| Document | Who applies it | What it is |
+|---|---|---|
+| `iam.policy_json()` | Operator pastes into IAM for the **launch** principal | Must be able to PassRole an instance role that *may* carry AgentCore |
+| Instance role grant (inline or attached) | Launch template / companion | The actual `InvokeGateway` / `GetWorkloadAccessToken*` allow |
+| `kirocrew-ec2-boundary` (or a new named successor) | Admin, once per account | Ceiling. Must list any AgentCore action the grant uses |
+| `security_policy.json` | Fleet trust root (keystone) | Picks the posture. Agent cannot weaken it |
+
+`capabilities.agentcore` grows an inner posture, still a data row
+(`SCOPE_CATALOG` append-only, evaluator untouched):
+
+```json
+{
+  "capabilities": {
+    "agentcore": {
+      "enabled": true,
+      "posture": "workload"
+    }
+  }
+}
+```
+
+`posture` is `"workload"` or `"login"`. Absent / unknown with
+`enabled: true` fails closed (boot abort if `boot.fail_closed`,
+else treat as disabled). The two postures are exclusive.
+
+#### Posture `workload` — deployed Crew can start
+
+Use this on a `kirocrew cloud launch` box (or any companion-managed
+host) that should reach Gateway **without** an interactive login.
+
+- Register a standalone workload identity `kirocrew` (not
+  Gateway-managed).
+- Gateway inbound is **IAM** (`authorizerType: AWS_IAM`). The
+  instance role is the caller. Action:
+  `bedrock-agentcore:InvokeGateway` on the Gateway ARN.
+- The instance role also needs
+  `bedrock-agentcore:GetWorkloadAccessToken` (and, for unattended
+  job-owner binding only,
+  `GetWorkloadAccessTokenForUserId`) scoped to
+  `workload-identity-directory/default/workload-identity/kirocrew`.
+- **Deny** `GetWorkloadAccessTokenForJWT` on this role: there is no
+  user JWT in this posture, and leaving ForJWT allowed invites a
+  planted-token confused deputy.
+- Kiro MCP defaults **still merge** (`~/.kiro/settings/mcp.json`,
+  crew store, apps). The fleet can still deny them with the
+  existing `mcp` ruleset. This posture answers "can the box start,"
+  not "is the catalog empty."
+- Cron / TaskRunner / injected envelopes run as the workload
+  identity. They may call M2M Gateway targets. They must not OBO as
+  an arbitrary user.
+
+The copyable **launcher** Policy.json (`iam.policy_json()`) does
+**not** grow `InvokeGateway` or `GetWorkloadAccessToken*`. Those
+belong on the instance role, not the laptop/CI principal that
+pastes the document. The launcher document grows only the verbs
+needed to *stand up* an AgentCore-capable box:
+
+- `iam:CreatePolicy` + `iam:GetPolicy` on the **new** boundary
+  ARN (`kirocrew-ec2-boundary-agentcore`), still no
+  `CreatePolicyVersion` / `Delete*`.
+- `iam:CreateRole` `ArnLike` on **either**
+  `kirocrew-ec2-boundary` or `kirocrew-ec2-boundary-agentcore`
+  (today the template `AllowedPattern` pins the original name
+  only — that pin must widen, or AgentCore launches cannot
+  attach the successor).
+- Existing tag-gated `PassRole` of `kirocrew-ec2-*` roles.
+
+The dashboard / `kirocrew cloud iam-policy` grows a **second,
+labeled** document — the instance-role fragment — from
+`iam.agentcore_instance_policy_document(posture)`. Copying the
+launcher JSON onto the instance role, or the instance JSON onto
+the launch principal, is a misconfiguration the copy UI must
+not invite.
+
+The instance boundary does **not** silently grow. A new named
+boundary (`kirocrew-ec2-boundary-agentcore`) is the **union**
+ceiling: existing SSM-core + source-bucket read, plus every
+AgentCore action either posture's instance grant may use
+(`GetWorkloadAccessToken`, `ForUserId`, `ForJWT`,
+`InvokeGateway`). A boundary does not grant; the instance
+document is still what turns a verb on. One successor name
+covers both postures so a fleet can switch `security_policy.json`
+without minting a third boundary. New launches opt in; existing
+instances stay on `kirocrew-ec2-boundary` and cannot reach
+Gateway. No `CreatePolicyVersion` of the original document.
+
+#### Posture `login` — Gateway catalog only, user must sign in
+
+Use this when the approved tool catalog *is* the Gateway, and a
+human has to be present.
+
+- Gateway inbound is **CUSTOM_JWT**. Crew attaches the operator's
+  IdP JWT after login. The instance role does **not** receive
+  `InvokeGateway` or `GetWorkloadAccessTokenForUserId`.
+- If Crew must mint a workload token after login, the role may have
+  `GetWorkloadAccessTokenForJWT` only, scoped to `kirocrew`.
+  ForUserId is **denied** in IAM.
+- **Override Kiro defaults at rebuild time.** When posture is
+  `login` and `capabilities.agentcore` is enabled,
+  `rebuild_agent_config()` withholds:
+
+  - `~/.kiro/settings/mcp.json` (Kiro global)
+  - seam-contributed provider globals
+  - `~/.kiro/crew/mcp.json` user servers
+  - leftover non-managed entries in the merge base
+
+  It still emits the managed Crew servers (`kirocrew-core`,
+  `kirocrew-cron`, `kirocrew-computer` when its spec_gate is open)
+  and the Gateway URL-only spec. Those are not "Kiro defaults";
+  they are Crew's own process. A `@server` ref whose entry was
+  withheld mounts nothing — same control as the computer-use
+  spec_gate (`mcp.md`).
+- Until `vend_gateway_inbound_token` returns a live JWT, the
+  Gateway server is **absent** (fail closed). The dashboard/CLI
+  login prompt is the only way to make it appear. Companion SSO
+  already owns `IdentityProvider` / `/api/sso-login`; this posture
+  consumes that login, it does not re-add Cognito to the core.
+- Unattended jobs cannot see Gateway tools. Cron on a login-posture
+  host is M2M-less and stays on managed Crew servers only.
+
+The login-mode instance document **omits** `InvokeGateway` and
+`GetWorkloadAccessTokenForUserId`. Copying the workload-mode
+fragment onto a login-mode fleet is a misconfiguration: the
+instance could IAM-invoke Gateway and skip the login. The core
+detects the mismatch (posture `login` but a successful IAM
+InvokeGateway probe, or vice versa) and refuses to emit the
+Gateway server, SEL-audited.
+
+#### How the two Policy.json shapes differ
+
+Workload-mode excerpt (instance grant + matching boundary ceiling;
+ARNs are fleet-pinned, never `*`):
+
+```json
+{
+  "Sid": "AgentCoreIdentity",
+  "Effect": "Allow",
+  "Action": [
+    "bedrock-agentcore:GetWorkloadAccessToken",
+    "bedrock-agentcore:GetWorkloadAccessTokenForUserId"
+  ],
+  "Resource": [
+    "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default",
+    "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default/workload-identity/kirocrew"
+  ]
+},
+{
+  "Sid": "AgentCoreGateway",
+  "Effect": "Allow",
+  "Action": ["bedrock-agentcore:InvokeGateway"],
+  "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/kirocrew-*"
+},
+{
+  "Sid": "DenyJwtPathOnWorkloadPosture",
+  "Effect": "Deny",
+  "Action": "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+  "Resource": "*"
+}
+```
+
+Login-mode excerpt:
+
+```json
+{
+  "Sid": "AgentCoreIdentityForJwt",
+  "Effect": "Allow",
+  "Action": ["bedrock-agentcore:GetWorkloadAccessTokenForJWT"],
+  "Resource": [
+    "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default",
+    "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default/workload-identity/kirocrew"
+  ]
+},
+{
+  "Sid": "DenyUserIdAndIamGateway",
+  "Effect": "Deny",
+  "Action": [
+    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+    "bedrock-agentcore:InvokeGateway"
+  ],
+  "Resource": "*"
+}
+```
+
+`iam.policy_json()` stays the launcher document. A new helper
+`iam.agentcore_instance_policy_document(posture)` emits the
+instance-role fragment above so the dashboard can copy **the
+right Policy.json for the posture in `security_policy.json`**,
+not a single kitchen-sink document.
 
 ### Edition split
 
@@ -267,11 +506,11 @@ replace `subject` with a client-supplied user id.
 
 | Surface | `subject` | JWT available? |
 |---|---|---|
-| Dashboard (companion SSO) | `dashboard+{idp_sub}` | Yes — use `ForJWT` |
-| Dashboard (OSS token auth) | `dashboard+{local_owner}` | No — `ForUserId` only if companion is enabled and the local owner is the host principal |
-| Slack / Discord / … | `{channel}+{provider_user_id}` | Only if companion SSO has bound that channel user |
+| Dashboard (companion SSO) | `dashboard+{idp_sub}` | Yes — `ForJWT` (`login` posture) |
+| Dashboard (OSS token auth) | `dashboard+{local_owner}` | No JWT. `ForUserId` only in `workload` posture, and only if the local owner is the host principal |
+| Slack / Discord / … | `{channel}+{provider_user_id}` | JWT only if companion SSO has bound that channel user (`login`). Else `ForUserId` only in `workload` |
 | CLI | `cli+{os_user}` | Same as local owner |
-| Cron / TaskRunner | `cron+{job_owner}` (the operator who created the job, persisted at create time) | No interactive JWT. M2M Gateway targets only, or fail closed |
+| Cron / TaskRunner | `cron+{job_owner}` (the operator who created the job, persisted at create time) | No interactive JWT. `workload`: M2M Gateway only. `login`: Gateway absent |
 | Subagent | inherit parent principal | Same token audience as parent |
 | Injected cron / subagent-completion envelopes | **not a user** | Do not mint a user-bound token for an injected message |
 
@@ -279,14 +518,18 @@ replace `subject` with a client-supplied user id.
 Identity docs, so `slack+U0123` and `dashboard+U0123` cannot collide in
 the vault.
 
-IAM on the companion role denies `GetWorkloadAccessTokenForUserId` when
-a JWT path exists for that surface. The core still prefers `user_jwt`
-when `annotate_principal` set one.
+IAM on the instance role denies the path the other posture uses
+(`ForJWT` denied in `workload`; `ForUserId` and `InvokeGateway`
+denied in `login`). The core still prefers `user_jwt` when
+`annotate_principal` set one.
 
 ### Gateway attach and per-session header injection
 
 `gateway_mcp_spec()` / `extra_mcp_servers()` contribute a **URL-only**
-remote MCP entry: endpoint, protocol, no `Authorization`.
+remote MCP entry: endpoint, protocol, no `Authorization`. In
+`login` posture the rest of the MCP merge is withheld first
+(see *Two postures, one Policy.json*); Gateway is then the only
+non-managed remote server that rebuild may emit.
 
 The missing core seam is per-session header injection at MCP spawn,
 analogous to `mcp_gateway` declared-env forwarding
@@ -335,17 +578,21 @@ is refused.
 
 ### Unattended jobs
 
-Cron and TaskRunner have no interactive JWT.
+Cron and TaskRunner have no interactive JWT. Posture decides whether
+they can see Gateway at all.
 
 v1 policy:
 
-- Gateway targets whose credential provider is **M2M** (client
-  credentials, no user) may run unattended, under the job-owner
-  principal.
-- OBO / 3LO targets are **denied** on unattended sessions unless a
-  still-valid vaulted user token already exists for that
-  `(workload, job_owner)` pair. There is no silent refresh via a
-  guessed user id.
+- **`workload`.** Gateway targets whose credential provider is
+  **M2M** (client credentials, no user) may run unattended, under
+  the job-owner / instance identity. OBO / 3LO targets are
+  **denied** on unattended sessions unless a still-valid vaulted
+  user token already exists for that `(workload, job_owner)` pair.
+  There is no silent refresh via a guessed user id.
+- **`login`.** Unattended sessions never receive a Gateway inbound
+  JWT, so the Gateway server stays absent. Cron stays on managed
+  Crew servers only. That is the point of the posture: a human had
+  to log in.
 - Injected `[Cron notification]` / `[Subagent completion event]`
   messages do not mint a new principal. They run as the job/parent
   already bound.
@@ -354,10 +601,12 @@ v1 policy:
 
 - New `SCOPE_CATALOG` row `capabilities.agentcore` with
   `capability_default=False` (opt-in, like `capabilities.publish` /
-  `capabilities.messaging`). Data row only; evaluator untouched;
-  `CONTRACT_VERSION` untouched.
+  `capabilities.messaging`). The inner `posture` field
+  (`workload` | `login`) is policy data, not a second scope.
+  Data row only; evaluator untouched; `CONTRACT_VERSION` untouched.
 - The capability gates: contributing the Gateway MCP server, calling
-  either vend method, and surfacing 3LO consent. `network.egress` still
+  either vend method, and surfacing 3LO consent. `login` also
+  withholds the default MCP merge at rebuild. `network.egress` still
   bounds the Gateway host. `mcp` still bounds the server/tool identity.
 - No `agentcore.json` in public `config.json`. Companion configuration
   lives in the companion. If a later public opt-in needs a file, it is
@@ -369,13 +618,17 @@ v1 policy:
   never enter SEL payloads, transcripts, or `status()`.
 - SEL events (grant and deny): `agentcore.workload_token`,
   `agentcore.gateway_inbound`, `agentcore.consent_url`,
-  `agentcore.unattended_denied`. No token bytes, no raw JWT.
+  `agentcore.unattended_denied`, `agentcore.posture_mismatch`.
+  No token bytes, no raw JWT.
 
 ### Dashboard and CLI
 
-- Status only in v1: workload name, enabled, whether this session has a
-  bound principal, Gateway configured. No token display, no "copy
-  bearer."
+- Status only in v1: workload name, enabled, posture, whether this
+  session has a bound principal, Gateway configured. No token
+  display, no "copy bearer."
+- Copy Policy JSON offers the launcher document and, when
+  `capabilities.agentcore` is enabled, the posture-correct
+  instance fragment. Never one kitchen-sink document.
 - 3LO consent is a modal / channel prompt with the allowlisted URL.
 - User-facing strings go through the i18n catalog
   (`website/docs/i18n-catalog.md`). Backend non-2xx bodies carry a
@@ -405,13 +658,40 @@ instead of kiro-cli header injection.
 
 Add `AgentIdentityProvider`, `DefaultAgentIdentityProvider`,
 `PlatformContext.agent_identity`, bootstrap wiring, CPP coverage tests,
-`capabilities.agentcore` (default off), and spec updates
-(`platform-context.md`, `governance.md`). No AWS dependency. Standalone
-behavior byte-identical.
+`capabilities.agentcore` (default off, with a `posture` field), and
+spec updates (`platform-context.md`, `governance.md`). No AWS
+dependency. Standalone behavior byte-identical.
 
 Exit: `test_platform_cpp_seam_coverage.py` lists the new slot;
-`enabled()` is False; no `bedrock` / `agentcore` import under
+`enabled()` is False; unknown/absent posture with `enabled: true`
+fails closed; no `bedrock` / `agentcore` import under
 `src/kiro_crew/`.
+
+### Phase 1b — Policy.json pair, boundary successor, login withhold
+
+Public-core JSON only (no AgentCore SDK):
+
+- `iam.agentcore_instance_policy_document(posture)` emits the
+  instance-role fragment for `workload` or `login`.
+- New named boundary `kirocrew-ec2-boundary-agentcore` (SSM-core +
+  source-bucket read + the AgentCore ceiling for that posture).
+  Original `kirocrew-ec2-boundary` stays byte-identical.
+- Launcher Policy.json / CloudFormation `AllowedPattern` accept
+  **either** boundary name. Still no `CreatePolicyVersion`.
+- Dashboard / `kirocrew cloud iam-policy` can copy the
+  posture-correct instance document as a labeled sibling of the
+  launcher document.
+- `rebuild_agent_config()` withholds Kiro-global, seam-global,
+  crew-store, and leftover non-managed servers when posture is
+  `login` and the capability is on. Managed `kirocrew-*` still
+  emit. Gateway is absent until a live inbound token exists.
+- Posture-vs-IAM mismatch probe fails closed (no Gateway emit,
+  SEL-audited).
+
+Exit: copying `iam.policy_json()` never grants `InvokeGateway`;
+the instance helper for `login` denies `InvokeGateway` and
+`ForUserId`; a login-posture rebuild fixture contains no Kiro
+global server; the original boundary document is unchanged.
 
 ### Phase 2 — Session principal + Identity vend (companion)
 
@@ -515,11 +795,17 @@ Puts OAuth, 3LO, and per-target credential-provider config in Crew.
 Gateway already does this, plus Cedar policy and interceptors. Crew
 should present identity, not become a token broker.
 
-### F. IAM inbound to Gateway, no JWT (rejected as the primary path)
+### F. IAM inbound to Gateway, no JWT (adopted as posture `workload`)
 
-Works for M2M. Drops user `sub`, so OBO and per-user vault binding
-disappear. Allowed as a companion-only fallback for unattended M2M
-targets, not for interactive sessions.
+This is no longer a fallback: it **is** the deployed-box posture.
+IAM inbound lets a `kirocrew cloud launch` instance invoke Gateway
+at boot with no login. It drops user `sub`, so OBO and per-user
+vault binding are unavailable on that path — cron is M2M-only, and
+the instance Policy.json **Denies** `ForJWT`. Interactive
+per-user vending is the other posture (`login` / CUSTOM_JWT),
+not a layer on top of this one. A fleet that wants both must
+run two hosts (or switch `security_policy.json` and relaunch
+with the matching boundary + instance grant).
 
 ## Open questions
 
@@ -538,6 +824,17 @@ targets, not for interactive sessions.
 5. **Sibling sandboxes RFC.** If that design lands a Crew-driven
    Code Interpreter session, it must use this RFC's workload identity
    rather than minting a second one.
+6. **Boundary successor vs parameterized name.** v1 uses a second
+   exact name (`kirocrew-ec2-boundary-agentcore`) so the original
+   document stays immutable. Confirm the CloudFormation
+   `PermissionsBoundaryArn` `AllowedPattern` can list both names
+   without weakening the create-once story.
+7. **Launcher document vs instance document in the dashboard.**
+   Today `GET /api/cloud/iam-policy` returns one blob. v1 adds a
+   labeled sibling rather than merging AgentCore actions into the
+   launcher JSON. Confirm the copy UI copy can show two documents
+   without operators pasting the instance grant onto the launch
+   principal.
 
 ## Related
 
@@ -547,7 +844,11 @@ targets, not for interactive sessions.
   redaction, MCP env forwarding
 - [`governance.md`](../system-specs/modules/governance.md) —
   `SCOPE_CATALOG` append-only
-- [`mcp.md`](../architecture/mcp.md) — MCP merge, stateless tools
+- [`mcp.md`](../architecture/mcp.md) — MCP merge, `spec_gate`
+  withhold, stateless tools
+- [`cloud.md`](../system-specs/modules/cloud.md) — launcher
+  Policy.json, immutable `kirocrew-ec2-boundary`, create-once
+  `CreatePolicy` (never `CreatePolicyVersion`)
 - [`injected-messages.md`](../system-specs/common/injected-messages.md)
   — cron / subagent envelopes are not the user
 - [Get workload access token](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/get-workload-access-token.html)
