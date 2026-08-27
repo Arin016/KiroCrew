@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from kiro_crew import platform_compat
 from kiro_crew.artifacts import slugify
 from kiro_crew.config.paths import data_home
+from kiro_crew.jsonl_util import rotate_jsonl_at
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,18 @@ MEMBERS_DIR_NAME = "members"
 
 #: Append-only pointer log inside a member's directory.
 ACTIVITY_FILE_NAME = "activity.jsonl"
+
+# Rotate a member's activity log once it exceeds this size, keeping ONE
+# previous generation (``.jsonl.1``) — the same 1 MiB cap / ~2 MiB total
+# shape as ``mcp_gateway.stub._FALLBACK_LOG_MAX_BYTES``. Entries are ~150
+# bytes, so the two generations together hold thousands of the most recent
+# pointers for :func:`read_activity`'s consumers (today the
+# ``dedupe_session`` probe inside :func:`record_activity`) — while an
+# unbounded log would grow forever (one append per participation event,
+# from multiple processes, and nothing ever pruned it). The dedupe probe
+# also reads this whole file synchronously on every deduped call, so the
+# cap bounds that read as well as the disk.
+_ACTIVITY_LOG_MAX_BYTES = 1024 * 1024
 
 # Same shape the artifact store enforces for its slugs: lowercase letters,
 # digits and hyphens, 1-80 chars, no leading or trailing hyphen. Kept here as a
@@ -201,6 +216,15 @@ def record_activity(
         # terminator and be absorbed by whatever came next. read_activity skips
         # the blank lines this produces.
         line = "\n" + json.dumps(entry, ensure_ascii=False) + "\n"
+        # Bound the log before appending. The helper's rotation is
+        # try-lock-guarded (the log is append-only from multiple processes, so
+        # unserialized rotation would let two writers hitting the cap together
+        # discard a generation), best-effort, and never raises; a lost
+        # try-lock skips rotating rather than waiting, so this call cannot
+        # stall the shared event loop any more than the append itself.
+        # History survives rotation: read_activity spans both generations, so
+        # the `dedupe_session` probe keeps seeing rotated-aside entries.
+        rotate_jsonl_at(path / ACTIVITY_FILE_NAME, _ACTIVITY_LOG_MAX_BYTES)
         # No fsync: this is an advisory pointer log, and a durability barrier is
         # a blocking kernel syscall that would stall the shared event loop for
         # every concurrent session. Losing the final entry to a crash is
@@ -216,30 +240,61 @@ def record_activity(
 def read_activity(slug: str, limit: int = 0) -> list[dict]:
     """Return a member's activity entries, oldest first.
 
-    Malformed lines are skipped rather than raising: the log is append-only from
-    multiple processes, and one torn line must not make the whole history
-    unreadable. ``limit`` > 0 returns only the most recent N.
+    Reads the one rotated generation (``.jsonl.1``, see
+    :data:`_ACTIVITY_LOG_MAX_BYTES`) before the live file — the same
+    two-generation read as the stub fallback log's aggregator — so a
+    rotation does not hide history from consumers: in particular the
+    ``dedupe_session`` probe keeps suppressing a session pair whose entry
+    was rotated aside. Malformed lines are skipped rather than raising: the
+    log is append-only from multiple processes, and one torn line must not
+    make the whole history unreadable. A generation that cannot be read is
+    likewise skipped rather than discarding what the other generation
+    yielded. ``limit`` > 0 returns only the most recent N across both
+    generations.
     """
     try:
-        path = member_dir(slug) / ACTIVITY_FILE_NAME
+        live = member_dir(slug) / ACTIVITY_FILE_NAME
     except MemberSlugError:
         return []
-    if not path.is_file():
-        return []
     out: list[dict] = []
+
+    # Hold a shared (non-blocking) lock on the rotation lock file while
+    # reading both generations.  This prevents a concurrent writer from
+    # rotating the live file into .1 between the two reads, which could
+    # cause records to be missed and duplicate session entries appended.
+    lock_fd: int = -1
+    lock_path = live.with_name(live.name + ".lock")
     try:
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if isinstance(row, dict):
-                    out.append(row)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        if not platform_compat.try_acquire_lock(lock_fd, exclusive=False):
+            # Could not acquire; close and proceed without the lock.
+            os.close(lock_fd)
+            lock_fd = -1
     except OSError:
-        logger.debug("member activity log read failed for %r", slug, exc_info=True)
-        return []
+        lock_fd = -1
+
+    try:
+        for path in (live.with_name(live.name + ".1"), live):
+            if not path.is_file():
+                continue
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if isinstance(row, dict):
+                            out.append(row)
+            except OSError:
+                logger.debug("member activity log read failed for %r", slug, exc_info=True)
+                continue
+    finally:
+        if lock_fd != -1:
+            platform_compat.release_lock(lock_fd)
+            os.close(lock_fd)
+
     return out[-limit:] if limit > 0 else out
