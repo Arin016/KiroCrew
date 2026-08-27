@@ -87,6 +87,24 @@ def _cron_unreadable_response(exc: CronStoreUnreadable) -> web.Response:
     )
 
 
+def _invalid_path_id_response(value: str, name: str) -> web.Response | None:
+    """Guard a URL path id (job_id/run_id/folder_id) for non-empty, bounded length.
+
+    Returns a 400 ``invalid_<name>`` response when ``value`` is empty or longer
+    than ``MAX_SHORT_STRING``, else ``None``. This is the single validator the
+    cron routes apply to every path-param id — the job/run routes and both
+    cron-folder routes — so a malformed id is rejected before any lock
+    acquisition, thread dispatch, or state lookup (the asymmetric-perimeter gap
+    #5789/#5808 closed). These ids are server-minted, so an over-long value only
+    arrives from a malformed/hostile client.
+    """
+    if not value or len(value) > MAX_SHORT_STRING:
+        return web.json_response(
+            {"error": f"invalid {name} format", "code": f"invalid_{name}"}, status=400
+        )
+    return None
+
+
 def _sel():
     """Late-binding _sel() for test monkeypatch compatibility."""
     import kiro_crew.dashboard.handlers as _pkg  # noqa: F811
@@ -329,6 +347,8 @@ async def api_cron_delete(request: web.Request) -> web.Response:
     """DELETE /api/crons/{id} — remove a cron job."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     try:
         ok = await state.crons.remove_job_async(
             job_id, actor="dashboard", source="api_cron_delete"
@@ -419,6 +439,8 @@ async def api_cron_update(request: web.Request) -> web.Response:
     """PATCH /api/crons/{id} — update a cron job (partial)."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     try:
         body = await request.json()
     except Exception:
@@ -535,6 +557,8 @@ async def api_cron_run(request: web.Request) -> web.Response:
     """POST /api/crons/{id}/run — trigger immediate execution."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     # Freshness-guaranteed lookup: this endpoint is handed a job id minted by
     # ANOTHER process (`kirocrew cron add`, the MCP cron_add tool), which writes
     # crons.json directly. The cache-only `list_jobs()` would not see that job
@@ -572,6 +596,8 @@ async def api_cron_cancel(request: web.Request) -> web.Response:
     """POST /api/crons/{id}/cancel — cancel a running execution."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     jobs = state.crons.list_jobs(include_disabled=True)
     job = next((j for j in jobs if j.id == job_id), None)
     if not job:
@@ -588,6 +614,8 @@ async def api_cron_to_chat(request: web.Request) -> web.Response:
     """POST /api/crons/{id}/to-chat — open last result in a chat session."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     slot_name = f"cron-{job_id}"
     jobs = state.crons.list_jobs(include_disabled=True)
     job = next((j for j in jobs if j.id == job_id), None)
@@ -636,6 +664,8 @@ async def api_cron_enable(request: web.Request) -> web.Response:
     """POST /api/crons/{id}/enable — toggle enable/disable."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     try:
         body = await request.json()
     except Exception:
@@ -656,6 +686,8 @@ async def api_cron_ack(request: web.Request) -> web.Response:
     """POST /api/crons/{id}/ack — acknowledge a cron notification."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     try:
         body = await request.json()
     except Exception:
@@ -677,6 +709,8 @@ async def api_cron_history(request: web.Request) -> web.Response:
     """GET /api/crons/{id}/history — paginated execution history (no trace)."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     try:
         limit = int(request.query.get("limit", "20"))
     except (ValueError, TypeError):
@@ -697,7 +731,11 @@ async def api_cron_history_detail(request: web.Request) -> web.Response:
     """GET /api/crons/{id}/history/{run_id} — full run detail with trace."""
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     run_id = request.match_info["run_id"]
+    if (_e := _invalid_path_id_response(run_id, "run_id")) is not None:
+        return _e
     detail = await state.crons.get_history().get_run_detail(job_id, run_id)
     if not detail:
         return web.json_response({"error": "run not found"}, status=404)
@@ -805,6 +843,8 @@ async def api_cron_script_source(request: web.Request) -> web.Response:
     """
     state: DashboardState = request.app["state"]
     job_id = request.match_info["job_id"]
+    if (_e := _invalid_path_id_response(job_id, "job_id")) is not None:
+        return _e
     # Freshness-guaranteed lookup, same rationale as api_cron_run: the job may
     # have been minted by another process and not yet be in the cache snapshot.
     job = await state.crons.get_job_async(job_id)
@@ -1411,10 +1451,8 @@ async def api_cron_folders_update(request: web.Request) -> web.Response:
     """PATCH /api/cron-folders/{folder_id} — rename a cron folder."""
     state: DashboardState = request.app["state"]
     folder_id = request.match_info["folder_id"]
-    if not folder_id or len(folder_id) > MAX_SHORT_STRING:
-        return web.json_response(
-            {"error": "invalid folder_id format", "code": "invalid_folder_id"}, status=400
-        )
+    if (_e := _invalid_path_id_response(folder_id, "folder_id")) is not None:
+        return _e
     try:
         body = await request.json()
     except Exception:
@@ -1449,10 +1487,8 @@ async def api_cron_folders_delete(request: web.Request) -> web.Response:
     """DELETE /api/cron-folders/{folder_id} — delete folder and clear assignments."""
     state: DashboardState = request.app["state"]
     folder_id = request.match_info["folder_id"]
-    if not folder_id or len(folder_id) > MAX_SHORT_STRING:
-        return web.json_response(
-            {"error": "invalid folder_id format", "code": "invalid_folder_id"}, status=400
-        )
+    if (_e := _invalid_path_id_response(folder_id, "folder_id")) is not None:
+        return _e
     async with _get_cron_folders_lock():
         try:
             found = await asyncio.to_thread(state.delete_cron_folder, folder_id)
