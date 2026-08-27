@@ -277,7 +277,10 @@ in the same CloudFormation stack that creates the instance.
   those; the public core never imports an AgentCore SDK.
 - Opt-in: `AgentCorePosture=none` (default) is the historical
   launch. `kirocrew cloud launch --agentcore-posture workload`
-  and the Settings Remote Crew selector flip it.
+  creates the AWS identity at deploy time. See-and-configure
+  lives on **that crew's** Settings → Security → Agent identity
+  (`GET`/`PUT /api/agentcore/identity`), not on the hub's Remote
+  Crew launcher. A fleet override or signed policy is refused.
 - Stack delete removes the identity. The launcher Policy.json
   grows `CreateWorkloadIdentity` / `DeleteWorkloadIdentity` /
   `GetWorkloadIdentity` / tag verbs, still scoped to
@@ -840,9 +843,10 @@ with the matching boundary + instance grant).
 2. **One workload vs per-agent-config workloads.** v1 is one
    `kirocrew` workload. A later `kirocrew-<agent_id>` split is
    additive (new identities, same protocol).
-3. **Dashboard route.** Merge AgentCore status into `GET /api/sso-ttl`
-   vs a sibling `GET /api/agent-identity`. Prefer sibling so the SSO
-   TTL probe stays an SSO probe.
+3. **Dashboard route.** Resolved: sibling
+   `GET`/`PUT /api/agentcore/identity` on **this crew's** Settings →
+   Security. Not `GET /api/sso-ttl`, and not the hub Remote Crew
+   launcher. SSO TTL stays an SSO probe.
 4. **Channel-user SSO binding.** How the companion proves a Slack user
    *is* the IdP `sub` is a companion concern. This RFC only requires
    that the proof happen before `user_jwt` is set.
