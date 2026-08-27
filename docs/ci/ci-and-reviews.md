@@ -554,6 +554,13 @@ commit status plus one `readiness:` label**.
   passed for it.
 - **Labels:** `readiness: checking` (pending), `readiness: action required` (a
   blocker), `readiness: passed`. Exactly one is ever present.
+- **Unapproved fork runs remain blocking but are attributed separately.** GitHub
+  reports a fork workflow held behind *Approve and run* as `action_required`
+  even though it has not executed. Readiness keeps the failure status and
+  `readiness: action required` label, but lists those lanes under **Awaiting
+  maintainer approval** instead of **Blocking**. It does not call them pending:
+  only a maintainer can clear the condition, while pending statuses are eligible
+  for automatic self-healing.
 
 Two subtleties:
 

@@ -462,6 +462,11 @@ jobs:
           passed=()
           pending=()
           failed=()
+          # A fork run with conclusion `action_required` was created but never
+          # executed: only a maintainer can approve it. Keep that condition out
+          # of `failed[]` so the verdict attributes the block correctly, and
+          # out of `pending[]` because automation cannot clear it by itself.
+          awaiting_approval=()
 
           for spec in "${workflow_specs[@]}"; do
             file="${spec%%|*}"
@@ -628,6 +633,15 @@ jobs:
                   # how a platform nobody builds for reads as covered. `skipped[]`
                   # feeds only the summary, never the verdict.
                   skipped) skipped+=("$label (skipped)") ;;
+                  action_required)
+                    if [ "$FORK" = "true" ]; then
+                      awaiting_approval+=("$label")
+                    else
+                      # On an upstream branch this conclusion is anomalous,
+                      # so retain the failure-class diagnostic.
+                      failed+=("$label ($conclusion)")
+                    fi
+                    ;;
                   *) failed+=("$label ($conclusion)") ;;
                 esac
               fi
@@ -642,14 +656,17 @@ jobs:
           # leaves a red check for a network blip. This deliberately does NOT
           # weaken the gate: pending blocks merge exactly like failure does,
           # and only a transport error with NO already-observed blocker takes
-          # this branch -- a genuine failure recorded by an earlier lane
-          # dominates (the `failed` guard below), falling through to the normal
-          # action-required verdict, so a known red is never masked by a later
-          # lane's network trouble. Recovery is automatic -- the self-heal
+          # this branch -- a genuine failure or maintainer-approval wait
+          # recorded by an earlier lane dominates (the array guards below),
+          # falling through to the normal action-required verdict, so a known
+          # red is never masked by a later lane's network trouble. Recovery is
+          # automatic -- the self-heal
           # sweep re-fires any pending readiness status older than its
           # staleness window, and any later monitored-workflow event recomputes
           # sooner.
-          if [ "$transport_failed" = "true" ] && [ "${#failed[@]}" -eq 0 ]; then
+          if [ "$transport_failed" = "true" ] \
+            && [ "${#failed[@]}" -eq 0 ] \
+            && [ "${#awaiting_approval[@]}" -eq 0 ]; then
             # The tiebreaker for every ambiguous case is an asymmetry:
             # publishing "pending" can only ever BLOCK a merge, never allow
             # one, so pending is the fail-safe write whenever validation
@@ -747,11 +764,20 @@ jobs:
             waiting+=("pull request is a draft")
           fi
 
-          if [ "${#blockers[@]}" -gt 0 ]; then
+          if [ "${#blockers[@]}" -gt 0 ] || [ "${#awaiting_approval[@]}" -gt 0 ]; then
             state="action_required"
             label="readiness: action required"
             status_state="failure"
-            description="${#blockers[@]} blocking readiness item(s)"
+            if [ "${#blockers[@]}" -gt 0 ] && [ "${#awaiting_approval[@]}" -gt 0 ]; then
+              description="${#blockers[@]} blocking readiness item(s); ${#awaiting_approval[@]} awaiting maintainer approval"
+            elif [ "${#blockers[@]}" -gt 0 ]; then
+              description="${#blockers[@]} blocking readiness item(s)"
+            else
+              description="${#awaiting_approval[@]} workflow(s) awaiting maintainer approval"
+              if [ "${#passed[@]}" -eq 0 ] && [ "$transport_failed" = "false" ]; then
+                description="$description; none has run yet"
+              fi
+            fi
           elif [ "${#waiting[@]}" -gt 0 ]; then
             state="checking"
             label="readiness: checking"
@@ -777,7 +803,7 @@ jobs:
           # can only be diagnosed by opening the summary UI by hand (#3550).
           # Plain `echo` here lands in the job's own log instead, so
           # `gh run view --log | grep 'pr-readiness: lane state'` finds it.
-          echo "pr-readiness: lane state -- passed=[${passed[*]:-}] pending=[${pending[*]:-}] failed=[${failed[*]:-}] skipped=[${skipped[*]:-}]"
+          echo "pr-readiness: lane state -- passed=[${passed[*]:-}] pending=[${pending[*]:-}] failed=[${failed[*]:-}] skipped=[${skipped[*]:-}] awaiting_approval=[${awaiting_approval[*]:-}]"
 
           {
             echo "state=$state"
@@ -796,6 +822,15 @@ jobs:
               echo
               echo "**Not eligible**"
               printf -- "- %s\n" "${skipped[@]}"
+            fi
+            if [ "${#awaiting_approval[@]}" -gt 0 ]; then
+              echo
+              echo "**Awaiting maintainer approval**"
+              printf -- "- %s\n" "${awaiting_approval[@]}"
+              echo
+              echo "> GitHub created these fork runs but has not executed them."
+              echo "> A maintainer must approve them; the contributor cannot"
+              echo "> clear this condition."
             fi
             if [ "${#blockers[@]}" -gt 0 ]; then
               echo
