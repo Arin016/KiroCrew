@@ -18,9 +18,7 @@ import type { ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft, ChevronDown, RefreshCw, Copy, Check, HardDrive, Library,
-  Archive, Share2, Download, Trash2, Upload, ShieldCheck, LayoutGrid, Globe,
-  FolderClosed, FileText, X, MoreHorizontal, Star, Info, Link2, Code,
-} from 'lucide-react'
+  Archive, Share2, Download, Trash2, Upload, ShieldCheck, FolderClosed, FileText, X, MoreHorizontal, Star, Link2, Code, } from 'lucide-react'
 import { Btn, Badge, StatCard, Toggle, Input, ContentSkeleton, IconButton } from '../../components/ui'
 import AwsConsentGate from '../../components/AwsConsentGate'
 import { i18nT } from '../../i18n/t'
@@ -36,15 +34,13 @@ function accountName(account: AwsAccount): string {
   return account.name || i18nT('apps.awsControl.page.not_connected_yet')
 }
 
-/** Health-light token + label key for the account connection state. */
+/** Credential-kind badge label, keyed literally (dynamicKeys gate). */
 const HEALTH_DOT: Record<string, string> = { ok: 'bg-ok', degraded: 'bg-warn', unknown: 'bg-muted' }
 const CONNECTION_LABEL_KEY: Record<string, string> = {
   ok: 'apps.awsControl.console.connection_connected',
   degraded: 'apps.awsControl.console.connection_degraded',
   unknown: 'apps.awsControl.console.connection_unknown',
 }
-
-/** Credential-kind badge label, keyed literally (dynamicKeys gate). */
 const PROFILE_KIND_LABEL_KEY: Record<ProfileKind, string> = {
   sso: 'apps.awsControl.page.kind_sso',
   'credential-process': 'apps.awsControl.page.kind_credential_process',
@@ -89,7 +85,7 @@ const BACKUP_KIND_LABEL_KEY: Record<BackupKind, string> = {
 }
 
 /** Copy-to-clipboard button that flips to a check for ~1.5s. */
-function CopyBtn({ text, testId }: { text: string; testId?: string }) {
+function CopyBtn({ text, testId, ariaLabel }: { text: string; testId?: string; ariaLabel?: string }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
     try {
@@ -99,73 +95,10 @@ function CopyBtn({ text, testId }: { text: string; testId?: string }) {
     } catch { /* clipboard unavailable — the text is still selectable by hand */ }
   }
   return (
-    <Btn onClick={copy} data-testid={testId}>
+    <Btn onClick={copy} data-testid={testId} aria-label={ariaLabel}>
       {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
       {copied ? i18nT('apps.awsControl.console.copied') : i18nT('apps.awsControl.console.copy')}
     </Btn>
-  )
-}
-
-/* ── Section: General ────────────────────────────────────────────────────── */
-
-/** One label/value pair in the General grid. */
-function DetailRow({ label, children, testId }: { label: string; children: ReactNode; testId?: string }) {
-  return (
-    <div className="flex flex-col gap-0.5" data-testid={testId}>
-      <dt className="text-[12px] text-muted">{label}</dt>
-      <dd className="text-[13px] text-text">{children}</dd>
-    </div>
-  )
-}
-
-/**
- * The General card: the account's identity at a glance. Name, full account id
- * (mono, with a copy button), the default profile's region, the connection
- * state with a health dot, and the number of keys.
- */
-function GeneralSection({ account }: { account: AwsAccount }) {
-  const defaultProfile = account.profiles.find((p) => p.default) ?? account.profiles[0]
-  const region = defaultProfile?.region ?? ''
-  return (
-    <section
-      className="rounded-lg border border-border bg-card px-4 py-4 shadow-sm"
-      data-testid="general-section"
-    >
-      <SectionHeader icon={<Info size={15} />} title={i18nT('apps.awsControl.console.general')} />
-      <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <DetailRow label={i18nT('apps.awsControl.console.name')} testId="general-name">
-          <span className="font-medium text-text-strong">{accountName(account)}</span>
-        </DetailRow>
-        <DetailRow label={i18nT('apps.awsControl.console.account_id')} testId="general-account-id">
-          {account.account ? (
-            <span className="flex items-center gap-1.5">
-              <span className="font-mono">{account.account}</span>
-              <IconButton
-                aria-label={i18nT('apps.awsControl.console.copy_id')}
-                onClick={() => { void navigator.clipboard?.writeText(account.account).catch(() => {}) }}
-                data-testid="general-copy-id"
-              >
-                <Copy size={13} />
-              </IconButton>
-            </span>
-          ) : (
-            <span className="text-muted">{i18nT('apps.awsControl.page.not_connected_yet')}</span>
-          )}
-        </DetailRow>
-        <DetailRow label={i18nT('apps.awsControl.console.region')} testId="general-region">
-          {region ? <span className="font-mono">{region}</span> : <span className="text-muted">—</span>}
-        </DetailRow>
-        <DetailRow label={i18nT('apps.awsControl.console.connection')} testId="general-connection">
-          <span className="flex items-center gap-1.5">
-            <span className={`h-2 w-2 rounded-full ${HEALTH_DOT[account.health]}`} role="img" aria-label={i18nT(CONNECTION_LABEL_KEY[account.health])} />
-            {i18nT(CONNECTION_LABEL_KEY[account.health])}
-          </span>
-        </DetailRow>
-        <DetailRow label={i18nT('apps.awsControl.console.keys')} testId="general-keys">
-          {i18nT('apps.awsControl.console.keys_count', { count: account.profiles.length })}
-        </DetailRow>
-      </dl>
-    </section>
   )
 }
 
@@ -971,20 +904,6 @@ function AccessSection({ account }: { account: string }) {
   )
 }
 
-/* ── Section 8: app ghosts ───────────────────────────────────────────────── */
-
-function AppGhost({ icon, title }: { icon: ReactNode; title: string }) {
-  return (
-    <div className="rounded-lg border border-dashed border-border bg-card/40 px-4 py-5 text-center" data-testid="app-ghost">
-      <div className="mb-1 flex justify-center text-muted opacity-40">{icon}</div>
-      <div className="text-[13px] font-medium text-muted">{title}</div>
-      <span className="mt-1.5 inline-block rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
-        {i18nT('apps.awsControl.console.connects_later')}
-      </span>
-    </div>
-  )
-}
-
 /* ── shared section header ───────────────────────────────────────────────── */
 
 function SectionHeader({ icon, title, actions }: { icon: ReactNode; title: string; actions?: ReactNode }) {
@@ -1019,11 +938,12 @@ export default function ConsoleView({ account, onBack }: { account: AwsAccount; 
 
   const drive: DriveStatus | undefined = driveQ.data
   const costs = costsQ.data
-  const connected = account.health === 'ok'
   // Fallback region for the setup preview, sourced the same way GeneralSection
   // sources the one it displays: the default key's region, else the first key's.
-  const setupRegion =
-    (account.profiles.find((p) => p.default) ?? account.profiles[0])?.region ?? ''
+  // The Payments row bills through this same key, so it reads its region and
+  // credential kind from the one profile.
+  const defaultProfile = account.profiles.find((p) => p.default) ?? account.profiles[0]
+  const setupRegion = defaultProfile?.region ?? ''
 
   return (
     <div className="flex h-full flex-col">
@@ -1038,21 +958,54 @@ export default function ConsoleView({ account, onBack }: { account: AwsAccount; 
           {i18nT('apps.awsControl.console.crumb_accounts')} / <span className="text-text">{accountName(account)}</span>
         </button>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className={`h-2.5 w-2.5 rounded-full ${connected ? 'bg-ok' : 'bg-warn'}`} data-testid="console-health" role="img" aria-label={connected ? i18nT('apps.awsControl.console.connected') : i18nT('apps.awsControl.console.not_connected')} />
+          {/* Three-state, not two. The deleted General card carried the full
+              Connected / Degraded / Unknown label, and collapsing it into a
+              binary `health === 'ok'` dot would announce "not connected" for a
+              degraded account whose keys still partly work - a misdiagnosis for
+              whoever is triaging a flaky key. The dot's colour keeps the same
+              three states its title and aria-label now name. */}
+          <span
+            className={`h-2.5 w-2.5 rounded-full ${HEALTH_DOT[account.health] ?? 'bg-muted'}`}
+            data-testid="console-health"
+            role="img"
+            title={i18nT(CONNECTION_LABEL_KEY[account.health] ?? 'apps.awsControl.console.connection_unknown')}
+            aria-label={i18nT(CONNECTION_LABEL_KEY[account.health] ?? 'apps.awsControl.console.connection_unknown')}
+          />
           <span className="text-lg font-semibold text-text-strong">{accountName(account)}</span>
-          {id && <span className="font-mono text-[13px] text-muted" data-testid="console-account-id">{id}</span>}
+          {id && (
+            <>
+              <span className="font-mono text-[13px] text-muted" data-testid="console-account-id">{id}</span>
+              {/* The copy button came off the deleted General card; a 12-digit
+                  account id is the field most often pasted elsewhere. */}
+              <CopyBtn text={id} testId="console-copy-id" ariaLabel={i18nT('apps.awsControl.console.copy_id')} />
+            </>
+          )}
         </div>
+
+        {/* No Payments control. Paid-service consent is SERVICE-scoped -- the
+            endpoint takes a service and derives the connection from that
+            service's own configuration -- so it cannot honestly sit on a
+            per-account page, and it stays where its gate was designed to live.
+            With consent gone, a panel here would have held only facts this same
+            screen already states: the credential kind and region are the
+            connection row's, the account id is the title's, and the
+            month-to-date figure is a tile. Restating them behind a button is
+            the duplication this change exists to remove. */}
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pb-6 md:px-6">
-        {/* Grouped detail: General + Connections (Reconnect lives here now). */}
-        <div className="flex flex-col gap-6">
-          <GeneralSection account={account} />
-          <ConnectionsSection account={account} />
-        </div>
+        {/* Connections only. The General card that used to sit above it carried
+            no field of its own: name (crumb + title), account id (title),
+            region and key count (the connection rows below), and a connection
+            state the title dot already shows — at a different precision, which
+            was its own small lie. */}
+        <ConnectionsSection account={account} />
 
-        {/* Section 2: stats */}
-        <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4" data-testid="console-stats">
+        {/* Two tiles, both of which have a data source. SITES and TASKS were
+            hardcoded em-dashes with no query behind them, and they said the
+            same "connects later" as the ghost cards that used to close the
+            page — four elements for two features that do not exist yet. */}
+        <div className="mt-6 grid grid-cols-2 gap-3" data-testid="console-stats">
           {costs?.consentMissing ? (
             <StatCard label={i18nT('apps.awsControl.console.stat_this_month')} value="—" title={i18nT('apps.awsControl.console.costs_consent_missing')} />
           ) : costsQ.isError ? (
@@ -1070,10 +1023,7 @@ export default function ConsoleView({ account, onBack }: { account: AwsAccount; 
             label={i18nT('apps.awsControl.console.stat_stored')}
             value={drive?.exists ? i18nT('apps.awsControl.console.stat_stored_value', { size: fmtBytes(drive.usage.bytes), objects: drive.usage.objects }) : '—'}
           />
-          <StatCard label={i18nT('apps.awsControl.console.stat_sites')} value="—" title={i18nT('apps.awsControl.console.connects_later')} />
-          <StatCard label={i18nT('apps.awsControl.console.stat_tasks')} value="—" title={i18nT('apps.awsControl.console.connects_later')} />
         </div>
-        <p className="mt-2 text-[12px] text-muted" data-testid="console-guard">{i18nT('apps.awsControl.console.guard_line')}</p>
 
         {driveQ.isLoading && <div className="mt-6"><ContentSkeleton rows={3} /></div>}
 
@@ -1116,11 +1066,10 @@ export default function ConsoleView({ account, onBack }: { account: AwsAccount; 
           </div>
         )}
 
-        {/* Section 8: app ghosts (always shown) */}
-        <div className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="console-ghosts">
-          <AppGhost icon={<LayoutGrid size={22} />} title={i18nT('apps.awsControl.console.ghost_tasks')} />
-          <AppGhost icon={<Globe size={22} />} title={i18nT('apps.awsControl.console.ghost_sites')} />
-        </div>
+        {/* No app ghosts. Tasks and Sites were dashed "connects later" cards
+            with no feature behind them, duplicating the two placeholder tiles
+            that used to sit in the stats strip. A capability appears on this
+            page when it exists. */}
 
         {/* Cost Explorer consent nudge when the gate is missing. */}
         {costs?.consentMissing && (

@@ -261,7 +261,6 @@ export default function AwsControlPage() {
   const refresh = () => accountsQ.refetch()
 
   const data = accountsQ.data
-  const totals = data?.totals
 
   // Client-side filter over name + id; harmless when few accounts.
   const filtered = useMemo(() => {
@@ -280,7 +279,6 @@ export default function AwsControlPage() {
   const header = (
     <PageHeader
       title={i18nT('apps.awsControl.page.title')}
-      subtitle={i18nT('apps.awsControl.page.subtitle')}
       actions={
         <Btn onClick={refresh} disabled={accountsQ.isFetching} data-testid="refresh">
           <RefreshCw size={13} className={accountsQ.isFetching ? 'animate-spin' : ''} />
@@ -313,23 +311,12 @@ export default function AwsControlPage() {
     <div className="flex h-full flex-col">
       {header}
       <div className="flex-1 overflow-y-auto px-4 pb-6 md:px-6">
-        {/* One quiet aggregate line + a client-side search, on the same row. The
-            line only carries counts we actually have — storage/cost are not
-            measured in P0, so they are simply absent, never a fake zero. */}
-        <div className="flex flex-wrap items-center justify-between gap-2" data-testid="accounts-aggregate">
-          <p className="text-[13px] text-muted" data-testid="aggregate-line">
-            {totals ? (
-              <>
-                {i18nT('apps.awsControl.page.aggregate_accounts', { count: totals.accounts })}
-                {' · '}
-                {i18nT('apps.awsControl.page.aggregate_keys', { count: totals.profiles })}
-                {' · '}
-                {i18nT('apps.awsControl.page.aggregate_healthy', { count: totals.profilesHealthy })}
-              </>
-            ) : (
-              '\u00A0'
-            )}
-          </p>
+        {/* Accounts and a client-side search over them. Nothing else lives on
+            this page: the aggregate counts line was removed because the list it
+            summarised is directly below it, and the paid-service consent gates
+            moved onto the account they actually bill (see ConsoleView), where
+            the connection they use is already on screen. */}
+        <div className="flex flex-wrap items-center justify-end gap-2" data-testid="accounts-aggregate">
           <div className="relative">
             <Search size={13} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
             <Input
@@ -394,39 +381,30 @@ export default function AwsControlPage() {
           </div>
         )}
 
-        {/* Paid services — each requires an explicit owner confirmation before the
-            first billable call (spec G1). The gates are their own durable-state
-            components; this page only mounts them under its intro.
+        {/* Paid-service consent, page-wide, because that is the scope it
+            actually has: GET /api/aws/consent takes a service and nothing else,
+            and its handler derives the (profile, region) from that service's own
+            configuration - it refuses a client-supplied pair so a confirmation
+            cannot diverge from the request it authorises. A confirmation is
+            therefore SERVICE-scoped, so this page, not an account page, is where
+            it can be stated truthfully. It is also the only surface that can
+            state it: the settings cards mount polly and transcribe, never s3 or
+            ce, so removing this section would leave a granted confirmation with
+            nowhere in the dashboard to be seen or withdrawn.
 
-            Guarded on the same signal as the account list: when a search is
-            actively filtering every account out (data with accounts, but
-            filtered to nothing), the page already shows "No accounts match X",
-            so the section must NOT render two consent cards alongside that
-            no-match state — it would read as if those cards survived the search.
-            In every other state (no query, or a query that still matches) the
-            section stays visible, so a normal unfiltered page is unchanged. */}
-        {!(data && data.accounts.length > 0 && filtered.length === 0) && (
-          <section className="mt-8" data-testid="paid-services">
-            <h2 className="text-sm font-semibold text-text-strong">
-              {i18nT('apps.awsControl.page.paid_services_title')}
-            </h2>
-            <p className="mt-1 text-[13px] text-muted">
-              {i18nT('apps.awsControl.page.paid_services_intro')}
-            </p>
-            {/* Each gate is ACCOUNT-scoped (AwsConsentGate resolves the registry's
-                default connection internally), but the copy above reads page-wide.
-                Say plainly that a card covers only its named connection and point
-                elsewhere for other accounts, so the operator does not read a
-                one-account confirmation as covering all N accounts in the header. */}
-            <p className="mt-1 mb-3 text-[13px] text-muted" data-testid="paid-services-scope">
-              {i18nT('apps.awsControl.page.paid_services_scope')}
-            </p>
-            <div className="flex flex-col gap-3">
-              <AwsConsentGate service="s3" />
-              <AwsConsentGate service="ce" />
-            </div>
-          </section>
-        )}
+            What this change removes is the THREE paragraphs that used to sit
+            above the cards, one of which existed only to disclaim that each card
+            covered a single connection - a caveat the placement never needed and
+            the cards' own fields already carry. */}
+        <section className="mt-8" data-testid="paid-services">
+          <h2 className="text-sm font-semibold text-text-strong">
+            {i18nT('apps.awsControl.page.paid_services_title')}
+          </h2>
+          <div className="mt-3 flex flex-col gap-3">
+            <AwsConsentGate service="s3" />
+            <AwsConsentGate service="ce" />
+          </div>
+        </section>
 
         <AddAccounts />
       </div>

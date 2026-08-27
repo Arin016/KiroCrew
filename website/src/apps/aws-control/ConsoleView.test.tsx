@@ -140,21 +140,21 @@ describe('ConsoleView', () => {
     expect(screen.queryByText(/···/)).toBeNull()
   })
 
-  it('renders the General section with name, full id + copy, region, connection, keys', async () => {
+  it('states name, id and connection once each, with no General card', async () => {
+    // The General card repeated every field it showed: name (crumb + title),
+    // account id (title), region and key count (the connection rows), and a
+    // connection state the title dot already carried -- at a coarser precision,
+    // which was its own small lie. Identity is stated once now.
     stubDrivePresent()
     renderWithProviders(<ConsoleView account={ACCOUNT} onBack={() => {}} />)
 
-    const general = await screen.findByTestId('general-section')
-    expect(within(general).getByTestId('general-name')).toHaveTextContent('personal')
-    expect(within(general).getByTestId('general-account-id')).toHaveTextContent('111122223333')
-    expect(within(general).getByTestId('general-copy-id')).toBeTruthy()
-    expect(within(general).getByTestId('general-region')).toHaveTextContent('us-west-2')
-    expect(within(general).getByTestId('general-connection')).toHaveTextContent(
-      i18nT('apps.awsControl.console.connection_connected'),
-    )
-    expect(within(general).getByTestId('general-keys')).toHaveTextContent(
-      i18nT('apps.awsControl.console.keys_count', { count: 1 }),
-    )
+    await screen.findByTestId('connections-section')
+    expect(screen.queryByTestId('general-section')).toBeNull()
+    expect(screen.getByTestId('console-account-id')).toHaveTextContent('111122223333')
+    expect(screen.getByTestId('console-health')).toBeTruthy()
+    // Region and key count are the connection row's to state.
+    const conns = screen.getByTestId('connections-section')
+    expect(conns).toHaveTextContent('us-west-2')
   })
 
   it('renders one Connections row per key with its kind, region and health', async () => {
@@ -201,18 +201,44 @@ describe('ConsoleView', () => {
     expect(await screen.findByTestId('reconnect-command')).toHaveTextContent('aws sso login --profile work')
   })
 
-  it('renders sites/tasks stats as em-dash ghosts', async () => {
+  it('renders only the tiles that have a data source, and no ghosts', async () => {
+    // SITES and TASKS were hardcoded em-dashes with no query behind them, and
+    // they said the same "connects later" as the two dashed ghost cards that
+    // closed the page: four elements for two features that do not exist.
     stubDrivePresent()
     renderWithProviders(<ConsoleView account={ACCOUNT} onBack={() => {}} />)
 
-    await screen.findByTestId('console-ghosts')
-    const stats = screen.getByTestId('console-stats')
-    const values = within(stats).getAllByTestId('stat-card-value').map((n) => n.textContent)
-    // Sites and Tasks are em dashes; a null figure must never read as 0.
-    expect(values.filter((v) => v === '—').length).toBeGreaterThanOrEqual(2)
+    const stats = await screen.findByTestId('console-stats')
+    // Both tiles resolve a value: the bill arrives async, so wait for it rather
+    // than reading the skeleton StatCard renders while it is undefined.
+    await waitFor(() => expect(within(stats).getAllByTestId('stat-card-value')).toHaveLength(2))
     expect(stats.textContent).not.toMatch(/\b0\b/)
-    // Two dashed app-ghost cards render.
-    expect(screen.getAllByTestId('app-ghost')).toHaveLength(2)
+    expect(screen.queryByTestId('console-ghosts')).toBeNull()
+    expect(screen.queryAllByTestId('app-ghost')).toHaveLength(0)
+    expect(screen.queryByTestId('console-guard')).toBeNull()
+  })
+
+  it('carries no Payments control: it would only restate this screen', async () => {
+    // Consent is service-scoped and stays page-wide on the accounts list;
+    // everything else a panel here could show is already on this page (kind and
+    // region in the connection row, account id in the title, the bill in a tile).
+    stubDrivePresent()
+    renderWithProviders(<ConsoleView account={ACCOUNT} onBack={() => {}} />)
+
+    await screen.findByTestId('connections-section')
+    expect(screen.queryByTestId('console-payments-toggle')).toBeNull()
+    expect(screen.queryByTestId('console-payments')).toBeNull()
+  })
+
+  it('keeps the three-state connection label and the id copy button', async () => {
+    // Both came off the deleted General card. A binary dot would announce "not
+    // connected" for a degraded account whose keys still partly work.
+    stubDrivePresent()
+    renderWithProviders(<ConsoleView account={ACCOUNT} onBack={() => {}} />)
+
+    const dot = await screen.findByTestId('console-health')
+    expect(dot).toHaveAttribute('aria-label', i18nT('apps.awsControl.console.connection_connected'))
+    expect(screen.getByTestId('console-copy-id')).toBeTruthy()
   })
 
   it('shows the drive-missing setup card, previews, then confirms and invalidates', async () => {
