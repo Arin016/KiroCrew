@@ -827,13 +827,13 @@ def cotenant_sids() -> tuple[frozenset[str], tuple[tuple[str, str], ...]]:
             # escape past the parse guard below and reach the caller. All four
             # mean the same thing here — which sessions this instance claims
             # cannot be established — so fail closed on it.
-            logger.warning("co-tenant %s has an unreadable session map", name, exc_info=True)
+            logger.warning("co-tenant %r has an unreadable session map", name, exc_info=True)
             refusals.append((name, "its session map could not be read"))
             continue
         try:
             data = json.loads(raw)
         except ValueError:
-            logger.warning("co-tenant %s has a malformed session map", name)
+            logger.warning("co-tenant %r has a malformed session map", name)
             refusals.append((name, "its session map could not be parsed"))
             continue
         if not isinstance(data, dict):

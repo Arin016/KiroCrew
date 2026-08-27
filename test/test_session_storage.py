@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew import session_storage
+from kiro_crew import hooks, session_storage
 from kiro_crew.config import paths
 from kiro_crew.history import transcript_stem
 from kiro_crew.session_storage import SessionIndex, SessionStorageError
@@ -2364,3 +2364,134 @@ class TestSingleTrashPass:
         assert report.trash_batches == 2
         assert report.trash_bytes == sum(b.bytes for b in batches)
         assert reads == [], "a handed-over list must not trigger another manifest pass"
+
+
+class TestCotenantNamesAreLogSafe:
+    """A co-tenant directory name is agent-controlled and can embed a newline;
+    every ``cotenant_sids`` log line that carries it must escape it, or one
+    record forges additional records (refs #6371, the #6281 log-forgery class).
+    """
+
+    _FORGED = "wt-evil\nWARNING kiro_crew.session_storage: co-tenant operator cleared all"
+
+    def test_unreadable_map_log_escapes_the_cotenant_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The unreadable-map warning must repr the name, not interpolate it raw."""
+        pod_root = tmp_path / "pods"
+        try:
+            forged = pod_root / self._FORGED
+            forged.mkdir(parents=True)
+        except OSError:
+            pytest.skip("this filesystem refuses a newline in a directory name")
+        # Write a session_map.json that is unreadable (permission denied).
+        map_path = forged / "session_map.json"
+        map_path.write_text("{}", encoding="utf-8")
+        map_path.chmod(0o000)
+
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(pod_root))
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIRO_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", paths._default_home())
+        monkeypatch.setattr(paths, "_config_dir_memo", None)
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+            session_storage.cotenant_sids()
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "unreadable session map" in record.getMessage()
+        ]
+        assert messages, "the unreadable-map site did not log at all"
+        assert all("\n" not in message for message in messages)
+        assert any(repr(self._FORGED) in message for message in messages)
+
+    def test_malformed_map_log_escapes_the_cotenant_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The malformed-map warning must repr the name, not interpolate it raw."""
+        pod_root = tmp_path / "pods"
+        try:
+            forged = pod_root / self._FORGED
+            forged.mkdir(parents=True)
+        except OSError:
+            pytest.skip("this filesystem refuses a newline in a directory name")
+        # Write a session_map.json with invalid JSON to trigger the malformed path.
+        map_path = forged / "session_map.json"
+        map_path.write_text("not json at all {{{{", encoding="utf-8")
+
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(pod_root))
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIRO_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", paths._default_home())
+        monkeypatch.setattr(paths, "_config_dir_memo", None)
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+            session_storage.cotenant_sids()
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "malformed session map" in record.getMessage()
+        ]
+        assert messages, "the malformed-map site did not log at all"
+        assert all("\n" not in message for message in messages)
+        assert any(repr(self._FORGED) in message for message in messages)
+
+    def test_both_sites_escape_without_touching_the_filesystem(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Windows refuses a newline in a real directory name, which would skip
+        the two filesystem tests above on those shards. Injecting the forged
+        name at the safe_read_file seam pins both log sites on every platform.
+        """
+        pod_root = tmp_path / "pods"
+        pod_root.mkdir(parents=True)
+
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(pod_root))
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIRO_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", paths._default_home())
+        monkeypatch.setattr(paths, "_config_dir_memo", None)
+
+        # Inject the forged name by monkeypatching _replay_store_cotenants to
+        # return a list containing our forged name, and hooks.safe_read_file to
+        # simulate the two failure modes.
+        scenarios = {
+            "unreadable": PermissionError("mocked"),
+            "malformed": "not json {{{{",
+        }
+        for label, behaviour in scenarios.items():
+            caplog.clear()
+            monkeypatch.setattr(
+                session_storage, "_replay_store_cotenants", lambda: [self._FORGED]
+            )
+            # Ensure the pod home directory "exists" for the path construction.
+            (pod_root / self._FORGED).mkdir(parents=True, exist_ok=True)
+
+            if isinstance(behaviour, Exception):
+
+                def _raise_on_read(path, *, _exc=behaviour):
+                    raise _exc
+
+                monkeypatch.setattr(hooks, "safe_read_file", _raise_on_read)
+            else:
+
+                def _return_bad_json(path, *, _content=behaviour):
+                    return _content
+
+                monkeypatch.setattr(hooks, "safe_read_file", _return_bad_json)
+
+            with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+                session_storage.cotenant_sids()
+
+            rendered = [record.getMessage() for record in caplog.records]
+            carrying = [msg for msg in rendered if repr(self._FORGED) in msg]
+            assert carrying, f"the {label}-map site did not log the name repr'd"
+            assert all("\n" not in msg for msg in rendered), (
+                f"the {label}-map site allowed a raw newline into the log"
+            )
