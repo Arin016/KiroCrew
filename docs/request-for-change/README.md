@@ -18,7 +18,8 @@ were added
 not been re-audited since 2026-08-03. The durable-run-coordinator row was added
 2026-08-22 and the orchestrator-chat-sessions row was re-audited at
 `c4f253891`; the `rfc-token-efficient-monitors` row was added 2026-08-22 and
-verified against `6d3e30bbbd`.
+verified against `6d3e30bbbd`; the `rfc-agentcore-sandboxes` row was added
+2026-08-27 and verified against `84d546170`.
 
 | Document | Status | What is actually on main |
 |---|---|---|
@@ -50,6 +51,7 @@ verified against `6d3e30bbbd`.
 | [rfc-amend-tenets-everything-is-an-app.md](rfc-amend-tenets-everything-is-an-app.md) | `draft` | Nothing. `TENETS.md` still carries seven tenets on main. `git log --follow` on it shows two commits and no prior amendment, and `grep -i tenet` returns zero hits in `GOVERNANCE.md` |
 | [rfc-crew-projects.md](rfc-crew-projects.md) | `draft` | Nothing. Verified at `5cd92ff99`: no project manifest format exists, `slot.project` is a bare directory path, and `grep -ril "confluence\|servicenow" src/kiro_crew` returns zero hits |
 | [rfc-tool-derived-diff-cards.md](rfc-tool-derived-diff-cards.md) | `in-progress` | Ships with [#5012](https://github.com/kirodotdev/KiroCrew/pull/5012): dashboard diff-card/summary promotion + runtime-selected prompt rule. The messaging `OutputEvent` extension (§3.3) is unstarted |
+| [rfc-agentcore-sandboxes.md](rfc-agentcore-sandboxes.md) | `draft` | Nothing. Research plan only; no `kind: "agentcore"` SessionHost, no `session.agentcore` config, no AgentCore package |
 
 Nothing in this directory is `implemented` or `superseded` today.
 
