@@ -5996,7 +5996,7 @@ class TestProxyHandlerPolicy:
         from kiro_crew.dashboard.handlers import source_providers as sp
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status")
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots")
         monkeypatch.setattr(sp, "is_owner_dashboard_request", lambda r: False)
         monkeypatch.setattr(sp, "stale_owner_session_response", lambda r: None)
         resp = await api_instances_proxy(req)
@@ -6007,7 +6007,7 @@ class TestProxyHandlerPolicy:
     async def test_disabled_feature_is_403(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status", enabled=False)
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", enabled=False)
         resp = await api_instances_proxy(req)
         assert resp.status == 403
 
@@ -6029,12 +6029,71 @@ class TestProxyHandlerPolicy:
 
     @pytest.mark.asyncio
     async def test_peer_instances_plane_is_refused_no_chaining(self, tmp_path, monkeypatch):
+        """Chaining hub → peer → third machine stays unreachable.
+
+        Under the `api/chat` allowlist this is no longer a rule of its own —
+        `api/instances` simply is not the allowed prefix — but the property is
+        worth its own test, because it is the one a future prefix addition
+        could silently give away.
+        """
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/instances/other/proxy/api/status")
+        req = self._req(tmp_path, monkeypatch, path="api/instances/other/proxy/api/chat/slots")
         resp = await api_instances_proxy(req)
         assert resp.status == 400
-        assert "chaining" in _body(resp)["error"]
+        assert _body(resp)["code"] == "proxy_path_denied"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "api/token/local",  # GET — mints a token for this gateway
+            "api/apps/kiro/token",  # POST — app-scoped token
+            "api/webhooks/tokens",  # POST — webhook token
+        ],
+    )
+    def test_peer_credential_routes_are_not_proxyable(self, raw):
+        """A peer-minted token must never be reachable through this carrier.
+
+        These three routes exist on every peer, and their replies are JSON —
+        so they satisfy the response content-type gate. Under the earlier
+        deny-only policy ("any `api/`, just not `api/instances`") a token could
+        therefore return through the proxy and land on the hub origin, in-band
+        through the body, defeating the invariant the response-header allowlist
+        exists to enforce. The allowlist is what makes them unreachable, so the
+        refusal is pinned by a test rather than by prose.
+        """
+        from kiro_crew.dashboard.handlers_instances import _proxy_canonical_path
+
+        path, reason = _proxy_canonical_path(raw)
+        assert path == ""
+        assert reason == "only the peer chat surface (api/chat) is proxied"
+
+    def test_allowed_prefixes_are_named_not_derived(self):
+        """The reachable surface is an explicit constant.
+
+        Pinned so that widening it is a deliberate, reviewable edit rather than
+        a side effect of some other change.
+        """
+        from kiro_crew.dashboard.handlers_instances import _PROXY_ALLOWED_PREFIXES
+
+        assert _PROXY_ALLOWED_PREFIXES == frozenset({("api", "chat")})
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "api",  # the bare prefix is not an endpoint
+            "api/chatter/x",  # a sibling that merely shares a prefix STRING
+            "api/status",
+        ],
+    )
+    def test_surface_outside_the_allowlist_is_refused(self, raw):
+        """Matching is per-SEGMENT, not a string prefix: `api/chatter` must not
+        ride in on `api/chat`."""
+        from kiro_crew.dashboard.handlers_instances import _proxy_canonical_path
+
+        path, reason = _proxy_canonical_path(raw)
+        assert path == ""
+        assert reason == "only the peer chat surface (api/chat) is proxied"
 
     @pytest.mark.parametrize(
         "raw",
@@ -6094,7 +6153,7 @@ class TestProxyHandlerPolicy:
     async def test_disallowed_method_is_405(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status", method="OPTIONS")
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", method="OPTIONS")
         resp = await api_instances_proxy(req)
         assert resp.status == 405
 
@@ -6102,7 +6161,7 @@ class TestProxyHandlerPolicy:
     async def test_missing_manager_is_503(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status", manager=None)
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", manager=None)
         resp = await api_instances_proxy(req)
         assert resp.status == 503
 
@@ -6138,7 +6197,7 @@ class TestProxyHandlerPolicy:
 
         req = self._req(tmp_path, monkeypatch, path="assets/x.js")
         assert _body(await api_instances_proxy(req))["code"] == "proxy_path_denied"
-        req = self._req(tmp_path, monkeypatch, path="api/status", method="OPTIONS")
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", method="OPTIONS")
         assert _body(await api_instances_proxy(req))["code"] == "proxy_method_not_allowed"
-        req = self._req(tmp_path, monkeypatch, path="api/status", manager=None)
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", manager=None)
         assert _body(await api_instances_proxy(req))["code"] == "instances_manager_unavailable"

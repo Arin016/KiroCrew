@@ -956,6 +956,32 @@ _URL_PATH_SEP = "/"
 # separately, since that is traversal rather than a name.
 _PROXY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~:@!$&'()*+,;=-]+$")
 
+# The ONLY peer surface this carrier reaches, as leading path segments. The
+# remote-crew chat view's entire wire surface lives under `api/chat`
+# (`api/chat/slots` GET+POST, `api/chat`, `api/chat/slots/{slot}/approve`,
+# `api/chat/slots/{slot}/interrupt`), so naming it positively is enough.
+#
+# This is an ALLOWLIST on purpose, and the distinction is load-bearing rather
+# than stylistic. Denying a prefix instead ("any `api/`, just not
+# `api/instances`") left the peer's credential-minting routes proxyable —
+# `GET /api/token/local`, `POST /api/apps/{name}/token`,
+# `POST /api/webhooks/tokens` — and their JSON replies satisfy the response
+# content-type gate, so a minted peer token could return through the carrier
+# and land on the hub origin. That is exactly the invariant the response-header
+# allowlist exists to enforce, defeated in-band through the body instead of a
+# header. Enumerating what to forbid also means every FUTURE sensitive peer
+# route is proxied silently, by default, until someone remembers this carrier.
+#
+# Pinning the surface positively makes both unreachable by construction: the
+# token planes, and the peer's own `api/instances` control plane (whose proxy
+# route would otherwise let one hub chain through a peer into a third machine's
+# SSH control plane, and recurse through the peer's own proxy).
+#
+# Extend this one named prefix at a time as the design's surface grows — the
+# deferred out-of-turn event stream will need its own entry — never by widening
+# back to "anything under api/".
+_PROXY_ALLOWED_PREFIXES: frozenset[tuple[str, ...]] = frozenset({("api", "chat")})
+
 
 def _proxy_canonical_path(raw: str) -> tuple[str, str]:
     """Canonicalize *raw* into a forwardable path, or return a denial reason.
@@ -972,11 +998,9 @@ def _proxy_canonical_path(raw: str) -> tuple[str, str]:
     So: decode to a fixed point FIRST, admit only plainly-named segments, and
     rebuild the outbound path from exactly the segments that were vetted. The
     proxy exists for the remote-crew chat surface, not as a general tunnel-HTTP
-    escape hatch, so the vetted shape is narrow on purpose — only the peer's
-    ``/api/`` surface is reachable, and its own ``/api/instances`` control plane
-    is off-limits (proxying into it would let one hub chain through a peer into
-    a third machine's SSH control plane, and recurse through the peer's own
-    proxy route).
+    escape hatch, so the vetted shape is narrow on purpose — the leading
+    segments must match one of ``_PROXY_ALLOWED_PREFIXES``, which pins the
+    reachable surface positively rather than enumerating what to forbid.
     """
     path = raw
     for _ in range(PROXY_PATH_MAX_DECODE_PASSES):
@@ -998,10 +1022,8 @@ def _proxy_canonical_path(raw: str) -> tuple[str, str]:
             return "", "path traversal"
         if not _PROXY_SEGMENT_RE.match(seg):
             return "", "illegal character in path segment"
-    if segments[0] != "api":
-        return "", "only the peer /api/ surface is proxied"
-    if len(segments) > 1 and segments[1] == "instances":
-        return "", "peer instances control plane is not proxied (no chaining)"
+    if tuple(segments[:2]) not in _PROXY_ALLOWED_PREFIXES:
+        return "", "only the peer chat surface (api/chat) is proxied"
     return _URL_PATH_SEP.join(segments), ""
 
 
