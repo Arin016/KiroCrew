@@ -227,12 +227,23 @@ async def api_cloud_preflight(request: web.Request) -> web.Response:
 
 
 async def api_cloud_iam_policy(request: web.Request) -> web.Response:
-    """GET /api/cloud/iam-policy — the least-privilege policy JSON to attach."""
+    """GET /api/cloud/iam-policy — the least-privilege policy JSON to attach.
+
+    ``policy`` is the document to paste (same bytes ``kirocrew cloud iam-policy``
+    prints). ``grants`` is the dashboard card's group list (id only; titles
+    localise in the frontend). ``cli`` is the command that reprints ``policy``.
+    """
     denied = _guard(request, "iam_policy")
     if denied is not None:
         return denied
     _audit("iam_policy", "success")
-    return web.json_response({"policy": iam.policy_json()})
+    return web.json_response(
+        {
+            "policy": iam.policy_json(),
+            "grants": iam.policy_grants(),
+            "cli": iam.IAM_POLICY_CLI,
+        }
+    )
 
 
 async def api_cloud_launch_list(request: web.Request) -> web.Response:

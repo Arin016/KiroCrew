@@ -1,7 +1,7 @@
 # Reaching a cloud-launched instance: native SSM vs legacy SSH
 
 When the cloud launcher provisions an EC2 box for you, it also registers that box
-in the **Instances** registry so the dashboard's **Settings → Instances** page can
+in the **Instances** registry so the dashboard's **Settings → Remote Crew** page can
 manage it — open a tunnel, mint a short-lived dashboard token, keep it warm, and
 self-heal a dropped connection. This page explains **how** that managed connection
 is made, and why the launcher now uses the **native SSM transport** instead of the
@@ -87,8 +87,10 @@ here, and opens the dashboard — all from your laptop.
 1. **One-time prep.** Install the AWS CLI and `session-manager-plugin` — on a bare
    machine the `cloud-install.sh` (macOS/Linux) or `install.ps1` (Windows)
    bootstrapper does this and hands off to the wizard. Verify prerequisites with
-   `kirocrew cloud doctor`. Attach the least-privilege policy printed by
-   `kirocrew cloud iam-policy` to the AWS profile you'll launch with.
+   `kirocrew cloud doctor`. Attach the least-privilege policy — copy it from
+   **Settings → Remote Crew → Set up a new one → Amazon EC2 → Recommended IAM
+   permissions**, or print it with `kirocrew cloud iam-policy` — to the AWS
+   profile you'll launch with.
 2. **Launch.** Run `kirocrew cloud launch` — interactive (size picker + confirm),
    or non-interactive, e.g. `kirocrew cloud launch --size power --region us-west-2
    --profile dev -y`. Useful flags: `--new` (a separate box instead of resuming
@@ -109,7 +111,7 @@ here, and opens the dashboard — all from your laptop.
 For setting up a box you manage yourself (SSH or SSM, and the common EC2 gotchas),
 see [remote-crew-on-ec2.md](remote-crew-on-ec2.md).
 
-## What you see in Settings → Instances
+## What you see in Settings → Remote Crew
 
 A launched box appears as a managed instance whose connection line reads, e.g.:
 

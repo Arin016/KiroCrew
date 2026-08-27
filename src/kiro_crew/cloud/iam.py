@@ -661,6 +661,35 @@ def policy_json() -> str:
     return json.dumps(policy_document(), indent=2)
 
 
+# The CLI verb that prints ``policy_json()``. The dashboard copies this so the
+# operator can fetch the same document from a terminal; stdout of the verb
+# itself stays the policy JSON only.
+IAM_POLICY_CLI = "kirocrew cloud iam-policy"
+
+# Grant groups the dashboard lists next to the copyable policy. IDs are stable
+# and machine-readable; titles live in the frontend catalog so they localise.
+# Adding a group is a data change here plus matching catalog keys — do not
+# put English titles in this module.
+POLICY_GRANT_IDS: tuple[str, ...] = (
+    "cloudformation",
+    "ec2_tagged",
+    "iam_boundary",
+    "ssm_tagged",
+    "s3_source",
+    "sts_identity",
+)
+
+
+def policy_grants() -> list[dict[str, str]]:
+    """Stable grant-group ids for the dashboard IAM card.
+
+    One entry per least-privilege bucket the operator is about to attach.
+    Titles are resolved by id in the dashboard catalog; this function never
+    returns user-facing English.
+    """
+    return [{"id": grant_id} for grant_id in POLICY_GRANT_IDS]
+
+
 def reachability_check(profile: str, region: str = "") -> dict[str, Any]:
     """Read-only reachability (NOT full verification).
 

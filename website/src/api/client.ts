@@ -1572,6 +1572,19 @@ export interface CloudPreflight {
   session_manager_plugin_command?: string
 }
 
+/** GET /api/cloud/iam-policy — least-privilege launcher policy the operator
+ *  applies themselves. ``policy`` is the document; ``grants`` are id-only
+ *  groups (titles live in the catalog); ``cli`` reprints ``policy``. */
+export interface CloudIamGrant {
+  id: string
+}
+
+export interface CloudIamPolicy {
+  policy: string
+  grants: CloudIamGrant[]
+  cli: string
+}
+
 export type LaunchJobStatus =
   | 'pending' | 'running' | 'awaiting_signin' | 'done' | 'failed' | 'cancelled'
 export type LaunchStepState = 'pending' | 'active' | 'done' | 'failed' | 'skipped'
@@ -2102,7 +2115,7 @@ export const api = {
     const s = p.toString()
     return get('/api/cloud/preflight' + (s ? '?' + s : '')).then(j) as Promise<CloudPreflight>
   },
-  cloudIamPolicy: () => get('/api/cloud/iam-policy').then(j) as Promise<{ policy: string }>,
+  cloudIamPolicy: () => get('/api/cloud/iam-policy').then(j) as Promise<CloudIamPolicy>,
   cloudLaunches: () => get('/api/cloud/launch').then(j) as Promise<{ jobs: LaunchJob[] }>,
   cloudLaunch: (body: { profile: string; region: string; size_key: string }) =>
     post('/api/cloud/launch', body).then(j) as Promise<LaunchJob>,

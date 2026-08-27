@@ -98,12 +98,24 @@ const PREFLIGHT_OK = {
   ec2_reachable: true, cloudformation_reachable: true, ssm_reachable: true,
   session_manager_plugin: true, note: '', detail: '',
 }
+const IAM_POLICY = {
+  policy: '{"Version":"2012-10-17"}',
+  grants: [{ id: 'cloudformation' }, { id: 'ec2_tagged' }, { id: 'iam_boundary' }, { id: 'ssm_tagged' }, { id: 's3_source' }, { id: 'sts_identity' }],
+  cli: 'kirocrew cloud iam-policy',
+}
+
+/** Open setup and pick Amazon EC2 — Cloud Sessions is the default and hides the launch form. */
+async function openEc2Setup(u: ReturnType<typeof userEvent.setup>) {
+  await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+  await u.click(await screen.findByRole('button', { name: /^Amazon EC2$/i }))
+}
 
 // localStorage is cleared too: the panel now persists the AWS profile/region, so a
 // test that seeds them would otherwise dictate what later tests probe.
 beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
+  vi.mocked(api.cloudIamPolicy).mockResolvedValue(IAM_POLICY)
 })
 
 describe('RemoteCrewPanel', () => {
@@ -204,7 +216,7 @@ describe('RemoteCrewPanel', () => {
     })
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
 
     expect(await screen.findByText(/sudo dnf install -y/)).toBeInTheDocument()
     expect(screen.queryByText(/brew install/)).not.toBeInTheDocument()
@@ -220,7 +232,7 @@ describe('RemoteCrewPanel', () => {
     })
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
 
     // The localized "not installed" line still explains the gap…
     expect(await screen.findByText(/Session Manager plugin/i)).toBeInTheDocument()
@@ -240,7 +252,7 @@ describe('RemoteCrewPanel', () => {
     vi.mocked(api.cloudPreflight).mockResolvedValue(PREFLIGHT_OK)
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
 
     // The field is repopulated…
     expect(await screen.findByLabelText(/AWS profile/i)).toHaveValue('Admin')
@@ -265,7 +277,7 @@ describe('RemoteCrewPanel', () => {
       )
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
 
     const recheck = (await screen.findAllByRole('button', { name: /Re-check/i }))[0]
     await u.click(recheck)
@@ -290,7 +302,7 @@ describe('RemoteCrewPanel', () => {
     vi.mocked(api.cloudPreflight).mockResolvedValue({ ...PREFLIGHT_OK, account: '1234•••7890' })
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
 
     const profileInput = await screen.findByLabelText(/AWS profile/i)
     const credsRow = await screen.findByText(/Credentials/i)
@@ -447,7 +459,7 @@ describe('RemoteCrewPanel', () => {
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
 
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
     // Prereq checklist rendered; a missing plugin blocks Launch.
     expect(await screen.findByText(/Before you start/i)).toBeInTheDocument()
     expect(screen.getByText(/Session Manager plugin/i)).toBeInTheDocument()
@@ -462,7 +474,7 @@ describe('RemoteCrewPanel', () => {
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
 
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
     // The sub-agent count is the headline the size choice turns on, so it must be
     // the real number: a var-name mismatch renders the raw `{{n}}` placeholder.
     expect(await screen.findByText(/~3 parallel sub-agents/)).toBeInTheDocument()
@@ -517,7 +529,7 @@ describe('RemoteCrewPanel', () => {
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
 
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
     // Collapsed: the arm64 ladder only.
     expect(screen.queryByText(/m7i\.2xlarge/)).not.toBeInTheDocument()
 
@@ -543,7 +555,7 @@ describe('RemoteCrewPanel', () => {
     const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
 
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+    await openEc2Setup(u)
     const launch = await screen.findByRole('button', { name: /^Launch$/ })
     await waitFor(() => expect(launch).not.toBeDisabled())
     await u.click(launch)

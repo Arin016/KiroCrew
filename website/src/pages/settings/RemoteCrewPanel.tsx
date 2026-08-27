@@ -8,9 +8,11 @@
  *      instance's target id with a launch job's `instance_id`, so cloud rows can
  *      offer the cloud lifecycle (Stop / Delete-by-tag) that a plain tunnel row
  *      cannot.
- *   2. "Set up a new one" — an AWS prerequisite checklist (from the cloud
- *      preflight) and a launch form that spins up a cloud-hosted crew on the
- *      user's OWN AWS account, then a progress card that polls the launch job.
+ *   2. "Set up a new one" — a destination picker (Cloud Sessions is the
+ *      default; only EC2 launches today), the recommended IAM policy as a
+ *      first-class card, an AWS prerequisite checklist (from the cloud
+ *      preflight), and a launch form that spins up a crew on the user's OWN
+ *      AWS account, then a progress card that polls the launch job.
  *
  * The instance CRUD (connect / disconnect / diagnose / remove) and the
  * enable/disable gate mirror InstancesPanel; the add-existing form and the
@@ -32,12 +34,18 @@ import {
   Check,
   ExternalLink,
   ChevronDown,
+  ChevronRight,
   X,
   Power,
   Loader2,
   MoreHorizontal,
   Pencil,
   Play,
+  Cloud,
+  Lock,
+  Zap,
+  Box,
+  Layers,
 } from 'lucide-react'
 import {
   api,
@@ -47,6 +55,7 @@ import {
   type LaunchJob,
   type CloudPreflight,
   type CloudCoords,
+  type CloudIamPolicy,
 } from '../../api/client'
 import { Card, Btn, Badge, IconButton } from '../../components/ui'
 import {
@@ -136,9 +145,75 @@ const tierWhy = (key: SizeTier['family']) =>
       : i18nT('pages.settings.remoteCrewPanel.tier_power_why')
 
 const PRICING_CALCULATOR_URL = 'https://calculator.aws'
+/** Same bytes ``iam.IAM_POLICY_CLI`` prints. A catalog value would translate the
+ *  command the operator has to type. */
+const IAM_POLICY_CLI = 'kirocrew cloud iam-policy'
 // NOTE: the session-manager-plugin install command is NOT hardcoded here. It has to
 // match the platform of the machine running the gateway — which may be a Linux host
 // while this dashboard is open on a Mac — so the preflight response carries it.
+
+/** Destinations the setup tab offers. Only EC2 launches today; the rest are
+ *  catalogued so connecting another environment is one click when it ships.
+ *  Cloud Sessions is the default pick — that is the managed-sandbox path. */
+type DestinationId = 'cloud-sessions' | 'ec2' | 'lambda' | 'microvms' | 'modal'
+interface Destination {
+  id: DestinationId
+  launchable: boolean
+  default?: boolean
+}
+const DESTINATIONS: Destination[] = [
+  { id: 'cloud-sessions', launchable: false, default: true },
+  { id: 'ec2', launchable: true },
+  { id: 'lambda', launchable: false },
+  { id: 'microvms', launchable: false },
+  { id: 'modal', launchable: false },
+]
+
+const destLabel = (id: DestinationId) =>
+  id === 'cloud-sessions'
+    ? i18nT('pages.settings.remoteCrewPanel.dest_cloud_sessions')
+    : id === 'ec2'
+      ? i18nT('pages.settings.remoteCrewPanel.dest_ec2')
+      : id === 'lambda'
+        ? i18nT('pages.settings.remoteCrewPanel.dest_lambda')
+        : id === 'microvms'
+          ? i18nT('pages.settings.remoteCrewPanel.dest_microvms')
+          : i18nT('pages.settings.remoteCrewPanel.dest_modal')
+const destWhy = (id: DestinationId) =>
+  id === 'cloud-sessions'
+    ? i18nT('pages.settings.remoteCrewPanel.dest_cloud_sessions_why')
+    : id === 'ec2'
+      ? i18nT('pages.settings.remoteCrewPanel.dest_ec2_why')
+      : id === 'lambda'
+        ? i18nT('pages.settings.remoteCrewPanel.dest_lambda_why')
+        : id === 'microvms'
+          ? i18nT('pages.settings.remoteCrewPanel.dest_microvms_why')
+          : i18nT('pages.settings.remoteCrewPanel.dest_modal_why')
+const destIcon = (id: DestinationId) =>
+  id === 'cloud-sessions'
+    ? Cloud
+    : id === 'ec2'
+      ? Server
+      : id === 'lambda'
+        ? Zap
+        : id === 'microvms'
+          ? Box
+          : Layers
+
+const grantTitle = (id: string) =>
+  id === 'cloudformation'
+    ? i18nT('pages.settings.remoteCrewPanel.iam_grant_cloudformation')
+    : id === 'ec2_tagged'
+      ? i18nT('pages.settings.remoteCrewPanel.iam_grant_ec2_tagged')
+      : id === 'iam_boundary'
+        ? i18nT('pages.settings.remoteCrewPanel.iam_grant_iam_boundary')
+        : id === 'ssm_tagged'
+          ? i18nT('pages.settings.remoteCrewPanel.iam_grant_ssm_tagged')
+          : id === 's3_source'
+            ? i18nT('pages.settings.remoteCrewPanel.iam_grant_s3_source')
+            : id === 'sts_identity'
+              ? i18nT('pages.settings.remoteCrewPanel.iam_grant_sts_identity')
+              : id
 
 /** One selectable size card. Shared by the arm64 ladder and the x86 lane so the
  *  disclosure offers real choices rather than describing sizes it cannot select. */
@@ -170,6 +245,119 @@ function SizeCard({ tier, on, onPick }: { tier: SizeTier; on: boolean; onPick: (
         <span className="block text-[12px] text-text mt-1.5">{tierWhy(tier.family)}</span>
       </span>
     </button>
+  )
+}
+
+function DestinationCard({ dest, on, onPick }: { dest: Destination; on: boolean; onPick: (id: DestinationId) => void }) {
+  const Icon = destIcon(dest.id)
+  return (
+    <button
+      type="button"
+      onClick={() => onPick(dest.id)}
+      aria-pressed={on}
+      aria-label={destLabel(dest.id)}
+      className={`w-full text-left flex items-start gap-3 rounded-md border p-3.5 transition-all ${on ? 'border-accent bg-accent-subtle shadow-[0_0_0_3px_var(--accent-glow)]' : 'border-border-strong bg-bg-elevated hover:border-border-strong'}`}
+    >
+      <span className={`mt-0.5 w-8 h-8 shrink-0 grid place-items-center rounded-md ${on ? 'bg-accent text-bg' : 'bg-bg-hover text-muted'}`}>
+        <Icon size={16} />
+      </span>
+      <span className="min-w-0">
+        <span className="font-bold text-[13px] text-text-strong flex items-center gap-2 flex-wrap">
+          {destLabel(dest.id)}
+          {dest.default && <Badge variant="aim">{i18nT('pages.settings.remoteCrewPanel.dest_default_badge')}</Badge>}
+          {!dest.launchable && (
+            <span className="font-normal text-[11px] text-muted">{i18nT('pages.settings.remoteCrewPanel.dest_coming_soon')}</span>
+          )}
+        </span>
+        <span className="block text-[12px] text-text mt-1">{destWhy(dest.id)}</span>
+      </span>
+    </button>
+  )
+}
+
+function IamPolicyCard({
+  data,
+  loading,
+  error,
+  copied,
+  onCopyPolicy,
+  onCopyCli,
+}: {
+  data: CloudIamPolicy | undefined
+  loading: boolean
+  error: string | null
+  copied: 'policy' | 'cli' | null
+  onCopyPolicy: () => void
+  onCopyCli: () => void
+}) {
+  const [showJson, setShowJson] = useState(false)
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-1 text-text font-medium">
+        <Lock className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.iam_title')}
+      </div>
+      <p className="text-[13px] text-muted mb-3">{i18nT('pages.settings.remoteCrewPanel.iam_lede')}</p>
+      {loading && !data ? (
+        <div className="flex items-center gap-2 text-muted text-sm py-2">
+          <RefreshCw className="lucide-inline animate-spin" /> {i18nT('pages.settings.remoteCrewPanel.iam_loading')}
+        </div>
+      ) : error && !data ? (
+        <ErrorNotice message={error} className="mb-3" />
+      ) : (
+        <>
+          {data && data.grants.length > 0 && (
+            <ul className="m-0 mb-3 p-0 list-none">
+              {data.grants.map(g => (
+                <li key={g.id} className="flex items-start gap-2 py-1.5 text-[13px] text-text border-b border-border last:border-b-0">
+                  <CheckCircle size={14} className="mt-0.5 shrink-0 text-ok" />
+                  <span>{grantTitle(g.id)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-[12px] text-muted mb-3">{i18nT('pages.settings.remoteCrewPanel.apply_in_iam')}</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Btn onClick={onCopyPolicy} disabled={!data?.policy}>
+              {copied === 'policy' ? <Check className="lucide-inline" /> : <Copy className="lucide-inline" />}
+              {copied === 'policy'
+                ? i18nT('pages.settings.remoteCrewPanel.copied')
+                : i18nT('pages.settings.remoteCrewPanel.copy_policy_json')}
+            </Btn>
+            <Btn onClick={onCopyCli} disabled={!data?.cli}>
+              {copied === 'cli' ? <Check className="lucide-inline" /> : <Copy className="lucide-inline" />}
+              {copied === 'cli'
+                ? i18nT('pages.settings.remoteCrewPanel.copied')
+                : i18nT('pages.settings.remoteCrewPanel.copy_cli')}
+            </Btn>
+            {data?.policy && (
+              <button
+                type="button"
+                onClick={() => setShowJson(v => !v)}
+                className="text-[12px] text-muted hover:text-text inline-flex items-center gap-1"
+              >
+                {showJson
+                  ? <ChevronDown size={12} />
+                  : <ChevronRight size={12} />}
+                {showJson
+                  ? i18nT('pages.settings.remoteCrewPanel.iam_hide_json')
+                  : i18nT('pages.settings.remoteCrewPanel.iam_show_json')}
+              </button>
+            )}
+          </div>
+          {showJson && data?.policy && (
+            <pre className="mt-3 max-h-64 overflow-auto rounded-md border border-border bg-bg px-3 py-2 text-[11px] font-mono text-text whitespace-pre">
+              {data.policy}
+            </pre>
+          )}
+          <p className="mt-3 text-[12px] text-muted">{i18nT('pages.settings.remoteCrewPanel.iam_cli_hint')}{' '}
+            <code className="text-text">{data?.cli ?? IAM_POLICY_CLI}</code>
+          </p>
+          <p className="mt-2 text-[12px] text-muted flex items-start gap-1.5">
+            <Lock size={13} className="mt-0.5 shrink-0" /> {i18nT('pages.settings.remoteCrewPanel.iam_never_writes')}
+          </p>
+        </>
+      )}
+    </Card>
   )
 }
 
@@ -653,7 +841,10 @@ export function RemoteCrewPanel() {
   const [checkedRegion, setCheckedRegion] = useState(() => readPersistedString(CLOUD_REGION_KEY, DEFAULT_REGION))
   const [showMoreSizes, setShowMoreSizes] = useState(false)
   const [sizeKey, setSizeKey] = useState<SizeTier['key']>('balanced')
-  const [copied, setCopied] = useState<'command' | 'policy' | null>(null)
+  const [copied, setCopied] = useState<'command' | 'policy' | 'cli' | null>(null)
+  // Cloud Sessions is the catalog default. A live launch pins EC2 so its
+  // progress card stays on the same destination that created it.
+  const [pickedDestination, setPickedDestination] = useState<DestinationId | null>(null)
   const [activeLaunchId, setActiveLaunchId] = useState<string | null>(null)
   const [confirmDeleteTag, setConfirmDeleteTag] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
@@ -772,6 +963,11 @@ export function RemoteCrewPanel() {
   const preflightQuery = useQuery({
     queryKey: ['cloud', 'preflight', checkedProfile, checkedRegion],
     queryFn: () => api.cloudPreflight(checkedProfile || undefined, checkedRegion || undefined),
+    enabled: tab === 'setup' && !disabled,
+  })
+  const iamQuery = useQuery({
+    queryKey: ['cloud', 'iam-policy'],
+    queryFn: () => api.cloudIamPolicy(),
     enabled: tab === 'setup' && !disabled,
   })
 
@@ -934,14 +1130,19 @@ export function RemoteCrewPanel() {
   }, [])
   const copyPolicy = useCallback(async () => {
     try {
-      const { policy } = await api.cloudIamPolicy()
-      void copyToClipboard(policy)
+      const data = iamQuery.data ?? await api.cloudIamPolicy()
+      void copyToClipboard(data.policy)
       setCopied('policy')
       setTimeout(() => setCopied(null), 1500)
     } catch (e) {
       setActionErr(errMsg(e, i18nT('pages.settings.instancesPanel.unknown_error')))
     }
-  }, [errMsg])
+  }, [errMsg, iamQuery.data])
+  const copyCli = useCallback(() => {
+    void copyToClipboard(iamQuery.data?.cli ?? IAM_POLICY_CLI)
+    setCopied('cli')
+    setTimeout(() => setCopied(null), 1500)
+  }, [iamQuery.data])
 
   const preflight: CloudPreflight | undefined = preflightQuery.data
   const blockingOk = !!preflight
@@ -956,6 +1157,7 @@ export function RemoteCrewPanel() {
   // device code) is present on the very first render after a remount, before the
   // status query has resolved.
   const activeJob = launchStatusQuery.data ?? inProgress[0] ?? null
+  const destination: DestinationId = pickedDestination ?? (activeJob ? 'ec2' : 'cloud-sessions')
 
   // A launch that reaches `done` has just added a crew, but nothing else invalidates
   // the instances cache and switching tabs does not remount this component — so "Your
@@ -1203,6 +1405,44 @@ export function RemoteCrewPanel() {
         </div>
       ) : (
         <div className="space-y-4">
+          <Card>
+            <div className="text-text font-medium mb-1">{i18nT('pages.settings.remoteCrewPanel.choose_destination')}</div>
+            <p className="text-[13px] text-muted mb-3">{i18nT('pages.settings.remoteCrewPanel.choose_destination_hint')}</p>
+            <div className="space-y-2.5">
+              {DESTINATIONS.map(dest => (
+                <DestinationCard
+                  key={dest.id}
+                  dest={dest}
+                  on={destination === dest.id}
+                  onPick={setPickedDestination}
+                />
+              ))}
+            </div>
+          </Card>
+
+          {destination !== 'ec2' && (
+            <Card>
+              <div className="text-text font-medium mb-1">{i18nT('pages.settings.remoteCrewPanel.dest_coming_soon')}</div>
+              <p className="text-[13px] text-muted mb-3">
+                {i18nT('pages.settings.remoteCrewPanel.dest_coming_soon_body', { name: destLabel(destination) })}
+              </p>
+              <Btn primary onClick={() => setPickedDestination('ec2')}>
+                <Server className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.dest_pick_ec2')}
+              </Btn>
+            </Card>
+          )}
+
+          {destination === 'ec2' && (
+          <>
+          <IamPolicyCard
+            data={iamQuery.data}
+            loading={iamQuery.isLoading}
+            error={iamQuery.error ? errMsg(iamQuery.error, i18nT('pages.settings.instancesPanel.unknown_error')) : null}
+            copied={copied === 'policy' || copied === 'cli' ? copied : null}
+            onCopyPolicy={() => { void copyPolicy() }}
+            onCopyCli={copyCli}
+          />
+
           {/* AWS prerequisites — the account inputs live HERE, above the rows they
               produce. The check runs against this profile/region, so showing the
               verdict first and the inputs in a later card inverted cause and effect:
@@ -1261,7 +1501,7 @@ export function RemoteCrewPanel() {
                   rechecking={preflightQuery.isFetching}
                 />
                 <PrereqRow ok={preflight.ec2_reachable} title={i18nT('pages.settings.remoteCrewPanel.prereq_ec2')} detail={preflight.ec2_reachable ? i18nT('pages.settings.remoteCrewPanel.service_ok') : i18nT('pages.settings.remoteCrewPanel.service_missing')} />
-                <PrereqRow ok={preflight.cloudformation_reachable} title={i18nT('pages.settings.remoteCrewPanel.prereq_cloudformation')} detail={preflight.cloudformation_reachable ? i18nT('pages.settings.remoteCrewPanel.service_ok') : i18nT('pages.settings.remoteCrewPanel.service_missing')} extraAction={preflight.cloudformation_reachable ? undefined : <Btn onClick={copyPolicy}>{copied === 'policy' ? <Check className="lucide-inline" /> : <Copy className="lucide-inline" />} {copied === 'policy' ? i18nT('pages.settings.remoteCrewPanel.copied') : i18nT('pages.settings.remoteCrewPanel.copy_policy_json')}</Btn>} />
+                <PrereqRow ok={preflight.cloudformation_reachable} title={i18nT('pages.settings.remoteCrewPanel.prereq_cloudformation')} detail={preflight.cloudformation_reachable ? i18nT('pages.settings.remoteCrewPanel.service_ok') : i18nT('pages.settings.remoteCrewPanel.service_missing')} />
                 <PrereqRow ok={preflight.ssm_reachable} title={i18nT('pages.settings.remoteCrewPanel.prereq_ssm')} detail={preflight.ssm_reachable ? i18nT('pages.settings.remoteCrewPanel.service_ok') : i18nT('pages.settings.remoteCrewPanel.service_missing')} />
                 <PrereqRow
                   ok={preflight.session_manager_plugin}
@@ -1338,6 +1578,8 @@ export function RemoteCrewPanel() {
               <span className="text-[12px] text-muted">{blockingOk ? i18nT('pages.settings.remoteCrewPanel.ready_in_6') : i18nT('pages.settings.remoteCrewPanel.finish_prereqs')}</span>
             </div>
           </Card>
+          </>
+          )}
 
           {activeJob && (
             <LaunchProgressCard

@@ -48,7 +48,13 @@ port, no SSH key.
 
 - **Automated (recommended):** the one-command launcher provisions a box, installs
   the gateway, and registers it over SSM for you — see
-  [cloud-instance-ssm-vs-ssh.md](cloud-instance-ssm-vs-ssh.md).
+  [cloud-instance-ssm-vs-ssh.md](cloud-instance-ssm-vs-ssh.md). From the
+  dashboard the same path is **Settings → Remote Crew → Set up a new one**.
+  Cloud Sessions is listed first (not launchable yet); pick **Amazon EC2**.
+  The **Recommended IAM permissions** card is the copyable least-privilege
+  policy — Kiro Crew never writes IAM. Apply it to the profile you launch
+  with before the checklist can go green, or print it with
+  `kirocrew cloud iam-policy`.
 - **Manual (a box you already have):** **Settings → Remote Crew → Add remote crew →
   Connection method = AWS SSM Session Manager**, then fill **SSM target** (the EC2
   instance id `i-…`, or an SSM managed-instance id `mi-…`), optional **AWS profile**

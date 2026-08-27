@@ -14,6 +14,7 @@ import userEvent from '@testing-library/user-event'
 import { createTestStore, renderWithProviders } from './helpers'
 import type {
   CloudPreflight,
+  CloudIamPolicy,
   InstanceView,
   InstanceTunnelStatus,
   LaunchJob,
@@ -143,6 +144,18 @@ const PREFLIGHT_OK: CloudPreflight = {
   note: '',
   detail: '',
 }
+const IAM_POLICY: CloudIamPolicy = {
+  policy: '{"Version":"2012-10-17"}',
+  grants: [
+    { id: 'cloudformation' },
+    { id: 'ec2_tagged' },
+    { id: 'iam_boundary' },
+    { id: 'ssm_tagged' },
+    { id: 's3_source' },
+    { id: 'sts_identity' },
+  ],
+  cli: 'kirocrew cloud iam-policy',
+}
 
 const list = (instances: InstanceView[], extra: { active?: boolean; warm_set_cap?: number } = {}) => ({
   active: extra.active ?? true,
@@ -166,9 +179,12 @@ function storeWithWarm(id: string) {
 
 const setup = () => userEvent.setup({ advanceTimers: (ms: number) => { vi.advanceTimersByTime(ms) } })
 
-/** Open the "Set up a new one" tab. */
+/** Open the "Set up a new one" tab and pick the launchable EC2 destination.
+ *  Cloud Sessions is the catalog default and does not render the AWS form. */
 async function openSetupTab(u: ReturnType<typeof setup>) {
   await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+  const ec2 = await screen.findByRole('button', { name: /^Amazon EC2$/i })
+  await u.click(ec2)
 }
 
 beforeEach(() => {
@@ -179,6 +195,7 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [] })
   vi.mocked(api.cloudPreflight).mockResolvedValue(PREFLIGHT_OK)
+  vi.mocked(api.cloudIamPolicy).mockResolvedValue(IAM_POLICY)
   // The status query is enabled by the mere existence of a persisted job, so a
   // test that only cares about the crew list still polls it — an unmocked
   // resolve returns undefined, which React Query rejects noisily.
@@ -457,32 +474,58 @@ describe('RemoteCrewPanel — AWS prerequisites', () => {
     expect(await screen.findByRole('button', { name: /Copy command/ })).toBeInTheDocument()
   })
 
-  it('fetches the IAM policy on demand and confirms the copy', async () => {
-    // The policy is not shipped to the browser: a missing-permission user asks
-    // the gateway for it at the moment they need to paste it.
+  it('shows the recommended IAM policy as a first-class setup card, even when CloudFormation is reachable', async () => {
     vi.mocked(api.listInstances).mockResolvedValue(list([]))
-    vi.mocked(api.cloudPreflight).mockResolvedValue({ ...PREFLIGHT_OK, cloudformation_reachable: false })
-    vi.mocked(api.cloudIamPolicy).mockResolvedValue({ policy: '{"Version":"2012-10-17"}' })
     const u = setup()
     renderWithProviders(<RemoteCrewPanel />)
     await openSetupTab(u)
+
+    expect(await screen.findByText(/Recommended IAM permissions/i)).toBeInTheDocument()
+    expect(screen.getByText(/CloudFormation stacks tagged/i)).toBeInTheDocument()
+    expect(screen.getByText(/never creates or edits IAM/i)).toBeInTheDocument()
+    expect(screen.getByText('kirocrew cloud iam-policy')).toBeInTheDocument()
 
     await u.click(await screen.findByRole('button', { name: /Copy policy JSON/ }))
     await waitFor(() => expect(copyToClipboard).toHaveBeenCalledWith('{"Version":"2012-10-17"}'))
     expect(await screen.findByRole('button', { name: /Copied/ })).toBeInTheDocument()
   })
 
+  it('copies the CLI verb that reprints the same policy', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(list([]))
+    const u = setup()
+    renderWithProviders(<RemoteCrewPanel />)
+    await openSetupTab(u)
+
+    await u.click(await screen.findByRole('button', { name: /Copy CLI command/ }))
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalledWith('kirocrew cloud iam-policy'))
+  })
+
   it('surfaces a failure to fetch the IAM policy rather than silently copying nothing', async () => {
     vi.mocked(api.listInstances).mockResolvedValue(list([]))
-    vi.mocked(api.cloudPreflight).mockResolvedValue({ ...PREFLIGHT_OK, cloudformation_reachable: false })
     vi.mocked(api.cloudIamPolicy).mockRejectedValue(new ApiError(500, 'policy render failed'))
     const u = setup()
     renderWithProviders(<RemoteCrewPanel />)
     await openSetupTab(u)
 
-    await u.click(await screen.findByRole('button', { name: /Copy policy JSON/ }))
     expect(await screen.findByText(/policy render failed/, undefined, { timeout: 5_000 })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Copy policy JSON/ })).not.toBeInTheDocument()
     expect(copyToClipboard).not.toHaveBeenCalled()
+  })
+
+  it('defaults to Cloud Sessions and keeps the AWS launch form behind Amazon EC2', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(list([]))
+    const u = setup()
+    renderWithProviders(<RemoteCrewPanel />)
+    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
+
+    expect(await screen.findByRole('button', { name: /^Cloud Sessions$/i })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getAllByText(/Coming soon/i).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/Before you start/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Launch$/ })).not.toBeInTheDocument()
+
+    await u.click(screen.getByRole('button', { name: /Set up on Amazon EC2/i }))
+    expect(await screen.findByText(/Before you start/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Launch$/ })).toBeInTheDocument()
   })
 
   it('re-probes the region the user just typed, not the remembered one', async () => {

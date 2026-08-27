@@ -16,7 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
-from kiro_crew.cloud import launch_job as lj
+from kiro_crew.cloud import iam, launch_job as lj
 from kiro_crew.dashboard import handlers_cloud as hc
 
 pytestmark = pytest.mark.asyncio
@@ -147,9 +147,12 @@ class TestReadEndpoints:
             _req("GET", "/api/cloud/iam-policy", state=_state(tmp_path))
         )
         assert resp.status == 200
-        doc = json.loads(_body(resp)["policy"])
+        body = _body(resp)
+        doc = json.loads(body["policy"])
         assert doc["Version"] == "2012-10-17"
         assert "Statement" in doc
+        assert [g["id"] for g in body["grants"]] == list(iam.POLICY_GRANT_IDS)
+        assert body["cli"] == iam.IAM_POLICY_CLI
 
     async def test_preflight_merges_plugin_flag(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

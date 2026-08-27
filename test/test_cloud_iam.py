@@ -480,6 +480,16 @@ class TestPolicyDocument:
     def test_policy_json_roundtrips(self):
         assert json.loads(iam.policy_json()) == iam.policy_document()
 
+    def test_policy_grants_are_id_only_and_cover_the_document(self):
+        grants = iam.policy_grants()
+        assert [g["id"] for g in grants] == list(iam.POLICY_GRANT_IDS)
+        assert all(set(g.keys()) == {"id"} for g in grants)
+        assert "cloudformation" in iam.POLICY_GRANT_IDS
+        assert "iam_boundary" in iam.POLICY_GRANT_IDS
+
+    def test_iam_policy_cli_is_the_documented_verb(self):
+        assert iam.IAM_POLICY_CLI == "kirocrew cloud iam-policy"
+
 
 class TestReachabilityCheck:
     def test_profile_unresolved(self, monkeypatch):
