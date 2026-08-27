@@ -1987,6 +1987,128 @@ class TestSharedStoreRefusal:
         assert "sits outside it" in report.reclaim_blocked_reason
 
 
+class TestCotenantNamesAreLogSafe:
+    """A co-tenant directory name is agent-influenced and can embed a newline;
+    both ``cotenant_sids`` log sites that carry it must escape it, or one record
+    forges additional records (refs #6371, the #6281/#6315 log-forgery class).
+    """
+
+    _FORGED = "wt-evil\nWARNING forged: reclaim authorized by operator"
+
+    def _pod_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        pod_root = tmp_path / "pods"
+        pod_root.mkdir()
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(pod_root))
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIRO_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", paths._default_home())
+        monkeypatch.setattr(paths, "_config_dir_memo", None)
+        return pod_root
+
+    def _make_forged_pod(self, pod_root: Path) -> Path:
+        pod = pod_root / self._FORGED
+        try:
+            pod.mkdir()
+        except OSError:
+            pytest.skip("this filesystem refuses a newline in a directory name")
+        return pod
+
+    @staticmethod
+    def _carrying(caplog: pytest.LogCaptureFixture, marker: str) -> list[str]:
+        return [record.getMessage() for record in caplog.records if marker in record.getMessage()]
+
+    def test_malformed_map_log_escapes_the_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        pod = self._make_forged_pod(self._pod_root(tmp_path, monkeypatch))
+        (pod / "session_map.json").write_text("not json{", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+            _protected, refusals = session_storage.cotenant_sids()
+
+        assert [name for name, _why in refusals] == [self._FORGED]
+        messages = self._carrying(caplog, "malformed session map")
+        assert messages, "the malformed-map site did not log at all"
+        # The rendered record stays one line: the name appears repr'd, and the
+        # injected second line never starts a record of its own.
+        assert all("\n" not in message for message in messages)
+        assert any(repr(self._FORGED) in message for message in messages)
+
+    def test_unreadable_map_log_escapes_the_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        pod = self._make_forged_pod(self._pod_root(tmp_path, monkeypatch))
+        # Invalid UTF-8 makes ``safe_read_file`` raise ``UnicodeDecodeError``,
+        # which is exactly the unreadable-map warning path under test.
+        (pod / "session_map.json").write_bytes(b"\xff\xfe\xfa")
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+            _protected, refusals = session_storage.cotenant_sids()
+
+        assert [name for name, _why in refusals] == [self._FORGED]
+        messages = self._carrying(caplog, "unreadable session map")
+        assert messages, "the unreadable-map site did not log at all"
+        assert all("\n" not in message for message in messages)
+        assert any(repr(self._FORGED) in message for message in messages)
+
+    def test_exc_info_rendering_does_not_carry_a_raw_newline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The unreadable-map site logs with ``exc_info=True``, and
+        ``safe_read_file``'s refusal messages embed the resolved path — which
+        keeps a newline-bearing directory name. The FULL rendered record
+        (message plus exception text) must stay forge-free, not just the
+        ``getMessage()`` line the other tests pin.
+        """
+        pod = self._make_forged_pod(self._pod_root(tmp_path, monkeypatch))
+        (pod / "session_map.json").write_text("{}", encoding="utf-8")
+        # Force the refusal arm so the raised PermissionError carries the real
+        # resolved path (newline included) into the traceback rendering.
+        monkeypatch.setattr(session_storage.hooks, "is_sensitive_path", lambda p: True)
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+            _protected, refusals = session_storage.cotenant_sids()
+
+        assert [name for name, _why in refusals] == [self._FORGED]
+        assert "unreadable session map" in caplog.text
+        # The injected payload never lands at the start of a rendered line,
+        # which is what a forged record would need.
+        assert not [line for line in caplog.text.splitlines() if line.startswith("WARNING forged")]
+
+    def test_both_sites_escape_without_touching_the_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Windows refuses a newline in a real directory name, which would skip
+        the two filesystem tests above on those shards. Injecting the forged
+        name at the candidate-list seam pins both log sites on every platform.
+        """
+        self._pod_root(tmp_path, monkeypatch)
+        monkeypatch.setattr(session_storage, "_replay_store_cotenants", lambda: [self._FORGED])
+
+        reads: dict[str, object] = {
+            "unreadable": PermissionError("refused"),
+            "malformed": "not json{",
+        }
+        for label, outcome in reads.items():
+
+            def _read(path: str, outcome: object = outcome) -> str:
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return str(outcome)
+
+            caplog.clear()
+            monkeypatch.setattr(session_storage.hooks, "safe_read_file", _read)
+
+            with caplog.at_level(logging.WARNING, logger="kiro_crew.session_storage"):
+                _protected, refusals = session_storage.cotenant_sids()
+
+            assert [name for name, _why in refusals] == [self._FORGED]
+            rendered = [record.getMessage() for record in caplog.records]
+            carrying = [message for message in rendered if repr(self._FORGED) in message]
+            assert carrying, f"the {label}-map site did not log the name repr'd"
+            assert all("\n" not in message for message in rendered)
+
+
 class TestBuckets:
     def test_split_on_the_documented_edges(self, stores: tuple[Path, Path]) -> None:
         _, kiro_home = stores

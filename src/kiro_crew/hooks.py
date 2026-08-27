@@ -1860,7 +1860,11 @@ def safe_read_file(path: str) -> str:
     """
     resolved = os.path.realpath(os.path.expanduser(path))
     if is_sensitive_path(resolved):
-        raise PermissionError(f"Blocked: access to sensitive path: {resolved}")
+        # {resolved!r}, not {resolved}: the resolved target is caller/attacker
+        # influenced (a symlink target is chosen by whoever wrote the link) and
+        # this text reaches log records via ``exc_info`` — a raw newline in it
+        # would forge a second record.
+        raise PermissionError(f"Blocked: access to sensitive path: {resolved!r}")
     try:
         fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:
@@ -1868,7 +1872,7 @@ def safe_read_file(path: str) -> str:
         # swap of the final component into a symlink — refuse it. Any other
         # OSError (ENOENT, EACCES) is a normal read error; re-raise as-is.
         if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
-            raise PermissionError(f"Blocked: refusing to follow symlink at {resolved}") from exc
+            raise PermissionError(f"Blocked: refusing to follow symlink at {resolved!r}") from exc
         raise
     with os.fdopen(fd, "r", encoding="utf-8") as fh:
         return fh.read()
@@ -1939,7 +1943,7 @@ def safe_read_file_bytes_with_identity(
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:
         if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
-            raise PermissionError(f"Blocked: refusing to follow symlink at {path}") from exc
+            raise PermissionError(f"Blocked: refusing to follow symlink at {path!r}") from exc
         return None
     try:
         st = os.fstat(fd)
