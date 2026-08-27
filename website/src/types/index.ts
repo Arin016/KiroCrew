@@ -920,6 +920,11 @@ export interface SubagentActivity {
    *  frames; shown beside the agent pill in the Subagents panel so a model-pinned
    *  run's real model is visible (#3582). */
   model?: string
+  /** The model pin the caller REQUESTED for this subagent (the `requested_model`
+   *  field on spawn/snapshot frames). Present only when the caller supplied a pin;
+   *  compared against `model` via `isModelDowngrade` to render the amber chip on
+   *  the live card (#5326). */
+  requestedModel?: string
   status: 'pending' | 'running' | 'tool' | 'done' | 'error' | 'stopped'
   streaming: string; lastTool: string
   startedAt: number; elapsed: number; error?: string

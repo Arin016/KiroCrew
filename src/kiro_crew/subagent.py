@@ -2525,6 +2525,12 @@ class SubagentManager:
                 # CC/raw path has completed at least one turn, so its
                 # ``_resolved_model_id`` is populated (refreshed in ``_run``).
                 "model": info.resolved_model,
+                # Carry the requested pin on the terminal report too, redacted
+                # like the spawn frame: after a reconnect the completed card is
+                # rebuilt from this event alone, so without it the live-downgrade
+                # amber chip would silently vanish from a downgraded finished run
+                # (Opus/Design/First-Principles review on #5326).
+                "requested_model": _redact(info.requested_model),
                 "result": _done_result(info.result),
             },
         )
@@ -5631,6 +5637,11 @@ class SubagentManager:
                 "task": _redact(info.task),
                 "agent": agent or "",
                 "model": info.resolved_model,
+                # The requested pin is caller-supplied (spawn_run.model), so it
+                # is redacted like every other free-text field on the frame — an
+                # unavailable/AKIA-shaped pin must never reach the dashboard
+                # socket raw (GPT review on #5326).
+                "requested_model": _redact(info.requested_model),
             },
         )
         # Stream results to disk for orchestrated chat.

@@ -250,13 +250,19 @@ refreshed on the first text chunk (covers the CC path); a known value is never
 clobbered back to `""`.
 
 The resolved id rides the wire as a `model` field on the `subagent_spawn`,
-`subagent_done`, and reconnect `subagent_snapshot` payloads. The single-completion
+`subagent_done`, and reconnect `subagent_snapshot` payloads, and the requested pin
+rides alongside it as a `requested_model` field on those same payloads (both are
+`_redact()`-ed, since the pin is caller-supplied). The single-completion
 meta (`subagent_completion_meta.single_completion_meta`, mirrored by
 `website/src/pages/chat/subagentCompletion.ts`) additionally carries `requestedModel`
 and `resolvedModel`. The frontend renders the resolved model as a chip beside the
-agent pill (Subagents panel + completion card) and flags a **downgrade** — an amber
-chip plus a persistent `role="status"` "Requested X, served Y" banner — when the two
-name different models. "Same model" is decided by the shared `normalizeModelKey`
+agent pill and flags a **downgrade** — an amber chip plus a persistent
+`role="status"` "Requested X, served Y" banner — when the two name different models,
+on BOTH the completion card AND the **live** Subagents-panel row (`ActivityViewer`),
+so a mis-pinned run is visible mid-flight, not only at completion. Because the pin
+rides `subagent_done` (and its reconnect replay), a downgraded run that completes
+before a reconnect rehydrates its card with the amber flag intact. "Same model" is
+decided by the shared `normalizeModelKey`
 (`website/src/lib/model.ts`, mirroring the backend `_normalize_model_key`): dotted vs
 dashed spellings and case fold, and `auto`/`default` fold to "no pin", so an honored
 pin whose wire spelling differs does not false-flag. Wave-digest completions
