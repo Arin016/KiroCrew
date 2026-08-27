@@ -4225,7 +4225,7 @@
         "iam_grant_s3_source": "A private source bucket used only during setup",
         "iam_grant_sts_identity": "Read the caller identity",
         "copy_cli": "Copy CLI command",
-        "iam_cli_hint": "Or print the same policy in a terminal:",
+        "iam_cli_hint": "You can also print the same policy from a terminal.",
         "iam_loading": "Loading the policy…",
         "iam_show_json": "Show policy JSON",
         "iam_hide_json": "Hide policy JSON",
