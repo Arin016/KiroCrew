@@ -330,21 +330,15 @@ class TestWhatThisSetGrants:
     puts it in a server of its own with the gate it actually needs.
     """
 
-    FOLDER_TOOLS = {
-        "chat_folder_tree",
-        "chat_folder_create",
-        "chat_folder_move",
-        "chat_folder_move_session",
-    }
+    #: One op-shaped tool per capability class, not one verb per tool: the four
+    #: folder verbs are ``chat_folder_ctl`` ops (tree/create/move/move_session).
+    FOLDER_TOOLS = {"chat_folder_ctl"}
     #: The session-control half. Granted by the SAME assignment as the folder
     #: half — see ``test_session_driving_tools_ship_with_the_folder_tools`` for
-    #: why the two classes ride together rather than in two servers.
-    SESSION_TOOLS = {
-        "session_create",
-        "session_stop",
-        "session_send",
-        "session_read_message",
-    }
+    #: why the two classes ride together rather than in two servers, and
+    #: ``mcp_dashboard.SESSION_CONTROL_TOOLS`` for why they are nonetheless two
+    #: TOOLS: channel containment matches a tool name and cannot see an op.
+    SESSION_TOOLS = {"session_ctl"}
     GRANTED_TOOLS = FOLDER_TOOLS | SESSION_TOOLS
 
     def test_the_set_is_exactly_the_folder_tools(self) -> None:

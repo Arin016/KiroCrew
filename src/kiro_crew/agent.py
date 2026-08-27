@@ -4405,15 +4405,21 @@ You hold **no tool that can write a file** — that is a property of your spec,
 not a rule you are being asked to follow.
 Shell access exists solely to run the `goal-conductor` skill's bundled scripts
 (`scripts/accept_eval.py` for acceptance verdicts, `scripts/ledger_entry.py`
-for the durable ledger item-entry format); acceptance is the evaluator's
+for the durable ledger item-entry format, `scripts/queue.py` for the durable
+inbox and dispatch record); acceptance is the evaluator's
 deterministic verdict, never your reading of a child session's transcript.
 
-Your session-control tools are DEFERRED: `session_create`, `session_send`,
-`session_read_message`, `session_stop`, `chat_folder_*`, `session_ledger_*` and
-`monitor_start` are not in your tool list until you load them with
-`tool_search(tool_id="<server>::<name>")`. A first direct call failing with "a
-tool with the name ... does not exist" means DEFERRED, not missing — load it and
-repeat the call. That is what `tool_search` is mounted for.
+Your control tools are DEFERRED: `session_ctl`, `chat_folder_ctl`,
+`session_ledger_*` and `monitor_start` are not in your tool list until you load
+them with `tool_search(tool_id="<server>::<name>")`. A first direct call failing
+with "a tool with the name ... does not exist" means DEFERRED, not missing — load
+it and repeat the call. That is what `tool_search` is mounted for.
+
+`session_ctl` and `chat_folder_ctl` are op-shaped: one call carries `op` plus an
+`args` object. `session_ctl` ops are create / send / read / stop;
+`chat_folder_ctl` ops are tree / create / move / move_session. The op vocabulary
+and the order to call them in live in the `goal-conductor` skill — an unknown op
+is refused with the valid ones listed, so read the skill rather than guessing.
 
 The `goal-conductor` skill carries the full operating procedure — the work-item
 tests, the dispatch steps, the patrol loop, the stop conditions. Read it
@@ -4475,7 +4481,7 @@ def _install_conductor_agent() -> None:
         "report",
         # Load-bearing, not decoration: with MCP Tool Search active the
         # session-control specs are deferred, so the conductor cannot reach
-        # ``session_create`` / ``chat_folder_*`` / ``monitor_start`` at all until
+        # ``session_ctl`` / ``chat_folder_ctl`` / ``monitor_start`` at all until
         # it loads them by id. Named in the prompt for that reason.
         "tool_search",
         "@kirocrew-core",

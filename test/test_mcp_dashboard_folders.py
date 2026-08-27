@@ -1468,14 +1468,141 @@ class TestAdvertisedSet:
     """
 
     def test_the_whole_set_is_advertised(self) -> None:
+        """Two op-shaped tools, one per capability class.
+
+        The eight verbs did not go away — they are ops (``SESSION_CTL_OPS`` /
+        ``CHAT_FOLDER_CTL_OPS``), asserted by ``TestOpDispatch`` below. What this
+        pins is the advertised SURFACE, which is what costs context in every
+        session that mounts this server.
+        """
         names = {t["name"] for t in _list_tools()}
-        assert names == {
-            "chat_folder_tree",
-            "chat_folder_create",
-            "chat_folder_move",
-            "chat_folder_move_session",
-            "session_create",
-            "session_stop",
-            "session_send",
-            "session_read_message",
-        }
+        assert names == {"chat_folder_ctl", "session_ctl"}
+
+    def test_every_op_is_advertised_as_an_enum(self) -> None:
+        """A model must not have to guess a verb that the dispatcher knows.
+
+        The enum, the op→handler map, and the refusal text all read the same
+        tuples, so this fails if an op is added to one and not the others.
+        """
+        from kiro_crew.mcp_dashboard import CHAT_FOLDER_CTL_OPS, SESSION_CTL_OPS
+
+        by_name = {t["name"]: t for t in _list_tools()}
+        assert by_name["session_ctl"]["inputSchema"]["properties"]["op"]["enum"] == list(
+            SESSION_CTL_OPS
+        )
+        assert by_name["chat_folder_ctl"]["inputSchema"]["properties"]["op"]["enum"] == list(
+            CHAT_FOLDER_CTL_OPS
+        )
+
+
+class TestOpDispatch:
+    """The eight verbs are ops now; this is where their routing is pinned.
+
+    ``TestAdvertisedSet`` pins the two-stub SURFACE. These cases pin that the
+    surface still reaches the same eight handlers, that a bad op is refused
+    instead of guessed at, and — the security-relevant one — that the
+    caller-identity gate runs on the RESOLVED op rather than the op-shaped name.
+    """
+
+    #: Explicit, not derived from ``_OP_TO_INNER``: a test that reads the same
+    #: mapping it is checking would pass on any mapping. This is the copy a
+    #: reviewer can compare against the RFC.
+    EXPECTED = {
+        "session_ctl": {
+            "create": "session_create",
+            "send": "session_send",
+            "read": "session_read_message",
+            "stop": "session_stop",
+        },
+        "chat_folder_ctl": {
+            "tree": "chat_folder_tree",
+            "create": "chat_folder_create",
+            "move": "chat_folder_move",
+            "move_session": "chat_folder_move_session",
+        },
+    }
+
+    def test_every_advertised_op_maps_to_its_handler(self) -> None:
+        for tool, ops in self.EXPECTED.items():
+            for op, inner in ops.items():
+                got, args, err = mcp_dashboard._resolve_op(tool, {"op": op})
+                assert (got, err) == (inner, ""), f"{tool} op={op}"
+                assert args == {}, "a missing args object resolves to empty, not None"
+
+    def test_the_advertised_enum_is_exactly_what_dispatch_accepts(self) -> None:
+        """No op reachable but unadvertised, and none advertised but unreachable."""
+        assert set(mcp_dashboard.SESSION_CTL_OPS) == set(self.EXPECTED["session_ctl"])
+        assert set(mcp_dashboard.CHAT_FOLDER_CTL_OPS) == set(self.EXPECTED["chat_folder_ctl"])
+        assert mcp_dashboard._OP_TO_INNER == self.EXPECTED
+
+    def test_session_control_inner_is_derived_not_copied(self) -> None:
+        """The identity gate's list must track the op vocabulary.
+
+        Spelled out per site is how ``session_create`` was once identity-gated and
+        still reachable from a channel agent; deriving it is what stops a newly
+        mapped session op from arriving ungated.
+        """
+        assert set(mcp_dashboard.SESSION_CONTROL_INNER) == set(
+            self.EXPECTED["session_ctl"].values()
+        )
+        # And the ADVERTISED name is what containment matches — one, not four.
+        assert mcp_dashboard.SESSION_CONTROL_TOOLS == ("session_ctl",)
+
+    def test_an_unknown_op_is_refused_and_names_the_valid_ones(self) -> None:
+        with patch("kiro_crew.mcp_dashboard._post") as post, patch(
+            "kiro_crew.mcp_dashboard._get"
+        ) as get:
+            out = _call_tool_inner("session_ctl", {"op": "delete", "args": {"target": "x"}})
+        assert out.startswith("Error: unknown session_ctl op 'delete'")
+        for op in mcp_dashboard.SESSION_CTL_OPS:
+            assert op in out
+        # A refusal must not have touched the gateway on the way to being refused.
+        post.assert_not_called()
+        get.assert_not_called()
+
+    def test_a_missing_op_is_refused_the_same_way(self) -> None:
+        out = _call_tool_inner("chat_folder_ctl", {"args": {}})
+        assert out.startswith("Error: unknown chat_folder_ctl op ''")
+
+    def test_args_must_be_an_object(self) -> None:
+        out = _call_tool_inner("session_ctl", {"op": "read", "args": ["target"]})
+        assert "`args` must be an object" in out and "list" in out
+
+    def test_a_session_op_reaches_the_session_control_route(self) -> None:
+        with patch(
+            "kiro_crew.mcp_dashboard._post", return_value={"target": "chat-2-200"}
+        ) as post:
+            _call_tool_inner(
+                "session_ctl", {"op": "send", "args": {"target": "chat-2-200", "message": "go"}}
+            )
+        assert post.call_args[0][0] == "/api/session-control/send"
+
+    def test_a_folder_op_reaches_the_folder_route(self) -> None:
+        with patch("kiro_crew.mcp_dashboard._get", side_effect=_rows), patch(
+            "kiro_crew.mcp_dashboard._post", return_value={"id": "dddddddddddd"}
+        ) as post:
+            _call_tool_inner("chat_folder_ctl", {"op": "create", "args": {"name": "Round 2"}})
+        assert post.call_args[0][0] == "/api/chat/folders"
+
+    def test_the_per_op_schema_still_validates_args(self) -> None:
+        """The outer schema owns the shape; the op body owns the fields."""
+        with pytest.raises(ValidationError):
+            _call_tool_inner("session_ctl", {"op": "send", "args": {"target": "chat-2-200"}})
+
+    def test_the_identity_gate_runs_on_the_resolved_session_op(self) -> None:
+        """Gating before translation would leave every session op ungated."""
+        with patch(
+            "kiro_crew.mcp_dashboard._resolve_session_key_strict", return_value=""
+        ), patch("kiro_crew.mcp_dashboard._post") as post:
+            out = _call_tool_inner(
+                "session_ctl", {"op": "stop", "args": {"target": "chat-2-200"}}
+            )
+        assert "cannot be identified well enough to control another session" in out
+        post.assert_not_called()
+
+    def test_a_folder_op_is_not_caught_by_the_session_identity_gate(self) -> None:
+        """Gating on the op-shaped name would have refused folder work too."""
+        with patch("kiro_crew.mcp_dashboard._get", side_effect=_rows):
+            out = _call_tool_inner("chat_folder_ctl", {"op": "tree", "args": {}})
+        assert "control another session" not in out
+        assert "kirocrew/0811" in out

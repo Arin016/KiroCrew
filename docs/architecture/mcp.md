@@ -577,7 +577,7 @@ Managed servers, registered by `agent._MANAGED_MCP_SERVERS` and installed into
 | `kirocrew-cron` | `kirocrew mcp-cron` (`mcp_cron.py`) | `cron_add`, `cron_list`, `cron_update`, `cron_remove`, `cron_remove_all`, `cron_pause`, `cron_resume`, `cron_trigger` |
 | `kirocrew-core` | `kirocrew mcp-core` (`mcp_core.py` + `mcp_tools/`) | spawn/subagent, learn, task, messaging, artifact, workflow, knowledge and session-directive tools (see below) |
 | `kirocrew-computer` | `kirocrew mcp-computer` (`mcp_computer.py`) | `computer_list_apps`, `computer_launch_app`, `computer_get_state`, `computer_click`, `computer_drag`, `computer_type_text`, `computer_press_key`, `computer_set_value`, `computer_scroll`, `computer_perform_action`, `computer_end_turn` |
-| `kirocrew-dashboard` | `kirocrew mcp-dashboard` (`mcp_dashboard.py`) | `chat_folder_tree`, `chat_folder_create`, `chat_folder_move`, `chat_folder_move_session` |
+| `kirocrew-dashboard` | `kirocrew mcp-dashboard` (`mcp_dashboard.py`) | `chat_folder_ctl` (ops `tree`, `create`, `move`, `move_session`), `session_ctl` (ops `create`, `send`, `read`, `stop`) |
 
 CLI commands and their MCP twins:
 
@@ -814,9 +814,9 @@ ancestor walk can resolve to a different slot than `_resolve_session_key_strict`
 did; letting them re-resolve would check one identity and write under another,
 and for an app-owned session the walk landing on an ancestor makes the write
 arrive looking like the unconfined person -- which would let an app reach the
-folders the ownership rule exists to protect. `chat_folder_move_session` already
-worked this way; create and move now do too, including each intermediate folder a
-`mkdir -p` parent path creates.
+folders the ownership rule exists to protect. `chat_folder_ctl`'s `move_session`
+op already worked this way; `create` and `move` now do too, including each
+intermediate folder a `mkdir -p` parent path creates.
 
 The same reasoning covers the OTHER way an app's write can arrive unattributable.
 An empty scope reads as the person, which is correct for a caller that never had a

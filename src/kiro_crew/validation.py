@@ -2662,6 +2662,35 @@ SESSION_READ_MESSAGE_SCHEMA = ToolSchema(
     ],
 )
 
+# ── Op-shaped dashboard tools ──
+#
+# The dashboard server advertises TWO tools, each taking an ``op`` plus an
+# ``args`` object. The per-op schemas above are still the validators — they are
+# applied to ``args`` once the op is known, which is why they stay module
+# constants after leaving the registry below.
+#
+# The op vocabulary is deliberately NOT repeated here as an ``allowed`` set:
+# ``mcp_dashboard`` owns it (``SESSION_CTL_OPS`` / ``CHAT_FOLDER_CTL_OPS``, which
+# also drive the advertised enum and the op→handler map), and a second copy would
+# be a third place to forget when an op is added. What these schemas own is the
+# SHAPE — ``op`` is a bounded string, ``args`` is an object — so a malformed call
+# is refused before any op dispatch runs.
+SESSION_CTL_SCHEMA = ToolSchema(
+    tool_name="session_ctl",
+    fields=[
+        FieldSpec("op", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("args", dict),
+    ],
+)
+
+CHAT_FOLDER_CTL_SCHEMA = ToolSchema(
+    tool_name="chat_folder_ctl",
+    fields=[
+        FieldSpec("op", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("args", dict),
+    ],
+)
+
 # ── Schema Registry ──
 
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
@@ -2873,15 +2902,14 @@ def _cu_coord_field(name: str, *, required: bool = False) -> FieldSpec:
 # registry must exist for the same reason the core one does — call_tool_with_logging
 # routes validation through it, and a tool absent from its server's registry has
 # its args passed through raw.
+# Two entries, not eight: the per-op schemas above validate ``args`` after the op
+# is resolved, so only the ADVERTISED tools are keyed here. This registry is what
+# ``call_tool_with_logging`` routes validation through, and a tool absent from it
+# has its args passed through raw — which is why each op body re-validates with its
+# own schema instead of trusting the outer shape.
 MCP_DASHBOARD_SCHEMAS: dict[str, ToolSchema] = {
-    "session_create": SESSION_CREATE_SCHEMA,
-    "session_stop": SESSION_STOP_SCHEMA,
-    "session_send": SESSION_SEND_SCHEMA,
-    "session_read_message": SESSION_READ_MESSAGE_SCHEMA,
-    "chat_folder_tree": CHAT_FOLDER_TREE_SCHEMA,
-    "chat_folder_create": CHAT_FOLDER_CREATE_SCHEMA,
-    "chat_folder_move": CHAT_FOLDER_MOVE_SCHEMA,
-    "chat_folder_move_session": CHAT_FOLDER_MOVE_SESSION_SCHEMA,
+    "session_ctl": SESSION_CTL_SCHEMA,
+    "chat_folder_ctl": CHAT_FOLDER_CTL_SCHEMA,
 }
 
 MCP_COMPUTER_SCHEMAS: dict[str, ToolSchema] = {

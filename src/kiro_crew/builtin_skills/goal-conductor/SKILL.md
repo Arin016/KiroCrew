@@ -17,10 +17,16 @@ Your four jobs, none of which can be delegated to a work item:
 Everything else belongs in a work item. This spec has **no `fs_write`** — that
 is deliberate. If a task needs a file written, it is a work item, not something
 you do. `execute_bash` IS granted, for exactly one purpose: running this
-skill's bundled scripts — the acceptance evaluator (`scripts/accept_eval.py`)
-and the ledger entry codec (`scripts/ledger_entry.py`). Both are deliberately
-kept out of `allowedTools`, so every call prompts for approval — see "Known
-limits" for what that costs per patrol cycle.
+skill's bundled scripts — the acceptance evaluator (`scripts/accept_eval.py`),
+the ledger entry codec (`scripts/ledger_entry.py`), and the durable inbox +
+dispatch record (`scripts/queue.py`). All three are deliberately kept out of
+`allowedTools`, so every call prompts for approval — see "Known limits" for what
+that costs per patrol cycle.
+
+Between them they hold everything that must survive a lost turn: the evaluator
+holds the VERDICT, the codec holds the ENTRY FORMAT, and the queue holds the two
+things that used to live only in this prose — a mid-flight user message, and
+whether an item was already dispatched.
 
 ## What is a work item
 
@@ -83,9 +89,23 @@ beats more parallelism: every open item is a session the user may have to read.
 
 For each item in the round:
 
-1. `chat_folder_create` once per goal (skip if it exists) so every session for
-   this goal lands in one place.
-2. `session_create` with a title that says what the item is FOR, and `agent` set
+Session and folder control are TWO op-shaped tools: `session_ctl(op, args)`
+with ops create / send / read / stop, and `chat_folder_ctl(op, args)` with ops
+tree / create / move / move_session. One call carries one op. An unknown op is
+refused with the valid ones listed — that costs a round trip, so take the op
+from this skill rather than guessing a verb.
+
+1. `chat_folder_ctl(op="create", args={name})` once per goal (skip if it exists)
+   so every session for this goal lands in one place.
+2. `queue.py dispatch_begin` with `{goal, item}`, BEFORE creating anything. It
+   pre-assigns the item's dispatch id and returns `replay: true` when a previous
+   attempt already began this item. **`replay: true` with `state: "begun"` means a
+   session may already exist for it with no seed** — read that session before
+   creating a second one, because an unseeded session looks exactly like a quiet
+   one. A second `dispatch_begin` deliberately returns the SAME id: a fresh id per
+   attempt is what opens two sessions for one item.
+3. `session_ctl(op="create", args={title, agent})` with a title that says what
+   the item is FOR, and `agent` set
    to the crew that fits. Call `select_crew` first and pass the agent it names —
    the matched crew when the item is clearly a specialist's job, otherwise the
    `default_agent` it returns. **Do NOT leave `agent` unset to "inherit the
@@ -93,11 +113,16 @@ For each item in the round:
    spec deliberately has no `fs_write` — so the child could not write a file even
    though writing one is the work you dispatched it to do, and the item would
    look stalled rather than misconfigured.
-3. `chat_folder_move_session` to file the new session under the goal's folder.
-4. `session_send` the seed prompt into the new session — the item's goal, its
+4. `chat_folder_ctl(op="move_session", args={session, folder})` to file the new
+   session under the goal's folder.
+5. `session_ctl(op="send", args={target, message})` the seed prompt into the new
+   session — the item's goal, its
    acceptance condition, and where to report. The seed is the item's whole
    contract: the child session gets no other context from you.
-5. `session_ledger_record` the item: its goal text, the round number, and — in
+6. `queue.py dispatch_sent` with `{goal, item, session}` immediately after the
+   seed lands. This is what closes the replay window: until it is recorded, every
+   later `dispatch_begin` for this item warns that the session may be unseeded.
+7. `session_ledger_record` the item: its goal text, the round number, and — in
    `artifacts`, under an `item-<n>` key — the durable item entry carrying its
    acceptance spec, session key, round, status and read cursor. **Never
    hand-write the entry value: encode it with the bundled codec**
@@ -111,7 +136,12 @@ For each item in the round:
    compaction; `next` carries the resumable intent.
 
 Send the seed BEFORE recording the ledger row as dispatched — a ledger row that
-says "running" for a session that never got its seed is the worse failure.
+says "running" for a session that never got its seed is the worse failure. The
+ordering is still yours to keep, but it is no longer only prose: `dispatch_begin`
+and `dispatch_sent` make a half-finished dispatch VISIBLE to the next turn, so a
+lost turn between create and send is recoverable instead of invisible. What they
+do NOT give you is atomicity — the two calls are yours to make, so the queue can
+tell you a dispatch was replayed but cannot prevent the replay.
 
 ### Patrol
 
@@ -154,7 +184,7 @@ Each cycle:
    after the item starts — a PR number for `pr_checks` is the common case.
    Record the condition with the value marked TBD at dispatch, tell the child
    in its seed prompt to report the value, and the first patrol cycle that
-   learns it (via `session_read_message`) rewrites the ledger entry to the
+   learns it (via `session_ctl(op="read")`) rewrites the ledger entry to the
    concrete spec. **Until the value is known, leave that item OUT of the
    evaluator batch entirely** and treat it as waiting in your own bookkeeping —
    do not send it with a placeholder. A spec whose `pr` is not an integer is an
@@ -163,7 +193,7 @@ Each cycle:
    malformed spec indistinguishable from one that is merely early. Never fake
    the gap with a search-style command either — list commands exit 0 on empty
    results, so they cannot carry the verdict.
-3. For items still running, `session_read_message` with the `since` cursor you
+3. For items still running, `session_ctl(op="read")` with the `since` cursor you
    stored last cycle — this answers "is it moving / did it ask a question",
    never "did it succeed". Store the returned `next_since` back into that item's
    `artifacts` entry (a fresh `ledger_entry.py encode` with the new cursor) —
@@ -175,11 +205,11 @@ Each cycle:
    failing it, asking a question, or stalling. Never post "nothing changed".
 
 **Shell exists for the bundled scripts, not for work.** `execute_bash` is
-granted so patrol can run `accept_eval.py` and `ledger_entry.py`. Running a
-work item's build, test, or fix yourself through it is the boundary violation
-this skill exists to prevent — if you need a command run to MAKE something
-true, that is a work item; the bundled scripts only CHECK and ENCODE what is
-already true.
+granted so patrol can run `accept_eval.py`, `ledger_entry.py` and `queue.py`.
+Running a work item's build, test, or fix yourself through it is the boundary
+violation this skill exists to prevent — if you need a command run to MAKE
+something true, that is a work item; the bundled scripts only CHECK, ENCODE and
+REMEMBER what is already true.
 
 ### Close the round
 
@@ -196,8 +226,18 @@ The user can message you any time. Apply a changed goal **at the round
 boundary** — that is the re-plan point, and cancelling mid-round throws away
 finished work.
 
+**Park it the moment it arrives: `queue.py enqueue` with `{goal, text}`.** Holding
+it "until the boundary" in the conversation alone is how a steering instruction
+disappears — a compaction between arrival and the boundary takes it with no trace.
+At the boundary, `queue.py claim` returns every parked message, and `queue.py done`
+with their ids drops the ones you applied. A claim does NOT delete: a turn that
+dies after claiming leaves the messages recoverable, and a later claim re-serves
+anything claimed longer ago than `stale_secs`. Use `release` when you claimed a
+message you are not going to apply this round.
+
 One exception: if their message directly invalidates an item that is still
-running, deal with that item now — `session_stop` it, or `session_send` the
+running, deal with that item now — `session_ctl(op="stop")` it, or
+`session_ctl(op="send")` the
 correction straight into it. Do not tear down the whole round for one item.
 
 ## Stop conditions
@@ -334,13 +374,16 @@ watches, and that cost grows with the loop's own history.
   are withheld from auto-approve so their calls still pass through the tool-call
   hook where the deny floor and governance ceiling apply. The steady-state cost is
   concrete and worth planning for: **each patrol cycle blocks on one approval for
-  the `accept_eval.py` invocation** plus one per codec call, and one per
-  session-control call in a dispatch round. Patrol is therefore
+  the `accept_eval.py` invocation** plus one per codec call, one per queue call,
+  and one per session-control call in a dispatch round. A dispatch round pays two
+  extra approvals per item for `dispatch_begin` + `dispatch_sent` — that is the
+  price of a recoverable dispatch, and it buys back the case where a lost turn
+  leaves a session nobody can tell is unseeded. Patrol is therefore
   attended-unattended — the loop wakes itself, but a cycle that finds nobody at
   the keyboard waits rather than proceeding. Size the nudge interval for that,
   and prefer batched calls — one evaluator call per cycle carrying every open
   item, one codec call per map-wide operation — over one call per item.
-- **`session_send` reports delivery, not completion.** `started: true` means the
+- **`session_ctl(op="send")` reports delivery, not completion.** `started: true` means the
   target began a turn on your message; `started: false` means it queued. Neither
   says the work succeeded — acceptance is still the domain assertion's job.
 - **Some targets are out of bounds by design.** Incognito/temporary sessions,
@@ -348,9 +391,10 @@ watches, and that cost grows with the loop's own history.
   and sessions in another workspace are all refused by the shared guard. Plan
   work items onto plain persistent dashboard sessions only.
 - **Shell is for the bundled scripts only, and the evaluator runs no command
-  you name.** `execute_bash` exists so patrol can run `accept_eval.py` and
-  `ledger_entry.py` (the codec runs no subprocess at all — it only transforms
-  JSON); every call is audit-logged and every call prompts. The evaluator
+  you name.** `execute_bash` exists so patrol can run `accept_eval.py`,
+  `ledger_entry.py` and `queue.py` (the codec and the queue run no subprocess at
+  all — one transforms JSON, the other reads and writes one JSON file); every call
+  is audit-logged and every call prompts. The evaluator
   accepts **no command, argv array, or shell string from a spec** — it builds
   every argv it runs from a fixed template, so `pr_checks` becomes `gh pr
   checks <n>` and nothing else executes. That is deliberate and load-bearing:

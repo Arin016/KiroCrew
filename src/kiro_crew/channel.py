@@ -54,13 +54,17 @@ _INBOX_POLL_SECS = 1.0
 # Matched against the rendered
 # permission-request text/title via _blocked_tool_named() (boundary-aware,
 # not naive substring — "Editing send_notification.py" must NOT match).
+# ``session_ctl`` is the one op-shaped tool those four verbs now live under
+# (create/send/read/stop — ``mcp_dashboard.SESSION_CTL_OPS``), so blocking the NAME
+# blocks all four: the same containment as before, expressed once. It is also why
+# folder organization stayed a SEPARATE tool (``chat_folder_ctl``): this matcher
+# reads rendered permission text and cannot see an ``op``, so a single merged name
+# would force a choice between handing a channel agent session control and taking
+# folder organization away from it.
 CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     "send_message",
     "send_notification",
-    "session_stop",
-    "session_send",
-    "session_read_message",
-    "session_create",
+    "session_ctl",
 )
 
 # Boundary-aware matcher: the tool name must stand alone in the rendered

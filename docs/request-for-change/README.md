@@ -22,6 +22,7 @@ verified against `6d3e30bbbd`.
 
 | Document | Status | What is actually on main |
 |---|---|---|
+| [rfc-conductor-op-tool-and-script-boundary.md](rfc-conductor-op-tool-and-script-boundary.md) | `partial` | The op-shaped surface shipped (`session_ctl` + `chat_folder_ctl` replace the eight dashboard verbs, the identity gate derives from the op map, channel containment blocks the one name) and so did `scripts/queue.py` (durable inbox + dispatch record). Gateway-side dispatch — the only thing that would make a duplicate dispatch impossible rather than detectable — is not built |
 | [rfc-durable-run-coordinator.md](rfc-durable-run-coordinator.md) | `draft` | Nothing. Design and seven-PR additive migration stack only; the existing in-memory manager and run folders remain authoritative |
 | [rfc-issue-radar-crews.md](rfc-issue-radar-crews.md) | `draft` | Nothing. Design of record only; `crew_brief.md` and `crew_ledger_spec.md` sit beside the Issue Radar backend as companion specs, also unimplemented |
 | [rfc-orchestrator-chat-sessions.md](rfc-orchestrator-chat-sessions.md) | `partial` | Crew Mode shipped in [#1295](https://github.com/kirodotdev/KiroCrew/pull/1295) and has since received store and routing fixes. The implementation deliberately diverges from the RFC in at least three places: no snapshot-generation CAS, no `release` decision action, and immediate per-result delivery instead of burst coalescing |

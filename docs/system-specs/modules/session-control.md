@@ -9,17 +9,29 @@ has spent an hour on a PR cannot tell whether the session watching the build has
 finished, and today the only way to find out is for the human to switch tabs and
 look. Session control lets the session ask directly.
 
-Three MCP tools on `kirocrew-dashboard`, three strict-internal routes, one config
-switch. Every route is on `_STRICT_INTERNAL_API_PATHS`; an unlisted one is
-unreachable in production because the caller's `X-Internal-Secret` is ignored.
+ONE op-shaped MCP tool on `kirocrew-dashboard` — `session_ctl(op, args)` — over
+four strict-internal routes, plus one config switch. Every route is on
+`_STRICT_INTERNAL_API_PATHS`; an unlisted one is unreachable in production because
+the caller's `X-Internal-Secret` is ignored.
 
-| Tool | Route | What it does |
-|------|-------|--------------|
-| `session_create` | `POST /api/session-control/create` | Open a new, empty session in the caller's workspace |
-| `session_stop` | `POST /api/session-control/stop` | Stop another session's in-flight turn |
-| `session_read_message` | `GET /api/session-control/read` | Read another session's transcript tail + liveness |
+| Op | Route | Internal handler | What it does |
+|----|-------|------------------|--------------|
+| `create` | `POST /api/session-control/create` | `session_create` | Open a new, empty session in the caller's workspace |
+| `send` | `POST /api/session-control/send` | `session_send` | Deliver a message the target runs as its next turn |
+| `read` | `GET /api/session-control/read` | `session_read_message` | Read another session's transcript tail + liveness |
+| `stop` | `POST /api/session-control/stop` | `session_stop` | Stop another session's in-flight turn |
 
-**One verb here writes into another session's conversation: `session_send`.**
+These four verbs were four separate advertised tools until the op-shaped surface
+landed (`docs/request-for-change/rfc-conductor-op-tool-and-script-boundary.md`).
+The handler names in the third column did NOT change — they are what the dispatch
+map, the audit trail and every error string still say; only the advertised surface
+collapsed, from eight stubs on this server to two. Folder organization is the
+sibling tool `chat_folder_ctl`, deliberately not merged into this one: channel
+containment matches a tool NAME and cannot see an `op`, so a single merged name
+would have to either hand a channel agent session control or take folder
+organization away from it.
+
+**One op here writes into another session's conversation: `op='send'`.**
 Reading returns a transcript tail, stopping cancels a turn the way the Stop button
 does, creating opens an empty session, and sending delivers a message that the
 target runs as its next turn. Delivery is the sharpest verb and is bounded
@@ -36,7 +48,7 @@ text. That window is accepted, not overlooked: it is not specific to this module
 (a human-typed message into a busy session drains through the same ungated path),
 so it is fixed once at the drain rather than per caller. Tracked as issue #5911.
 
-`session_create` earns its place on its own, not as the front half of a delivery
+`op='create'` earns its place on its own, not as the front half of a delivery
 design: an agent that has just worked out that a job needs its own session can
 open it pre-named and bound to the right agent, in the caller's workspace, and
 hand the person a key they can read and stop. Without it the person does that by
@@ -48,7 +60,7 @@ NOT seed a first message: that would be delivery.
 capability every session should carry. That server is an **assignable set**: it
 is absent from the default agent's spec and loads only for an agent whose own
 spec references it, so an ordinary session spends no context on tools it will
-never call. The set already holds the chat-folder tools, and the two classes are
+never call. The set also holds `chat_folder_ctl`, and the two classes are
 granted together on purpose — an agent given the job of organizing sessions is
 the same agent that should be able to see what they are doing. A test pins that
 bundling so neither half can leave the set unnoticed.
@@ -60,7 +72,7 @@ and its keys are what `target` accepts.
 
 Deny-by-default, and checked in **one** place — `authorize_target` — for the two
 verbs that take a target, so a guard cannot be present on `stop` and missing on
-`read`. (`session_create` has no target to authorize; it checks the caller's own
+`read`. (`op='create'` has no target to authorize; it checks the caller's own
 eligibility with the same refusals.) Every refusal is recorded in the SEL as
 `session_control.<op>` with `outcome=denied`, so an attempt to reach a session
 that is out of bounds is visible after the fact even though nothing happened.
@@ -91,17 +103,23 @@ Two notes on scope:
 - **Only sessions the dashboard currently holds are addressable.** A closed tab
   is out of reach on purpose — waking one would resurrect a conversation the
   user put away. This is narrower than `list_sessions`, which also lists history.
-- **All three tools are on `CHANNEL_AGENT_BLOCKED_TOOLS`, including the read.** A
-  channel agent is contained to channel posts, and session control crosses that
-  boundary in both directions: a stop reaches the user through one of their
-  dashboard transcripts, and `session_read_message` pulls a private dashboard
-  conversation into a channel other humans can see. Containment is about what
-  crosses the boundary, not about who writes, so the read is blocked alongside
-  the rest. `session_create` earns its place for a different reason: it writes
-  nothing into an existing conversation, but it puts a persistent,
+- **`session_ctl` is on `CHANNEL_AGENT_BLOCKED_TOOLS`, and that covers all four
+  ops including the read.** A channel agent is contained to channel posts, and
+  session control crosses that boundary in both directions: a stop reaches the
+  user through one of their dashboard transcripts, and `op='read'` pulls a private
+  dashboard conversation into a channel other humans can see. Containment is about
+  what crosses the boundary, not about who writes, so the read is blocked
+  alongside the rest. `op='create'` earns its place for a different reason: it
+  writes nothing into an existing conversation, but it puts a persistent,
   sidebar-visible session outside that containment.
 
-All three tools additionally require a **signed** caller identity
+  Blocking is by tool NAME: `_blocked_tool_named` matches rendered
+  permission-request text, so there is no such thing as blocking one op and
+  admitting another. That is coverage by construction rather than a list to keep
+  in step — and it is the reason folder organization is a separate tool, since
+  otherwise it would be blocked by the same match.
+
+All four ops additionally require a **signed** caller identity
 (`_resolve_session_key_strict`), not the lenient `/proc` ancestor walk. A
 subagent spawned by `spawn_run` lives under its parent slot's process tree, so
 the walk resolves it to the parent — and since authorization here is entirely
@@ -134,13 +152,12 @@ section nor a missing setting can produce cross-session reach.
 
 ## The wait → read poll loop
 
-`session_read_message` is the observation half, and polling is the supported
-shape:
+`op='read'` is the observation half, and polling is the supported shape:
 
-1. `session_read_message(target)` — record `next_since`.
+1. `session_ctl(op="read", args={target})` — record `next_since`.
 2. `wait(seconds=…)`.
-3. `session_read_message(target, since=<previous next_since>)` — returns only what
-   arrived since, so a loop does not re-read the same messages.
+3. `session_ctl(op="read", args={target, since: <previous next_since>})` — returns
+   only what arrived since, so a loop does not re-read the same messages.
 
 `total` is an **absolute position** in the session, not the length of the live
 window. A slot retains only its most recent messages in memory and credits each
@@ -176,11 +193,11 @@ window.
 
 ## Configuration
 
-`agent.session_control` (bool, default **false**). Off makes all three tools
-refuse with a message naming the switch, so an agent that has not been granted it
-reports why rather than failing silently.
+`agent.session_control` (bool, default **false**). Off makes all four ops refuse
+with a message naming the switch, so an agent that has not been granted it reports
+why rather than failing silently.
 
-Default-off is the deliberate part. The three tools ride on the existing
+Default-off is the deliberate part. `session_ctl` rides on the existing
 assignable `kirocrew-dashboard` server rather than a new one, so an operator who
 had already assigned that server to an agent for folder organization would
 otherwise find that agent able to read peer transcripts and stop peer turns purely
@@ -198,7 +215,7 @@ infer a grant from silence.
 
 ## What is deliberately not here
 
-- **No delivery to a target outside the addressable set.** `session_send` writes
+- **No delivery to a target outside the addressable set.** `op='send'` writes
   into another session's conversation, but only one the same `authorize_target`
   guard admits: a channel-linked, channel-mirrored, crew-mode, incognito,
   app-scoped, unattended or cross-workspace target is refused, so the verb cannot
@@ -207,5 +224,5 @@ infer a grant from silence.
 - **No cross-workspace or cross-machine reach.** The boundary is one gateway's
   live sessions in one workspace.
 - **No waking closed sessions.** See above.
-- **No writes on the read path.** `session_read_message` never changes the
+- **No writes on the read path.** `op='read'` never changes the
   target's state, so a poll loop cannot perturb what it is measuring.

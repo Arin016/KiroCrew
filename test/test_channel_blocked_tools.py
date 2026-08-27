@@ -88,10 +88,16 @@ async def test_blocked_tool_rejected_even_on_trusted_channel(monkeypatch, tool):
         ("send_notification (kirocrew-core)", True),
         ("kirocrew-core___send_message", True),
         ("mcp__kirocrew-core__send_message", True),  # canonical MCP prefix (round 20)
+        # The op-shaped session tool: containment matches this ONE name and
+        # thereby all four session ops (create/send/read/stop).
+        ("session_ctl (kirocrew-dashboard)", True),
+        ("kirocrew-dashboard___session_ctl", True),
+        ("mcp__kirocrew-dashboard__session_ctl", True),
         ('Tool: "send_notification"', True),
         # Negative (GPT 5.6 round 19): filenames/paths/identifiers that merely
         # CONTAIN a blocked tool name must not trip the containment guard.
         ("Editing send_notification.py", False),
+        ("Editing session_ctl.py", False),
         ("Reading /tmp/send_message_backup.txt", False),
         ("fs_write path=src/send_notification_helpers.py", False),
         ("grep send_message_v2", False),
@@ -119,3 +125,25 @@ def test_every_session_control_tool_is_contained():
 
     missing = sorted(set(SESSION_CONTROL_TOOLS) - set(CHANNEL_AGENT_BLOCKED_TOOLS))
     assert not missing, f"session-control tools reachable from a channel agent: {missing}"
+
+
+def test_containing_the_op_shaped_name_contains_every_session_op():
+    """One blocked name has to hold four verbs, because the matcher sees no op.
+
+    ``_blocked_tool_named`` reads RENDERED permission text, so it cannot inspect
+    arguments: there is no such thing as blocking ``session_ctl op='send'`` here.
+    That is precisely why folder organization stayed a separate tool
+    (``chat_folder_ctl``) — merged into one name, this containment would have to
+    choose between handing a channel agent session control and taking folder
+    organization away from it.
+
+    So the property to pin is coverage by construction: every session op lives
+    under a blocked name, and the folder tool is NOT blocked.
+    """
+    from kiro_crew.channel import _blocked_tool_named
+    from kiro_crew.mcp_dashboard import SESSION_CTL_OPS
+
+    assert SESSION_CTL_OPS, "an empty op set would make the containment vacuous"
+    assert _blocked_tool_named("session_ctl (kirocrew-dashboard)")
+    # The deliberate non-block: organizing the sidebar stays available.
+    assert not _blocked_tool_named("chat_folder_ctl (kirocrew-dashboard)")

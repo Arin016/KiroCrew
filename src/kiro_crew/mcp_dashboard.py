@@ -99,18 +99,50 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "kirocrew-dashboard"
 SERVER_VERSION = "1.0.0"
 
-#: The session-control half of this server's tool set, in one place because three
-#: separate things must agree on it: the caller-identity gate in
-#: ``_call_tool_inner``, the channel-agent containment list
-#: (``CHANNEL_AGENT_BLOCKED_TOOLS``), and the pinned advertised set in the
-#: registration tests. Spelling it out per site is how ``session_create`` came to
-#: be gated for identity but reachable from a channel agent.
-SESSION_CONTROL_TOOLS: tuple[str, ...] = (
-    "session_create",
-    "session_stop",
-    "session_send",
-    "session_read_message",
-)
+#: The ops each advertised tool accepts. One source for three consumers — the
+#: advertised enum, the op→handler map below, and the refusal text a bad op gets —
+#: so an op cannot be half-added.
+SESSION_CTL_OPS: tuple[str, ...] = ("create", "send", "read", "stop")
+CHAT_FOLDER_CTL_OPS: tuple[str, ...] = ("tree", "create", "move", "move_session")
+
+#: op → the internal handler name its body is still written under. The bodies did
+#: not move: each is the same endpoint call validated by the same per-op schema, so
+#: this change is the tool SURFACE only. Keeping the internal names also keeps the
+#: audit trail and every error string recognisable across the change.
+_OP_TO_INNER: dict[str, dict[str, str]] = {
+    "session_ctl": {
+        "create": "session_create",
+        "send": "session_send",
+        "read": "session_read_message",
+        "stop": "session_stop",
+    },
+    "chat_folder_ctl": {
+        "tree": "chat_folder_tree",
+        "create": "chat_folder_create",
+        "move": "chat_folder_move",
+        "move_session": "chat_folder_move_session",
+    },
+}
+
+#: The ADVERTISED session-control surface: one op-shaped tool. This is the name the
+#: channel-agent containment list matches (``CHANNEL_AGENT_BLOCKED_TOOLS``) and the
+#: name the registration tests pin.
+#:
+#: Session control and folder organization are TWO tools rather than one for this
+#: reason and no other: containment matches on the tool NAME, against rendered
+#: permission-request text, so it cannot see an ``op``. Folding both classes into
+#: one name would make that block all-or-nothing — either a channel agent regains
+#: session control (the regression the old per-site spelling already caused once)
+#: or it loses the folder organization it has today. The split keeps the block exact.
+SESSION_CONTROL_TOOLS: tuple[str, ...] = ("session_ctl",)
+
+#: The internal handler names session control dispatches to — what the
+#: caller-identity gate in ``_call_tool_inner`` tests AFTER op resolution. Derived
+#: from the op map rather than spelled out, so the gate cannot fall out of step with
+#: the vocabulary: an op added to ``session_ctl`` is identity-gated the moment it is
+#: mapped. That derivation is the fix for the failure mode the previous comment here
+#: described, where each site carried its own copy of the list.
+SESSION_CONTROL_INNER: tuple[str, ...] = tuple(_OP_TO_INNER["session_ctl"].values())
 
 # The folder endpoints store ``name[:100]``. Mirroring the number here is what
 # lets this server refuse an overlong name instead of writing one it cannot
@@ -120,224 +152,125 @@ _MAX_FOLDER_NAME = 100
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
-    """The tool surface this server advertises."""
+    """The tool surface this server advertises: two op-shaped tools.
+
+    Eight verbs, two stubs. ``tools/list`` is read once per session, so every
+    descriptor is a standing context cost for that whole session whether or not the
+    capability is used; the per-op detail belongs in the skill that drives the ops,
+    which is loaded on demand. Same shape as the ``browser`` tool
+    (:mod:`kiro_crew.mcp_tools.browser`), for the same reason.
+
+    The descriptions stay self-sufficient on purpose. This set is granted to agents
+    that carry no conductor skill, so a reader of the tool list alone must still be
+    able to drive it correctly — the skill adds ORDER, not the vocabulary.
+    """
     return [
         {
-            "name": "chat_folder_tree",
+            "name": "chat_folder_ctl",
             "description": (
-                "Show the user's SIDEBAR folder tree — the folders they organize "
-                "their chat sessions in — with the live sessions filed in each one. "
-                "Returns per folder: id, human path, project directory, default "
-                "agent, and how many archived (history) sessions are filed there; "
-                "then one line per live session (slot key + title) nested under it, "
-                "and an '(unfiled)' group for sessions at the top level. Use this to "
-                "get folder ids/paths and session keys before calling "
-                "chat_folder_create / chat_folder_move / chat_folder_move_session, "
-                "or when the user asks what their tree looks like. This is the "
-                "folder-shaped view; list_sessions is the flat newest-first one."
-            ),
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "chat_folder_create",
-            "description": (
-                "Create a sidebar folder (or subfolder) for chat sessions. "
-                "``parent`` accepts a folder id OR a '/'-separated human path from "
-                "chat_folder_tree; missing path segments are created too (mkdir -p). "
-                "Omit ``parent`` (or pass 'root') for a top-level folder. Creating a "
-                "folder never moves anything — file sessions into it with "
-                "chat_folder_move_session. An app agent may create at the top level "
-                "or inside a folder it created itself, and the new folder belongs to "
-                "it; creating inside one of the person's folders is refused."
+                "Organize the user's SIDEBAR: submit ONE operation. `op` is the "
+                "action, `args` its parameters.\n"
+                "op='tree' args={} — the folder tree with the live sessions filed "
+                "in each folder: per folder its id, human path, project directory, "
+                "default agent and archived (history) count; then slot key + title "
+                "per session, plus an '(unfiled)' group for top-level sessions. Call "
+                "this FIRST to get the ids, paths and session keys the other ops "
+                "take. This is the folder-shaped view; list_sessions is the flat "
+                "newest-first one.\n"
+                "op='create' args={name, parent?} — create a folder or subfolder. "
+                "`name` max 100 chars and cannot contain '/'. `parent` is a folder "
+                "id or a '/'-separated human path; missing segments are created too "
+                "(mkdir -p); omit it or pass 'root' for top level. Creating never "
+                "moves anything — file sessions in with op='move_session'.\n"
+                "op='move' args={folder, new_parent?} — reparent a folder with "
+                "everything in it (sessions and subfolders travel along); nothing is "
+                "deleted; cycle-guarded, so a folder cannot become its own "
+                "descendant. Omit `new_parent` / pass 'root' for top level.\n"
+                "op='move_session' args={session, folder?} — file a LIVE session "
+                "into a folder, or unfile it to the top level (omit `folder` / pass "
+                "'root'). `session` is a slot key, a 'dashboard:<slot>' session key, "
+                "or a session's exact title when unique. The folder must already "
+                "exist. Metadata only: the session keeps its transcript, model and "
+                "any running turn. ARCHIVED (history) sessions cannot be moved — "
+                "revive one into the sidebar first.\n"
+                "App-agent limits: it may create at the top level or inside a folder "
+                "it created itself, and may move only its own folders."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": {
+                    "op": {
                         "type": "string",
+                        "enum": list(CHAT_FOLDER_CTL_OPS),
+                        "description": "The folder operation to perform.",
+                    },
+                    "args": {
+                        "type": "object",
                         "description": (
-                            "Folder name (max 100 chars). Cannot contain '/' — that "
-                            "would render like a nested path and be unaddressable."
-                        ),
-                    },
-                    "parent": {
-                        "type": "string",
-                        "description": "Parent folder id or human path. Omit / 'root' for top level.",
-                    },
-                },
-                "required": ["name"],
-            },
-        },
-        {
-            "name": "chat_folder_move",
-            "description": (
-                "Reparent a sidebar folder — nest it under another folder, or move it "
-                "back to the top level. Moves the folder with everything in it "
-                "(sessions and subfolders travel with it); nothing is deleted. "
-                "Cycle-guarded: a folder cannot become its own descendant. "
-                "``folder`` and ``new_parent`` are each a folder id or human path; "
-                "omit ``new_parent`` (or pass 'root') for the top level. An app agent "
-                "may move only a folder it created itself, and only to the top level "
-                "or under another of its own."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "folder": {"type": "string", "description": "Folder to move (id or path)."},
-                    "new_parent": {
-                        "type": "string",
-                        "description": "Destination parent folder (id or path). Omit / 'root' for top level.",
-                    },
-                },
-                "required": ["folder"],
-            },
-        },
-        {
-            "name": "chat_folder_move_session",
-            "description": (
-                "File a LIVE chat session into a sidebar folder, or unfile it to the "
-                "top level (omit ``folder`` / pass 'root'). ``session`` is a slot key "
-                "or 'dashboard:<slot>' session key from chat_folder_tree, or a "
-                "session's exact title when that title is unique. ``folder`` is a "
-                "folder id or human path — the folder must already exist "
-                "(chat_folder_create makes one). Metadata only: the session keeps its "
-                "transcript, model, and any running turn. ARCHIVED (history) sessions "
-                "cannot be moved — revive one into the sidebar first, then call this."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session": {
-                        "type": "string",
-                        "description": "Slot key, 'dashboard:<slot>' session key, or exact unique session title.",
-                    },
-                    "folder": {
-                        "type": "string",
-                        "description": "Destination folder id or human path. Omit / 'root' to unfile.",
-                    },
-                },
-                "required": ["session"],
-            },
-        },
-        {
-            "name": "session_create",
-            "description": (
-                "Open a NEW chat session, pre-named and bound to the agent you pick, so a "
-                "separate workstream has a home of its own. The new session appears in "
-                "the user's sidebar like any other — they can read it, take it over and "
-                "close it — so use it to stand up a workstream alongside this one (watch a "
-                "build, grind a long refactor) rather than to hide work. It starts empty: "
-                "the person is the one who types the first message into it. Returns its "
-                "key; pass that as `target` to the other session tools."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": (
-                            "Short name for the session, shown in the sidebar. Say what the "
-                            "session is FOR so the user can tell your sessions apart."
-                        ),
-                    },
-                    "agent": {
-                        "type": "string",
-                        "description": (
-                            "Agent to bind the session to. Omit to use the default agent."
+                            "Operation parameters (name, parent, folder, "
+                            "new_parent, session). Optional; defaults to {}."
                         ),
                     },
                 },
-                "required": [],
+                "required": ["op"],
             },
         },
         {
-            "name": "session_stop",
+            "name": "session_ctl",
             "description": (
-                "Stop another session's in-flight turn — the same thing as pressing Stop "
-                "in that tab. Use it when a peer session is working on something you now "
-                "know is wrong or already done, and letting it finish would waste the run "
-                "or make a conflicting change. The first call cancels cooperatively; "
-                "calling again while that is still pending escalates to a hard kill. "
-                "A stop card appears in the "
-                "target's transcript so the person reading it sees what happened. Stopping "
-                "discards the turn's work, so read the session first when you are not sure "
-                "what it is doing."
+                "Drive ANOTHER chat session: submit ONE operation. `op` is the "
+                "action, `args` its parameters. `target` throughout is a session key "
+                "from list_sessions or chat_folder_ctl op='tree', or a session's "
+                "exact title when unique.\n"
+                "op='create' args={title?, agent?} — open a NEW session, pre-named "
+                "and bound to the agent you pick, so a separate workstream has a "
+                "home of its own. It appears in the user's sidebar like any other — "
+                "they can read it, take it over, close it — so use it to stand up "
+                "work ALONGSIDE this session (watch a build, grind a long refactor), "
+                "never to hide work. It starts empty; returns its key, which you "
+                "pass as `target` afterwards. Say in `title` what the session is FOR "
+                "so the user can tell your sessions apart. Omit `agent` for the "
+                "default agent.\n"
+                "op='send' args={target, message} — deliver a message as the "
+                "target's next agent turn: the way to seed a session you just "
+                "created, answer a question it raised, or steer it mid-run. Idle "
+                "target starts immediately; busy target queues the message until its "
+                "turn ends — the result says which happened. It lands in the "
+                "target's transcript tagged as sent by your session, so the person "
+                "reading it can tell it from their own typing. Write it as you would "
+                "type into that session's composer.\n"
+                "op='read' args={target, limit?, since?} — read the tail of the "
+                "target's transcript plus whether it is still working. Poll with "
+                "`wait`, then read: pass the previous read's `next_since` back as "
+                "`since` and you get only what arrived in between, so a loop does "
+                "not re-read the same messages. `running: false` with nothing new "
+                "means finished, which is the difference between 'not done yet' and "
+                "'done'. `limit` defaults to 20, max 100. READ-only.\n"
+                "op='stop' args={target} — stop the target's in-flight turn, the "
+                "same as pressing Stop in that tab. Use it when a peer session is "
+                "working on something you now know is wrong or already done. The "
+                "first call cancels cooperatively; calling again while that is "
+                "pending escalates to a hard kill. A stop card appears in the "
+                "target's transcript. Stopping discards that turn's work, so read "
+                "the session first when you are unsure what it is doing."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": {
+                    "op": {
                         "type": "string",
-                        "description": "Session key from list_sessions, or its exact title.",
+                        "enum": list(SESSION_CTL_OPS),
+                        "description": "The session operation to perform.",
                     },
-                },
-                "required": ["target"],
-            },
-        },
-        {
-            "name": "session_send",
-            "description": (
-                "Send a message into another session as its next agent turn — the "
-                "way to seed a session you just created with session_create, answer "
-                "a question it raised, or steer it mid-run. If the target is idle "
-                "the turn starts immediately; if it is busy the message queues and "
-                "runs when its current turn ends — the result says which happened. "
-                "The message lands in the target's transcript tagged as sent by "
-                "your session, so the person reading it can tell it from their own "
-                "typing. Use session_read_message afterwards to watch what the "
-                "target did with it."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Session key from list_sessions, or its exact title.",
-                    },
-                    "message": {
-                        "type": "string",
+                    "args": {
+                        "type": "object",
                         "description": (
-                            "The message to deliver. It becomes the target's next "
-                            "user-role turn, so write it as you would type into "
-                            "that session's composer."
+                            "Operation parameters (target, message, title, agent, "
+                            "limit, since). Optional; defaults to {}."
                         ),
                     },
                 },
-                "required": ["target", "message"],
-            },
-        },
-        {
-            "name": "session_read_message",
-            "description": (
-                "Read the tail of another session's transcript, plus whether it is still "
-                "working. Use it to watch a peer session's progress: `wait`, then read — "
-                "pass the ``next_since`` from the previous read back as ``since`` "
-                "and you get only what arrived in between, so a poll loop does not re-read "
-                "the same messages. ``running: false`` with nothing new means the target "
-                "finished and is idle, which is the difference between 'not done yet' and "
-                "'done'. READ-only: it never sends anything or changes the target's state."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Session key from list_sessions, or its exact title.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max messages to return (default 20, max 100).",
-                        "default": 20,
-                    },
-                    "since": {
-                        "type": "integer",
-                        "description": (
-                            "Return messages from this index onward — pass the ``next_since`` from "
-                            "your previous read to get only new ones. Omit for the newest tail."
-                        ),
-                    },
-                },
-                "required": ["target"],
+                "required": ["op"],
             },
         },
     ]
@@ -832,10 +765,49 @@ def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str | None]:
     return caller_key, None
 
 
+def _resolve_op(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """Translate an op-shaped call into ``(inner_name, inner_args, error)``.
+
+    A non-empty ``error`` means nothing resolved and the caller must return it
+    verbatim: an unknown op is a plain refusal naming the valid ones, not a raise,
+    because the model's next move is to pick a real op and a traceback tells it
+    less than the list does.
+
+    The returned args are deliberately NOT validated here — the op body validates
+    with its own schema, the same call it made when it was its own tool. One
+    validator per op, in the one place that knows the op, instead of a second copy
+    here that could drift from it.
+    """
+    ops = _OP_TO_INNER[name]
+    op = str(args.get("op") or "").strip()
+    inner = ops.get(op)
+    if not inner:
+        return "", {}, f"Error: unknown {name} op {op!r}. Valid ops: {' | '.join(ops)}."
+    inner_args = args.get("args")
+    if inner_args is None:
+        inner_args = {}
+    if not isinstance(inner_args, dict):
+        return (
+            "",
+            {},
+            f"Error: {name} `args` must be an object, got {type(inner_args).__name__}.",
+        )
+    return inner, inner_args, ""
+
+
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
     """Dispatch one validated tool call."""
+    if name in _OP_TO_INNER:
+        # Resolve the op FIRST so everything below — the identity gate included —
+        # sees the concrete operation. Order is load-bearing in both directions:
+        # gating on the op-shaped name would gate folder calls too, and gating
+        # before translation would leave every session op ungated.
+        name, args, err = _resolve_op(name, args)
+        if err:
+            return err
+
     caller_key = ""
-    if name in SESSION_CONTROL_TOOLS:
+    if name in SESSION_CONTROL_INNER:
         # Authorization for all four is the CALLER'S IDENTITY: the route decides
         # what a session may reach from the key sent here. The lenient resolver
         # walks /proc ancestors, and a spawned subagent lives under its parent
