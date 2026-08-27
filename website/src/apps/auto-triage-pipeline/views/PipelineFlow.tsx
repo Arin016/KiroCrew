@@ -200,6 +200,33 @@ export default function PipelineFlow({
         />
       </div>
 
+      {/* The pre-stamp share of EVENTS, disclosed rather than folded in silently.
+          The fold admits an event recorded before the pipeline stamped a repository
+          into EVERY repository's view -- dropping it would delete the whole
+          pre-stamp history from a filtered view and read as "this pipeline never
+          ran". That is the right trade, but it makes the number above only partly
+          repository-specific, and `unattributedEvents` was computed for exactly this
+          disclosure and then never rendered: the counter existed, the claim it was
+          supposed to qualify did not carry it.
+
+          Shown only when there IS such a share, so an install whose whole trail is
+          stamped never sees a line reading zero. Label-and-value rather than a
+          sentence carrying the number, so no locale needs plural agreement for a
+          count that is usually in the thousands. */}
+      {overview.unattributedEvents > 0 ? (
+        <p
+          className="text-[11px] leading-snug"
+          style={{ color: 'var(--text-dim)' }}
+          data-testid="atp-unattributed"
+        >
+          <span className="font-semibold uppercase tracking-wide">
+            {i18nT('apps.autoTriagePipeline.global.unattributed_label')}
+          </span>{' '}
+          <span style={{ color: 'var(--text)' }}>{overview.unattributedEvents}</span>{' '}
+          {i18nT('apps.autoTriagePipeline.global.unattributed_note')}
+        </p>
+      ) : null}
+
       <Card className="p-3">
         {/* Narrow-first. Six cards with a fixed minimum width are ~57rem of content,
             so on a 320px viewport the horizontal strip could only be reached by

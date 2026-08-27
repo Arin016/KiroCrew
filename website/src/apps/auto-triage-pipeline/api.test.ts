@@ -410,6 +410,53 @@ describe('autoTriagePipelineFoldApi.overview', () => {
     expect(parsed.searchParams.get('hours')).toBe('48')
   })
 
+  it('omits the repo param when none is given, asking for every repository', async () => {
+    // The wide reading is the backward-compatible one: this endpoint answered for
+    // every repository before the trail carried one, so a client that never learns
+    // the parameter keeps working.
+    fetchSpy.mockResolvedValue(jsonResponse({ steps: [] }))
+    await autoTriagePipelineFoldApi.overview()
+    const parsed = new URL(calledUrl(fetchSpy), 'http://localhost')
+    expect(parsed.searchParams.has('repo')).toBe(false)
+  })
+
+  it('sends the repo param when one is given', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ steps: [] }))
+    await autoTriagePipelineFoldApi.overview(undefined, 'acme/widgets')
+    const parsed = new URL(calledUrl(fetchSpy), 'http://localhost')
+    expect(parsed.searchParams.get('repo')).toBe('acme/widgets')
+    expect(parsed.searchParams.has('hours')).toBe(false)
+  })
+
+  it('coerces the repository census and drops a row with no name', async () => {
+    // A nameless row is what `unattributedEvents` already counts. Kept as an empty
+    // label it would render a blank entry that matches nothing when selected.
+    fetchSpy.mockResolvedValue(
+      jsonResponse({
+        steps: [],
+        unattributedEvents: 4565,
+        repos: [
+          { repo: 'acme/alpha', count: 208 },
+          { repo: '', count: 9 },
+          { count: 3 },
+          'not-an-object',
+        ],
+      }),
+    )
+    const res = await autoTriagePipelineFoldApi.overview()
+    expect(res.unattributedEvents).toBe(4565)
+    expect(res.repos).toEqual([{ repo: 'acme/alpha', count: 208 }])
+  })
+
+  it('defaults the new fields when the server omits them', async () => {
+    // An older gateway does not send them; the view must read 0 and [] rather than
+    // undefined, or a count would render as NaN.
+    fetchSpy.mockResolvedValue(jsonResponse({ steps: [], totalEvents: 7 }))
+    const res = await autoTriagePipelineFoldApi.overview()
+    expect(res.unattributedEvents).toBe(0)
+    expect(res.repos).toEqual([])
+  })
+
   it('coerces a well-formed overview payload, including routed and unmapped arrays', async () => {
     fetchSpy.mockResolvedValue(
       jsonResponse({

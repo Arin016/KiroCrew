@@ -448,6 +448,8 @@
         "header_resolved": "解決済み"
       },
       "global": {
+        "unattributed_label": "リポジトリ記録前のイベント",
+        "unattributed_note": "パイプラインがリポジトリを記録する前に記録されたため、すべてのリポジトリの表示に含まれます。",
         "tab_pipeline": "パイプライン",
         "tab_lanes": "項目レーン",
         "tablist_label": "自動トリアージパイプラインのビュー",

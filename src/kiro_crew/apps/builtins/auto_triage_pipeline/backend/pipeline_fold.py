@@ -513,6 +513,36 @@ def _workspace() -> Path:
     return workspace_dir()
 
 
+def _event_repo(record: dict[str, Any]) -> str:
+    """The repository an event names, or ``""`` when it names none.
+
+    ``""`` is the pre-stamp shape, not a defect: the scheduled jobs only began
+    recording the repository recently, and the events written before that cannot be
+    back-filled.
+    """
+    value = record.get("repo")
+    return value if isinstance(value, str) and value else ""
+
+
+def _repo_admits(event_repo: str, wanted: str | None) -> bool:
+    """Does an event belong to the ``wanted`` repository's view?
+
+    Three cases, and the middle one is the whole compatibility contract:
+
+    * ``wanted`` is None -- no filter was asked for, so everything belongs.
+    * ``event_repo`` is ``""`` -- the event predates repository stamping. It belongs
+      to EVERY repository's view rather than to none. Dropping it would delete the
+      entire pre-stamp history from a filtered view, which reads as "this pipeline
+      never ran" -- strictly worse than the missing dimension it replaces. The fold
+      counts these separately so the ambiguity is reportable.
+    * otherwise -- exact match only. No prefix or case games: a repository name is
+      an identifier, and a near-match here would silently merge two pipelines.
+    """
+    if wanted is None or not event_repo:
+        return True
+    return event_repo == wanted
+
+
 def audit_log_path(root: Path | None = None) -> Path:
     return (root if root is not None else _workspace()) / AUDIT_LOG_NAME
 
@@ -578,6 +608,19 @@ class PipelineFold:
     total_events: int = 0
     unparseable: int = 0
     unmapped: dict[str, int] = field(default_factory=dict)
+    #: Events that carry no repository at all, counted rather than dropped. Every
+    #: event written before the jobs began stamping the repository is in here, and
+    #: nothing can back-fill them: the record does not name a repository and an
+    #: issue number alone stops identifying one as soon as a second repository
+    #: exists. They are therefore included in EVERY repository's fold -- a reader
+    #: that filtered them out would make the whole history vanish, which reads as
+    #: the pipeline never having run. This count is what lets a view say so out
+    #: loud instead of quietly attributing them.
+    unattributed: int = 0
+    #: Every repository the trail actually names, with its event count. Derived
+    #: from the data rather than from configuration, so a view can offer exactly
+    #: the repositories that have events instead of asserting one.
+    repos: dict[str, int] = field(default_factory=dict)
     first_event_at: float | None = None
     last_event_at: float | None = None
     recent_hours: int = DEFAULT_RECENT_HOURS
@@ -587,6 +630,11 @@ class PipelineFold:
             "steps": [s.to_dict() for s in self.steps],
             "totalEvents": self.total_events,
             "unparseable": self.unparseable,
+            "unattributedEvents": self.unattributed,
+            "repos": [
+                {"repo": name, "count": count}
+                for name, count in sorted(self.repos.items(), key=lambda kv: (-kv[1], kv[0]))
+            ],
             "unmappedEvents": [
                 {"event": name, "count": count}
                 for name, count in sorted(self.unmapped.items(), key=lambda kv: (-kv[1], kv[0]))[
@@ -604,6 +652,7 @@ def fold_pipeline(
     root: Path | None = None,
     recent_hours: int = DEFAULT_RECENT_HOURS,
     now: float | None = None,
+    repo: str | None = None,
 ) -> PipelineFold:
     """Fold the whole event trail into per-step throughput.
 
@@ -615,6 +664,17 @@ def fold_pipeline(
     not blank the page. Note that clamping means there is no "all time" value --
     the cumulative counters already answer that, and ``recent`` is only ever a
     window.
+
+    ``repo`` narrows the fold to one repository, as ``owner/name``. Omit it to
+    fold every repository together, which is what the view did before the
+    scheduled jobs recorded a repository at all and remains the honest answer when
+    the caller has no repository in mind.
+
+    Events written before the jobs began stamping carry no repository, and are
+    counted into ``unattributed`` and included in EVERY repository's fold -- see
+    ``_repo_admits`` for why excluding them would be worse than the gap it closes.
+    ``repos`` reports what the trail actually names, so a caller can offer the
+    repositories that have events rather than assert one.
     """
     recent_hours = max(1, min(int(recent_hours or DEFAULT_RECENT_HOURS), 24 * 90))
     clock = time.time() if now is None else now
@@ -640,6 +700,33 @@ def fold_pipeline(
     for record, ok in _iter_jsonl(text):
         if not ok or record is None:
             result.unparseable += 1
+            continue
+        # Repository attribution is read BEFORE anything else. `repos` and
+        # `unattributed` are a CENSUS of the whole trail -- they answer "which
+        # repositories exist here", so they must count events this fold then drops.
+        # `total_events` is the opposite: it counts only what was ADMITTED, so the
+        # figure a view prints beside the steps was computed from the same events.
+        # Dropping a foreign event before reading its name also keeps it out of
+        # `unmapped`, which would otherwise read as drift in THIS pipeline.
+        event_repo = _event_repo(record)
+        if event_repo:
+            # The census KEY is serialized straight to the dashboard, so it goes
+            # through `_printable` like every other string this fold hands its
+            # routes. It is the one field that did not: the trail is written by
+            # agent-driven jobs, so a repository value is attacker-reachable text
+            # like a title is, and a credential-shaped one would have been returned
+            # raw -- which also made the redaction-sink registration for this module
+            # claim more than the code did.
+            #
+            # Matching still uses the RAW value. `_printable` also truncates and
+            # neutralizes control characters, so admitting on the redacted spelling
+            # would compare a mangled name against the caller's exact one and drop
+            # events belonging to the very repository that was asked for.
+            key = _printable(event_repo, 120)
+            result.repos[key] = result.repos.get(key, 0) + 1
+        else:
+            result.unattributed += 1
+        if not _repo_admits(event_repo, repo):
             continue
         result.total_events += 1
         name = record.get("event")
@@ -885,11 +972,22 @@ def list_step_items(
     root: Path | None = None,
     limit: int = MAX_ROWS,
 ) -> list[ItemRow]:
-    """Return the items currently sitting in ``step``.
+    """Return the items currently sitting in ``step``, for one repository.
 
     "Currently sitting in" means the item entered this step and no event has
     been observed taking it out -- the same in-flight relation L0 counts, so the
     number on the step card and the length of this list cannot disagree.
+
+    ``owner``/``repo`` now FILTER the list, which reverses this function's earlier
+    contract. They used to locate the local issue cache and nothing else, because
+    the trail carried no repository and there was nothing to filter on; the
+    docstring said so explicitly. The scheduled jobs stamp the repository now, so
+    the honest reading of those arguments is the one a caller already expects.
+
+    Events written before stamping began have no repository and are admitted to
+    every repository's list -- see ``_repo_admits``. The consequence worth naming:
+    an item whose events ALL predate stamping appears under each repository, which
+    is why the L0 fold reports ``unattributedEvents`` for a view to disclose.
     """
     spec = STEP_BY_KEY.get(step)
     if spec is None:
@@ -909,6 +1007,12 @@ def list_step_items(
 
     for record, ok in _iter_jsonl(text):
         if not ok or record is None:
+            continue
+        # Same rule as L0, and it has to be the same call: an item list that
+        # admitted a different repository's events would report items this step
+        # does not hold, and the count on the step card would stop matching the
+        # length of this list -- the one invariant this function exists to keep.
+        if not _repo_admits(_event_repo(record), f"{owner}/{repo}"):
             continue
         name = record.get("event")
         if not isinstance(name, str) or not name:

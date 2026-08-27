@@ -451,6 +451,8 @@
         "header_resolved": "ERLEDIGT"
       },
       "global": {
+        "unattributed_label": "EREIGNISSE VOR KENNZEICHNUNG",
+        "unattributed_note": "Vor der Repository-Kennzeichnung durch die Pipeline aufgezeichnet und daher in der Ansicht jedes Repositorys enthalten.",
         "tab_pipeline": "Pipeline",
         "tab_lanes": "Vorgangsbahnen",
         "tablist_label": "Ansichten der Auto-Triage-Pipeline",

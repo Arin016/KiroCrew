@@ -448,6 +448,8 @@
         "header_resolved": "已解决"
       },
       "global": {
+        "unattributed_label": "标记仓库前的事件",
+        "unattributed_note": "记录于流水线开始标记仓库之前，因此会计入每个仓库的视图。",
         "tab_pipeline": "流水线",
         "tab_lanes": "条目泳道",
         "tablist_label": "自动分诊流水线视图",

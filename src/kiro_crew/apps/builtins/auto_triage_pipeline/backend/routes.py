@@ -94,8 +94,33 @@ def _int_query(request: web.Request, name: str, default: int) -> int:
 async def _handle_overview(request: web.Request) -> web.StreamResponse:
     """GET {PREFIX}/overview — L0: the pipeline and its per-step throughput."""
     hours = _int_query(request, "hours", fold.DEFAULT_RECENT_HOURS)
+    # Optional. ABSENT means "every repository", which is the honest answer when the
+    # caller names none and is exactly what this route did before the trail carried
+    # a repository at all -- so an old client keeps working unchanged. A malformed
+    # value is REFUSED rather than silently widened to every repository: quietly
+    # showing more than was asked for is how a two-repository install starts
+    # reporting one pipeline's items as another's.
+    #
+    # PRESENT-BUT-EMPTY (`?repo=`, or whitespace) is malformed, not absent, and is
+    # refused for that same reason. The distinction is the whole point: a caller that
+    # sent the parameter INTENDED to narrow, so treating its empty value as "no
+    # filter asked for" hands back every repository to a client that believes it is
+    # looking at one -- the exact failure the paragraph above refuses, reached by
+    # falsiness instead of by a bad name. `.get()` returning None is the only signal
+    # that separates the two, so the emptiness check has to happen after it.
+    wanted_repo: str | None = None
+    raw_param = request.query.get("repo")
+    if raw_param is not None:
+        raw_repo = raw_param.strip()
+        if not raw_repo:
+            return _bad_request("repo must be owner/name", "repo_invalid")
+        owner_part, sep, name_part = raw_repo.partition("/")
+        if not sep or not _REPO_NAME_RE.match(owner_part) or not _REPO_NAME_RE.match(name_part):
+            return _bad_request("repo must be owner/name", "repo_invalid")
+        wanted_repo = f"{owner_part}/{name_part}"
+
     try:
-        result = await asyncio.to_thread(fold.fold_pipeline, recent_hours=hours)
+        result = await asyncio.to_thread(fold.fold_pipeline, recent_hours=hours, repo=wanted_repo)
     except fold.FoldError as exc:
         # The message is authored by the fold layer and names no absolute path.
         return web.json_response({"error": str(exc), "code": "unreadable"}, status=503)
@@ -111,14 +136,14 @@ async def _handle_overview(request: web.Request) -> web.StreamResponse:
 async def _handle_step(request: web.Request) -> web.StreamResponse:
     """GET {PREFIX}/step?step=&owner=&repo= — L1: the items inside one step.
 
-    ``owner``/``repo`` are used ONLY to locate the local issue cache that supplies
-    titles, labels and assignees. They do NOT filter the item list: the pipeline's
-    event trail carries no repository dimension at all, because these scheduled
-    jobs run against one repository by construction. So passing a different
-    owner/repo returns the SAME items with less enrichment, never a different
-    pipeline -- which is also why the L0 overview takes no repo parameter. Anyone
-    reading this as a repo filter would draw exactly the wrong conclusion from a
-    two-repository install.
+    ``owner``/``repo`` locate the local issue cache for titles, labels and
+    assignees AND filter the item list. The filtering half is new: the trail used
+    to carry no repository, so there was nothing to filter on and this docstring
+    said as much. The scheduled jobs stamp the repository now.
+
+    Events written before stamping began carry none and are admitted to every
+    repository's list, so the pre-stamp history is never hidden -- the L0 overview
+    reports how many such events exist under ``unattributedEvents``.
     """
     resolved = _repo_params(request)
     if isinstance(resolved, web.Response):

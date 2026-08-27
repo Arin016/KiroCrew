@@ -755,3 +755,179 @@ def test_register_routes_mounts_only_read_methods() -> None:
         f"{routes.PREFIX}/step",
     ]
     assert "POST" not in methods and "PUT" not in methods and "DELETE" not in methods
+
+
+# ── the repository dimension ──────────────────────────────────────────────────
+# The scheduled jobs stamp `repo` on every event they write. Everything written
+# before that does not carry one and cannot be back-filled, so the load-bearing
+# rule is what happens to those: they belong to EVERY repository's fold, never to
+# none. A reader that dropped them would delete the entire pre-stamp history from
+# a filtered view, which reads as "this pipeline never ran".
+
+
+def _mixed_trail(root: Path) -> None:
+    """A trail shaped like the real one: pre-stamp events plus two repositories."""
+    _write_log(
+        root,
+        [
+            # pre-stamp: no `repo` key at all
+            {"ts": "2026-08-01T00:00:00Z", "event": "triage", "issue": 1},
+            {"ts": "2026-08-01T00:01:00Z", "event": "implement_queued", "issue": 1},
+            # stamped, repository A
+            {"ts": "2026-08-02T00:00:00Z", "event": "triage", "issue": 2, "repo": "acme/alpha"},
+            {
+                "ts": "2026-08-02T00:01:00Z",
+                "event": "implement_queued",
+                "issue": 2,
+                "repo": "acme/alpha",
+            },
+            # stamped, repository B
+            {"ts": "2026-08-03T00:00:00Z", "event": "triage", "issue": 3, "repo": "acme/beta"},
+        ],
+    )
+
+
+def test_no_repo_filter_folds_every_repository(tmp_path: Path) -> None:
+    """Omitting the filter keeps the pre-stamp behaviour: everything counts."""
+    _mixed_trail(tmp_path)
+    result = fold.fold_pipeline(root=tmp_path).to_dict()
+    assert result["totalEvents"] == 5
+    assert result["unattributedEvents"] == 2
+
+
+def test_the_census_key_is_REDACTED_while_matching_stays_exact(tmp_path: Path) -> None:
+    """A census key reaches the dashboard, so it is redacted like every other string.
+
+    The trail is written by agent-driven jobs, so a repository value is
+    attacker-reachable text exactly as an issue title is. This field was the one
+    string the fold handed its routes WITHOUT `_printable`, which also made the
+    module's redaction-sink registration claim more than the code did.
+
+    Both halves are asserted together because fixing only the first breaks the
+    second: `_printable` truncates and neutralizes as well as redacts, so matching on
+    the redacted spelling would compare a mangled name against the caller's exact one
+    and hide the events of the very repository that was asked for.
+    """
+    secret = "acme/x-aws_secret_access_key=AKIAIOSFODNN7EXAMPLE"
+    _write_log(
+        tmp_path,
+        [
+            {"ts": "2026-08-02T00:00:00Z", "event": "triage", "issue": 7, "repo": secret},
+            {"ts": "2026-08-02T00:01:00Z", "event": "triage", "issue": 8, "repo": "acme/alpha"},
+        ],
+    )
+
+    census = fold.fold_pipeline(root=tmp_path).to_dict()["repos"]
+    keys = {row["repo"] for row in census}
+
+    # The raw credential-shaped value never reaches the payload...
+    assert secret not in keys
+    assert not any("AKIAIOSFODNN7EXAMPLE" in k for k in keys)
+    # ...and the clean sibling is untouched, so redaction is not blanket mangling.
+    assert "acme/alpha" in keys
+
+    # Matching is on the RAW value: filtering by the exact stored spelling still
+    # admits that repository's own event (plus any pre-stamp ones, of which there are
+    # none here), so a redacted key has not become the filter's identity.
+    assert fold.fold_pipeline(root=tmp_path, repo=secret).to_dict()["totalEvents"] == 1
+
+
+def test_a_filtered_fold_admits_its_own_events_plus_the_pre_stamp_ones(tmp_path: Path) -> None:
+    _mixed_trail(tmp_path)
+    result = fold.fold_pipeline(root=tmp_path, repo="acme/alpha").to_dict()
+    # 2 stamped for alpha + 2 pre-stamp; beta's single event is excluded.
+    assert result["totalEvents"] == 4
+    assert result["unattributedEvents"] == 2
+
+
+def test_a_repository_with_no_events_still_sees_the_pre_stamp_history(tmp_path: Path) -> None:
+    """The failure this rule exists to prevent: a filtered view going blank.
+
+    Dropping unattributed events would return 0 here, and the view would report a
+    pipeline that never ran rather than one whose history predates attribution.
+    """
+    _mixed_trail(tmp_path)
+    result = fold.fold_pipeline(root=tmp_path, repo="nobody/nothing").to_dict()
+    assert result["totalEvents"] == 2
+    assert result["unattributedEvents"] == 2
+
+
+def test_the_repository_census_does_not_move_with_the_filter(tmp_path: Path) -> None:
+    """`repos` answers "what exists", so it must not depend on what was asked for.
+
+    A census that shrank under a filter could not drive a repository picker: each
+    selection would narrow the list that produced it until only one option was left.
+    """
+    _mixed_trail(tmp_path)
+    unfiltered = fold.fold_pipeline(root=tmp_path).to_dict()["repos"]
+    filtered = fold.fold_pipeline(root=tmp_path, repo="acme/alpha").to_dict()["repos"]
+    assert unfiltered == filtered
+    assert {e["repo"]: e["count"] for e in unfiltered} == {"acme/alpha": 2, "acme/beta": 1}
+
+
+def test_a_foreign_event_is_not_reported_as_pipeline_drift(tmp_path: Path) -> None:
+    """A dropped event must not also land in `unmapped`.
+
+    `unmapped` is a drift signal about THIS pipeline's vocabulary. An unrecognised
+    event name belonging to a different repository is not drift here, so the filter
+    has to run before the name is read.
+    """
+    _write_log(
+        tmp_path,
+        [
+            {"ts": "2026-08-02T00:00:00Z", "event": "triage", "issue": 1, "repo": "acme/alpha"},
+            {
+                "ts": "2026-08-03T00:00:00Z",
+                "event": "a_name_we_know_nothing_of",
+                "issue": 2,
+                "repo": "acme/beta",
+            },
+        ],
+    )
+    result = fold.fold_pipeline(root=tmp_path, repo="acme/alpha").to_dict()
+    assert [e["event"] for e in result["unmappedEvents"]] == []
+
+
+def test_an_empty_or_non_string_repo_on_an_event_reads_as_unattributed(tmp_path: Path) -> None:
+    """A malformed stamp degrades to "no repository", never to a filter match.
+
+    Treating `repo: ""` or `repo: 5` as a value would attribute the event to a
+    repository named by junk, and a view keyed on it would grow a phantom row.
+    """
+    _write_log(
+        tmp_path,
+        [
+            {"ts": "2026-08-02T00:00:00Z", "event": "triage", "issue": 1, "repo": ""},
+            {"ts": "2026-08-02T00:01:00Z", "event": "triage", "issue": 2, "repo": 5},
+            {"ts": "2026-08-02T00:02:00Z", "event": "triage", "issue": 3, "repo": None},
+        ],
+    )
+    result = fold.fold_pipeline(root=tmp_path).to_dict()
+    assert result["unattributedEvents"] == 3
+    assert result["repos"] == []
+
+
+def test_l1_filters_items_by_repository(tmp_path: Path) -> None:
+    """L1's owner/repo now filter, reversing this function's earlier contract."""
+    _write_log(
+        tmp_path,
+        [
+            {"ts": "2026-08-02T00:00:00Z", "event": "triage", "issue": 11, "repo": "acme/alpha"},
+            {"ts": "2026-08-02T00:01:00Z", "event": "triage", "issue": 22, "repo": "acme/beta"},
+        ],
+    )
+    _write_queue(tmp_path, [])
+    rows = fold.list_step_items("triage", owner="acme", repo="alpha", root=tmp_path)
+    assert [r.number for r in rows] == [11]
+
+
+def test_l1_keeps_a_pre_stamp_item_under_every_repository(tmp_path: Path) -> None:
+    """The same admission rule as L0, so the two levels cannot disagree."""
+    _write_log(
+        tmp_path,
+        [{"ts": "2026-08-01T00:00:00Z", "event": "triage", "issue": 7}],
+    )
+    _write_queue(tmp_path, [])
+    for owner, repo in (("acme", "alpha"), ("nobody", "nothing")):
+        rows = fold.list_step_items("triage", owner=owner, repo=repo, root=tmp_path)
+        assert [r.number for r in rows] == [7], f"{owner}/{repo} lost the pre-stamp item"

@@ -454,6 +454,8 @@
         "header_resolved": "RESOLVIDO"
       },
       "global": {
+        "unattributed_label": "EVENTOS ANTERIORES A MARCACAO",
+        "unattributed_note": "Registrados antes de a cadeia de processamento marcar um repositório, por isso contam na visão de cada repositório.",
         "tab_pipeline": "Pipeline",
         "tab_lanes": "Faixas de itens",
         "tablist_label": "Visualizações do pipeline de triagem automática",

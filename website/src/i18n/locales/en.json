@@ -330,6 +330,8 @@
         "header_resolved": "RESOLVED"
       },
       "global": {
+        "unattributed_label": "PRE-STAMP EVENTS",
+        "unattributed_note": "Recorded before the pipeline stamped a repository, so they count in every repository's view.",
         "tab_pipeline": "Pipeline",
         "tab_lanes": "Item lanes",
         "tablist_label": "Auto triage pipeline views",

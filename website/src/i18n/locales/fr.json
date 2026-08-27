@@ -454,6 +454,8 @@
         "header_resolved": "RÉSOLU"
       },
       "global": {
+        "unattributed_label": "EVENEMENTS AVANT MARQUAGE",
+        "unattributed_note": "Enregistrés avant que la chaîne de traitement ne marque un dépôt, donc ils comptent dans la vue de chaque dépôt.",
         "tab_pipeline": "Pipeline",
         "tab_lanes": "Couloirs d'éléments",
         "tablist_label": "Vues du pipeline de triage automatique",

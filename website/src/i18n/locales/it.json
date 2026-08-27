@@ -454,6 +454,8 @@
         "header_resolved": "RISOLTO"
       },
       "global": {
+        "unattributed_label": "EVENTI PRIMA DEL CONTRASSEGNO",
+        "unattributed_note": "Registrati prima che la catena di elaborazione contrassegnasse un repository, quindi contano nella vista di ogni repository.",
         "tab_pipeline": "Pipeline",
         "tab_lanes": "Corsie degli elementi",
         "tablist_label": "Viste della pipeline di triage automatico",

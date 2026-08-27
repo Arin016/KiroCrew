@@ -94,8 +94,10 @@ export default function GlobalPipelineView() {
   const repo = DEFAULT_REPO
 
   const overview = useQuery({
-    queryKey: ['atp', 'overview'],
-    queryFn: () => autoTriagePipelineFoldApi.overview(),
+    // Keyed on the repository as well: the answer is now repository-specific, so a
+    // shared key would serve one repository's fold for another.
+    queryKey: ['atp', 'overview', repo.owner, repo.repo],
+    queryFn: () => autoTriagePipelineFoldApi.overview(undefined, `${repo.owner}/${repo.repo}`),
     refetchInterval: REFRESH_MS,
   })
 

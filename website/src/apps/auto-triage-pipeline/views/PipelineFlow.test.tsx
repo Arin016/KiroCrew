@@ -208,4 +208,24 @@ describe('PipelineFlow — unparseable warning row', () => {
     renderFlow(overview([step({ key: 'scan' })], { unparseable: 0 }))
     expect(screen.queryByTestId('atp-unparseable')).toBeNull()
   })
+
+  it('DISCLOSES the pre-stamp share of the event count when there is one', () => {
+    // The fold admits an event with no repository stamp into EVERY repository's
+    // view, so a filtered EVENTS total is only partly repository-specific. The
+    // count existed on the payload from the start and was rendered nowhere, which
+    // made the total read as fully attributed. This is the disclosure.
+    renderFlow(overview([step({ key: 'scan' })], { totalEvents: 4773, unattributedEvents: 4565 }))
+    const note = screen.getByTestId('atp-unattributed')
+    expect(note.textContent).toContain('4565')
+    // And it says WHY, not just the number -- a bare count beside the total would
+    // read as a second unexplained metric rather than a qualification of the first.
+    expect(note.textContent).toContain('every repository')
+  })
+
+  it('does NOT disclose anything when the whole trail is stamped', () => {
+    // A fully-stamped install must not see a line reading zero: it would invite an
+    // operator to chase an ambiguity that does not exist.
+    renderFlow(overview([step({ key: 'scan' })], { totalEvents: 208, unattributedEvents: 0 }))
+    expect(screen.queryByTestId('atp-unattributed')).toBeNull()
+  })
 })

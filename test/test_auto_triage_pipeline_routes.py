@@ -87,8 +87,9 @@ async def test_overview_returns_the_folded_pipeline(
 ) -> None:
     seen: dict[str, Any] = {}
 
-    def fake_fold(*, recent_hours: int):
+    def fake_fold(*, recent_hours: int, repo: str | None = None):
         seen["hours"] = recent_hours
+        seen["repo"] = repo
         return _Row({"steps": [{"step": "scan", "inFlight": 2}]})
 
     monkeypatch.setattr(fold, "fold_pipeline", fake_fold)
@@ -97,6 +98,9 @@ async def test_overview_returns_the_folded_pipeline(
         assert resp.status == 200
         assert (await resp.json())["steps"][0]["step"] == "scan"
     assert seen["hours"] == 48
+    # No repo asked for means every repository, which is what this route did
+    # before the trail carried one -- an old client keeps working unchanged.
+    assert seen["repo"] is None
 
 
 @pytest.mark.asyncio
@@ -110,7 +114,7 @@ async def test_overview_falls_back_to_the_default_window_for_junk_hours(
     """
     seen: dict[str, Any] = {}
 
-    def fake_fold(*, recent_hours: int):
+    def fake_fold(*, recent_hours: int, repo: str | None = None):
         seen["hours"] = recent_hours
         return _Row({"steps": []})
 
@@ -338,3 +342,86 @@ def test_only_read_routes_are_mounted() -> None:
 def test_the_route_prefix_tracks_the_manifest_name() -> None:
     """The manifest's permissions.api entries and these paths must not drift."""
     assert routes.PREFIX == f"/api/apps/{routes.APP_NAME}"
+
+
+@pytest.mark.asyncio
+async def test_overview_passes_a_valid_repo_through_to_the_fold(
+    enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_fold(*, recent_hours: int, repo: str | None = None):
+        seen["repo"] = repo
+        return _Row({"steps": []})
+
+    monkeypatch.setattr(fold, "fold_pipeline", fake_fold)
+    async with client_for(make_app()) as client:
+        resp = await client.get(f"{routes.PREFIX}/overview?repo=acme/widgets")
+        assert resp.status == 200
+    assert seen["repo"] == "acme/widgets"
+
+
+@pytest.mark.asyncio
+async def test_overview_REFUSES_a_malformed_repo_instead_of_widening(
+    enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad repo is a 400, NOT a silent fall back to every repository.
+
+    Widening is the dangerous direction: a caller that asked for one repository and
+    got all of them would show another pipeline's items as its own, and nothing in
+    the response would say so. `hours` may safely default because it only narrows a
+    throughput window; identity may not.
+    """
+    called = False
+
+    def fake_fold(**_kwargs):
+        nonlocal called
+        called = True
+        return _Row({"steps": []})
+
+    monkeypatch.setattr(fold, "fold_pipeline", fake_fold)
+    async with client_for(make_app()) as client:
+        for bad in ("noslash", "a/b/c", "../etc/passwd", "a/", "/b", "D:foo/bar", "x" * 101 + "/y"):
+            resp = await client.get(f"{routes.PREFIX}/overview?repo={bad}")
+            assert resp.status == 400, bad
+            assert (await resp.json())["code"] == "repo_invalid", bad
+    assert not called, "a refused repo must never reach the fold"
+
+
+@pytest.mark.asyncio
+async def test_overview_REFUSES_a_present_but_EMPTY_repo_instead_of_widening(
+    enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`?repo=` is malformed, not absent.
+
+    Separate from the malformed-name test above because it fails by a different
+    mechanism and the earlier code passed that test while failing this one: the value
+    was read with `(get("repo") or "").strip()` and gated on truthiness, so an empty
+    or whitespace value skipped validation entirely and fell through to "no filter",
+    handing back EVERY repository to a caller that had asked to narrow. The names in
+    the other test are all truthy, so nothing there could catch it.
+
+    A caller that sent the parameter intended to narrow. Absent (no parameter at all)
+    is the only spelling that means "every repository".
+    """
+    called = False
+
+    def fake_fold(**_kwargs):
+        nonlocal called
+        called = True
+        return _Row({"steps": []})
+
+    monkeypatch.setattr(fold, "fold_pipeline", fake_fold)
+    async with client_for(make_app()) as client:
+        # "" -> ?repo= ; the rest are whitespace that .strip() reduces to empty.
+        for blank in ("", "%20", "+", "%09", "%20%20"):
+            resp = await client.get(f"{routes.PREFIX}/overview?repo={blank}")
+            assert resp.status == 400, repr(blank)
+            assert (await resp.json())["code"] == "repo_invalid", repr(blank)
+        assert not called, "an empty repo must never reach the fold"
+
+        # And the contrast that makes the distinction load-bearing: OMITTING the
+        # parameter is still the documented "every repository" answer.
+        resp = await client.get(f"{routes.PREFIX}/overview")
+        assert resp.status == 200
+        assert called, "an absent repo must still reach the fold"

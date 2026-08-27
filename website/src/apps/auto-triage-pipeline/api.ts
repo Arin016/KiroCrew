@@ -369,11 +369,27 @@ export interface UnmappedEvent {
   count: number
 }
 
+/** One repository the event trail names, with how many events carry it. */
+export interface RepoEventCount {
+  repo: string
+  count: number
+}
+
 /** L0 — the whole pipeline. Timestamps are epoch SECONDS and may be null. */
 export interface OverviewResponse {
   steps: OverviewStep[]
   totalEvents: number
   unparseable: number
+  /** Events carrying no repository, which is every event written before the
+   *  scheduled jobs began stamping one. They are folded into EVERY repository's
+   *  view because nothing can back-fill them and excluding them would erase the
+   *  pre-stamp history from a filtered view. This count is what lets the view
+   *  disclose that rather than silently attributing them. */
+  unattributedEvents: number
+  /** Every repository the trail names. A census of the whole trail, so it does
+   *  NOT shrink when a filter is applied -- otherwise selecting a repository
+   *  would narrow the very list the selection came from. */
+  repos: RepoEventCount[]
   unmappedEvents: UnmappedEvent[]
   firstEventAt: number | null
   lastEventAt: number | null
@@ -613,11 +629,13 @@ export const autoTriagePipelineFoldApi = {
    * L0 — the pipeline overview for the last `hours` (default: server's own
    * window). Empty result on any failure: no steps, zero counts, null bounds.
    */
-  overview: async (hours?: number): Promise<OverviewResponse> => {
+  overview: async (hours?: number, repo?: string): Promise<OverviewResponse> => {
     const empty = (): OverviewResponse => ({
       steps: [],
       totalEvents: 0,
       unparseable: 0,
+      unattributedEvents: 0,
+      repos: [],
       unmappedEvents: [],
       firstEventAt: null,
       lastEventAt: null,
@@ -625,6 +643,11 @@ export const autoTriagePipelineFoldApi = {
     })
     const q = new URLSearchParams()
     if (typeof hours === 'number' && Number.isFinite(hours)) q.set('hours', String(Math.trunc(hours)))
+    // Sent only when the caller named one. Omitting it asks the server for every
+    // repository, which is what this endpoint answered before the trail carried a
+    // repository at all -- so the widest reading is also the backward-compatible
+    // one, and no client has to be taught the new parameter to keep working.
+    if (repo) q.set('repo', repo)
     const suffix = q.toString() ? `?${q.toString()}` : ''
     const o = await getObjectOrThrow(`${ATP_API}/overview${suffix}`)
     const steps: OverviewStep[] = []
@@ -641,10 +664,24 @@ export const autoTriagePipelineFoldApi = {
         if (r) unmappedEvents.push({ event: str(r, 'event'), count: num(r, 'count') })
       }
     }
+    // The census of repositories the trail names. A row with no name is dropped
+    // rather than kept as an empty label: an unnamed repository is what
+    // `unattributedEvents` already counts, and a blank row in a picker would offer
+    // the operator a selection that matches nothing.
+    const repos: RepoEventCount[] = []
+    if (Array.isArray(o.repos)) {
+      for (const e of o.repos) {
+        const r = asObject(e)
+        const name = r ? str(r, 'repo') : ''
+        if (name) repos.push({ repo: name, count: num(r as Record<string, unknown>, 'count') })
+      }
+    }
     return {
       steps,
       totalEvents: num(o, 'totalEvents'),
       unparseable: num(o, 'unparseable'),
+      unattributedEvents: num(o, 'unattributedEvents'),
+      repos,
       unmappedEvents,
       firstEventAt: ts(o, 'firstEventAt'),
       lastEventAt: ts(o, 'lastEventAt'),
