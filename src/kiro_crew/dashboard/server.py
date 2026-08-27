@@ -1330,10 +1330,16 @@ def _register_mcp_routes(app: web.Application) -> None:
     # Dynamic Workflows (M6) — author, run, monitor, cancel, rerun
     from kiro_crew.dashboard.handlers.workflows import (
         api_workflow_author,
+        api_workflow_definition_get,
+        api_workflow_definition_run,
+        api_workflow_definition_update,
+        api_workflow_definitions,
+        api_workflow_definitions_create,
         api_workflow_run,
         api_workflow_run_cancel,
         api_workflow_run_get,
         api_workflow_run_intent,
+        api_workflow_run_promote,
         api_workflow_run_rerun,
         api_workflow_runs,
     )
@@ -1341,8 +1347,18 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/workflows/author", api_workflow_author)
     app.router.add_post("/api/workflows/run", api_workflow_run)
     app.router.add_post("/api/workflows/run_intent", api_workflow_run_intent)
+    app.router.add_get("/api/workflows/definitions", api_workflow_definitions)
+    app.router.add_post("/api/workflows/definitions", api_workflow_definitions_create)
+    app.router.add_post(
+        "/api/workflows/definitions/{workflow_ref}/run", api_workflow_definition_run
+    )
+    app.router.add_get("/api/workflows/definitions/{workflow_ref}", api_workflow_definition_get)
+    app.router.add_patch(
+        "/api/workflows/definitions/{workflow_ref}", api_workflow_definition_update
+    )
     app.router.add_get("/api/workflows/runs", api_workflow_runs)
     app.router.add_get("/api/workflows/runs/{run_id}", api_workflow_run_get)
+    app.router.add_post("/api/workflows/runs/{run_id}/promote", api_workflow_run_promote)
     app.router.add_post("/api/workflows/runs/{run_id}/cancel", api_workflow_run_cancel)
     app.router.add_post("/api/workflows/runs/{run_id}/rerun", api_workflow_run_rerun)
 
@@ -2765,6 +2781,9 @@ async def start_dashboard(
             nudge_authorizer=_wf_nudge_authorizer,
             timeout_secs=_wf_timeout_secs,
         )
+        if state.task_runner is not None:
+            state.workflow_service.attach_task_runner(state.task_runner)
+            state.task_runner.attach_workflow_service(state.workflow_service)
         logger.info(
             "WorkflowService ready (dynamic workflows, max parallel agents=%s, run ceiling=%ss)",
             _wf_concurrency,
