@@ -7793,6 +7793,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             <SidePanel
               tabsCtl={tabsCtl}
               slot={activeSlot || ''}
+              panelHidden={isSidePanelHidden({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen })}
               onFileOpen={handleFileOpen}
               onArtifactOpen={handleArtifactOpen}
               onAddToContext={handleAddToContext}
@@ -7832,6 +7833,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               <SidePanel
                 tabsCtl={tabsCtl}
                 slot={activeSlot || ''}
+                panelHidden={isSidePanelHidden({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen })}
                 onFileOpen={handleFileOpen}
                 onArtifactOpen={handleArtifactOpen}
                 onAddToContext={handleAddToContext}
