@@ -886,9 +886,12 @@ class TestTrashBatchNamesAreLogSafe:
             def is_dir() -> bool:
                 return True
 
-        manifests: dict[str, tuple[dict[str, object], list[dict[str, object]]] | None] = {
+        # The seam is whatever ``list_trash`` reads the manifest through, which is
+        # the summarising reader (#6312) -- patching the streaming one instead
+        # leaves the real read running against this stub and fails on ``batch /``.
+        manifests: dict[str, tuple[dict[str, object], int, int] | None] = {
             "missing": None,
-            "disagreeing": ({"batch_id": "someone-else", "created_at": _NOW}, []),
+            "disagreeing": ({"batch_id": "someone-else", "created_at": _NOW}, 0, 0),
         }
         for label, parsed in manifests.items():
             caplog.clear()
@@ -897,7 +900,7 @@ class TestTrashBatchNamesAreLogSafe:
                 session_storage.platform_compat, "is_link_or_junction", lambda p: False
             )
             monkeypatch.setattr(
-                session_storage, "_read_manifest", lambda batch, parsed=parsed: parsed
+                session_storage, "_summarize_manifest", lambda batch, parsed=parsed: parsed
             )
 
             with caplog.at_level(logging.DEBUG, logger="kiro_crew.session_storage"):
