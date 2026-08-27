@@ -246,7 +246,9 @@ return `None` / `{}` / the input principal unchanged.
 - Modify: `src/kiro_crew/cloud/source.py` (create-once helper for the
   new boundary name; still never `CreatePolicyVersion`)
 - Modify: `src/kiro_crew/cloud/templates/kirocrew-ec2.yaml`
-  (`PermissionsBoundaryArn` `AllowedPattern` lists both names)
+  (`PermissionsBoundaryArn` `AllowedPattern` lists both names;
+  `AgentCorePosture` creates `AWS::BedrockAgentCore::WorkloadIdentity`
+  named `kirocrew-<StackTag>` and attaches the instance grant)
 - Modify: dashboard cloud IAM copy + `cli_cloud` `iam-policy` (labeled
   sibling document; query/flag `--instance --posture`)
 - Modify: `src/kiro_crew/agent.py` / MCP merge (`rebuild_agent_config`

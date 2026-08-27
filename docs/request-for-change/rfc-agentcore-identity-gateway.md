@@ -258,13 +258,39 @@ agreement, not one:
 `enabled: true` fails closed (boot abort if `boot.fail_closed`,
 else treat as disabled). The two postures are exclusive.
 
+#### Deploy assigns the AgentCore identity
+
+A remote Crew launch **creates** the standalone AgentCore identity
+in the same CloudFormation stack that creates the instance.
+
+- Resource: `AWS::BedrockAgentCore::WorkloadIdentity` (CDK L2:
+  `aws_bedrockagentcore.WorkloadIdentity`). Same resource, two
+  front-ends. The public wheel does not depend on `aws-cdk-lib`.
+- Name: `kirocrew-<StackTag>` so two crews in one account do not
+  collide. Hand-rolled fleets may still use the bare name
+  `kirocrew`.
+- The instance role receives the posture grant automatically
+  (`AWS::IAM::Policy`). Operators do not paste the instance
+  Policy.json onto a CFN-launched box.
+- systemd gets `KIROCREW_AGENTCORE_POSTURE` and
+  `KIROCREW_AGENTCORE_WORKLOAD_NAME`. The companion adapter reads
+  those; the public core never imports an AgentCore SDK.
+- Opt-in: `AgentCorePosture=none` (default) is the historical
+  launch. `kirocrew cloud launch --agentcore-posture workload`
+  and the Settings Remote Crew selector flip it.
+- Stack delete removes the identity. The launcher Policy.json
+  grows `CreateWorkloadIdentity` / `DeleteWorkloadIdentity` /
+  `GetWorkloadIdentity` / tag verbs, still scoped to
+  `kirocrew` / `kirocrew-*`. It still does **not** grow
+  `InvokeGateway`.
+
 #### Posture `workload` — deployed Crew can start
 
 Use this on a `kirocrew cloud launch` box (or any companion-managed
 host) that should reach Gateway **without** an interactive login.
 
-- Register a standalone workload identity `kirocrew` (not
-  Gateway-managed).
+- Register a standalone workload identity `kirocrew-<StackTag>`
+  (not Gateway-managed) via the CloudFormation resource above.
 - Gateway inbound is **IAM** (`authorizerType: AWS_IAM`). The
   instance role is the caller. Action:
   `bedrock-agentcore:InvokeGateway` on the Gateway ARN.
@@ -294,10 +320,9 @@ needed to *stand up* an AgentCore-capable box:
   ARN (`kirocrew-ec2-boundary-agentcore`), still no
   `CreatePolicyVersion` / `Delete*`.
 - `iam:CreateRole` `ArnLike` on **either**
-  `kirocrew-ec2-boundary` or `kirocrew-ec2-boundary-agentcore`
-  (today the template `AllowedPattern` pins the original name
-  only — that pin must widen, or AgentCore launches cannot
-  attach the successor).
+  `kirocrew-ec2-boundary` or `kirocrew-ec2-boundary-agentcore`.
+- `bedrock-agentcore:CreateWorkloadIdentity` (and Get/Delete/Tag)
+  on `workload-identity/kirocrew` and `kirocrew-*`.
 - Existing tag-gated `PassRole` of `kirocrew-ec2-*` roles.
 
 The dashboard / `kirocrew cloud iam-policy` grows a **second,
