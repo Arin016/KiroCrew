@@ -88,7 +88,7 @@ here, and opens the dashboard — all from your laptop.
    machine the `cloud-install.sh` (macOS/Linux) or `install.ps1` (Windows)
    bootstrapper does this and hands off to the wizard. Verify prerequisites with
    `kirocrew cloud doctor`. Attach the least-privilege policy — copy it from
-   **Settings → Remote Crew → Set up a new one → Amazon EC2 → Recommended IAM
+   **Settings → Remote Crew → Launch on Amazon EC2 → Recommended IAM
    permissions**, or print it with `kirocrew cloud iam-policy` — to the AWS
    profile you'll launch with.
 2. **Launch.** Run `kirocrew cloud launch` — interactive (size picker + confirm),

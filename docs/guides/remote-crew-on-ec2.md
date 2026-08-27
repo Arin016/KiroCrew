@@ -49,8 +49,7 @@ port, no SSH key.
 - **Automated (recommended):** the one-command launcher provisions a box, installs
   the gateway, and registers it over SSM for you — see
   [cloud-instance-ssm-vs-ssh.md](cloud-instance-ssm-vs-ssh.md). From the
-  dashboard the same path is **Settings → Remote Crew → Set up a new one**.
-  Cloud Sessions is listed first (not launchable yet); pick **Amazon EC2**.
+  dashboard the same path is **Settings → Remote Crew → Launch on Amazon EC2**.
   The **Recommended IAM permissions** card is the copyable least-privilege
   policy — Kiro Crew never writes IAM. Apply it to the profile you launch
   with before the checklist can go green, or print it with

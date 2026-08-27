@@ -8035,8 +8035,6 @@
         "wxid": "wxid_…"
       },
       "remoteCrewPanel": {
-        "your_crews": "Your crews",
-        "set_up_a_new_one": "Set up a new one",
         "crews_you_can_switch_to": "Crews you can switch to",
         "up_to_warm": "Up to {{n}} stay warm at once",
         "no_crews": "No crews yet. Set one up, or add a machine you already have.",

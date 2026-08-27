@@ -515,8 +515,8 @@ what its own edit invalidated, and never reopens anything on the user's behalf.
    menu deep.
 
 An unsaved edit is held by the PANEL, keyed by crew, not by the form component.
-The crew list unmounts for any number of reasons the form cannot see — switching
-to the **Set up a new one** tab is enough — and an edit whose only home was the
+The crew list unmounts for any number of reasons the form cannot see — a failed
+list refresh that recovers, or the initial loading card — and an edit whose only home was the
 form's own state came back silently reverted to the stored record. Because a
 guard can only refuse the exits it enumerates, the values are lifted instead of
 defended: the form is re-seeded from that draft when it remounts. The draft carries
@@ -722,7 +722,7 @@ authenticated owner (`request["user"]`), non-Slack, POSIX only, `403` otherwise.
 | Method and path | Purpose |
 |---|---|
 | `GET /api/cloud/preflight?profile=&region=` | AWS reachability + the prerequisite checklist (the doctor checks as JSON). |
-| `GET /api/cloud/iam-policy` | The minimum IAM policy document to paste into the user's account, plus `grants` (id-only groups the dashboard titles) and `cli` (`kirocrew cloud iam-policy`). The Remote Crew setup tab shows this as a first-class card — not only when CloudFormation is unreachable. |
+| `GET /api/cloud/iam-policy` | The minimum IAM policy document to paste into the user's account, plus `grants` (id-only groups the dashboard titles) and `cli` (`kirocrew cloud iam-policy`). Remote Crew's **Launch on Amazon EC2** disclosure shows this as a first-class card — not only when CloudFormation is unreachable. |
 | `GET /api/cloud/launch` | List launch jobs, in progress and finished. |
 | `POST /api/cloud/launch` | Start a launch job; returns the job immediately. `409` when one is already in flight. |
 | `GET /api/cloud/launch/{id}` | Poll one job: per-step state plus the device-code prompt while signing in. |

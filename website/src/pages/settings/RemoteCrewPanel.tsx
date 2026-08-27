@@ -1,18 +1,13 @@
 /**
- * RemoteCrewPanel — Settings → Remote Crew. One page, two tabs:
+ * RemoteCrewPanel — Settings → Remote Crew. One page:
  *
- *   1. "Your crews" (default) — the machines you can switch to from the top
- *      header: any in-progress cloud launch (a durable gateway job), the
- *      connected/added instances, and the add-a-machine form. Cloud-launched
- *      crews are told apart from hand-added ones by correlating each SSM
- *      instance's target id with a launch job's `instance_id`, so cloud rows can
- *      offer the cloud lifecycle (Stop / Delete-by-tag) that a plain tunnel row
- *      cannot.
- *   2. "Set up a new one" — a destination picker (Cloud Sessions is the
- *      default; only EC2 launches today), the recommended IAM policy as a
- *      first-class card, an AWS prerequisite checklist (from the cloud
- *      preflight), and a launch form that spins up a crew on the user's OWN
- *      AWS account, then a progress card that polls the launch job.
+ *   the machines you can switch to from the top header (in-progress cloud
+ *   launches, connected/added instances), an expandable "Launch on Amazon EC2"
+ *   form (IAM policy, AWS preflight, size, Launch), and the add-a-machine
+ *   form. Cloud-launched crews are told apart from hand-added ones by
+ *   correlating each SSM instance's target id with a launch job's
+ *   `instance_id`, so cloud rows can offer the cloud lifecycle (Stop /
+ *   Delete-by-tag) that a plain tunnel row cannot.
  *
  * The instance CRUD (connect / disconnect / diagnose / remove) and the
  * enable/disable gate mirror InstancesPanel; the add-existing form and the
@@ -41,11 +36,7 @@ import {
   MoreHorizontal,
   Pencil,
   Play,
-  Cloud,
   Lock,
-  Zap,
-  Box,
-  Layers,
 } from 'lucide-react'
 import {
   api,
@@ -152,54 +143,6 @@ const IAM_POLICY_CLI = 'kirocrew cloud iam-policy'
 // match the platform of the machine running the gateway — which may be a Linux host
 // while this dashboard is open on a Mac — so the preflight response carries it.
 
-/** Destinations the setup tab offers. Only EC2 launches today; the rest are
- *  catalogued so connecting another environment is one click when it ships.
- *  Cloud Sessions is the default pick — that is the managed-sandbox path. */
-type DestinationId = 'cloud-sessions' | 'ec2' | 'lambda' | 'microvms' | 'modal'
-interface Destination {
-  id: DestinationId
-  launchable: boolean
-  default?: boolean
-}
-const DESTINATIONS: Destination[] = [
-  { id: 'cloud-sessions', launchable: false, default: true },
-  { id: 'ec2', launchable: true },
-  { id: 'lambda', launchable: false },
-  { id: 'microvms', launchable: false },
-  { id: 'modal', launchable: false },
-]
-
-const destLabel = (id: DestinationId) =>
-  id === 'cloud-sessions'
-    ? i18nT('pages.settings.remoteCrewPanel.dest_cloud_sessions')
-    : id === 'ec2'
-      ? i18nT('pages.settings.remoteCrewPanel.dest_ec2')
-      : id === 'lambda'
-        ? i18nT('pages.settings.remoteCrewPanel.dest_lambda')
-        : id === 'microvms'
-          ? i18nT('pages.settings.remoteCrewPanel.dest_microvms')
-          : i18nT('pages.settings.remoteCrewPanel.dest_modal')
-const destWhy = (id: DestinationId) =>
-  id === 'cloud-sessions'
-    ? i18nT('pages.settings.remoteCrewPanel.dest_cloud_sessions_why')
-    : id === 'ec2'
-      ? i18nT('pages.settings.remoteCrewPanel.dest_ec2_why')
-      : id === 'lambda'
-        ? i18nT('pages.settings.remoteCrewPanel.dest_lambda_why')
-        : id === 'microvms'
-          ? i18nT('pages.settings.remoteCrewPanel.dest_microvms_why')
-          : i18nT('pages.settings.remoteCrewPanel.dest_modal_why')
-const destIcon = (id: DestinationId) =>
-  id === 'cloud-sessions'
-    ? Cloud
-    : id === 'ec2'
-      ? Server
-      : id === 'lambda'
-        ? Zap
-        : id === 'microvms'
-          ? Box
-          : Layers
-
 const grantTitle = (id: string) =>
   id === 'cloudformation'
     ? i18nT('pages.settings.remoteCrewPanel.iam_grant_cloudformation')
@@ -243,33 +186,6 @@ function SizeCard({ tier, on, onPick }: { tier: SizeTier; on: boolean; onPick: (
           })}
         </span>
         <span className="block text-[12px] text-text mt-1.5">{tierWhy(tier.family)}</span>
-      </span>
-    </button>
-  )
-}
-
-function DestinationCard({ dest, on, onPick }: { dest: Destination; on: boolean; onPick: (id: DestinationId) => void }) {
-  const Icon = destIcon(dest.id)
-  return (
-    <button
-      type="button"
-      onClick={() => onPick(dest.id)}
-      aria-pressed={on}
-      aria-label={destLabel(dest.id)}
-      className={`w-full text-left flex items-start gap-3 rounded-md border p-3.5 transition-all ${on ? 'border-accent bg-accent-subtle shadow-[0_0_0_3px_var(--accent-glow)]' : 'border-border-strong bg-bg-elevated hover:border-border-strong'}`}
-    >
-      <span className={`mt-0.5 w-8 h-8 shrink-0 grid place-items-center rounded-md ${on ? 'bg-accent text-bg' : 'bg-bg-hover text-muted'}`}>
-        <Icon size={16} />
-      </span>
-      <span className="min-w-0">
-        <span className="font-bold text-[13px] text-text-strong flex items-center gap-2 flex-wrap">
-          {destLabel(dest.id)}
-          {dest.default && <Badge variant="aim">{i18nT('pages.settings.remoteCrewPanel.dest_default_badge')}</Badge>}
-          {!dest.launchable && (
-            <span className="font-normal text-[11px] text-muted">{i18nT('pages.settings.remoteCrewPanel.dest_coming_soon')}</span>
-          )}
-        </span>
-        <span className="block text-[12px] text-text mt-1">{destWhy(dest.id)}</span>
       </span>
     </button>
   )
@@ -731,7 +647,7 @@ function PrereqRow({
   )
 }
 
-/** The launch-in-progress card (setup tab): 4 steps + device-code sign-in. */
+/** The launch-in-progress card: 4 steps + device-code sign-in. */
 function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
   job: LaunchJob
   onCancel: (id: string) => void
@@ -808,8 +724,8 @@ function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
         </div>
       )}
 
-      {/* No hand-off: this card sits in the setup flow whose form fields
-          (name, host, size) are still live — navigating away discards them. */}
+      {/* No hand-off: this card sits next to the launch form whose fields
+          (profile, region, size) are still live — leaving the page discards them. */}
       {job.error ? <ErrorNotice message={job.error} className="mt-3" /> : null}
       <p className="mt-3 text-[12px] text-muted">
         {job.status === 'done' ? i18nT('pages.settings.remoteCrewPanel.launch_done') : i18nT('pages.settings.remoteCrewPanel.runs_on_gateway')}
@@ -821,9 +737,11 @@ function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
 export function RemoteCrewPanel() {
   const queryClient = useQueryClient()
   const dispatch = useAppDispatch()
-  const [tab, setTab] = useState<'crews' | 'setup'>('crews')
+  // The EC2 launch form starts closed so the crew list stays the page. An
+  // in-progress job opens it so the sign-in code stays reachable.
+  const [launchOpen, setLaunchOpen] = useState(false)
 
-  // Setup-tab form + preflight state. `checkedProfile`/`checkedRegion` are the
+  // Launch-form + preflight state. `checkedProfile`/`checkedRegion` are the
   // committed values the preflight ran against, so typing a profile does not
   // hammer AWS on every keystroke — a check fires on first open, on blur, and on
   // the explicit Re-check.
@@ -842,9 +760,6 @@ export function RemoteCrewPanel() {
   const [showMoreSizes, setShowMoreSizes] = useState(false)
   const [sizeKey, setSizeKey] = useState<SizeTier['key']>('balanced')
   const [copied, setCopied] = useState<'command' | 'policy' | 'cli' | null>(null)
-  // Cloud Sessions is the catalog default. A live launch pins EC2 so its
-  // progress card stays on the same destination that created it.
-  const [pickedDestination, setPickedDestination] = useState<DestinationId | null>(null)
   const [activeLaunchId, setActiveLaunchId] = useState<string | null>(null)
   const [confirmDeleteTag, setConfirmDeleteTag] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
@@ -854,9 +769,9 @@ export function RemoteCrewPanel() {
   // Unsaved work in the open form. Swapping rows would unmount it and lose typed
   // host/port corrections silently, so the swap is refused instead.
   // The unsaved edit itself, keyed by crew — NOT a boolean. The form unmounts
-  // whenever the crew list does (switching to the setup tab is enough), and a
-  // guard can only refuse the exits it knows about; holding the values here means
-  // the work survives the unmount instead of needing a new guard per exit.
+  // whenever the crew list does, and a guard can only refuse the exits it knows
+  // about; holding the values here means the work survives the unmount instead of
+  // needing a new guard per exit.
   // `seq` counts REBASES, and is used as the form's React key: adopting the current
   // record rewrites the draft's values, and a mounted form cannot re-seed itself.
   const [editDraft, setEditDraft] = useState<
@@ -963,12 +878,12 @@ export function RemoteCrewPanel() {
   const preflightQuery = useQuery({
     queryKey: ['cloud', 'preflight', checkedProfile, checkedRegion],
     queryFn: () => api.cloudPreflight(checkedProfile || undefined, checkedRegion || undefined),
-    enabled: tab === 'setup' && !disabled,
+    enabled: launchOpen && !disabled,
   })
   const iamQuery = useQuery({
     queryKey: ['cloud', 'iam-policy'],
     queryFn: () => api.cloudIamPolicy(),
-    enabled: tab === 'setup' && !disabled,
+    enabled: launchOpen && !disabled,
   })
 
   const instances = useMemo(() => instancesQuery.data?.instances ?? [], [instancesQuery.data])
@@ -1157,11 +1072,16 @@ export function RemoteCrewPanel() {
   // device code) is present on the very first render after a remount, before the
   // status query has resolved.
   const activeJob = launchStatusQuery.data ?? inProgress[0] ?? null
-  const destination: DestinationId = pickedDestination ?? (activeJob ? 'ec2' : 'cloud-sessions')
+
+  useEffect(() => {
+    if (inProgress.length > 0 || (activeJob && (!isTerminal(activeJob) || activeJob.signin))) {
+      setLaunchOpen(true)
+    }
+  }, [inProgress.length, activeJob])
 
   // A launch that reaches `done` has just added a crew, but nothing else invalidates
-  // the instances cache and switching tabs does not remount this component — so "Your
-  // crews" would keep showing the pre-launch list until an unrelated refetch happened.
+  // the instances cache — so the list would keep showing the pre-launch rows until
+  // an unrelated refetch happened.
   // Keyed by job id so this fires once per launch instead of on every poll.
   const reconciledLaunch = useRef<string | null>(null)
   useEffect(() => {
@@ -1187,7 +1107,7 @@ export function RemoteCrewPanel() {
   }, [instances, cloudTagByInstanceId, deletingTags])
 
   // ── Initial load: don't render the full UI until we know whether the
-  //    feature is enabled. Without this the panel flashes the tabbed form
+  //    feature is enabled. Without this the panel flashes the full form
   //    and then jitters to the "off" card once the 403 arrives. ──
   if (instancesQuery.isLoading) {
     return (
@@ -1221,29 +1141,6 @@ export function RemoteCrewPanel() {
     )
   }
 
-  const Tabs = (
-    <div className="flex gap-1 border-b border-border mb-5">
-      <button
-        type="button"
-        onClick={() => setTab('crews')}
-        aria-label={i18nT('pages.settings.remoteCrewPanel.your_crews')}
-        className={`px-3.5 py-2 text-[13px] font-semibold -mb-px border-b-2 transition-colors flex items-center gap-2 ${tab === 'crews' ? 'text-text-strong border-accent' : 'text-muted border-transparent hover:text-text'}`}
-      >
-        {i18nT('pages.settings.remoteCrewPanel.your_crews')}
-        <span className={`text-[11px] px-1.5 rounded-full ${tab === 'crews' ? 'bg-accent-subtle text-accent' : 'bg-bg-hover text-muted'}`}>{instances.length}</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => setTab('setup')}
-        aria-label={i18nT('pages.settings.remoteCrewPanel.set_up_a_new_one')}
-        className={`px-3.5 py-2 text-[13px] font-semibold -mb-px border-b-2 transition-colors flex items-center gap-2 ${tab === 'setup' ? 'text-text-strong border-accent' : 'text-muted border-transparent hover:text-text'}`}
-      >
-        <Rocket size={14} /> {i18nT('pages.settings.remoteCrewPanel.set_up_a_new_one')}
-        {inProgress.length > 0 && <span className="w-1.5 h-1.5 rounded-full bg-accent" aria-hidden />}
-      </button>
-    </div>
-  )
-
   const Notices = (
     <>
       {actionErr && <ErrorNotice message={actionErr} onDismiss={() => setActionErr(null)} className="mb-3" />}
@@ -1259,11 +1156,9 @@ export function RemoteCrewPanel() {
 
   return (
     <div>
-      {Tabs}
       {Notices}
 
-      {tab === 'crews' ? (
-        <div className="space-y-4">
+      <div className="space-y-4">
           <Card>
             <div className="flex items-center justify-between mb-1">
               <div className="flex items-center gap-2 text-text font-medium">
@@ -1288,7 +1183,7 @@ export function RemoteCrewPanel() {
               // Never fall through to the empty state on a failed load — that
               // reads as "your crews are gone" when the list simply did not load.
               <div className="py-1">
-                {/* No hand-off: the add-crew form shares this tab — a failed
+                {/* No hand-off: the add-crew form shares this page — a failed
                     list refresh must not offer a navigation that discards it. */}
                 <ErrorNotice message={errMsg(instancesQuery.error ?? launchesQuery.error, i18nT('pages.settings.instancesPanel.unknown_error'))} />
                 {/* Refresh replays the same rejected credential, so it can only
@@ -1402,37 +1297,32 @@ export function RemoteCrewPanel() {
           </Card>
 
           <AddInstanceForm onAdded={reloadInstances} />
-        </div>
-      ) : (
-        <div className="space-y-4">
+
           <Card>
-            <div className="text-text font-medium mb-1">{i18nT('pages.settings.remoteCrewPanel.choose_destination')}</div>
-            <p className="text-[13px] text-muted mb-3">{i18nT('pages.settings.remoteCrewPanel.choose_destination_hint')}</p>
-            <div className="space-y-2.5">
-              {DESTINATIONS.map(dest => (
-                <DestinationCard
-                  key={dest.id}
-                  dest={dest}
-                  on={destination === dest.id}
-                  onPick={setPickedDestination}
-                />
-              ))}
-            </div>
+            <button
+              type="button"
+              aria-expanded={launchOpen}
+              aria-label={i18nT('pages.settings.remoteCrewPanel.launch_on_ec2')}
+              onClick={() => setLaunchOpen(v => !v)}
+              className="w-full flex items-start justify-between gap-3 text-left"
+            >
+              <span className="min-w-0">
+                <span className="flex items-center gap-2 text-text font-medium">
+                  <Rocket className="lucide-inline" />
+                  {i18nT('pages.settings.remoteCrewPanel.launch_on_ec2')}
+                  {inProgress.length > 0 && <span className="w-1.5 h-1.5 rounded-full bg-accent" aria-hidden />}
+                </span>
+                <span className="block text-[13px] text-muted mt-1">
+                  {i18nT('pages.settings.remoteCrewPanel.launch_on_ec2_why')}
+                </span>
+              </span>
+              <ChevronDown
+                className={`lucide-inline mt-1 shrink-0 text-muted transition-transform ${launchOpen ? 'rotate-180' : ''}`}
+              />
+            </button>
           </Card>
 
-          {destination !== 'ec2' && (
-            <Card>
-              <div className="text-text font-medium mb-1">{i18nT('pages.settings.remoteCrewPanel.dest_coming_soon')}</div>
-              <p className="text-[13px] text-muted mb-3">
-                {i18nT('pages.settings.remoteCrewPanel.dest_coming_soon_body', { name: destLabel(destination) })}
-              </p>
-              <Btn primary onClick={() => setPickedDestination('ec2')}>
-                <Server className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.dest_pick_ec2')}
-              </Btn>
-            </Card>
-          )}
-
-          {destination === 'ec2' && (
+          {launchOpen && (
           <>
           <IamPolicyCard
             data={iamQuery.data}
@@ -1578,8 +1468,6 @@ export function RemoteCrewPanel() {
               <span className="text-[12px] text-muted">{blockingOk ? i18nT('pages.settings.remoteCrewPanel.ready_in_6') : i18nT('pages.settings.remoteCrewPanel.finish_prereqs')}</span>
             </div>
           </Card>
-          </>
-          )}
 
           {activeJob && (
             <LaunchProgressCard
@@ -1589,8 +1477,9 @@ export function RemoteCrewPanel() {
               onSignin={id => signinMutation.mutate(id)}
             />
           )}
-        </div>
-      )}
+          </>
+          )}
+      </div>
     </div>
   )
 }

@@ -179,12 +179,11 @@ function storeWithWarm(id: string) {
 
 const setup = () => userEvent.setup({ advanceTimers: (ms: number) => { vi.advanceTimersByTime(ms) } })
 
-/** Open the "Set up a new one" tab and pick the launchable EC2 destination.
- *  Cloud Sessions is the catalog default and does not render the AWS form. */
+/** Expand the on-page EC2 launch disclosure (IAM, preflight, size, Launch).
+ *  In-progress and leftover sign-in jobs auto-open it — do not toggle those shut. */
 async function openSetupTab(u: ReturnType<typeof setup>) {
-  await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
-  const ec2 = await screen.findByRole('button', { name: /^Amazon EC2$/i })
-  await u.click(ec2)
+  const btn = await screen.findByRole('button', { name: /Launch on Amazon EC2/i })
+  if (btn.getAttribute('aria-expanded') !== 'true') await u.click(btn)
 }
 
 beforeEach(() => {
@@ -512,18 +511,16 @@ describe('RemoteCrewPanel — AWS prerequisites', () => {
     expect(copyToClipboard).not.toHaveBeenCalled()
   })
 
-  it('defaults to Cloud Sessions and keeps the AWS launch form behind Amazon EC2', async () => {
+  it('keeps the AWS launch form behind the Launch on Amazon EC2 disclosure', async () => {
     vi.mocked(api.listInstances).mockResolvedValue(list([]))
     const u = setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
 
-    expect(await screen.findByRole('button', { name: /^Cloud Sessions$/i })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getAllByText(/Coming soon/i).length).toBeGreaterThan(0)
+    expect(await screen.findByRole('button', { name: /Launch on Amazon EC2/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText(/Before you start/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Launch$/ })).not.toBeInTheDocument()
 
-    await u.click(screen.getByRole('button', { name: /Set up on Amazon EC2/i }))
+    await u.click(screen.getByRole('button', { name: /Launch on Amazon EC2/i }))
     expect(await screen.findByText(/Before you start/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Launch$/ })).toBeInTheDocument()
   })
@@ -597,7 +594,7 @@ describe('RemoteCrewPanel — launching', () => {
 
   it('fetches the device-code prompt when the job is waiting but carries none', async () => {
     // The prompt lives on the gateway; a job that reached awaiting_signin before
-    // this tab existed has nothing to render until the dashboard asks for it.
+    // this page was opened has nothing to render until the dashboard asks for it.
     const waiting: LaunchJob = { ...RUNNING_JOB, status: 'awaiting_signin', signin: null }
     vi.mocked(api.listInstances).mockResolvedValue(list([]))
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [waiting] })
@@ -1026,12 +1023,11 @@ describe('RemoteCrewPanel — editing a crew', () => {
     expect(refusal.closest('[data-crew-id]')?.getAttribute('data-crew-id')).toBe('m2')
   })
 
-  it('keeps a typed edit across a switch to the setup tab and back', async () => {
-    // The crew list unmounts when the setup tab opens, so an edit whose only home
-    // was the form's own state was silently reverted to the stored values on the
-    // way back. A guard can only refuse the exits it enumerates; the draft lives
-    // in the panel instead, so it survives the unmount rather than being defended
-    // from it one exit at a time.
+  it('keeps a typed edit when the EC2 launch disclosure opens', async () => {
+    // The crew list used to unmount when a setup tab opened. Launch is now on
+    // the same page, so the form stays mounted — and the lifted draft still
+    // holds the typed value if a later refresh replaces the list.
+    vi.mocked(api.listInstances).mockResolvedValue(list([MANUAL_INSTANCE]))
     const u = setup()
     renderWithProviders(<RemoteCrewPanel />)
 
@@ -1042,23 +1038,20 @@ describe('RemoteCrewPanel — editing a crew', () => {
     await u.clear(host)
     await u.type(host, 'dev-box-1-corrected')
 
-    await u.click(screen.getByRole('button', { name: /Set up a new one/i }))
-    expect(screen.queryByRole('group', { name: /Edit dev-box-1/i })).not.toBeInTheDocument()
-
-    await u.click(screen.getByRole('button', { name: /Your crews|Crews/i }))
-    const reopened = within(await screen.findByRole('group', { name: /Edit dev-box-1/i }))
-    expect((reopened.getByRole('textbox', { name: /SSH host/i }) as HTMLInputElement).value).toBe(
+    await u.click(screen.getByRole('button', { name: /Launch on Amazon EC2/i }))
+    expect(await screen.findByText(/Before you start/i)).toBeInTheDocument()
+    const stillOpen = within(screen.getByRole('group', { name: /Edit dev-box-1/i }))
+    expect((stillOpen.getByRole('textbox', { name: /SSH host/i }) as HTMLInputElement).value).toBe(
       'dev-box-1-corrected',
     )
   })
 
   it('keeps a restored draft anchored to the record it was typed against', async () => {
-    // Preserving the draft across an unmount reintroduced the very hazard the
-    // immutable baseline exists to prevent: on remount the baseline was re-derived
-    // from the CURRENT `inst`, so a CLI change the poll picked up meanwhile became
-    // a difference against the stale draft and would have been written back. The
-    // baseline travels WITH the draft, so a field the user never touched is still
-    // not a difference.
+    // Preserving the draft after a poll reintroduced the very hazard the
+    // immutable baseline exists to prevent: re-deriving the baseline from the
+    // CURRENT `inst` made a CLI change the poll picked up a difference against
+    // the stale draft, and would have written it back. The baseline travels
+    // WITH the draft, so a field the user never touched is still not a difference.
     let rows: InstanceView[] = [MANUAL_INSTANCE]
     vi.mocked(api.listInstances).mockImplementation(async () => list(rows))
     vi.mocked(api.updateInstance).mockResolvedValue(MANUAL_INSTANCE)
@@ -1080,8 +1073,6 @@ describe('RemoteCrewPanel — editing a crew', () => {
     await act(async () => {
       await u.click(screen.getByRole('button', { name: 'Refresh' }))
     })
-    await u.click(screen.getByRole('button', { name: /Set up a new one/i }))
-    await u.click(screen.getByRole('button', { name: /Your crews/i }))
     const reopened = within(await screen.findByRole('group', { name: /Edit dev-box-1/i }))
 
     // The port moved externally, which is a machine coordinate, so the save is

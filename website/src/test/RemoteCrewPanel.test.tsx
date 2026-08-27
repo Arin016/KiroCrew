@@ -104,10 +104,11 @@ const IAM_POLICY = {
   cli: 'kirocrew cloud iam-policy',
 }
 
-/** Open setup and pick Amazon EC2 — Cloud Sessions is the default and hides the launch form. */
+/** Expand the on-page EC2 launch disclosure (IAM, preflight, size, Launch).
+ *  In-progress and leftover sign-in jobs auto-open it — do not toggle those shut. */
 async function openEc2Setup(u: ReturnType<typeof userEvent.setup>) {
-  await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
-  await u.click(await screen.findByRole('button', { name: /^Amazon EC2$/i }))
+  const btn = await screen.findByRole('button', { name: /Launch on Amazon EC2/i })
+  if (btn.getAttribute('aria-expanded') !== 'true') await u.click(btn)
 }
 
 // localStorage is cleared too: the panel now persists the AWS profile/region, so a
@@ -159,11 +160,9 @@ describe('RemoteCrewPanel', () => {
     vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [] })
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [SIGNIN_JOB] })
     vi.mocked(api.cloudLaunchStatus).mockResolvedValue(SIGNIN_JOB)
-    const u = userEvent.setup()
 
     // A fresh mount: nothing was launched in this component's lifetime.
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
 
     expect(await screen.findByText(/WXYZ-1234/)).toBeInTheDocument()
     expect(document.querySelector('a[href="https://device.sso/verify"]')).not.toBeNull()
@@ -171,8 +170,8 @@ describe('RemoteCrewPanel', () => {
   })
 
   it('refreshes the crew list when a launch finishes, without waiting for a manual reload', async () => {
-    // Switching tabs does not remount the panel, so nothing would invalidate the
-    // instances cache and the brand-new crew would stay missing from Your crews.
+    // Staying on the same page does not remount the panel, so nothing would
+    // invalidate the instances cache and the brand-new crew would stay missing.
     vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [] })
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [RUNNING_JOB] })
     vi.mocked(api.cloudLaunchStatus).mockResolvedValue({ ...RUNNING_JOB, status: 'done' as const })
@@ -326,9 +325,7 @@ describe('RemoteCrewPanel', () => {
     vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [] })
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [SIGNIN_JOB] })
     vi.mocked(api.cloudLaunchStatus).mockResolvedValue(SIGNIN_JOB)
-    const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
 
     const card = (await screen.findByText(/WXYZ-1234/)).closest('div')?.parentElement
     expect(card).toBeTruthy()
@@ -357,11 +354,10 @@ describe('RemoteCrewPanel', () => {
     // dashboard; gating the block on status==='awaiting_signin' hid the code the
     // moment the job went terminal, making that promise a dead end.
     const job = { ...DONE_JOB, id: 'j-unconfirmed', signin: { code: 'WXYZ-9876', url: 'https://sign-in.example/device' } }
+    vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [] })
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [job] } as never)
     vi.mocked(api.cloudLaunchStatus).mockResolvedValue(job as never)
-    const u = userEvent.setup()
     renderWithProviders(<RemoteCrewPanel />)
-    await u.click(await screen.findByRole('button', { name: /Set up a new one/i }))
 
     expect(await screen.findByText(/WXYZ-9876/)).toBeInTheDocument()
     expect(screen.getByText(/could not confirm the sign-in/i)).toBeInTheDocument()
@@ -411,8 +407,8 @@ describe('RemoteCrewPanel', () => {
     expect(screen.getByRole('button', { name: /Enable remote crew management/i })).toBeInTheDocument()
   })
 
-  it('does not flash the tabbed UI before showing the disabled state', async () => {
-    // Bug: the panel rendered the full form (tabs, crew list) during the initial
+  it('does not flash the full UI before showing the disabled state', async () => {
+    // Bug: the panel rendered the full form (crew list, launch) during the initial
     // query, then jittered to the "off" card once the 403 arrived. Fix: show a
     // neutral loading card until the enabled/disabled state is determined.
     let rejectInstances: (e: Error) => void = () => {}
@@ -422,16 +418,16 @@ describe('RemoteCrewPanel', () => {
     vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [] })
     renderWithProviders(<RemoteCrewPanel />)
 
-    // While loading: a spinner, no tabs, no form.
+    // While loading: a spinner, no crew list, no launch disclosure.
     expect(screen.getByText(/Loading/i)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Your crews/i })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Set up a new one/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Crews you can switch to/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Launch on Amazon EC2/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Enable remote crew management/i })).not.toBeInTheDocument()
 
     // After the 403 resolves: transitions directly to the disabled card.
     rejectInstances(new ApiError(403, 'instances feature is disabled'))
     expect(await screen.findByText(/Remote crew management is off/i)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Your crews/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Crews you can switch to/i)).not.toBeInTheDocument()
   })
 
   it('distinguishes cloud crews from hand-added machines, and shows an in-progress launch', async () => {
