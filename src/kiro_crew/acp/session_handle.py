@@ -1657,6 +1657,17 @@ class AcpSessionHandle:
             avail = models.get("availableModels", [])
             if isinstance(avail, list):
                 self._available_models = self._normalize_models(avail)
+            # A backend may advertise its model list without echoing
+            # ``currentModelId`` (it is best-effort in the ACP shape). When it
+            # names exactly one model that IS the served model unambiguously, so
+            # adopt it as the resolved id — otherwise ``served_model`` reports
+            # ``""`` for the whole session on an unpinned run (no ``set_model``,
+            # no ``currentModelId``), which is why the panel's model chip stays
+            # blank until completion fills it from a different source. With two
+            # or more advertised and no ``currentModelId`` the served choice is
+            # genuinely unknown, so leave it empty rather than guess.
+            if not self._resolved_model_id and len(self._available_models) == 1:
+                self._resolved_model_id = self._available_models[0]["modelId"]
         elif isinstance(models, list):
             self._available_models = self._normalize_models(models)
 

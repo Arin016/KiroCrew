@@ -7372,3 +7372,57 @@ async def test_cancel_during_drain_reject_does_not_wedge_handle():
     assert handle.is_turn_active is False  # not wedged
     # The stranded request went back on the queue for the next drain.
     assert not q["sA"].empty()
+
+
+# ── store_session_config: resolved-model capture (issue #5869) ──
+
+
+def test_store_session_config_adopts_sole_advertised_model_when_no_current_id():
+    """An unpinned session whose ``session/new`` advertises exactly one model
+    but omits ``currentModelId`` must still resolve that model, so ``served_model``
+    is non-empty for the whole run (the panel model chip depends on it)."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {"models": {"availableModels": [{"modelId": "kiro-model-x", "name": "X"}]}}
+    )
+    assert handle._resolved_model_id == "kiro-model-x"
+    assert handle.served_model == "kiro-model-x"
+
+
+def test_store_session_config_current_model_id_wins_over_sole_advertised():
+    """When the backend DOES echo ``currentModelId`` it is authoritative — the
+    sole-advertised fallback must not override it."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {
+            "models": {
+                "currentModelId": "kiro-current",
+                "availableModels": [{"modelId": "kiro-other", "name": "Other"}],
+            }
+        }
+    )
+    assert handle._resolved_model_id == "kiro-current"
+
+
+def test_store_session_config_leaves_model_empty_when_ambiguous():
+    """Two or more advertised models and no ``currentModelId`` is genuinely
+    ambiguous — do not guess; ``served_model`` stays empty."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {
+            "models": {
+                "availableModels": [
+                    {"modelId": "kiro-a", "name": "A"},
+                    {"modelId": "kiro-b", "name": "B"},
+                ]
+            }
+        }
+    )
+    assert handle._resolved_model_id == ""
+    assert handle.served_model == ""
