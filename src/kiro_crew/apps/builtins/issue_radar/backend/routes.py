@@ -68,7 +68,13 @@ from functools import partial, wraps
 
 from aiohttp import web
 
-from kiro_crew.apps.builtins.issue_radar.backend import github_client, provider, store, watch
+from kiro_crew.apps.builtins.issue_radar.backend import (
+    github_client,
+    pipeline_routes,
+    provider,
+    store,
+    watch,
+)
 from kiro_crew.apps.manager import is_app_enabled
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.context import ui_language_tag
@@ -5320,6 +5326,14 @@ def register_routes(app: web.Application) -> None:
     from . import crew_routes
 
     crew_routes.register_crew_routes(app)
+
+    # The pipeline dashboard's three read routes. Its own module, registered HERE
+    # for the same reason as the crews: this function is the single place that lists
+    # this app's routes. Its import is at MODULE scope, unlike crew_routes' -- that
+    # one is function-local because it is genuinely circular (crew_routes imports
+    # this module for the shared gates), and pipeline_routes is not: it depends only
+    # on pipeline_fold and store, and carries its own copy of the enablement gate.
+    pipeline_routes.register_pipeline_routes(app)
 
     # Background new-issue watcher: a single in-process asyncio loop (NOT a cron
     # job) that polls opted-in repos every ~60s and pushes a KiroCrew

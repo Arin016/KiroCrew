@@ -21,8 +21,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import pipeline_fold as fold
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import routes
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_fold as fold
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_routes as routes
+from kiro_crew.apps.builtins.issue_radar.backend import store
 
 
 @pytest.fixture(name="enabled")
@@ -38,7 +39,7 @@ def enabled_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def make_app() -> web.Application:
     application = web.Application()
-    routes.register_routes(application)
+    routes.register_pipeline_routes(application)
     return application
 
 
@@ -339,9 +340,24 @@ def test_only_read_routes_are_mounted() -> None:
     ]
 
 
-def test_the_route_prefix_tracks_the_manifest_name() -> None:
-    """The manifest's permissions.api entries and these paths must not drift."""
-    assert routes.PREFIX == f"/api/apps/{routes.APP_NAME}"
+def test_the_route_prefix_and_the_enablement_gate_name_the_SAME_app() -> None:
+    """The surface we mount under and the app we gate on must be one app.
+
+    This replaces an earlier pin that tied the prefix to the pipeline's own
+    manifest name, which no longer exists -- the pipeline is a sub-surface of
+    Issue Radar now, with no manifest and no App Store card of its own.
+
+    Both halves are asserted together because the failure is silent in EITHER
+    direction and neither is visible from the other's side. Mount under Issue
+    Radar but gate on some other name and the dashboard 403s while Issue Radar is
+    plainly enabled, which reads as broken rather than as switched off. Gate on
+    Issue Radar but mount elsewhere and the path outlives the app it belongs to.
+    """
+    assert routes.PREFIX == f"/api/apps/{store.APP_NAME}/pipeline"
+    assert routes.store.APP_NAME == store.APP_NAME
+    # And the name is the real one, not a plausible-looking string: an unknown app
+    # is never "enabled", so a typo here would deny every request forever.
+    assert store.APP_NAME == "issue-radar"
 
 
 @pytest.mark.asyncio

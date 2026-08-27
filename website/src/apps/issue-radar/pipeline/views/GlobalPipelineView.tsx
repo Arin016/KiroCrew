@@ -24,17 +24,11 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, AlertTriangle, ChevronLeft, RefreshCw } from 'lucide-react'
 import { autoTriagePipelineFoldApi, type RepoRef } from '../api'
-import { Btn, Card, IconButton, PageHeader, EmptyState as UIEmptyState } from '../../../components/ui'
-import { i18nT } from '../../../i18n/t'
+import { Btn, Card, IconButton, PageHeader, EmptyState as UIEmptyState } from '../../../../components/ui'
+import { i18nT } from '../../../../i18n/t'
 import PipelineFlow, { stepLabel } from './PipelineFlow'
 import StepItemsTable from './StepItemsTable'
 import ItemSessionsTable from './ItemSessionsTable'
-
-// The repository this pipeline runs against. Both halves are GitHub IDENTIFIERS,
-// so the joined spelling is the real name of the repo and not the product name in
-// prose -- the slug exemption cannot see that here because the owner and the repo
-// are separate fields rather than one `owner/repo` string.
-const DEFAULT_REPO: RepoRef = { owner: 'kirodotdev', repo: 'KiroCrew' } // brand-ok: repo identifier
 
 /** How often the open level refetches, in ms.
  *
@@ -69,7 +63,7 @@ function ErrorPanel({ testId, onRetry }: { testId: string; onRetry: () => void }
   )
 }
 
-export default function GlobalPipelineView() {
+export default function GlobalPipelineView({ repo }: { repo: RepoRef }) {
   const [step, setStep] = useState<string | null>(null)
   const [item, setItem] = useState<number | null>(null)
   // The clock has to ADVANCE, not be captured at mount. The queries below refetch
@@ -84,14 +78,16 @@ export default function GlobalPipelineView() {
     return () => clearInterval(id)
   }, [])
 
-  // FIXED to the pipeline's own repository, NOT the stored preference. The
-  // preference is shared with the other view and a user who set it to a different
-  // repo would have pipeline items enriched from THAT repo's issue cache -- titles,
-  // labels and assignees belonging to whichever issue happens to share the number.
-  // The event trail carries no repository dimension precisely because these jobs
-  // run against one repo, so reading the preference here offers a choice the data
-  // cannot honour.
-  const repo = DEFAULT_REPO
+  // The repository comes from Issue Radar's active selection (see
+  // PipelineDashboardView). It used to be a hardcoded constant here, justified by
+  // two facts that were both true at the time and are both false now: the event
+  // trail carried no repository dimension, so a choice could not be honoured; and
+  // the only choice available was a localStorage preference shared with the lanes
+  // view, which could name a repository whose issue cache would then enrich THIS
+  // pipeline's items with whichever issue happened to share a number. The trail is
+  // stamped per repository now, and the selection is Issue Radar's own rather than
+  // a remembered guess -- so the fold can honour it and the enrichment agrees with
+  // the items being enriched.
 
   const overview = useQuery({
     // Keyed on the repository as well: the answer is now repository-specific, so a
@@ -108,6 +104,17 @@ export default function GlobalPipelineView() {
     refetchInterval: REFRESH_MS,
   })
 
+  // NOT keyed on the repository, unlike the two levels above, because the answer
+  // genuinely is not repository-scoped: `list_item_sessions` resolves an item
+  // through the dispatch queue, and `_read_queue` builds `{issue: entry}` from the
+  // `issue` field alone with later-lines-win. Two repositories sharing an issue
+  // number therefore collide in the QUEUE FILE, before any fold reads it -- so
+  // adding `repo` to this key would imply a scope the data cannot honour, and
+  // passing one to the route would be a parameter it has to ignore.
+  //
+  // Pre-existing and unreachable on a one-repository install, which every install
+  // is today. Fixing it means keying the pipeline's own queue by repository and
+  // issue, which is the scheduled jobs' data model, not this view's.
   const sessions = useQuery({
     queryKey: ['atp', 'sessions', item],
     queryFn: () => autoTriagePipelineFoldApi.itemSessions(item as number),

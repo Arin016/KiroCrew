@@ -15,7 +15,7 @@
 // helper DEGRADES to a readable placeholder rather than emitting "NaN", "-3s" or
 // "Infinity" into an operator's table.
 
-import { fmtDuration, fmtNumber, fmtRelative, fmtUnit, type FormatUnit } from '../../../i18n/format'
+import { fmtDuration, fmtNumber, fmtRelative, fmtUnit, type FormatUnit } from '../../../../i18n/format'
 
 /** Shown wherever a value is absent (null) or not a finite number. A single
  * constant so the table reads consistently and a view can special-case it. */

@@ -35,20 +35,18 @@ import type { CrewFabricItem, CrewFabricResponse, RepoRef } from '../api'
 // ── the HTTP seam ────────────────────────────────────────────────────────────
 // Declared through vi.hoisted so the vi.mock factory (itself hoisted to the top
 // of the module) can close over the same fn instances the tests drive.
-const { crewFabric, listConnectedRepos } = vi.hoisted(() => ({
+const { crewFabric } = vi.hoisted(() => ({
   crewFabric: vi.fn<[RepoRef], Promise<CrewFabricResponse>>(),
-  listConnectedRepos: vi.fn<[], Promise<unknown[]>>(),
 }))
 
 vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>()
   return {
     ...actual,
-    autoTriagePipelineApi: { crewFabric, listConnectedRepos },
-    // A first-ever visit has no stored preference, so the resolver falls back to
-    // the connected list the mock returns.
-    loadStoredPreference: () => null,
-    saveRepoPreference: () => {},
+    // Only the fabric read is mocked now. The connected-repo list and the two
+    // preference helpers used to be mocked here because the view resolved its own
+    // repository; it takes one as a prop, so there is nothing left to resolve.
+    autoTriagePipelineApi: { crewFabric },
   }
 })
 
@@ -99,8 +97,6 @@ beforeEach(() => {
     dispatchEvent: vi.fn(),
   })) as unknown as typeof matchMedia
   crewFabric.mockReset()
-  listConnectedRepos.mockReset()
-  listConnectedRepos.mockResolvedValue([{ owner: 'acme', repo: 'demo-repo' }])
   localStorage.clear()
 })
 
@@ -147,7 +143,7 @@ function renderView() {
   })
   return render(
     <QueryClientProvider client={qc}>
-      <PipelineView />
+      <PipelineView repo={{ owner: 'acme', repo: 'demo-repo' }} />
     </QueryClientProvider>,
   )
 }

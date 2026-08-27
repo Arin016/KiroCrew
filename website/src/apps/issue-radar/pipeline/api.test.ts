@@ -16,18 +16,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   autoTriagePipelineApi,
   autoTriagePipelineFoldApi,
-  loadStoredPreference,
-  saveRepoPreference,
   CREW_PHASES,
   CREW_FABRIC_SCHEMA,
-  REPO_PREFERENCE_KEY,
-  ISSUE_RADAR_ACTIVE_REPO_KEY,
   type CrewFabricResponse,
   type RepoRef,
 } from './api'
 
 const ISSUE_RADAR_API = '/api/apps/issue-radar'
-const ATP_API = '/api/apps/auto-triage-pipeline'
+const ATP_API = '/api/apps/issue-radar/pipeline'
 
 /** Resolve a fetch mock to a JSON body at the given status. */
 function jsonResponse(body: unknown, status = 200): Response {
@@ -297,81 +293,6 @@ describe('autoTriagePipelineApi.listConnectedRepos', () => {
   it('returns [] on a transport-level failure', async () => {
     fetchSpy.mockRejectedValue(new TypeError('Failed to fetch'))
     await expect(autoTriagePipelineApi.listConnectedRepos()).resolves.toEqual([])
-  })
-})
-
-describe('repo preference storage', () => {
-  afterEach(() => {
-    localStorage.clear()
-    vi.restoreAllMocks()
-  })
-
-  it('loadStoredPreference returns null when neither key is set', () => {
-    expect(loadStoredPreference()).toBeNull()
-  })
-
-  it('saveRepoPreference persists only owner/repo when no identity is given, and reloads it', () => {
-    saveRepoPreference({ owner: 'o', repo: 'r' })
-    const stored = JSON.parse(localStorage.getItem(REPO_PREFERENCE_KEY) as string)
-    expect(stored).toEqual({ owner: 'o', repo: 'r' })
-    expect(loadStoredPreference()).toEqual({ owner: 'o', repo: 'r' })
-  })
-
-  it('saveRepoPreference persists provider and host when present', () => {
-    saveRepoPreference({ owner: 'o', repo: 'r', provider: 'gitlab', host: 'gl.example.com' })
-    expect(loadStoredPreference()).toEqual({
-      owner: 'o',
-      repo: 'r',
-      provider: 'gitlab',
-      host: 'gl.example.com',
-    })
-  })
-
-  it("prefers this app's own key over Issue Radar's active-repo key", () => {
-    localStorage.setItem(
-      ISSUE_RADAR_ACTIVE_REPO_KEY,
-      JSON.stringify({ owner: 'radar', repo: 'from-radar' }),
-    )
-    localStorage.setItem(REPO_PREFERENCE_KEY, JSON.stringify({ owner: 'own', repo: 'from-own' }))
-    expect(loadStoredPreference()).toEqual({ owner: 'own', repo: 'from-own' })
-  })
-
-  it("falls back to Issue Radar's active-repo key on a first-ever visit here", () => {
-    localStorage.setItem(
-      ISSUE_RADAR_ACTIVE_REPO_KEY,
-      JSON.stringify({ owner: 'radar', repo: 'seed', provider: 'github' }),
-    )
-    expect(loadStoredPreference()).toEqual({ owner: 'radar', repo: 'seed', provider: 'github' })
-  })
-
-  it('discards a malformed stored value (bad JSON) rather than throwing', () => {
-    localStorage.setItem(REPO_PREFERENCE_KEY, '{not valid json')
-    expect(loadStoredPreference()).toBeNull()
-  })
-
-  it('discards a stored value missing owner/repo, and one that is not an object', () => {
-    localStorage.setItem(REPO_PREFERENCE_KEY, JSON.stringify({ owner: 'o' }))
-    expect(loadStoredPreference()).toBeNull()
-    localStorage.setItem(REPO_PREFERENCE_KEY, JSON.stringify(['array']))
-    expect(loadStoredPreference()).toBeNull()
-    localStorage.setItem(REPO_PREFERENCE_KEY, JSON.stringify(null))
-    expect(loadStoredPreference()).toBeNull()
-  })
-
-  it('drops non-string provider/host while keeping a valid owner/repo', () => {
-    localStorage.setItem(
-      REPO_PREFERENCE_KEY,
-      JSON.stringify({ owner: 'o', repo: 'r', provider: 5, host: {} }),
-    )
-    expect(loadStoredPreference()).toEqual({ owner: 'o', repo: 'r' })
-  })
-
-  it('saveRepoPreference swallows a storage failure (private mode / quota)', () => {
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new Error('QuotaExceededError')
-    })
-    // Must not throw.
-    expect(() => saveRepoPreference({ owner: 'o', repo: 'r' })).not.toThrow()
   })
 })
 

@@ -26,8 +26,8 @@
 //     link that an operator would click.
 import type { ReactNode } from 'react'
 import { ChevronRight, ExternalLink, GitPullRequest, RotateCcw } from 'lucide-react'
-import { Badge, Card, EmptyState } from '../../../components/ui'
-import { i18nT } from '../../../i18n/t'
+import { Badge, Card, EmptyState } from '../../../../components/ui'
+import { i18nT } from '../../../../i18n/t'
 import type { StepItem } from '../api'
 import { EMPTY_PLACEHOLDER, formatRelativeTime } from '../lib/format'
 

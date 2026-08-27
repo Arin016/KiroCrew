@@ -367,13 +367,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Una vista de solo lectura en tres niveles de la canalizacion de triaje automatico de Kiro Crew: los seis pasos y su rendimiento, las incidencias dentro de un paso y el coste de las sesiones de agente de cada incidencia.",
-        "display_name": "Pipeline de auto-triaje de Kiro Crew",
-        "page_label": "Pipeline de auto-triaje",
-        "use_case_1": "Detecta dónde se acumula, se reabre o queda en espera el trabajo del equipo de Issue Radar en todo el pipeline de entrega.",
-        "configuration_1": "Conecta un repositorio en Issue Radar y deja que su registro del equipo recopile eventos de fase; después activa esta app y elige ese repositorio."
-      },
       "pipeline": {
         "subtitle": "Un carril por elemento de trabajo de la crew, en todas las fases: mira en qué fase está cada elemento y dónde se acumulan.",
         "refresh": "Actualizar la pipeline",
@@ -404,10 +397,6 @@
         "empty_row_2": "El color indica el estado de un vistazo: una crew editando, esperando una comprobación o terminada.",
         "empty_row_3": "Las etiquetas de permanencia muestran cuánto lleva un elemento en cada fase, para que uno atascado destaque.",
         "empty_footer": "Configura crews en Issue Radar para iniciar el pipeline.",
-        "no_repo_title": "Ningún repositorio conectado",
-        "no_repo_body": "El pipeline dibuja una vía por cada elemento de trabajo del crew de un repositorio conectado. Todavía no hay ningún repositorio conectado — conecta uno para ver aquí sus elementos de trabajo del crew.",
-        "repo_picker_label": "Cambiar de repositorio",
-        "repo_picker_prefix": "Repo",
         "legend_editing": "Editando",
         "legend_waiting": "Esperando",
         "legend_released": "Publicado",
@@ -2447,6 +2436,7 @@
           "re_fetch_issues_and_labels_from": "Volver a obtener incidencias + etiquetas de {{provider}}"
         },
         "registry": {
+          "pipeline": "Canalización",
           "overview": "Resumen",
           "tagging": "Etiquetado",
           "graph": "Grafo"

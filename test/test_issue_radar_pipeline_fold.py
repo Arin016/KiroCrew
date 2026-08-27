@@ -1,4 +1,4 @@
-"""Tests for the auto-triage-pipeline read-only fold.
+"""Tests for Issue Radar's read-only pipeline fold.
 
 Every test builds its OWN fixtures under tmp_path. Nothing here reads real data
 under ~/.kirocrew: a fold test that depended on the live trail would pass or fail
@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import pipeline_fold as fold
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import routes
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_fold as fold
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_routes as routes
 
 # --------------------------------------------------------------------------
 # Fixtures: everything resolves inside tmp_path.
@@ -733,11 +733,11 @@ def test_known_step_lists_resident_item(wire_sources: dict[str, Path]) -> None:
 
 
 # --------------------------------------------------------------------------
-# 16. No write path: register_routes mounts only GET/HEAD.
+# 16. No write path: register_pipeline_routes mounts only GET/HEAD.
 # --------------------------------------------------------------------------
 
 
-def test_register_routes_mounts_only_read_methods() -> None:
+def test_register_pipeline_routes_mounts_only_read_methods() -> None:
     """The app is a window, never a hand on the pipeline. aiohttp's add_get also
     registers HEAD; NOTHING else may be mounted. Assert every registered method
     is GET or HEAD and there are exactly three GET routes -- a POST/PATCH/DELETE
@@ -745,7 +745,7 @@ def test_register_routes_mounts_only_read_methods() -> None:
     from aiohttp import web
 
     app = web.Application()
-    routes.register_routes(app)
+    routes.register_pipeline_routes(app)
     methods = sorted({r.method for r in app.router.routes()})
     assert set(methods) <= {"GET", "HEAD"}
     get_paths = sorted(r.resource.canonical for r in app.router.routes() if r.method == "GET")

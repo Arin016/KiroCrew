@@ -367,13 +367,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Une vue en lecture seule a trois niveaux du pipeline de triage automatique de Kiro Crew : les six etapes et leur debit, les tickets dans une etape, et le cout des sessions d'agent de chaque ticket.",
-        "display_name": "Pipeline d'auto-triage Kiro Crew",
-        "page_label": "Pipeline d'auto-triage",
-        "use_case_1": "Repère où le travail d'équipe d'Issue Radar s'accumule, est rouvert ou reste en attente dans l'ensemble du pipeline de livraison.",
-        "configuration_1": "Connecte un dépôt dans Issue Radar et laisse son registre d'équipe collecter les événements de phase, puis active cette app et sélectionne ce dépôt."
-      },
       "pipeline": {
         "subtitle": "Une voie par élément de travail de la crew, sur toutes les phases : voyez dans quelle phase se trouve chaque élément et où les éléments s’accumulent.",
         "refresh": "Actualiser le pipeline",
@@ -404,10 +397,6 @@
         "empty_row_2": "La couleur indique l’état d’un coup d’œil : une crew qui édite, attend une vérification ou a terminé.",
         "empty_row_3": "Les libellés de durée montrent combien de temps un élément est resté dans chaque phase, pour repérer un élément bloqué.",
         "empty_footer": "Configurez des crews dans Issue Radar pour lancer la pipeline.",
-        "no_repo_title": "Aucun dépôt connecté",
-        "no_repo_body": "La pipeline dessine une voie par élément de travail crew pour un dépôt connecté. Aucun dépôt n'est encore connecté — connectez-en un pour voir ici ses éléments de travail crew.",
-        "repo_picker_label": "Changer de dépôt",
-        "repo_picker_prefix": "Dépôt",
         "legend_editing": "Édition",
         "legend_waiting": "En attente",
         "legend_released": "Publié",
@@ -2491,6 +2480,7 @@
           "re_fetch_issues_and_labels_from": "Récupérer à nouveau les tickets + étiquettes depuis {{provider}}"
         },
         "registry": {
+          "pipeline": "Chaîne de traitement",
           "overview": "Vue d’ensemble",
           "tagging": "Étiquetage",
           "graph": "Graphe"

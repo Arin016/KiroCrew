@@ -367,13 +367,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Una vista in sola lettura a tre livelli della pipeline di triage automatico di Kiro Crew: i sei passi e il loro flusso, le issue dentro un passo e il costo delle sessioni agente di ogni issue.",
-        "display_name": "Pipeline di auto-triage Kiro Crew",
-        "page_label": "Pipeline di auto-triage",
-        "use_case_1": "Individua dove il lavoro della squadra di Issue Radar si accumula, viene riaperto o resta in attesa nell'intera pipeline di consegna.",
-        "configuration_1": "Collega un repository in Issue Radar e lascia che il relativo registro della squadra raccolga gli eventi di fase, quindi attiva questa app e seleziona quel repository."
-      },
       "pipeline": {
         "subtitle": "Una corsia per elemento di lavoro della crew, in tutte le fasi: vedi in quale fase si trova ogni elemento e dove si accumulano.",
         "refresh": "Aggiorna la pipeline",
@@ -404,10 +397,6 @@
         "empty_row_2": "Il colore indica lo stato a colpo d’occhio: una crew che modifica, in attesa di un controllo o completata.",
         "empty_row_3": "Le etichette di permanenza mostrano quanto è rimasto un elemento in ciascuna fase, così un elemento bloccato risalta.",
         "empty_footer": "Configura le crew in Issue Radar per avviare la pipeline.",
-        "no_repo_title": "Nessun repository collegato",
-        "no_repo_body": "La pipeline disegna una corsia per ogni elemento di lavoro del crew di un repository collegato. Nessun repository è ancora collegato — collegane uno per vedere qui i suoi elementi di lavoro del crew.",
-        "repo_picker_label": "Cambia repository",
-        "repo_picker_prefix": "Repo",
         "legend_editing": "In modifica",
         "legend_waiting": "In attesa",
         "legend_released": "Rilasciato",
@@ -2447,6 +2436,7 @@
           "re_fetch_issues_and_labels_from": "Recupera di nuovo issue ed etichette da {{provider}}"
         },
         "registry": {
+          "pipeline": "Catena di elaborazione",
           "overview": "Panoramica",
           "tagging": "Etichettatura",
           "graph": "Grafo"

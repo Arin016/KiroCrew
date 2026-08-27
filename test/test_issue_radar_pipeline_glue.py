@@ -1,4 +1,4 @@
-"""Pins the glued-plus-torn recovery path in the auto-triage-pipeline fold.
+"""Pins the glued-plus-torn recovery path in Issue Radar's pipeline fold.
 
 Separate from the main suite because it targets one specific data-loss shape
 found by review: a well-formed record glued to a TORN one on the same line. The
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import pipeline_fold as fold
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_fold as fold
 
 
 @pytest.fixture()

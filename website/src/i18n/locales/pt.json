@@ -367,13 +367,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Uma visao somente leitura em tres niveis do pipeline de triagem automatica do Kiro Crew: os seis passos e sua vazao, as issues dentro de um passo e o custo das sessoes de agente de cada issue.",
-        "display_name": "Pipeline de auto-triagem do Kiro Crew",
-        "page_label": "Pipeline de auto-triagem",
-        "use_case_1": "Veja onde o trabalho da equipe do Issue Radar está se acumulando, sendo reaberto ou aguardando em todo o pipeline de entrega.",
-        "configuration_1": "Conecte um repositório no Issue Radar e deixe o ledger da equipe coletar eventos de fase; depois ative este app e escolha esse repositório."
-      },
       "pipeline": {
         "subtitle": "Uma faixa por item de trabalho do crew, em todas as fases — veja em que fase está cada item e onde eles estão se acumulando.",
         "refresh": "Atualizar o pipeline",
@@ -404,10 +397,6 @@
         "empty_row_2": "A cor mostra o estado num relance: um crew editando, aguardando uma verificação ou concluído.",
         "empty_row_3": "Os rótulos de permanência mostram quanto tempo um item ficou em cada fase, destacando os que travaram.",
         "empty_footer": "Configure crews no Issue Radar para iniciar o pipeline.",
-        "no_repo_title": "Nenhum repositório conectado",
-        "no_repo_body": "O pipeline desenha uma faixa por item de trabalho do crew de um repositório conectado. Nenhum repositório está conectado ainda — conecte um para ver aqui seus itens de trabalho do crew.",
-        "repo_picker_label": "Trocar de repositório",
-        "repo_picker_prefix": "Repo",
         "legend_editing": "Editando",
         "legend_waiting": "Aguardando",
         "legend_released": "Liberado",
@@ -2447,6 +2436,7 @@
           "re_fetch_issues_and_labels_from": "Buscar novamente issues + etiquetas do {{provider}}"
         },
         "registry": {
+          "pipeline": "Cadeia de processamento",
           "overview": "Visão geral",
           "tagging": "Etiquetagem",
           "graph": "Grafo"

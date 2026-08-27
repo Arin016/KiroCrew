@@ -20,7 +20,7 @@ import { colVbX, TRACK_PAD_L, TRACK_PAD_R } from './PipelineView'
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SRC = readFileSync(
-  'src/apps/auto-triage-pipeline/views/PipelineView.tsx',
+  'src/apps/issue-radar/pipeline/views/PipelineView.tsx',
   'utf8',
 )
 

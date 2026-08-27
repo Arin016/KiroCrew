@@ -364,13 +364,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Eine schreibgeschuetzte, dreistufige Ansicht von Kiro Crews eigener Auto-Triage-Pipeline: die sechs Schritte und ihr Durchsatz, die Issues in einem Schritt und die Kosten der Agent-Sitzungen je Issue.",
-        "display_name": "Kiro Crew Auto-Triage-Pipeline",
-        "page_label": "Auto-Triage-Pipeline",
-        "use_case_1": "Erkenne über die gesamte Bereitstellungspipeline hinweg, wo sich Crew-Arbeit aus Issue Radar staut, erneut geöffnet wurde oder wartet.",
-        "configuration_1": "Verbinde ein Repository in Issue Radar und lass dessen Crew-Ledger Phasenereignisse sammeln; aktiviere dann diese App und wähle das Repository aus."
-      },
       "pipeline": {
         "subtitle": "Eine Spur pro Arbeitselement der Crew, über alle Phasen – sieh, in welcher Phase jedes Element steckt und wo sich Elemente stauen.",
         "refresh": "Pipeline aktualisieren",
@@ -401,10 +394,6 @@
         "empty_row_2": "Die Farbe zeigt den Status auf einen Blick: eine Crew, die bearbeitet, auf eine Prüfung wartet oder fertig ist.",
         "empty_row_3": "Verweildauer-Labels zeigen, wie lange ein Element in jeder Phase saß, damit ein hängendes Element auffällt.",
         "empty_footer": "Richten Sie crews in Issue Radar ein, um die Pipeline zu starten.",
-        "no_repo_title": "Kein Repository verbunden",
-        "no_repo_body": "Die Pipeline zeichnet eine Spur pro crew-Arbeitselement für ein verbundenes Repository. Es ist noch kein Repository verbunden — verbinden Sie eines, um dessen crew-Arbeitselemente hier zu sehen.",
-        "repo_picker_label": "Repository wechseln",
-        "repo_picker_prefix": "Repo",
         "legend_editing": "Bearbeiten",
         "legend_waiting": "Warten",
         "legend_released": "Freigegeben",
@@ -2440,6 +2429,7 @@
           "re_fetch_issues_and_labels_from": "Issues + Labels erneut von {{provider}} abrufen"
         },
         "registry": {
+          "pipeline": "Ablaufkette",
           "overview": "Übersicht",
           "tagging": "Verschlagwortung",
           "graph": "Graph"

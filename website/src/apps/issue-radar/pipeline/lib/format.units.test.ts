@@ -13,7 +13,7 @@
  * hand-picked pair of numbers.
  */
 import { describe, it, expect, beforeAll } from 'vitest'
-import { initI18n } from '../../../i18n'
+import { initI18n } from '../../../../i18n'
 import { formatRelativeTime } from './format'
 
 beforeAll(async () => {

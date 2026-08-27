@@ -1,17 +1,24 @@
-// Auto Triage Pipeline — a small, SELF-CONTAINED typed client for the one seam
-// this app reads: Issue Radar's crew-fabric endpoint. The data half of the
-// feature (recording `phase` on the ledger line, `fold_fabric`, the route) lives
-// in the `issue_radar` builtin and is repo-agnostic; this app is its first
-// tenant, so it reads THROUGH that seam rather than owning a backend of its own.
+// Pipeline API client — the typed client for Issue Radar's pipeline dashboard.
+//
+// It reads two surfaces, both Issue Radar's own:
 //
 //   GET /api/apps/issue-radar/crew/fabric?owner=&repo=[&provider=&host=]
+//   GET /api/apps/issue-radar/pipeline/{overview,step,item/sessions}
 //
-// The base path is issue-radar's, matching every builtin's `/api/apps/<name>`
-// convention. Nothing here imports from `../issue-radar/*`: the types below are
-// this app's own copy, so the two apps can evolve their frontends independently
-// (wave 2 builds the faithful drawing and the queue dashboard on top of these).
+// The crew-fabric half was always Issue Radar's (recording `phase` on the ledger
+// line, `fold_fabric`, the route); the pipeline half used to be a separate builtin
+// with its own `/api/apps/auto-triage-pipeline/*` prefix and its own App Store
+// card, and is now mounted under Issue Radar as a sub-surface. Both bases are
+// therefore derived from ONE constant below rather than spelled out twice.
 //
-// FORWARD-TOLERANT, like the seam it reads. `crewFabric()` never throws on a repo
+// Kept as this module's own types rather than importing Issue Radar's `api.ts`.
+// That is no longer about app independence -- this IS part of Issue Radar now --
+// but about direction: the fold payloads are a backend contract this module
+// mirrors field for field, and folding them into the app-wide api module would put
+// three read-only dashboard shapes next to ~30 read/write repository operations
+// with a different failure law (see FORWARD-TOLERANT below).
+//
+// FORWARD-TOLERANT, like the seams it reads. `crewFabric()` never throws on a repo
 // with no fabric: a 404 (issue-radar disabled / route absent), 500, 403 (repo not
 // connected), a non-JSON body, or a payload from a newer schema all collapse to
 // the same normalized empty result, and the view renders its designed empty
@@ -148,65 +155,24 @@ export interface ReposResponse {
   repos: ConnectedRepo[]
 }
 
-/** This app's OWN localStorage key for the repo the user last viewed here. It is
- * a REMEMBERED PREFERENCE, not the source of truth — the connected-repo list from
- * the backend is authoritative, and a preference naming a repo no longer in that
- * list is discarded (see `lib/fabric.ts` `selectRepo`). The app writes only this
- * key; it never writes Issue Radar's. */
-export const REPO_PREFERENCE_KEY = 'kc:auto-triage-pipeline:repo'
-
-/** localStorage key Issue Radar persists its active repo under. This app READS it
- * (never writes it) as a seed for a first-ever visit, so a user who already has a
- * repo open in Issue Radar lands on the same one — but it is only one candidate
- * preference, not the source of truth. */
-export const ISSUE_RADAR_ACTIVE_REPO_KEY = 'kc:issue-radar:active-repo'
+/* There is deliberately NO repo preference key here any more.
+ *
+ * This module used to persist its own `kc:auto-triage-pipeline:repo` and, on a
+ * first-ever visit, READ Issue Radar's `kc:issue-radar:active-repo` as a seed so
+ * the two surfaces would tend to agree on a repository. That existed only because
+ * the pipeline shipped as a standalone app and had to guess, through storage, at a
+ * choice it could not see. It is now rendered inside Issue Radar, which passes the
+ * active repository in directly, so the guess is replaced by the value itself --
+ * and a second remembered copy could only ever disagree with it.
+ */
 
 /** Coerce an unknown parsed value into a `RepoRef`, or null if it is not one.
- * Guards every field so a malformed or pre-GitLab value cannot crash the read. */
-function coerceRepoRef(v: unknown): RepoRef | null {
-  if (!v || typeof v !== 'object') return null
-  const o = v as Record<string, unknown>
-  if (typeof o.owner !== 'string' || typeof o.repo !== 'string') return null
-  if (!o.owner || !o.repo) return null
-  const ref: RepoRef = { owner: o.owner, repo: o.repo }
-  if (typeof o.provider === 'string') ref.provider = o.provider as SourceProvider
-  if (typeof o.host === 'string') ref.host = o.host
-  return ref
-}
-
-/** Read a `RepoRef` out of a localStorage key, or null when absent/invalid. */
-function readRepoRefKey(key: string): RepoRef | null {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return null
-    return coerceRepoRef(JSON.parse(raw))
-  } catch {
-    return null
-  }
-}
-
-/** The remembered repo preference for THIS app, or null. Prefers this app's own
- * key; falls back to Issue Radar's active-repo key so a first-ever visit with a
- * repo already open there lands on the same one. Both are only candidate
- * preferences — `selectRepo` still validates the choice against the connected
- * list and falls back when it is stale. */
-export function loadStoredPreference(): RepoRef | null {
-  return readRepoRefKey(REPO_PREFERENCE_KEY) ?? readRepoRefKey(ISSUE_RADAR_ACTIVE_REPO_KEY)
-}
-
-/** Persist the user's chosen repo under THIS app's own key. Never touches Issue
- * Radar's key. Best-effort: a storage failure (private mode, quota) is swallowed
- * — the choice simply is not remembered across reloads. */
-export function saveRepoPreference(ref: RepoRef): void {
-  try {
-    const v: RepoRef = { owner: ref.owner, repo: ref.repo }
-    if (ref.provider) v.provider = ref.provider
-    if (ref.host) v.host = ref.host
-    localStorage.setItem(REPO_PREFERENCE_KEY, JSON.stringify(v))
-  } catch {
-    // ignore — persistence is a nicety, not a requirement
-  }
-}
+ *
+ * Deliberately deleted along with the preference reader that was its only caller.
+ * A `RepoRef` no longer arrives from untrusted storage -- it is handed in by Issue
+ * Radar, already validated where it was chosen -- so a defensive coercion here
+ * would guard a boundary that no longer exists.
+ */
 
 /** The query params a fabric request carries — owner/repo plus the identity
  * (provider/host) when present. */
@@ -312,11 +278,11 @@ export const autoTriagePipelineApi = {
 }
 
 // ---------------------------------------------------------------------------
-// L0 / L1 / L2 — the app's OWN three read endpoints.
+// L0 / L1 / L2 — the pipeline's three read endpoints.
 //
-// These hit this app's own backend (`/api/apps/auto-triage-pipeline/*`, folded
-// by `pipeline_fold.py`), not Issue Radar's seam above. The `to_dict()` payloads
-// in that module ARE the contract mirrored here.
+// These hit `pipeline_routes.py` (folded by `pipeline_fold.py`), which is mounted
+// as a sub-surface of Issue Radar's backend rather than as an app of its own. The
+// `to_dict()` payloads in that module ARE the contract mirrored here.
 //
 // Same forward-tolerant law as `crewFabric`: the folds read a LIVE, append-only
 // log another process is writing, so EVERY field can be absent, null, or the
@@ -326,8 +292,15 @@ export const autoTriagePipelineApi = {
 // payload all collapse to a designed empty result the view can render.
 // ---------------------------------------------------------------------------
 
-/** This app's own backend base — distinct from `ISSUE_RADAR_API` above. */
-const ATP_API = `/api/apps/${'auto-triage-pipeline'}`
+/** The fold routes, nested under Issue Radar's base.
+ *
+ * DERIVED from `ISSUE_RADAR_API` rather than spelled out, because the backend
+ * derives its own prefix the same way (`f"/api/apps/{store.APP_NAME}/pipeline"`).
+ * Two independent literals would let the client and the mount drift into a 404
+ * that looks like an empty pipeline, since every fold client is deliberately
+ * forward-tolerant and renders a non-2xx as "nothing here yet".
+ */
+const PIPELINE_API = `${ISSUE_RADAR_API}/pipeline`
 
 /** Unit a step's throughput is counted in. Early steps are batch jobs that open
  * no session, so they count issues; the session-bearing steps count sessions.
@@ -649,7 +622,7 @@ export const autoTriagePipelineFoldApi = {
     // one, and no client has to be taught the new parameter to keep working.
     if (repo) q.set('repo', repo)
     const suffix = q.toString() ? `?${q.toString()}` : ''
-    const o = await getObjectOrThrow(`${ATP_API}/overview${suffix}`)
+    const o = await getObjectOrThrow(`${PIPELINE_API}/overview${suffix}`)
     const steps: OverviewStep[] = []
     if (Array.isArray(o.steps)) {
       for (const s of o.steps) {
@@ -701,7 +674,7 @@ export const autoTriagePipelineFoldApi = {
     if (typeof query.limit === 'number' && Number.isFinite(query.limit)) {
       q.set('limit', String(Math.trunc(query.limit)))
     }
-    const o = await getObjectOrThrow(`${ATP_API}/step?${q.toString()}`)
+    const o = await getObjectOrThrow(`${PIPELINE_API}/step?${q.toString()}`)
     const items: StepItem[] = []
     if (Array.isArray(o.items)) {
       for (const it of o.items) {
@@ -719,7 +692,7 @@ export const autoTriagePipelineFoldApi = {
    */
   itemSessions: async (number: number): Promise<ItemSessionsResponse> => {
     const q = new URLSearchParams({ number: String(Math.trunc(number)) })
-    const o = await getObjectOrThrow(`${ATP_API}/item/sessions?${q.toString()}`)
+    const o = await getObjectOrThrow(`${PIPELINE_API}/item/sessions?${q.toString()}`)
     const sessions: ItemSession[] = []
     if (Array.isArray(o.sessions)) {
       for (const s of o.sessions) {

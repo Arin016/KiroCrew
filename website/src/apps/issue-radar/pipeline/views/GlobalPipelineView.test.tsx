@@ -17,7 +17,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
 
-import { store } from '../../../store'
+import { store } from '../../../../store'
 
 const { overview, step, itemSessions } = vi.hoisted(() => ({
   overview: vi.fn(),
@@ -126,7 +126,7 @@ function renderView() {
     <Provider store={store}>
       <MemoryRouter>
         <QueryClientProvider client={qc}>
-          <GlobalPipelineView />
+          <GlobalPipelineView repo={{ owner: 'acme', repo: 'widgets' }} />
         </QueryClientProvider>
       </MemoryRouter>
     </Provider>,

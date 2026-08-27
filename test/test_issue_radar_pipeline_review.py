@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import pipeline_fold as fold
-from kiro_crew.apps.builtins.auto_triage_pipeline.backend import routes
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_fold as fold
+from kiro_crew.apps.builtins.issue_radar.backend import pipeline_routes as routes
 
 # --------------------------------------------------------------------------
 # The issue cache is a WRAPPER; the fields live under `detail`.

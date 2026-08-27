@@ -1,14 +1,23 @@
-"""HTTP routes for the Auto Triage Pipeline view.
+"""HTTP routes for Issue Radar's pipeline dashboard.
 
 Three GET routes, one per level of the object model, and nothing else. There is
 no POST, PATCH or DELETE here and there is deliberately no write path at all:
 the pipeline is executed by its own scheduled jobs, which own every piece of
-state this app reads. Keeping the app strictly a window means it can never act
-on the repository, and a bug in the view can never corrupt a running pipeline.
+state this module reads. Keeping it strictly a window means it can never act on
+the repository, and a bug in the view can never corrupt a running pipeline.
 
-Registered at gateway startup like every other builtin backend, so each handler
-re-checks enablement itself (deny-by-default): an opt-in app whose routes are
-mounted unconditionally would otherwise stay callable after being disabled.
+Mounted by ``issue_radar/backend/routes.py:register_routes`` alongside the crew
+routes, and gated on Issue Radar's OWN enablement. The pipeline used to ship as
+a separate opt-in builtin with its own manifest and its own App Store card; it
+does not any more, because it reads one Issue Radar repository at a time and had
+no configuration of its own beyond which repository to point at -- a question
+Issue Radar's repo picker already answers. A second toggle for it would have
+been a toggle over the same data, and a dashboard tab that 403s while its parent
+app is enabled reads to an operator as broken rather than as switched off.
+
+Each handler re-checks enablement itself (deny-by-default) rather than trusting
+the mount: routes are registered unconditionally at gateway startup, so an app
+that is disabled later would otherwise stay callable.
 """
 
 from __future__ import annotations
@@ -24,20 +33,20 @@ from aiohttp import web
 from kiro_crew.apps.manager import is_app_enabled
 
 from . import pipeline_fold as fold
+from . import store
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "auto-triage-pipeline"
-
-#: Route prefix. Mirrors the app's manifest name so the manifest's
-#: ``permissions.api`` entries and the mounted paths cannot drift.
-PREFIX = f"/api/apps/{APP_NAME}"
+#: Route prefix. Nested under Issue Radar's own surface so the pipeline shares
+#: its parent's identity and enablement rather than advertising an app that no
+#: longer exists.
+PREFIX = f"/api/apps/{store.APP_NAME}/pipeline"
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
 def _require_enabled(handler: Handler) -> Handler:
-    """Deny requests while the app is disabled.
+    """Deny requests while Issue Radar is disabled.
 
     ``is_app_enabled`` reads installed.json synchronously, so it runs off the
     event loop.
@@ -45,9 +54,9 @@ def _require_enabled(handler: Handler) -> Handler:
 
     @wraps(handler)
     async def _wrapped(request: web.Request) -> web.StreamResponse:
-        if not await asyncio.to_thread(is_app_enabled, APP_NAME):
+        if not await asyncio.to_thread(is_app_enabled, store.APP_NAME):
             return web.json_response(
-                {"error": f"{APP_NAME} is disabled", "code": "app_disabled"}, status=403
+                {"error": f"{store.APP_NAME} is disabled", "code": "app_disabled"}, status=403
             )
         return await handler(request)
 
@@ -204,8 +213,13 @@ async def _handle_item_sessions(request: web.Request) -> web.StreamResponse:
     return web.json_response(payload)
 
 
-def register_routes(app: web.Application) -> None:
-    """Mount the three read routes. No write route exists by design."""
+def register_pipeline_routes(app: web.Application) -> None:
+    """Mount the three read routes. No write route exists by design.
+
+    Named like ``register_crew_routes`` rather than ``register_routes``: this
+    module is one of Issue Radar's sub-surfaces, and the bare name belongs to the
+    package-level entry point the gateway calls.
+    """
     app.router.add_get(f"{PREFIX}/overview", _require_enabled(_handle_overview))
     app.router.add_get(f"{PREFIX}/step", _require_enabled(_handle_step))
     app.router.add_get(f"{PREFIX}/item/sessions", _require_enabled(_handle_item_sessions))

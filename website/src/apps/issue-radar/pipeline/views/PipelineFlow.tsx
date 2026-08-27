@@ -18,8 +18,8 @@
 // batch jobs that open no session, so their unit is issues, while the working
 // steps are counted in sessions. The card never guesses the noun.
 import { Activity, AlertTriangle } from 'lucide-react'
-import { Card, StatCard } from '../../../components/ui'
-import { i18nT } from '../../../i18n/t'
+import { Card, StatCard } from '../../../../components/ui'
+import { i18nT } from '../../../../i18n/t'
 import type { OverviewResponse, OverviewStep } from '../api'
 import { formatRelativeTime } from '../lib/format'
 

@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, RefreshCw, ChevronDown, Check } from 'lucide-react'
+import { Activity, RefreshCw } from 'lucide-react'
 import {
-  autoTriagePipelineApi, loadStoredPreference, saveRepoPreference,
-  type CrewFabricItem, type RepoRef, type ConnectedRepo,
+  autoTriagePipelineApi,
+  type CrewFabricItem, type RepoRef,
 } from '../api'
 import {
   SPINE_PHASES, foldItem, columnOccupancy, laneDwells, openDwellSeconds, formatDwell,
   queueSummary, laneTimelineRows, phaseHeader, phaseCaption,
-  selectRepo, repoOrderKey, byteOrder,
   EDITING_SLOT_CAP, type FabricLane, type QueueSummary, type TimelineRow, type DwellParts,
 } from '../lib/fabric'
-import { Card, PageHeader, StatCard, IconButton, EmptyState as UIEmptyState } from '../../../components/ui'
-import { i18nT } from '../../../i18n/t'
-import { fmtUnit } from '../../../i18n/format'
+import { Card, PageHeader, StatCard, IconButton, EmptyState as UIEmptyState } from '../../../../components/ui'
+import { i18nT } from '../../../../i18n/t'
+import { fmtUnit } from '../../../../i18n/format'
 
 // The lane label for a work item: a localized "pull request" / "issue" prefix
 // (other locales abbreviate these differently) joined to the number. The pure
@@ -197,53 +196,41 @@ function useTrackWidth(): [React.MutableRefObject<HTMLDivElement | null>, number
   return [ref, w]
 }
 
-/** The whole page. Resolves which repo to show from the BACKEND's connected-repo
- * list (source of truth) combined with a remembered preference, so the app stands
- * alone. */
-export default function PipelineView() {
-  const reposQuery = useQuery({
-    queryKey: ['auto-triage-pipeline', 'connected-repos'],
-    queryFn: () => autoTriagePipelineApi.listConnectedRepos(),
-    refetchOnWindowFocus: true,
-  })
-  const connected = useMemo<ConnectedRepo[]>(
-    () => (Array.isArray(reposQuery.data) ? reposQuery.data : []),
-    [reposQuery.data],
-  )
-
-  const [chosen, setChosen] = useState<RepoRef | null>(null)
-  const resolved = useMemo(
-    () => selectRepo(chosen ?? loadStoredPreference(), connected),
-    [chosen, connected],
-  )
-
-  const onPick = useCallback((ref: RepoRef) => {
-    saveRepoPreference(ref)
-    setChosen(ref)
-  }, [])
-
-  if (reposQuery.isLoading && !resolved) return <ResolvingState />
-  if (!resolved) return <NoRepoState />
+/** The whole lanes surface, for the ONE repository Issue Radar has active.
+ *
+ * This used to resolve the repository itself -- a backend connected-repo list, a
+ * remembered preference, and a picker to change it -- because it shipped as a
+ * standalone app and had nowhere else to get the answer. Issue Radar owns repo
+ * selection, so all of that is gone: the list fetch, the preference, the picker,
+ * and the two intermediate states (resolving / no-repo) that only existed while
+ * the answer was still unknown.
+ */
+export default function PipelineView({ repo }: { repo: RepoRef }) {
+  // Remount on a repository change rather than re-render. Every piece of state
+  // below the dashboard -- the held lane, the hover card, the measured track width
+  // -- is scoped to one repository's fabric, and a lane id means nothing across
+  // repositories. Kept here even though the host also switches on the repo, so the
+  // guarantee belongs to the component that owns the state.
   return (
     <PipelineDashboard
-      key={`${resolved.provider ?? 'github'}:${resolved.host ?? ''}:${resolved.owner}/${resolved.repo}`}
-      repo={resolved}
-      connected={connected}
-      onPick={onPick}
+      key={`${repo.provider ?? 'github'}:${repo.host ?? ''}:${repo.owner}/${repo.repo}`}
+      repo={repo}
     />
   )
 }
 
 /** The header shared by every state — the shared PageHeader with a single title
  * (the app's own name, so the page announces ONE name, not three — defect #20),
- * the repo picker, and the refresh control living WITH the repo it acts on
- * (defect #23). */
+ * the refresh control living WITH the repo it acts on (defect #23).
+ *
+ * The repo picker that used to live here is gone with the app: Issue Radar's own
+ * picker chooses the repository, so a second one inside the dashboard could only
+ * disagree with it. The title reads from `global.tab_lanes` -- the name this view
+ * is already called one row above -- rather than the old `manifest.page_label`,
+ * which was deleted along with the manifest it named. */
 function PageChrome({
-  repo, connected, onPick, onRefresh, refreshing,
+  onRefresh, refreshing,
 }: {
-  repo?: RepoRef
-  connected?: ConnectedRepo[]
-  onPick?: (ref: RepoRef) => void
   onRefresh?: () => void
   refreshing?: boolean
 }) {
@@ -252,45 +239,34 @@ function PageChrome({
       title={
         <span className="inline-flex items-center gap-2">
           <Activity size={20} className="text-accent" />
-          {i18nT('apps.autoTriagePipeline.manifest.page_label')}
+          {i18nT('apps.autoTriagePipeline.global.tab_lanes')}
         </span>
       }
       subtitle={i18nT('apps.autoTriagePipeline.pipeline.subtitle')}
       actions={
-        repo && connected && onPick ? (
-          <div className="flex items-center gap-2">
-            <RepoPicker repo={repo} connected={connected} onPick={onPick} />
-            {onRefresh && (
-              <IconButton
-                aria-label={i18nT('apps.autoTriagePipeline.pipeline.refresh')}
-                title={i18nT('apps.autoTriagePipeline.pipeline.refresh')}
-                onClick={onRefresh}
-                disabled={refreshing}
-                className="border border-border h-8 w-8 flex items-center justify-center"
-              >
-                <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-              </IconButton>
-            )}
-          </div>
+        onRefresh ? (
+          <IconButton
+            aria-label={i18nT('apps.autoTriagePipeline.pipeline.refresh')}
+            title={i18nT('apps.autoTriagePipeline.pipeline.refresh')}
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="border border-border h-8 w-8 flex items-center justify-center"
+          >
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+          </IconButton>
         ) : undefined
       }
     />
   )
 }
 
-function PipelineDashboard({
-  repo, connected, onPick,
-}: {
-  repo: RepoRef
-  connected: ConnectedRepo[]
-  onPick: (ref: RepoRef) => void
-}) {
+function PipelineDashboard({ repo }: { repo: RepoRef }) {
   const reduced = useReducedMotion()
   const [hovered, setHovered] = useState<number | null>(null)
 
   const scopeKey = `${repo.provider ?? 'github'}:${repo.host ?? ''}:${repo.owner}/${repo.repo}`
   const fabricQuery = useQuery({
-    queryKey: ['auto-triage-pipeline', 'fabric', scopeKey],
+    queryKey: ['issue-radar', 'pipeline-fabric', scopeKey],
     queryFn: () => autoTriagePipelineApi.crewFabric(repo),
     refetchInterval: 30_000,
   })
@@ -314,9 +290,6 @@ function PipelineDashboard({
   return (
     <div className="h-full overflow-y-auto pb-6">
       <PageChrome
-        repo={repo}
-        connected={connected}
-        onPick={onPick}
         onRefresh={() => fabricQuery.refetch()}
         refreshing={fabricQuery.isFetching}
       />
@@ -1080,132 +1053,3 @@ function EmptyState() {
   )
 }
 
-// ── the repo picker: switch repo without leaving the app ──
-
-function RepoPicker({
-  repo, connected, onPick,
-}: {
-  repo: RepoRef
-  connected: ConnectedRepo[]
-  onPick: (ref: RepoRef) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const wrapRef = useRef<HTMLDivElement | null>(null)
-
-  const ordered = useMemo(
-    () => [...connected].filter((r) => r && r.owner && r.repo)
-      .sort((a, b) => byteOrder(repoOrderKey(a), repoOrderKey(b))),
-    [connected],
-  )
-  const multiple = ordered.length > 1
-  const label = `${repo.owner}/${repo.repo}`
-  const activeProvider = repo.provider ?? 'github'
-  const activeHost = repo.host ?? 'github.com'
-
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  const isActive = (r: ConnectedRepo) =>
-    r.owner === repo.owner && r.repo === repo.repo &&
-    (r.provider ?? 'github') === activeProvider && (r.host ?? 'github.com') === activeHost
-
-  return (
-    <div ref={wrapRef} className="relative inline-block">
-      <button
-        type="button"
-        onClick={() => multiple && setOpen((v) => !v)}
-        disabled={!multiple}
-        aria-haspopup={multiple ? 'listbox' : undefined}
-        aria-expanded={multiple ? open : undefined}
-        aria-label={i18nT('apps.autoTriagePipeline.pipeline.repo_picker_label')}
-        title={multiple ? i18nT('apps.autoTriagePipeline.pipeline.repo_picker_label') : label}
-        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12px] text-text-strong hover:border-border-strong disabled:cursor-default enabled:cursor-pointer font-mono"
-      >
-        <span className="text-[10px] uppercase tracking-[.14em] text-muted-strong">
-          {i18nT('apps.autoTriagePipeline.pipeline.repo_picker_prefix')}
-        </span>
-        <span className="truncate max-w-[220px]">{label}</span>
-        {multiple && <ChevronDown size={12} className="text-muted flex-shrink-0" />}
-      </button>
-
-      {open && multiple && (
-        <div
-          role="listbox"
-          aria-label={i18nT('apps.autoTriagePipeline.pipeline.repo_picker_label')}
-          className="absolute right-0 top-full mt-1 z-50 min-w-[240px] max-w-[360px] rounded-md border border-border-strong bg-card shadow-lg py-1 max-h-[60vh] overflow-y-auto"
-        >
-          {ordered.map((r) => {
-            const active = isActive(r)
-            const rlabel = `${r.owner}/${r.repo}`
-            const sub = `${r.provider ?? 'github'} · ${r.host ?? 'github.com'}`
-            return (
-              <button
-                key={repoOrderKey(r)}
-                type="button"
-                role="option"
-                aria-selected={active}
-                onClick={() => {
-                  setOpen(false)
-                  if (!active) {
-                    onPick({ owner: r.owner, repo: r.repo, provider: r.provider, host: r.host })
-                  }
-                }}
-                className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[11px] hover:bg-bg-elevated cursor-pointer font-mono"
-              >
-                <Check size={12} className={active ? 'text-accent flex-shrink-0' : 'opacity-0 flex-shrink-0'} />
-                <span className="flex flex-col min-w-0">
-                  <span className="truncate text-text-strong">{rlabel}</span>
-                  <span className="truncate text-[10px] text-muted-strong uppercase tracking-[.06em]">{sub}</span>
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── a light holding state while the connected-repo list is still loading ──
-
-function ResolvingState() {
-  return (
-    <div className="h-full overflow-y-auto pb-6">
-      <PageChrome />
-      <div className="px-4 md:px-6">
-        <Card><LaneBoardSkeleton /></Card>
-      </div>
-    </div>
-  )
-}
-
-// ── shown when NO repo is connected anywhere — the genuine empty state ──
-
-function NoRepoState() {
-  return (
-    <div className="h-full overflow-y-auto pb-6">
-      <PageChrome />
-      <div className="px-4 md:px-6">
-        <Card className="mb-0">
-          <UIEmptyState
-            icon={<Activity />}
-            title={i18nT('apps.autoTriagePipeline.pipeline.no_repo_title')}
-            subtitle={i18nT('apps.autoTriagePipeline.pipeline.no_repo_body')}
-            testId="atp-no-repo"
-          />
-        </Card>
-      </div>
-    </div>
-  )
-}

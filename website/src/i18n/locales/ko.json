@@ -361,13 +361,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Kiro Crew 자체 자동 트리아지 파이프라인의 읽기 전용 3단계 보기. 여섯 단계와 처리량, 단계 안의 이슈, 각 이슈의 에이전트 세션 비용을 보여줍니다.",
-        "display_name": "Kiro Crew 자동 분류 파이프라인",
-        "page_label": "자동 분류 파이프라인",
-        "use_case_1": "Issue Radar의 크루 작업이 전체 제공 파이프라인에서 어디에 쌓이거나 다시 열리거나 대기 중인지 확인합니다.",
-        "configuration_1": "Issue Radar에서 저장소를 연결해 크루 원장이 단계 이벤트를 수집하게 한 다음, 이 앱을 활성화하고 선택기에서 해당 저장소를 고르세요."
-      },
       "pipeline": {
         "subtitle": "크루 작업 항목마다 레인 하나씩, 모든 단계를 가로질러 표시 — 각 항목이 어느 단계에 있고 어디에 쌓이고 있는지 한눈에 확인하세요.",
         "refresh": "파이프라인 새로고침",
@@ -398,10 +391,6 @@
         "empty_row_2": "색으로 상태를 한눈에 알 수 있습니다: 편집 중, 검사 대기, 완료.",
         "empty_row_3": "체류 라벨은 각 단계에 머문 시간을 보여주므로 막힌 항목이 눈에 띕니다.",
         "empty_footer": "Issue Radar에서 crew를 설정하여 파이프라인을 시작하세요.",
-        "no_repo_title": "연결된 리포지토리 없음",
-        "no_repo_body": "파이프라인은 연결된 리포지토리의 crew 작업 항목마다 하나의 레인을 그립니다. 아직 연결된 리포지토리가 없습니다 — 하나를 연결하면 해당 crew 작업 항목이 여기에 표시됩니다.",
-        "repo_picker_label": "리포지토리 전환",
-        "repo_picker_prefix": "리포",
         "legend_editing": "편집 중",
         "legend_waiting": "대기 중",
         "legend_released": "릴리스됨",
@@ -2389,6 +2378,7 @@
           "re_fetch_issues_and_labels_from": "{{provider}}에서 이슈 + 레이블 다시 가져오기"
         },
         "registry": {
+          "pipeline": "파이프라인",
           "overview": "개요",
           "tagging": "태그 지정",
           "graph": "그래프"

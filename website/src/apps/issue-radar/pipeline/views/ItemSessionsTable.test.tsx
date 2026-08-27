@@ -44,7 +44,7 @@ const { liveSlotKeys, chatSlots } = vi.hoisted(() => {
     chatSlots: vi.fn(async () => liveSlotKeys.map((key) => ({ key }))),
   }
 })
-vi.mock('../../../api/client', () => ({ api: { chatSlots } }))
+vi.mock('../../../../api/client', () => ({ api: { chatSlots } }))
 
 import ItemSessionsTable, { cellText, slotKeysOf } from './ItemSessionsTable'
 import type { ItemSession } from '../api'
