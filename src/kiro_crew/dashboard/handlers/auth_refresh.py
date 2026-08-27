@@ -30,6 +30,7 @@ from kiro_crew.dashboard.refresh_tokens import (
     generate_refresh_token,
     refresh_cookie_name,
     refresh_token_boot,
+    refresh_token_requires_peer,
     validate_refresh_token,
 )
 from kiro_crew.dashboard.tailnet import TailnetTrust, peer_pin_key, resolve_forwarded_peer
@@ -418,6 +419,32 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
 
     state = _get_state()
 
+    # An identity-bound chain (the persistent QR session shape) may only be USED
+    # while a daemon-verified tailnet peer can be established. Placed here, ahead
+    # of BOTH the reuse branch and the mint, because every path below this line
+    # hands the caller a live credential: the grace-replay branch re-serves the
+    # cached pair and re-sets both cookies without minting anything, so a check
+    # sited at the mint leaves a 60-second window in which a replayed token is
+    # honoured with no identity check at all. That window was the review finding.
+    #
+    # Ordering it BEFORE reuse detection is deliberate, not incidental. Reuse
+    # detection revokes the chain, so letting it run first would let any
+    # unverified caller destroy a legitimate 30-day session by replaying one
+    # consumed token — a sign-out handed to anyone who can reach the port. An
+    # unverified caller gets 401 either way, so refusing first loses no theft
+    # signal: a thief who CAN verify still trips reuse detection normally.
+    #
+    # A refusal does NOT revoke. Identity resolution fails transiently (daemon
+    # restart, a stripped header), and burning a 30-day credential over a blip
+    # would turn a recoverable hiccup into a re-scan. The session simply cannot
+    # be used until identity is established again, which is the honest reading of
+    # "bounded by identity" — and it is the only bound available here, since
+    # behind `tailscale serve` every request arrives from 127.0.0.1, so an
+    # address pin would read as a pin while excluding nobody.
+    if refresh_token_requires_peer(refresh_token) and not await _verified_peer(request):
+        _audit(user_id, "refresh_token_use", "peer_unverified", chain_id)
+        return web.json_response({"error": "peer_identity_unverified"}, status=401)
+
     # Reuse detection: if this jti is already consumed AND it is NOT
     # within the multi-tab grace window, treat as theft and revoke.
     if state.is_consumed(jti):
@@ -476,15 +503,25 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
     # this path, carrying degrades to "unbound", while re-deriving would silently
     # mint a live binding for it.
     carried_boot = refresh_token_boot(refresh_token)
+    carried_require_peer = refresh_token_requires_peer(refresh_token)
+    _carried_claims: dict[str, str] = {}
+    if carried_boot:
+        _carried_claims["boot"] = carried_boot
+    if carried_require_peer:
+        # Carried onto BOTH halves of the rotated pair. Dropping it on either one
+        # would make the FIRST rotation silently downgrade an identity-bound
+        # session to an ordinary one — the same shape of defect as the review
+        # finding this check answers, one rotation later.
+        _carried_claims["require_peer"] = "1"
     new_access_token = generate_token(
         user_id,
         ttl_seconds=MAX_SESSION_TTL_SECS,
         register_nonce=False,
-        extra={"boot": carried_boot} if carried_boot else None,
+        extra=_carried_claims or None,
     )
     new_session_exp = now + MAX_SESSION_TTL_SECS
     new_refresh_token, _new_chain, _new_jti, new_refresh_exp = generate_refresh_token(
-        user_id, chain_id=chain_id, boot=carried_boot
+        user_id, chain_id=chain_id, boot=carried_boot, require_peer=carried_require_peer
     )
 
     public_payload = {
@@ -523,6 +560,24 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
     _expire_foreign_port_cookies(resp, request)
     _audit(user_id, "refresh_token_use", "ok")
     return resp
+
+
+async def _verified_peer(request: web.Request) -> bool:
+    """Whether a daemon-verified tailnet peer resolves for this request.
+
+    Reads the same ``tailnet_trust`` gate and the same resolver that
+    :func:`_rebind_rotated_token_to_peer` uses, so "can this be pinned" and "may
+    this rotate" cannot answer differently — a rotation admitted here that the
+    rebind then could not pin is precisely the gap this pair closes.
+    """
+    trust = request.app.get("tailnet_trust")
+    if not (isinstance(trust, TailnetTrust) and trust.trust_identity and trust.allowed_logins):
+        return False
+    try:
+        return await resolve_forwarded_peer(request, trust) is not None
+    except Exception:  # noqa: BLE001 - an auth decision must not 500 on the probe
+        logger.debug("refresh: tailnet peer resolution failed", exc_info=True)
+        return False
 
 
 async def _rebind_rotated_token_to_peer(

@@ -43,6 +43,7 @@ from kiro_crew.dashboard.refresh_tokens import (
     RefreshStateManager,
     generate_refresh_token,
     refresh_cookie_name,
+    refresh_token_requires_peer,
     validate_refresh_token,
 )
 from kiro_crew.dashboard.tailnet import TailnetTrust
@@ -291,6 +292,103 @@ async def test_me_reports_both_expiries(state: RefreshStateManager) -> None:
     assert payload["user_id"] == "alice"
     assert payload["session_exp"] > time.time()
     assert abs(payload["refresh_exp"] - refresh_exp) < 1.0
+
+
+@pytest.mark.asyncio
+async def test_require_peer_is_enforced_before_the_grace_replay_return(
+    state: RefreshStateManager,
+) -> None:
+    """The grace-replay branch must not hand back a cached pair unverified.
+
+    Regression for a check sited too late: grace replay re-serves the previously
+    issued pair and re-sets BOTH cookies without minting anything, so a peer
+    check placed at the mint left a REFRESH_GRACE_SECS window in which a replayed
+    token was honoured with no identity check at all.
+    """
+    refresh, chain_id, jti, _exp = generate_refresh_token("phone", require_peer=True)
+    # Stage exactly the state the grace branch reads: this jti consumed as the
+    # chain head, with the replacement pair it minted available for replay.
+    state.mark_consumed(
+        jti,
+        chain_id,
+        time.time() + 3600,
+        "203.0.113.9",
+        json.dumps(
+            {
+                "session_exp": time.time() + 3600,
+                "refresh_exp": time.time() + 3600,
+                "_access_token": "cached-access",
+                "_refresh_token": "cached-refresh",
+            }
+        ),
+    )
+    request = _mk(
+        "POST",
+        "/api/auth/refresh",
+        origin="http://localhost:7777",
+        cookies={refresh_cookie_name(str(PORT)): refresh},
+    )
+    response = await h.api_auth_refresh(request)
+    assert response.status == 401
+    assert _body(response) == {"error": "peer_identity_unverified"}
+    # No credential leaked through the replay path.
+    assert "Set-Cookie" not in response.headers
+    # Refused, NOT revoked - an unverified caller must not be able to sign a
+    # legitimate session out by replaying one consumed token.
+    assert not state.is_chain_revoked(chain_id)
+
+
+@pytest.mark.asyncio
+async def test_require_peer_chain_refuses_to_rotate_without_a_verified_peer(
+    state: RefreshStateManager,
+) -> None:
+    """An identity-bound chain must not rotate when no tailnet peer resolves.
+
+    This is the whole security argument for the persistent QR shape: it drops the
+    boot bound, so identity is the only thing left bounding it. An address pin is
+    no substitute — behind ``tailscale serve`` every request arrives from
+    127.0.0.1, so ``ip:127.0.0.1`` excludes nobody on the tailnet.
+
+    The chain is REFUSED, not revoked: identity resolution fails transiently, and
+    burning a 30-day credential over a daemon blip would turn a recoverable
+    hiccup into a re-scan.
+    """
+    refresh, chain_id, _jti, _exp = generate_refresh_token("phone", require_peer=True)
+    request = _mk(
+        "POST",
+        "/api/auth/refresh",
+        origin="http://localhost:7777",
+        cookies={refresh_cookie_name(str(PORT)): refresh},
+    )
+    response = await h.api_auth_refresh(request)
+    assert response.status == 401
+    assert _body(response) == {"error": "peer_identity_unverified"}
+    # Refused, NOT revoked - the same chain must still be usable once identity
+    # can be established again.
+    assert not state.is_chain_revoked(chain_id)
+
+
+def test_require_peer_survives_rotation_and_defaults_off() -> None:
+    """The claim is carried, and absent by default.
+
+    A chain that lost the claim on its first rotation would silently become an
+    ordinary rotating session - the same defect one rotation later.
+    """
+    bound, _c, _j, _e = generate_refresh_token("phone", require_peer=True)
+    assert refresh_token_requires_peer(bound) is True
+    plain, _c2, _j2, _e2 = generate_refresh_token("desktop")
+    assert refresh_token_requires_peer(plain) is False
+
+
+def test_require_peer_fails_closed_on_an_undecodable_payload() -> None:
+    """An undecodable payload answers True, not False.
+
+    The conservative direction here is the opposite of ``refresh_token_boot``'s:
+    answering False would let a signed-but-unreadable token rotate WITHOUT the
+    identity check its chain was minted to require.
+    """
+    assert refresh_token_requires_peer("not-a-token") is True
+    assert refresh_token_requires_peer("") is True
 
 
 @pytest.mark.asyncio

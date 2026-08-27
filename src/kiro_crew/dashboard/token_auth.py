@@ -2516,6 +2516,14 @@ def token_auth_middleware(
                 _token_boot = str(data.get("boot", ""))
                 if _token_boot:
                     _carried["boot"] = _token_boot
+                # Carried for the same reason ``boot`` is: the session token is a
+                # fresh mint, so a claim not named here is silently dropped — and
+                # dropping this one would turn an identity-bound persistent
+                # session into an ordinary rotating one, which is exactly the
+                # binding it was minted to keep.
+                _token_require_peer = str(data.get("require_peer", ""))
+                if _token_require_peer:
+                    _carried["require_peer"] = _token_require_peer
                 # ``no_refresh`` gets the same treatment as ``boot`` and for the
                 # same reason: the claim must survive the exchange or a DOWNSTREAM
                 # consumer that reads the session cookie to learn the caller's
@@ -2705,7 +2713,9 @@ def token_auth_middleware(
                     # re-minted a fresh session on the next visit, and "ends at
                     # restart" would be false by one rotation.
                     refresh_token, chain_id, _jti, refresh_exp = generate_refresh_token(
-                        user_id, boot=str(data.get("boot", ""))
+                        user_id,
+                        boot=str(data.get("boot", "")),
+                        require_peer=str(data.get("require_peer", "")) == "1",
                     )
                     refresh_remaining = int(refresh_exp - time.time())
                     if refresh_remaining > 0:
