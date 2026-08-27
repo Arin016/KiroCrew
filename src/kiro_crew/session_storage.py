@@ -1277,36 +1277,177 @@ def _append_entry(handle: IO[str], entry: dict[str, Any]) -> None:
     handle.flush()
 
 
+# Longest manifest record accepted, in characters (terminator excluded: the
+# threshold applies to the stripped record). A real record is a header or one
+# session's file list — kilobytes at most. The manifest lives in an
+# agent-writable tree, so a reader that trusts line length would hand a single
+# multi-gigabyte no-newline line one allocation; a record past this cap ABORTS the
+# read instead (the whole batch is then treated as having no readable manifest,
+# exactly like an unreadable file). Skipping just the record would be worse than
+# failing: a partial restore REWRITES the manifest from the records it parsed, so
+# a skipped record's staged files would be silently orphaned. The transient peak
+# on a hostile manifest is a small multiple of this value (up to two cap-sized
+# reads concatenated, times Python's up-to-4-bytes-per-char widening), flat
+# regardless of file size — this constant is the dial if that ceiling moves.
+_MANIFEST_RECORD_CAP = 8 * 1024 * 1024
+
+
+class _OversizedManifestRecord(Exception):
+    """A manifest record exceeded ``_MANIFEST_RECORD_CAP``; the batch is unreadable."""
+
+
+def _manifest_records(handle: IO[str], batch: Path) -> Iterator[dict[str, Any]]:
+    """Yield each JSON object record of an open manifest, header first.
+
+    Record boundaries match ``str.splitlines`` — the previous whole-file reader —
+    so a manifest split on any unicode line boundary parses exactly as it always
+    did: reads are accumulated in a carry-over buffer and re-split per chunk, so a
+    cap-sized read ending mid-record never invents or destroys a boundary. Blank
+    and non-dict lines are skipped silently. A record that fails to parse is
+    skipped and counted: a trailing partial line (a crash mid-append) is expected
+    and logged at debug, while any other unparseable record — mid-file corruption —
+    gets one aggregated warning per read (#6292 item 3). Either way every complete
+    record before it describes real moved files that must stay restorable, so a
+    parse failure never fails the batch wholesale.
+
+    A record longer than ``_MANIFEST_RECORD_CAP`` is different: it raises
+    :class:`_OversizedManifestRecord` (readers map it to ``None``, the
+    no-readable-manifest posture) rather than being skipped, and its bytes are
+    never materialised past the cap. Skipping would lose data: ``restore()``
+    rewrites the manifest from the records it parsed, so a skipped record's
+    staged files would be orphaned. Aborting keeps every file protected by the
+    unlisted-file guards until a human looks.
+
+    The skip counting and its log lines run only when the generator is driven to
+    exhaustion; both callers do, and a future caller that stops early forfeits
+    them knowingly.
+    """
+    corrupt = 0
+    trailing_partial = False
+    buf = ""  # partial record carried between reads; capped below
+
+    def _parse(piece: str) -> dict[str, Any] | None:
+        nonlocal corrupt
+        piece = piece.strip()
+        if not piece:
+            return None
+        if len(piece) > _MANIFEST_RECORD_CAP:
+            raise _OversizedManifestRecord(batch.name)
+        try:
+            record = json.loads(piece)
+        except ValueError:
+            corrupt += 1
+            return None
+        return record if isinstance(record, dict) else None
+
+    while True:
+        chunk = handle.readline(_MANIFEST_RECORD_CAP)
+        if not chunk:
+            break
+        data = buf + chunk
+        pieces = data.splitlines()
+        # The final piece is complete iff data ends on a line boundary. \n is the
+        # common case; the appended probe catches every other splitlines boundary
+        # (\u2028, \x1c, ...) without enumerating them.
+        ends_on_boundary = data.endswith("\n") or len((data + "x").splitlines()) > len(pieces)
+        if ends_on_boundary:
+            complete, buf = pieces, ""
+        else:
+            complete, buf = pieces[:-1], pieces[-1]
+        for piece in complete:
+            record = _parse(piece)
+            if record is not None:
+                yield record
+        if len(buf) > _MANIFEST_RECORD_CAP:
+            raise _OversizedManifestRecord(batch.name)
+    # EOF: whatever is left in buf is a genuinely unterminated final line. It can
+    # never exceed the cap here — an over-cap carry raised above — and the assert
+    # keeps that invariant enforced if the loop is ever reshaped.
+    assert len(buf) <= _MANIFEST_RECORD_CAP
+    if buf:
+        stripped = buf.strip()
+        if stripped:
+            try:
+                record = json.loads(stripped)
+            except ValueError:
+                trailing_partial = True
+            else:
+                if isinstance(record, dict):
+                    yield record
+    if corrupt:
+        # %r: the batch name is a directory name from an agent-writable tree, so it
+        # can embed newlines; the repr keeps one log record from forging others.
+        logger.warning("trash manifest in %r: skipped %d unparseable line(s)", batch.name, corrupt)
+    if trailing_partial:
+        logger.debug("trash manifest in %r ends in a partial line (crash mid-append)", batch.name)
+
+
 def _read_manifest(batch: Path) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     """Parse a batch manifest into its header and session entries.
 
-    A trailing partial line (a crash mid-append) is skipped rather than failing
-    the whole batch: every complete line before it describes real moved files that
-    must stay restorable.
+    Streams the file line by line rather than materialising it as one string; the
+    entries list itself is still O(sessions), which the two callers that rewrite or
+    enumerate the manifest genuinely need. Callers that need only aggregates should
+    use :func:`_summarize_manifest` instead. A trailing partial line (a crash
+    mid-append) is skipped rather than failing the whole batch — every complete
+    line before it describes real moved files that must stay restorable (see
+    :func:`_manifest_records`).
     """
-    try:
-        raw = (batch / MANIFEST_NAME).read_text(encoding="utf-8")
-    except OSError:
-        return None
     header: dict[str, Any] | None = None
     entries: list[dict[str, Any]] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if header is None:
-            header = record
-            continue
-        entries.append(record)
+    try:
+        with (batch / MANIFEST_NAME).open(encoding="utf-8") as handle:
+            for record in _manifest_records(handle, batch):
+                if header is None:
+                    header = record
+                    continue
+                entries.append(record)
+    except OSError:
+        return None
+    except _OversizedManifestRecord:
+        logger.warning(
+            "trash manifest in %r has a record over %d chars; treating it as unreadable",
+            batch.name,
+            _MANIFEST_RECORD_CAP,
+        )
+        return None
     if header is None or header.get("schema") != MANIFEST_SCHEMA:
         return None
     return header, entries
+
+
+def _summarize_manifest(batch: Path) -> tuple[dict[str, Any], int, int] | None:
+    """The manifest's header plus (session count, staged byte total).
+
+    A batch can hold six figures of sessions, and the trash listing needs only
+    these two aggregates — so they are accumulated during the same single streamed
+    pass :func:`_read_manifest` makes, without ever holding the parsed entries.
+    Guards match :func:`_read_manifest` exactly: same skipped-line tolerance, same
+    schema rejection, and ``None`` on an unreadable manifest.
+    """
+    header: dict[str, Any] | None = None
+    sessions = 0
+    staged_bytes = 0
+    try:
+        with (batch / MANIFEST_NAME).open(encoding="utf-8") as handle:
+            for record in _manifest_records(handle, batch):
+                if header is None:
+                    header = record
+                    continue
+                sessions += 1
+                staged_bytes += _entry_bytes(record)
+    except OSError:
+        return None
+    except _OversizedManifestRecord:
+        logger.warning(
+            "trash manifest in %r has a record over %d chars; treating it as unreadable",
+            batch.name,
+            _MANIFEST_RECORD_CAP,
+        )
+        return None
+    if header is None or header.get("schema") != MANIFEST_SCHEMA:
+        return None
+    return header, sessions, staged_bytes
 
 
 def _rewrite_manifest(batch: Path, header: dict[str, Any], entries: list[dict[str, Any]]) -> None:
@@ -1588,13 +1729,13 @@ def list_trash() -> list[TrashBatch]:
         # listed as a real batch and the sweep would delete through it.
         if platform_compat.is_link_or_junction(candidate) or not candidate.is_dir():
             continue
-        parsed = _read_manifest(candidate)
+        parsed = _summarize_manifest(candidate)
         if parsed is None:
             # %r: the directory name is agent-controlled; repr keeps an embedded
             # newline from forging additional log records.
             logger.debug("trash batch %r has no readable manifest", candidate.name)
             continue
-        header, entries = parsed
+        header, sessions, staged_bytes = parsed
         # The DIRECTORY is the batch's identity. A header that names a different
         # batch would make a targeted empty delete the batch it named instead of
         # the one it came from, so a disagreement is treated as corruption rather
@@ -1614,8 +1755,8 @@ def list_trash() -> list[TrashBatch]:
                 batch_id=candidate.name,
                 created_at=float(created) if isinstance(created, (int, float)) else 0.0,
                 reason=str(header.get("reason") or ""),
-                sessions=len(entries),
-                bytes=sum(_entry_bytes(e) for e in entries),
+                sessions=sessions,
+                bytes=staged_bytes,
             )
         )
     batches.sort(key=lambda b: b.created_at, reverse=True)
