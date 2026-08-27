@@ -305,9 +305,9 @@ function IamPolicyCard({
         <ErrorNotice message={error} className="mb-3" />
       ) : (
         <>
-          {data && data.grants.length > 0 && (
+          {(data?.grants ?? []).length > 0 && (
             <ul className="m-0 mb-3 p-0 list-none">
-              {data.grants.map(g => (
+              {(data?.grants ?? []).map(g => (
                 <li key={g.id} className="flex items-start gap-2 py-1.5 text-[13px] text-text border-b border-border last:border-b-0">
                   <CheckCircle size={14} className="mt-0.5 shrink-0 text-ok" />
                   <span>{grantTitle(g.id)}</span>
