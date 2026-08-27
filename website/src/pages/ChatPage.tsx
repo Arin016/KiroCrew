@@ -1384,7 +1384,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       errorHandoffActiveDurableRef.current = true
       persistErrorHandoffClaims()
       try {
-        await dispatch(switchSlot(slotKey)).unwrap()
+        // `keepTargetOnMissing`: this slot was JUST created, so a 404 from its
+        // detail fetch is a create/fetch race on a slot that exists -- the
+        // reducer keeps it selected (with the seeded composer) atomically
+        // instead of unwinding to the previous chat (#6309), and this catch
+        // stays a no-op rather than patching state back from the caller.
+        await dispatch(switchSlot({ key: slotKey, keepTargetOnMissing: true })).unwrap()
       } catch {
         // switchSlot.pending already activated the fresh slot. Its detail fetch
         // may fail independently; keep the seeded composer usable in that slot.
