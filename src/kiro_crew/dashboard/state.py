@@ -5009,6 +5009,11 @@ class DashboardState:
         # could not parse (mirrors the hooks store's unparsed-entry preservation).
         self._unparsed_cron_folder_entries: list[Any] = []
         self._chat_pins: list[dict[str, Any]] = []  # pinned chat messages
+        # Malformed chat_pins.json entries dropped at load time, kept verbatim
+        # so save_chat_pins round-trips them back instead of erasing bytes a
+        # hand-edit left in a shape the loader could not validate (mirrors the
+        # cron-folder unparsed-entry preservation, #5768/#5792).
+        self._unparsed_chat_pin_entries: list[Any] = []
         # Serializes pin mutation + persistence so concurrent requests cannot
         # interleave snapshots and replace chat_pins.json out of order.
         # LoopBoundLock, not asyncio.Lock (#4800): DashboardState outlives any
@@ -5023,6 +5028,13 @@ class DashboardState:
         self._folders_lock = LoopBoundLock()
         # Tag vocabulary: list of {id, name, color, order}. User-managed.
         self._tags: list[dict[str, Any]] = []
+        # Malformed tags.json entries dropped at load time, kept verbatim so a
+        # save round-trips them back instead of erasing bytes a hand-edit left
+        # in a shape the loader could not validate. This store's save path runs
+        # DURING load (seed/back-fill), so without preservation a single
+        # hand-edited-but-malformed row is wiped at boot with no user action
+        # (#5792, the worst of the sibling cases).
+        self._unparsed_tag_entries: list[Any] = []
         # True once load_tags() parsed tags.json successfully (or seeded a
         # fresh install). False means the vocabulary state is UNKNOWN (parse
         # or I/O failure) — restore-time pruning must fail open then, because
@@ -5031,6 +5043,10 @@ class DashboardState:
         self._tags_authoritative: bool = False
         # Sidebar columns — flat list of {id, name, tag_ids, mode, order, include_untagged}
         self._tag_boards: list[dict[str, Any]] = []
+        # Malformed tag-board (sidebar column) entries dropped at load time,
+        # kept verbatim so a save round-trips them back rather than erasing a
+        # hand-edited-but-typo'd column (#5792).
+        self._unparsed_tag_board_entries: list[Any] = []
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         # Gateway replacement is process-wide, not an ordinary repeatable
         # background mutation.  The task latch coalesces duplicate /api/restart
@@ -7421,6 +7437,11 @@ class DashboardState:
         Legacy pins (pre-mid era) may lack the ``mid`` field — they are preserved
         for backward compatibility; new pins always carry ``mid``.
 
+        Individual malformed entries are dropped from the active list but kept
+        verbatim in ``_unparsed_chat_pin_entries`` so the next ``save_chat_pins``
+        round-trips them back to disk rather than silently erasing a user's
+        hand-edited-but-typo'd pin (mirrors the cron-folder contract, #5792).
+
         Error classification:
         - Missing file: normal (first run) → empty list.
         - Malformed JSON / invalid shape: tolerated for compatibility → empty list.
@@ -7431,12 +7452,16 @@ class DashboardState:
         try:
             if not path.exists():
                 self._chat_pins = []
+                self._unparsed_chat_pin_entries = []
                 return
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             # Malformed content — treat as empty (data corruption).
             logger.warning("chat_pins.json has malformed content: %s", exc)
             self._chat_pins = []
+            # Whole-file parse failure: nothing was parsed, so there are no
+            # per-entry bytes to preserve. Do NOT clear a prior load's
+            # preserved entries against an unreadable read.
             return
         except OSError:
             # Transient I/O error — do NOT clobber valid in-memory state.
@@ -7448,28 +7473,49 @@ class DashboardState:
             self._chat_pins = []
             return
 
-        valid = [
-            pin
-            for pin in raw
-            if isinstance(pin, dict)
-            and all(isinstance(pin.get(key), str) and pin.get(key) for key in ("id", "slot_key"))
-            # Require at least one identity field: mid or message_ts
-            and (
-                (isinstance(pin.get("mid"), str) and pin.get("mid"))
-                or (isinstance(pin.get("message_ts"), str) and pin.get("message_ts"))
+        def _is_valid(pin: Any) -> bool:
+            return (
+                isinstance(pin, dict)
+                and all(
+                    isinstance(pin.get(key), str) and pin.get(key) for key in ("id", "slot_key")
+                )
+                # Require at least one identity field: mid or message_ts
+                and bool(
+                    (isinstance(pin.get("mid"), str) and pin.get("mid"))
+                    or (isinstance(pin.get("message_ts"), str) and pin.get("message_ts"))
+                )
+                and isinstance(pin.get("preview"), str)
+                and isinstance(pin.get("pinned_at"), str)
+                and bool(pin.get("pinned_at"))
             )
-            and isinstance(pin.get("preview"), str)
-            and isinstance(pin.get("pinned_at"), str)
-            and pin.get("pinned_at")
-        ]
-        if len(valid) != len(raw):
-            logger.warning("Dropped %d malformed chat pin record(s) on load", len(raw) - len(valid))
+
+        valid = [pin for pin in raw if _is_valid(pin)]
+        unparsed = [pin for pin in raw if not _is_valid(pin)]
+        if unparsed:
+            logger.warning(
+                "Preserving %d malformed chat pin record(s) while loading "
+                "chat_pins.json (kept verbatim, not active)",
+                len(unparsed),
+            )
         self._chat_pins = valid
+        self._unparsed_chat_pin_entries = unparsed
 
     def save_chat_pins(self) -> None:
-        """Persist pinned chat messages with an atomic, owner-only file replacement."""
+        """Persist pinned chat messages with an atomic, owner-only file replacement.
+
+        Writes the active pins plus any malformed entries preserved at load
+        time (``_unparsed_chat_pin_entries``), so a save triggered by an
+        unrelated pin operation cannot erase bytes a hand-edit left in a shape
+        this loader could not validate.
+        """
         path = config_dir() / self._CHAT_PINS_FILE
-        atomic_write(path, json.dumps(self._chat_pins), fsync=True, mode=0o600)
+        unparsed = getattr(self, "_unparsed_chat_pin_entries", [])
+        atomic_write(
+            path,
+            json.dumps([*self._chat_pins, *unparsed]),
+            fsync=True,
+            mode=0o600,
+        )
 
     async def remove_chat_pins_for_slots(self, slot_keys: set[str]) -> int:
         """Remove pins when their persisted history sessions are permanently deleted."""
@@ -7621,6 +7667,18 @@ class DashboardState:
                 raw = json.loads(tags_path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
                     self._tags = [t for t in raw if isinstance(t, dict) and t.get("id")]
+                    # Keep rows the active list dropped verbatim so the seed/
+                    # back-fill save below (and every later save) round-trips
+                    # them back instead of erasing a hand-edited-but-typo'd row
+                    # at boot with no user action (#5792).
+                    unparsed = [t for t in raw if not (isinstance(t, dict) and t.get("id"))]
+                    if unparsed:
+                        logger.warning(
+                            "Preserving %d malformed tag entr(ies) while loading "
+                            "tags.json (kept verbatim, not active)",
+                            len(unparsed),
+                        )
+                    self._unparsed_tag_entries = unparsed
                 else:
                     # Valid JSON but not a list (e.g. {}): the vocabulary
                     # state is UNKNOWN, same as a parse failure — do not let
@@ -7660,6 +7718,17 @@ class DashboardState:
                 raw = json.loads(columns_path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
                     self._tag_boards = [c for c in raw if isinstance(c, dict) and c.get("id")]
+                    # Preserve dropped columns verbatim so a later save
+                    # round-trips them rather than erasing a hand-edited-but-
+                    # typo'd column (#5792).
+                    unparsed_cols = [c for c in raw if not (isinstance(c, dict) and c.get("id"))]
+                    if unparsed_cols:
+                        logger.warning(
+                            "Preserving %d malformed sidebar column(s) while "
+                            "loading tag_boards.json (kept verbatim, not active)",
+                            len(unparsed_cols),
+                        )
+                    self._unparsed_tag_board_entries = unparsed_cols
                     # Prune column tag_ids missing from the vocabulary: tag
                     # deletion commits the vocab write first (crash-atomic),
                     # so a crash mid-delete can leave dangling ids here. The
@@ -7678,8 +7747,15 @@ class DashboardState:
             logger.warning("Failed to load sidebar columns", exc_info=True)
 
     def save_tags(self) -> None:
-        """Persist tag vocabulary to disk (atomic write)."""
-        self._atomic_write_json(config_dir() / self._TAGS_FILE, self._tags)
+        """Persist tag vocabulary to disk (atomic write).
+
+        Appends any malformed entries preserved at load time
+        (``_unparsed_tag_entries``) so a save — including the seed/back-fill
+        save that runs during ``load_tags`` itself — cannot erase bytes a
+        hand-edit left in a shape the loader could not validate (#5792).
+        """
+        unparsed = getattr(self, "_unparsed_tag_entries", [])
+        self._atomic_write_json(config_dir() / self._TAGS_FILE, [*self._tags, *unparsed])
 
     def save_tags_snapshot(self, snapshot: list[dict]) -> None:
         """Persist a pre-captured tag snapshot to disk (strict -- raises on failure).
@@ -7690,14 +7766,26 @@ class DashboardState:
         location resolves through this module's ``config_dir`` exactly like
         ``save_tags`` -- keeping tests that patch it working unchanged.
 
+        Malformed entries preserved at load time (``_unparsed_tag_entries``)
+        are appended so this write path preserves them too (#5792).
+
         Raises on I/O failure so callers can roll back in-memory state and
         surface HTTP 5xx rather than silently losing data.
         """
-        self._atomic_write_json_strict(config_dir() / self._TAGS_FILE, snapshot)
+        unparsed = getattr(self, "_unparsed_tag_entries", [])
+        self._atomic_write_json_strict(config_dir() / self._TAGS_FILE, [*snapshot, *unparsed])
 
     def save_tag_boards(self) -> None:
-        """Persist sidebar column layout to disk (atomic write)."""
-        self._atomic_write_json(config_dir() / self._TAG_BOARDS_FILE, self._tag_boards)
+        """Persist sidebar column layout to disk (atomic write).
+
+        Appends any malformed columns preserved at load time
+        (``_unparsed_tag_board_entries``) so a save cannot erase bytes a
+        hand-edit left in a shape the loader could not validate (#5792).
+        """
+        unparsed = getattr(self, "_unparsed_tag_board_entries", [])
+        self._atomic_write_json(
+            config_dir() / self._TAG_BOARDS_FILE, [*self._tag_boards, *unparsed]
+        )
 
     def save_tag_boards_snapshot(self, snapshot: list[dict]) -> None:
         """Persist a pre-captured boards snapshot to disk (strict -- raises on failure).
@@ -7708,10 +7796,15 @@ class DashboardState:
         resolves through this module's ``config_dir`` exactly like
         ``save_tag_boards`` -- keeping tests that patch it working unchanged.
 
+        Malformed columns preserved at load time
+        (``_unparsed_tag_board_entries``) are appended so this write path
+        preserves them too (#5792).
+
         Raises on I/O failure so callers can roll back in-memory state and
         surface HTTP 5xx rather than silently losing data.
         """
-        self._atomic_write_json_strict(config_dir() / self._TAG_BOARDS_FILE, snapshot)
+        unparsed = getattr(self, "_unparsed_tag_board_entries", [])
+        self._atomic_write_json_strict(config_dir() / self._TAG_BOARDS_FILE, [*snapshot, *unparsed])
 
     @staticmethod
     def _atomic_write_json_strict(path: Path, data: Any) -> None:
