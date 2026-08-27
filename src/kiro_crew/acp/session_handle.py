@@ -41,12 +41,14 @@ from kiro_crew.acp._dispatch import (
     set_model_params,
 )
 from kiro_crew.acp.client import (
+    _COMPACTION_FAILED_TURN_BUDGET,
     AcpProcessDied,
     AcpTimeoutError,
     _effective_prompt_timeout_async,
     _is_safe_oauth_url,
     _is_tool_interrupted_marker,
     _raise_acp_error,
+    compaction_failure_detail,
     format_command_result,
     parse_slash_command,
     prompt_timeout_for_ceiling,
@@ -98,6 +100,7 @@ from kiro_crew.acp.types import (
     OUTCOME_CANCELLED,
     OUTCOME_SELECTED,
     STOP_REASON_CANCELLED,
+    STOP_REASON_COMPACTION_FAILED,
     STOP_REASON_STALE_RECOVER,
     STOP_REASON_TOOL_STALL,
     UPDATE_CURRENT_MODE,
@@ -521,6 +524,10 @@ class AcpSessionHandle:
         # a yield in prompt().
         self._parked_total: float = 0.0
         self._parked_since: float | None = None
+        # Monotonic timestamp of a `failed` compaction status seen this turn
+        # (None otherwise). Arms the post-failure budget in _dispatch_events,
+        # which ends an abandoned turn instead of draining to the ceiling.
+        self._compaction_failed_at: float | None = None
         # Consumers that implement the low-fidelity child downgrade (dashboard
         # card / interactive approver) opt IN; for everyone else the handle
         # itself fail-closes low-fidelity child permission requests below, so
@@ -1848,6 +1855,10 @@ class AcpSessionHandle:
         """
         deadline = time.monotonic() + timeout
         last_data_ts = time.monotonic()
+        # Cleared per turn: armed by the compaction branch below on a
+        # `failed` status, then read by the post-failure budget check at the
+        # loop top (mirrors AcpClient._prompt_loop).
+        self._compaction_failed_at = None
         # Whether a native agent-switch notification already reported the
         # switch this turn; guards the result-extracted fallback below from
         # double-emitting EVENT_AGENT_SWITCHED (mirrors AcpClient).
@@ -1856,6 +1867,15 @@ class AcpSessionHandle:
         # taken. The idle clocks below measure BACKEND silence, so any park that
         # happens after this point must be subtracted from them.
         parked_at_data = self._parked_total
+        # SESSION-ATTRIBUTABLE twin of (last_data_ts, parked_at_data), for the
+        # post-compaction-failure budget only. On a shared runtime, ownerless
+        # global notifications are fanned out to every co-tenant queue
+        # (msg.fanout_no_owner), so another session's steady traffic would
+        # keep resetting last_data_ts and defer the budget to the multi-hour
+        # outer deadline — the exact hang this budget exists to bound. The
+        # pre-existing tool/stale clocks keep last_data_ts unchanged.
+        last_own_data_ts = last_data_ts
+        parked_at_own_data = parked_at_data
 
         _buffered: list[JsonRpcMessage] = []
         try:
@@ -1863,6 +1883,46 @@ class AcpSessionHandle:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+
+                # Post-compaction-failure budget: automatic compaction reported
+                # `failed` and the backend has since gone silent past the budget,
+                # so no prompt response or end_turn is coming. End the turn with
+                # an explicit stop reason so the caller releases the slot instead
+                # of draining to the chat-turn ceiling (issue #3583). Consumer
+                # park time is subtracted, like every other idle clock here, so a
+                # long human approval cannot be charged to the backend.
+                #
+                # SUSPENDED while a tool is in flight, for the same reason as
+                # AcpClient's twin: a silent long tool dispatched after the failed
+                # compaction is live work, and reaping it at 60s would cancel the
+                # session out from under it. The tool-stall watchdog below owns
+                # that case; this budget re-arms when the tool resolves.
+                #
+                # Clock asymmetry with AcpClient's twin is INTENTIONAL: the shared
+                # runtime fans ownerless frames out to every co-tenant, so this
+                # side keys off SESSION-ATTRIBUTABLE frames (last_own_data_ts)
+                # where the dedicated-process side can trust last_data_ts.
+                if self._compaction_failed_at is not None and not self._tool_dispatched:
+                    _compact_idle = max(
+                        0.0,
+                        (time.monotonic() - max(last_own_data_ts, self._compaction_failed_at))
+                        - max(0.0, self._parked_total - parked_at_own_data),
+                    )
+                    if _compact_idle > _COMPACTION_FAILED_TURN_BUDGET:
+                        logger.warning(
+                            "Compaction failed on session %s and no prompt response "
+                            "arrived for %.0fs — ending the turn.",
+                            self._session_id,
+                            _compact_idle,
+                        )
+                        self._compaction_failed_at = None
+                        self._turn_done.set()
+                        yield AcpEvent(
+                            kind=EVENT_COMPLETE,
+                            stop_reason=STOP_REASON_COMPACTION_FAILED,
+                            usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                        )
+                        return
 
                 # Unresponsive-cancel recovery: cancel() was sent but kiro-cli has
                 # not acked (no cancelled stopReason) within the grace budget. On a
@@ -2128,6 +2188,11 @@ class AcpSessionHandle:
 
                 last_data_ts = time.monotonic()
                 parked_at_data = self._parked_total
+                if not msg.fanout_no_owner:
+                    # Only a frame attributable to THIS session defers the
+                    # post-compaction-failure budget (see the twin's init note).
+                    last_own_data_ts = last_data_ts
+                    parked_at_own_data = parked_at_data
                 self.last_prompt_stats.event_count += 1
 
                 # Turn-complete response
@@ -2302,17 +2367,43 @@ class AcpSessionHandle:
                     params = msg.params or {}
                     status = params.get("status", {})
                     status_type = status.get("type", "") if isinstance(status, dict) else str(status)
-                    if status_type == "completed":
+                    # A compaction notification carrying no sessionId is fanned
+                    # out to EVERY co-tenant queue (AcpRuntime marks the copies
+                    # fanout_no_owner once more than one session is registered),
+                    # so at most one recipient actually compacted and nothing in
+                    # the frame says which.  Only a frame this session OWNS may
+                    # touch this session's per-turn state, in both directions:
+                    # an ownerless `failed` would arm the budget in every quiet
+                    # peer and reap its live turn (every consumer resets the
+                    # session on that terminal), and an ownerless `completed`
+                    # would disarm a peer's legitimate budget and restore the
+                    # #3583 hang this fix exists to close.  Same trust boundary
+                    # the budget's own clock already draws (last_own_data_ts) and
+                    # the subagent roster already draws (runtime_global=).  A lone
+                    # session's frame is left unmarked and genuinely is its own,
+                    # so single-session behaviour is unchanged.  The event still
+                    # surfaces either way — only the mutations are gated.
+                    owns_frame = not msg.fanout_no_owner
+                    if status_type == "completed" and owns_frame:
                         # The pre-compaction counts (and their authoritative
                         # context_tokens_from_usage flag) no longer describe
                         # the session — drop them so the context meter resets
                         # and the next telemetry can re-derive real numbers.
                         # Mirrors AcpClient._handle_compaction_status.
+                        self._compaction_failed_at = None
                         self.last_prompt_stats.reset_after_compaction()
                     # Compaction summary is backend-echoed text (LLM-influenced)
                     # that reaches the dashboard — redact exfil URLs/credentials
                     # before surfacing it (parity with other text surfaces).
                     summary = redact_text(str(params.get("summary", "") or ""))
+                    if status_type == "failed":
+                        if owns_frame:
+                            # Arm the bounded post-failure wait (the budget check
+                            # at the loop top) and carry the notification's own
+                            # reason so the notice stops collapsing to
+                            # "unknown error".
+                            self._compaction_failed_at = time.monotonic()
+                        summary = compaction_failure_detail(params)
                     yield AcpEvent(kind=EVENT_COMPACTION_STATUS, text=status_type, title=summary)
                 elif action == "clear":
                     yield AcpEvent(kind=EVENT_CLEAR_STATUS)
@@ -2917,14 +3008,25 @@ class AcpSessionHandle:
                 # them so the meter resets and fresh telemetry re-derives real
                 # numbers (parity with the kiro-cli compaction handler).
                 self.last_prompt_stats.reset_after_compaction()
+                self._compaction_failed_at = None
                 status_type = "completed"
             elif kind == kas_wire.KIND_SUMMARIZATION_FAILED:
                 status_type = "failed"
+                # KAS is the third producer of a failed compaction status and
+                # rides the SAME dispatch loop, so it gets the same bounded
+                # post-failure wait — a KAS turn abandoned after failed
+                # summarization must not drain to the ceiling either.
+                self._compaction_failed_at = time.monotonic()
             else:
                 status_type = "started"
             # conversationSummary is backend-echoed, LLM-influenced text that
             # reaches the dashboard — redact exfil URLs/credentials first.
             summary = redact_text(str(kiro.get(kas_wire.FIELD_CONVERSATION_SUMMARY, "") or ""))
+            if status_type == "failed":
+                # conversationSummary is empty on failure, so the notice would
+                # collapse to "unknown error" here too — carry KAS's own reason
+                # (redacted + bounded by the helper).
+                summary = compaction_failure_detail(kiro)
             return [AcpEvent(kind=EVENT_COMPACTION_STATUS, text=status_type, title=summary)]
         if kind in kas_wire.STEERING_KINDS:
             # KAS mid-turn steer echo. kiro-cli sends these as `session/update`

@@ -35,7 +35,11 @@ if TYPE_CHECKING:
     from kiro_crew.dashboard.state import DashboardState
 
 from kiro_crew.acp.client import AcpError, AcpProcessDied, AcpPromptBusy, AcpTimeoutError
-from kiro_crew.acp.types import STOP_REASON_CANCELLED, STOP_REASON_END_TURN
+from kiro_crew.acp.types import (
+    STOP_REASON_CANCELLED,
+    STOP_REASON_COMPACTION_FAILED,
+    STOP_REASON_END_TURN,
+)
 from kiro_crew.agent_discovery import project_agent_files, project_agent_name
 from kiro_crew.config.loader import (
     ACTIVATION_REVIEW,
@@ -3611,6 +3615,9 @@ async def handle_message(
                     _stop_reason
                     and _stop_reason != STOP_REASON_END_TURN
                     and _stop_reason != STOP_REASON_CANCELLED
+                    # Expected terminal state after a failed auto-compaction;
+                    # handled below with a session reset, so not "unexpected".
+                    and _stop_reason != STOP_REASON_COMPACTION_FAILED
                 ):
                     logger.warning(
                         "Unexpected stop_reason %r for %s — treating as normal completion",
@@ -3630,8 +3637,26 @@ async def handle_message(
             # the payload shape and model reflection cannot drift across surfaces.
             record_interaction_event(client, session_key, "slack")
 
-        # Check context usage — fires background compaction at configured threshold, never blocks
-        sessions.check_context_usage(session_key, client)
+        if _stop_reason == STOP_REASON_COMPACTION_FAILED:
+            # The completion was synthetic — the backend abandoned the turn
+            # after a failed auto-compaction and never sent end_turn, so it
+            # still counts the prompt as in progress. Reset now (mirrors the
+            # dashboard runner's needs_session_reset) or the NEXT message
+            # collides with "prompt already in progress" and burns the busy
+            # recovery path. No re-queue: the compaction notice already told
+            # the user. The context-usage probe is skipped — compaction just
+            # failed and the session was torn down.
+            try:
+                await sessions.reset(session_key)
+            except Exception:
+                logger.debug(
+                    "Failed to reset session %s after compaction failure",
+                    session_key,
+                    exc_info=True,
+                )
+        else:
+            # Check context usage — fires background compaction at configured threshold, never blocks
+            sessions.check_context_usage(session_key, client)
 
     except AcpTimeoutError as e:
         _had_error = True

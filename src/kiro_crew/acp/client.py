@@ -43,6 +43,7 @@ from kiro_crew.acp._dispatch import (
     make_unified_diff,
     parse_session_modes,
     parse_usage_update,
+    redact_text,
 )
 from kiro_crew.acp.liveness import (
     VERDICT_WORKING,
@@ -96,6 +97,7 @@ from kiro_crew.acp.types import (
     OPTION_ALLOW_ONCE,
     OUTCOME_CANCELLED,
     OUTCOME_SELECTED,
+    STOP_REASON_COMPACTION_FAILED,
     STOP_REASON_END_TURN,
     UPDATE_AGENT_MESSAGE_CHUNK,
     UPDATE_AGENT_THOUGHT_CHUNK,
@@ -870,6 +872,18 @@ _STALE_TURN_TIMEOUT = 90.0
 # keep resetting the timer via tool_call_update progress frames and tool
 # results, so this only trips on a genuine stall.
 _TOOL_STALL_TIMEOUT = 600.0
+# After a compaction `failed` status, kiro-cli can leave the turn it was
+# compacting for unanswered: no session/prompt response and no end_turn ever
+# arrive, so the read loop drains in silence to the caller's full prompt
+# ceiling (hours) and the slot is never released — the user waits it out or
+# presses Stop (issue #3583). Once a failure has been seen, treat this much
+# BACKEND SILENCE as a dead turn and end it with
+# STOP_REASON_COMPACTION_FAILED. Any stdout frame resets the clock, so a
+# backend that recovers and keeps streaming is unaffected and stays governed
+# by _STALE_TURN_TIMEOUT / _TOOL_STALL_TIMEOUT. Deliberately does NOT fold in
+# _last_activity (stderr/keepalive): a wedged post-compaction turn that keeps
+# writing stderr must still be reaped.
+_COMPACTION_FAILED_TURN_BUDGET = 60.0
 _CANCEL_GRACE_SECS = 10.0  # grace window for cooperative cancel ack
 # Absolute safety cap for _wait_for_response's activity-based deadline. The
 # per-call deadline resets on every received frame (so a long session/load
@@ -890,6 +904,42 @@ _ACP_SHELL_KIND = "execute"
 def _is_shell_kind(kind: str | None) -> bool:
     """True when an ACP tool_kind denotes a shell/exec command."""
     return kind == _ACP_SHELL_KIND
+
+
+# Cap for the failure detail carried into the compaction notice: it is
+# backend-echoed text on a chat row, not a log line.
+_COMPACTION_DETAIL_MAX_CHARS = 200
+
+
+def compaction_failure_detail(params: dict) -> str:
+    """Best-effort reason text from a ``failed`` compaction notification.
+
+    kiro-cli carries no dedicated error field today: ``summary`` is
+    populated on success but typically empty on failure, which collapsed the
+    user-facing notice to "unknown error" with nothing to report or grep
+    (issue #3583). Prefer any named reason the payload does carry, else fall
+    back to the raw shape so the notice says something concrete. Redacted
+    here (not at each call site) because this reaches the dashboard.
+    """
+    status = params.get("status")
+    status = status if isinstance(status, dict) else {}
+    detail = ""
+    for source in (status, params):
+        for key in ("error", "reason", "message", "detail"):
+            value = source.get(key)
+            if isinstance(value, dict):
+                value = value.get("message") or value.get("error")
+            if isinstance(value, str) and value.strip():
+                detail = value.strip()
+                break
+        if detail:
+            break
+    if not detail:
+        # No named reason anywhere — the raw params ARE the only evidence.
+        detail = f"no reason reported by the agent (raw: {params})"
+    # redact_text is the single-source scrub (exfil URLs + credentials) every
+    # other LLM-influenced surface uses, including the sibling KAS summary.
+    return redact_text(detail)[:_COMPACTION_DETAIL_MAX_CHARS]
 
 
 class AcpError(Exception):
@@ -2224,6 +2274,13 @@ class AcpClient:
         # single progress frame.  Gates the _TOOL_STALL_TIMEOUT watchdog so a
         # dispatched-but-never-resolved tool can't hang the whole turn.
         self._tool_dispatched: bool = False
+        # Armed by _handle_compaction_status on a `failed` status and cleared at
+        # turn start: gates the _COMPACTION_FAILED_TURN_BUDGET check in
+        # _prompt_loop. _compaction_failed_turn records that the check fired, so
+        # _dispatch_events ends the turn with the compaction stop reason instead
+        # of the generic timeout error.
+        self._compaction_failed_at: float | None = None
+        self._compaction_failed_turn: bool = False
         # Liveness oracle for the stale-turn gate: before ending a silent turn
         # at _STALE_TURN_TIMEOUT, consult /proc evidence so a backend that is
         # provably working (CPU/IO movement in the subprocess subtree) is not
@@ -4095,14 +4152,62 @@ class AcpClient:
             # clear the active turn's tracked consult and so allow a second walk
             # while the first is still pending.
             self._retire_liveness_state()
+            self._compaction_failed_at = None
+            self._compaction_failed_turn = False
             deadline = time.monotonic() + timeout
             consecutive_empty = 0
             last_data_ts = time.monotonic()
+            # Consumer park accounting (mirrors AcpSessionHandle._dispatch_events):
+            # the interval between this generator's yield and its resume is
+            # CONSUMER time — a human approval prompt parks the whole generator
+            # chain at that yield — so the post-compaction-failure idle clock
+            # below must subtract it or a long approval wait reads as backend
+            # silence and the budget reaps a live turn. `parked_at_data`
+            # snapshots the accumulator when `last_data_ts` is taken, so only
+            # park time accrued SINCE the last frame is excluded.
+            parked_total = 0.0
+            parked_at_data = 0.0
 
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+
+                # Post-compaction-failure budget: a `failed` status arrived and the
+                # backend has since gone silent past the budget, so no prompt
+                # response or end_turn is coming. Stop reading so _dispatch_events
+                # ends the turn explicitly and the runner releases the slot,
+                # instead of draining to `deadline` (hours).
+                #
+                # SUSPENDED while a tool is in flight: kiro-cli can recover from a
+                # failed compaction and dispatch a tool, and a legitimately silent
+                # long tool (a build, a spawned subagent) would then be reaped at
+                # 60s — killing valid work that the tool-stall watchdog already
+                # governs on its own, much longer, liveness-gated budget. A tool
+                # dispatch is positive evidence the turn is alive, so this budget
+                # hands off to _TOOL_STALL_TIMEOUT and re-arms when the tool
+                # resolves (_tool_dispatched cleared in _dispatch_events).
+                #
+                # Clock asymmetry with AcpSessionHandle's twin is INTENTIONAL: this
+                # path owns a dedicated process, so every frame is its own and the
+                # park accounting below is what it needs; the shared-runtime twin
+                # instead needs session-attributable frames (a co-tenant's fanout
+                # must not defer the reap). Keep both when touching either.
+                if self._compaction_failed_at is not None and not self._tool_dispatched:
+                    _compact_idle = max(
+                        0.0,
+                        (time.monotonic() - max(self._compaction_failed_at, last_data_ts))
+                        - max(0.0, parked_total - parked_at_data),
+                    )
+                    if _compact_idle > _COMPACTION_FAILED_TURN_BUDGET:
+                        logger.warning(
+                            "Compaction failed for req %d and no prompt response "
+                            "arrived for %.0fs — ending the turn.",
+                            req_id,
+                            _compact_idle,
+                        )
+                        self._compaction_failed_turn = True
+                        return
 
                 msg = await self._read_message(timeout=min(remaining, _READ_TIMEOUT))
                 if msg is None:
@@ -4204,6 +4309,7 @@ class AcpClient:
 
                 consecutive_empty = 0
                 last_data_ts = time.monotonic()
+                parked_at_data = parked_total
                 # NB: do NOT clear _tool_dispatched here.  The last_data_ts reset
                 # above already prevents false positives for tools that stream
                 # progress frames (each frame restarts the _TOOL_STALL_TIMEOUT
@@ -4216,7 +4322,16 @@ class AcpClient:
                 self.last_prompt_stats.event_count += 1
 
                 action = self._process_message(msg, req_id)
-                yield action, msg
+                # Single yield chokepoint: everything downstream (dispatch,
+                # chat runner, a human answering an approval card) runs while
+                # this generator is suspended here, so the whole gap is
+                # consumer time. `finally` so an abandoned generator's
+                # GeneratorExit still closes the park.
+                _parked_since = time.monotonic()
+                try:
+                    yield action, msg
+                finally:
+                    parked_total += max(0.0, time.monotonic() - _parked_since)
         finally:
             self._turn_lock.release()
             # Release any cooperative-stop waiter regardless of how the loop
@@ -4530,6 +4645,11 @@ class AcpClient:
                 status = params.get("status", {})
                 status_type = status.get("type", "") if isinstance(status, dict) else str(status)
                 summary = params.get("summary", "")
+                if status_type == "failed":
+                    # The notice reads AcpEvent.title, and `summary` is empty on
+                    # failure — carry the notification's own reason so the row
+                    # stops collapsing to "unknown error".
+                    summary = compaction_failure_detail(params)
                 yield AcpEvent(kind=EVENT_COMPACTION_STATUS, text=status_type, title=summary)
             elif action == "clear":
                 yield AcpEvent(kind=EVENT_CLEAR_STATUS)
@@ -4657,6 +4777,21 @@ class AcpClient:
         if not got_complete:
             self._last_stop_reason = ""
             self._turn_done.set()
+            if self._compaction_failed_turn:
+                # Compaction failed and the turn was abandoned by the backend.
+                # Terminate explicitly — checked BEFORE the stale-turn branch so
+                # a turn that had streamed text does not report a normal
+                # end_turn, and before AcpTimeoutError so callers get the real
+                # cause. The user-facing notice is already appended by the
+                # compaction-status path; this only ends the turn.
+                self._compaction_failed_turn = False
+                self._last_stop_reason = STOP_REASON_COMPACTION_FAILED
+                yield AcpEvent(
+                    kind=EVENT_COMPLETE,
+                    stop_reason=STOP_REASON_COMPACTION_FAILED,
+                    usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                )
+                return
             # If text was streamed, this is a stale turn (kiro-cli finished
             # but never sent `result`).  Yield a synthetic complete so callers
             # finalize normally instead of showing a timeout error.
@@ -5783,7 +5918,12 @@ class AcpClient:
         s_type = status.get("type", "") if isinstance(status, dict) else str(status)
         if s_type == "failed":
             logger.warning("Compaction failed — raw notification params: %s", params)
+            # Arm the bounded post-failure wait (see
+            # _COMPACTION_FAILED_TURN_BUDGET): kiro-cli may never answer the
+            # prompt this compaction was for.
+            self._compaction_failed_at = time.monotonic()
         elif s_type == "completed":
+            self._compaction_failed_at = None
             self.last_prompt_stats.reset_after_compaction()
 
     async def wait_for_compaction(self, timeout: float = COMPACT_WAIT_TIMEOUT_SECS) -> dict:

@@ -32,6 +32,7 @@ from kiro_crew.acp.types import (
     EVENT_MCP_SERVER_INITIALIZED,
     EVENT_STEER_CONSUMED,
     STOP_REASON_CANCELLED,
+    STOP_REASON_COMPACTION_FAILED,
     STOP_REASON_END_TURN,
     STOP_REASON_REFUSAL,
     STOP_REASON_STALE_RECOVER,
@@ -7760,6 +7761,10 @@ async def _run_chat(
                     and _stop_reason != STOP_REASON_CANCELLED
                     and _stop_reason != STOP_REASON_STALE_RECOVER
                     and _stop_reason != STOP_REASON_TOOL_STALL
+                    # An abandoned post-compaction-failure turn is an EXPECTED
+                    # terminal state (the compaction notice already told the
+                    # user); no retry, so it must not log as unexpected.
+                    and _stop_reason != STOP_REASON_COMPACTION_FAILED
                 ):
                     logger.warning(
                         "Unexpected stop_reason %r for slot %s",
@@ -7871,6 +7876,22 @@ async def _run_chat(
                 _emit_stall("Session stuck — please start a new chat.")
             else:
                 _emit_stall("⟳ Tool appeared stalled — please retry.")
+            return
+
+        # Automatic compaction failed and the backend then abandoned the turn.
+        # Returning HERE is load-bearing: this reason is in the "error:" family,
+        # and the branch below is pipe-death recovery — it would re-queue the
+        # message and label it "Connection lost", neither of which is true. A
+        # retry would also just hit the same over-threshold context and fail
+        # again. No message to add either: the compaction-status path already
+        # appended the visible notice naming the failure. The session reset IS
+        # needed, though — this completion is synthetic (the client stopped
+        # reading; the backend never sent end_turn), so the backend still
+        # counts the turn as in progress and the next prompt would collide
+        # with "prompt already in progress". The finally's reset tears that
+        # runtime down and session/load-resumes, WITHOUT re-queuing anything.
+        if _stop_reason == STOP_REASON_COMPACTION_FAILED:
+            needs_session_reset = True  # checked in finally block (reset, no re-queue)
             return
 
         # CC process died mid-turn: re-queue message for automatic retry

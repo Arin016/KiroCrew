@@ -295,6 +295,13 @@ STOP_REASON_STALE_RECOVER = "stale_recover"
 # generic error handling; chat_runner routes it to a dedicated recovery
 # (continue-nudge, NOT a verbatim re-run of the original message).
 STOP_REASON_TOOL_STALL = "error: tool stall"
+# Signalled by the ACP layer when automatic compaction reported `failed`
+# and the backend then abandoned the turn (no prompt response, no
+# end_turn) past the post-failure budget. Kept in the "error:" family so
+# callers without a dedicated branch fall back to generic error handling;
+# it deliberately triggers NO retry — the user-visible compaction notice
+# already explains what happened, and this only releases the slot.
+STOP_REASON_COMPACTION_FAILED = "error: compaction failed"
 
 # ── Approval Modes ──
 

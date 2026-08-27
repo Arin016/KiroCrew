@@ -37,6 +37,7 @@ from kiro_crew.acp.types import (
     EVENT_COMPLETE,
     EVENT_PERMISSION_REQUEST,
     EVENT_TEXT_CHUNK,
+    STOP_REASON_COMPACTION_FAILED,
     STOP_REASON_STALE_RECOVER,
     STOP_REASON_TOOL_STALL,
 )
@@ -2286,6 +2287,59 @@ class TestRunChatRecoveryLadders:
 
         assert any("please retry" in err for err in _errors(slot))
         assert slot._queue == []
+
+    @pytest.mark.asyncio
+    async def test_compaction_failure_neither_retries_nor_claims_a_lost_link(self, tmp_path):
+        """A compaction-failed turn is terminal: the reason is in the "error:"
+        family, so without its own branch it lands in pipe-death recovery — a
+        re-queue plus a "Connection lost" card, both false. Compaction retry
+        policy is not this layer's to invent (issue #3583)."""
+        state, client = _runner_state(tmp_path)
+        slot = _slot()
+        _set_stream(
+            client,
+            [
+                LLMEvent(
+                    kind="compaction_status",
+                    text="failed",
+                    title="context window exceeded",
+                ),
+                _complete(STOP_REASON_COMPACTION_FAILED),
+            ],
+        )
+
+        await _drive(state, slot)
+
+        errors = _errors(slot)
+        assert not any("Connection lost" in err for err in errors), errors
+        assert not any("Session stuck" in err for err in errors), errors
+        assert slot._acp_pipe_death_retries == 0
+        assert slot._queue == []
+        # The failure is still explained — by the compaction notice the status
+        # path appended, which is the only message this turn needs.
+        assert any(
+            "Compaction failed" in m.get("content", "")
+            and "context window exceeded" in m.get("content", "")
+            for m in slot.messages
+        ), slot.messages
+
+    @pytest.mark.asyncio
+    async def test_compaction_failure_resets_the_abandoned_backend_session(self, tmp_path):
+        """The completion is synthetic — the client stopped reading; the
+        backend never sent end_turn — so without a reset the runtime still
+        counts the turn as in progress and the NEXT prompt collides with
+        "prompt already in progress". The finally must reset (tear down +
+        session/load resume) WITHOUT re-queuing anything."""
+        state, client = _runner_state(tmp_path)
+        slot = _slot()
+        state.sessions.reset = AsyncMock()
+        _set_stream(client, [_complete(STOP_REASON_COMPACTION_FAILED)])
+
+        await _drive(state, slot)
+
+        state.sessions.reset.assert_awaited_once()
+        assert slot._queue == []
+        assert slot._acp_pipe_death_retries == 0
 
     @pytest.mark.asyncio
     async def test_tool_stall_recovery_names_the_stalled_tool(self, tmp_path):

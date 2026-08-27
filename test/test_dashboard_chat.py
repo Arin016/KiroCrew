@@ -670,6 +670,22 @@ class TestBroadcastCompactionResultBackoff:
         assert "x in a row" in msg
         assert "too large to" in msg or "unknown error" in msg
 
+    def test_enriched_title_replaces_unknown_error(self, tmp_path, monkeypatch):
+        """The notice reads the event title. kiro-cli sends no summary on
+        failure, so the ACP layer now carries the notification's own reason
+        there (issue #3583) — the row must name it instead of collapsing to
+        "unknown error"."""
+        from kiro_crew.dashboard.chat_utils import _broadcast_compaction_result
+
+        state, slot = self._make_slot_and_state(tmp_path, monkeypatch)
+
+        msg = _broadcast_compaction_result(
+            state, slot, self._failed_event("context window exceeded")
+        )
+        assert msg is not None
+        assert "context window exceeded" in msg
+        assert "unknown error" not in msg
+
     def test_success_resets_streak_and_cooldown(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.chat_utils import (
             _COMPACTION_NOTICE_SHOW_FIRST_N,

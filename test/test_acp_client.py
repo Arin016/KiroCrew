@@ -10399,3 +10399,416 @@ class TestMiseNodeInstallsDir:
         script.write_text("#!/usr/bin/env node\n")
 
         assert client_mod._resolve_node_for_script(str(script)) is None
+
+
+class TestCompactionFailureTurnBudget:
+    """A `failed` compaction must FAIL THE TURN, not hang it.
+
+    kiro-cli can report compaction `failed` and then abandon the prompt it was
+    compacting for: no session/prompt response and no end_turn ever arrive, so
+    the read loop drained in silence to the caller's full prompt ceiling
+    (hours) while the slot stayed occupied — the user waited it out or pressed
+    Stop (issue #3583). The budget bounds that wait and the turn ends with
+    STOP_REASON_COMPACTION_FAILED. No retry is attempted: compaction stays
+    kiro-cli's, this only makes its failure fail cleanly.
+    """
+
+    def _failed_msg(self, params: dict | None = None):
+        from kiro_crew.acp.types import METHOD_COMPACTION_STATUS, JsonRpcMessage
+
+        return JsonRpcMessage(
+            method=METHOD_COMPACTION_STATUS,
+            params=params if params is not None else {"status": {"type": "failed"}},
+        )
+
+    def _silent_after(self, frames: list):
+        """_read_message double: drain `frames`, then stay silent forever."""
+
+        async def _read(timeout: float = 0.0):
+            return frames.pop(0) if frames else None
+
+        return _read
+
+    @pytest.mark.asyncio
+    async def test_silent_turn_after_failure_ends_at_budget(self, tmp_path, monkeypatch):
+        """Armed by the failed status, the loop stops reading at the budget and
+        marks the turn so the caller can terminate it explicitly."""
+        from kiro_crew.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        # Neither existing watchdog can save this turn: no text streamed and no
+        # tool dispatched, so only the 2h prompt ceiling applied before the fix.
+        client._stale_eligible = False
+        client._tool_dispatched = False
+        client._is_process_alive = lambda: True
+        client._read_message = self._silent_after([self._failed_msg()])
+
+        actions = []
+        t0 = time.monotonic()
+        async for action, msg in client._prompt_loop(req_id=1, timeout=30.0):
+            actions.append(action)
+            if action == "compaction":
+                # What _dispatch_events does with the frame — the arming site.
+                client._handle_compaction_status(msg)
+        elapsed = time.monotonic() - t0
+
+        assert actions == ["compaction"]
+        assert client._compaction_failed_turn is True
+        assert client._turn_done.is_set()
+        # Prove the budget ended it, not the 30s outer deadline.
+        assert elapsed < 5.0, f"loop ran too long ({elapsed:.2f}s) — budget did not fire"
+
+    @pytest.mark.asyncio
+    async def test_failed_status_then_silence_completes_the_stream(self, tmp_path, monkeypatch):
+        """Full path, the reported hang: a `failed` status arrives, the backend
+        never answers the prompt, and the stream still terminates — with the
+        compaction stop reason, well inside the 30s turn ceiling."""
+        from kiro_crew.acp import client as acp_client
+        from kiro_crew.acp.types import (
+            EVENT_COMPACTION_STATUS,
+            EVENT_COMPLETE,
+            STOP_REASON_COMPACTION_FAILED,
+            AcpEvent,
+        )
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client.ensure_ready = AsyncMock()
+        client._send_prompt = AsyncMock(return_value=1)
+        client._is_process_alive = lambda: True
+        client._read_message = self._silent_after(
+            [self._failed_msg({"status": {"type": "failed", "error": "context too large"}})]
+        )
+
+        events: list[AcpEvent] = []
+        t0 = time.monotonic()
+        async for ev in client.stream_events("hello", timeout=30.0):
+            events.append(ev)
+        elapsed = time.monotonic() - t0
+
+        assert [e.kind for e in events] == [EVENT_COMPACTION_STATUS, EVENT_COMPLETE]
+        assert events[0].title == "context too large"
+        assert events[-1].stop_reason == STOP_REASON_COMPACTION_FAILED
+        assert elapsed < 5.0, f"turn ran too long ({elapsed:.2f}s) — the hang is back"
+
+    @pytest.mark.asyncio
+    async def test_budget_is_disarmed_without_a_failure(self, tmp_path, monkeypatch):
+        """No failed status → no budget: the loop runs to its own deadline, so
+        an ordinary silent turn keeps its existing watchdog behavior."""
+        from kiro_crew.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.05)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._stale_eligible = False
+        client._tool_dispatched = False
+        client._read_message = AsyncMock(return_value=None)
+        client._is_process_alive = lambda: True
+
+        t0 = time.monotonic()
+        async for _action, _msg in client._prompt_loop(req_id=1, timeout=0.4):
+            pass
+        elapsed = time.monotonic() - t0
+
+        assert client._compaction_failed_turn is False
+        assert elapsed >= 0.35, "loop exited early — the budget fired unarmed"
+
+    @pytest.mark.asyncio
+    async def test_completed_status_disarms_the_budget(self, tmp_path):
+        """A retried compaction that succeeds must clear the armed failure, or
+        the next silent stretch of a healthy turn would end it."""
+        client = AcpClient(work_dir=tmp_path)
+        client._handle_compaction_status(self._failed_msg())
+        assert client._compaction_failed_at is not None
+
+        client._handle_compaction_status(
+            self._failed_msg({"status": {"type": "completed"}, "summary": "ok"})
+        )
+        assert client._compaction_failed_at is None
+
+    @pytest.mark.asyncio
+    async def test_frames_after_the_failure_defer_the_budget(self, tmp_path, monkeypatch):
+        """The budget measures BACKEND SILENCE: a backend that keeps sending
+        frames after a failed compaction is not reaped by it."""
+        from kiro_crew.acp import client as acp_client
+        from kiro_crew.acp.types import METHOD_METADATA, JsonRpcMessage
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.3)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._is_process_alive = lambda: True
+        client._handle_compaction_status(self._failed_msg())
+
+        async def _steady_stream(timeout: float = 0.0):
+            await asyncio.sleep(0.05)
+            return JsonRpcMessage(method=METHOD_METADATA, params={})
+
+        client._read_message = _steady_stream
+
+        actions = []
+        async for action, _msg in client._prompt_loop(req_id=1, timeout=0.6):
+            actions.append(action)
+
+        # Ran to its own deadline while frames kept arriving.
+        assert actions and all(a == "metadata" for a in actions)
+        assert client._compaction_failed_turn is False
+
+    @pytest.mark.asyncio
+    async def test_dispatch_ends_turn_with_compaction_stop_reason(self):
+        """The abandoned turn terminates with the explicit stop reason instead
+        of raising the generic timeout, so the runner releases the slot."""
+        from kiro_crew.acp.types import (
+            EVENT_COMPLETE,
+            STOP_REASON_COMPACTION_FAILED,
+            AcpEvent,
+        )
+
+        client = AcpClient()
+
+        async def fake_prompt_loop(req_id, timeout):
+            # The budget fired: the loop stops reading with no `complete`.
+            client._compaction_failed_turn = True
+            if False:  # pragma: no cover - keeps this an async generator
+                yield "complete", None
+
+        client.ensure_ready = AsyncMock()
+        client._send_prompt = AsyncMock(return_value=1)
+        client._prompt_loop = fake_prompt_loop
+
+        events: list[AcpEvent] = []
+        async for ev in client.stream_events("test"):
+            events.append(ev)
+
+        assert [e.kind for e in events] == [EVENT_COMPLETE]
+        assert events[0].stop_reason == STOP_REASON_COMPACTION_FAILED
+        # Single-shot: the marker must not leak into the next turn.
+        assert client._compaction_failed_turn is False
+
+    @pytest.mark.asyncio
+    async def test_streamed_text_still_reports_compaction_failure(self):
+        """A turn that streamed text before the failure must NOT be finalized as
+        a normal end_turn by the stale-turn branch — the cause is the failure."""
+        from kiro_crew.acp.types import (
+            EVENT_COMPLETE,
+            STOP_REASON_COMPACTION_FAILED,
+            AcpEvent,
+        )
+
+        client = AcpClient()
+
+        async def fake_prompt_loop(req_id, timeout):
+            client._stale_eligible = True
+            client._compaction_failed_turn = True
+            if False:  # pragma: no cover - keeps this an async generator
+                yield "complete", None
+
+        client.ensure_ready = AsyncMock()
+        client._send_prompt = AsyncMock(return_value=1)
+        client._prompt_loop = fake_prompt_loop
+
+        events: list[AcpEvent] = []
+        async for ev in client.stream_events("test"):
+            events.append(ev)
+
+        assert [e.kind for e in events] == [EVENT_COMPLETE]
+        assert events[0].stop_reason == STOP_REASON_COMPACTION_FAILED
+
+    @pytest.mark.asyncio
+    async def test_failed_event_title_carries_the_reason(self):
+        """The notice reads AcpEvent.title. kiro-cli leaves `summary` empty on
+        failure, which collapsed the row to "unknown error" — the raw
+        notification's own reason now rides the title instead."""
+        from kiro_crew.acp.types import (
+            EVENT_COMPACTION_STATUS,
+            METHOD_COMPACTION_STATUS,
+            AcpEvent,
+            JsonRpcMessage,
+        )
+
+        client = AcpClient()
+        compact_msg = JsonRpcMessage(
+            method=METHOD_COMPACTION_STATUS,
+            params={
+                "status": {"type": "failed", "error": "context window exceeded"},
+                "summary": "",
+            },
+        )
+        complete_msg = JsonRpcMessage(id=1, result={"stopReason": "end_turn"})
+
+        async def fake_prompt_loop(req_id, timeout):
+            yield "compaction", compact_msg
+            yield "complete", complete_msg
+
+        client.ensure_ready = AsyncMock()
+        client._send_prompt = AsyncMock(return_value=1)
+        client._prompt_loop = fake_prompt_loop
+
+        events: list[AcpEvent] = []
+        async for ev in client.stream_events("test"):
+            events.append(ev)
+
+        assert events[0].kind == EVENT_COMPACTION_STATUS
+        assert events[0].text == "failed"
+        assert events[0].title == "context window exceeded"
+
+    @pytest.mark.asyncio
+    async def test_consumer_park_is_not_charged_to_the_budget(self, tmp_path, monkeypatch):
+        """A human approval parks the whole generator chain at _prompt_loop's
+        single yield. That interval is CONSUMER time (mirrors the
+        AcpSessionHandle park accounting): without the exclusion, the resume
+        computes idle = the park length and reaps a live turn whose backend
+        was only ever waiting for the approval answer."""
+        from kiro_crew.acp import client as acp_client
+        from kiro_crew.acp.types import METHOD_METADATA, JsonRpcMessage
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.2)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._stale_eligible = False
+        client._tool_dispatched = False
+        client._is_process_alive = lambda: True
+        client._read_message = self._silent_after(
+            [self._failed_msg(), JsonRpcMessage(method=METHOD_METADATA, params={})]
+        )
+
+        parked = False
+        resumed_at = None
+        async for action, msg in client._prompt_loop(req_id=1, timeout=30.0):
+            if action == "compaction":
+                client._handle_compaction_status(msg)
+            elif action == "metadata" and not parked:
+                # The consumer holds this frame past the WHOLE budget — the
+                # shape of a human answering an approval card slowly.
+                parked = True
+                await asyncio.sleep(0.3)
+                resumed_at = time.monotonic()
+        ended_at = time.monotonic()
+
+        # The budget still ends the (genuinely) silent turn — but measured
+        # from the resume, not from the frame before the park.
+        assert client._compaction_failed_turn is True
+        assert parked and resumed_at is not None
+        assert ended_at - resumed_at >= 0.15, (
+            f"turn ended {ended_at - resumed_at:.2f}s after the consumer resumed - "
+            "the park was charged to the backend-silence budget"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_tool_in_flight_suspends_the_budget(self, tmp_path, monkeypatch):
+        """kiro-cli can recover from a failed compaction and dispatch a tool. A
+        legitimately silent long tool (a build, a spawned subagent) must NOT be
+        reaped at the compaction budget — that would cancel valid work the
+        tool-stall watchdog already governs on its own longer budget."""
+        from kiro_crew.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.05)
+        monkeypatch.setattr(acp_client, "_TOOL_STALL_TIMEOUT", 30.0)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._is_process_alive = lambda: True
+        client._read_message = self._silent_after([self._failed_msg()])
+
+        async def _drive(timeout: float) -> None:
+            async for action, msg in client._prompt_loop(req_id=1, timeout=timeout):
+                if action == "compaction":
+                    client._handle_compaction_status(msg)
+                    # The turn recovers and dispatches a tool, exactly as
+                    # _dispatch_events would mark it.
+                    client._tool_dispatched = True
+
+        t0 = time.monotonic()
+        await _drive(0.4)
+        elapsed = time.monotonic() - t0
+
+        # Ran to its own deadline: the budget stayed suspended for the whole of
+        # the tool's silence, and the turn was not marked compaction-failed.
+        assert client._compaction_failed_turn is False
+        assert elapsed >= 0.35, f"loop exited at {elapsed:.2f}s — the budget reaped a live tool"
+        # Still armed, so the budget re-fires once the tool resolves.
+        assert client._compaction_failed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_the_budget_re_arms_when_the_tool_resolves(self, tmp_path, monkeypatch):
+        """Suspension is not a permanent disarm: once the tool resolves and the
+        backend goes silent again, the abandoned turn is still ended."""
+        from kiro_crew.acp import client as acp_client
+        from kiro_crew.acp.types import METHOD_METADATA, JsonRpcMessage
+
+        monkeypatch.setattr(acp_client, "_COMPACTION_FAILED_TURN_BUDGET", 0.1)
+        monkeypatch.setattr(acp_client, "_READ_TIMEOUT", 0.02)
+
+        client = AcpClient(work_dir=tmp_path)
+        client._turn_done.clear()
+        client._is_process_alive = lambda: True
+        # A failed status, then one more frame standing in for the tool's own
+        # traffic — after which the backend goes silent for good.
+        client._read_message = self._silent_after(
+            [self._failed_msg(), JsonRpcMessage(method=METHOD_METADATA, params={})]
+        )
+
+        t0 = time.monotonic()
+        async for action, msg in client._prompt_loop(req_id=1, timeout=30.0):
+            if action == "compaction":
+                client._handle_compaction_status(msg)
+                client._tool_dispatched = True
+            elif action == "metadata":
+                # The tool resolved (what _dispatch_events does on its result).
+                client._tool_dispatched = False
+        elapsed = time.monotonic() - t0
+
+        assert client._compaction_failed_turn is True
+        assert elapsed < 5.0, f"loop ran {elapsed:.2f}s — the budget did not re-arm"
+
+
+class TestCompactionFailureDetail:
+    """`compaction_failure_detail` is what stops the notice collapsing to
+    "unknown error": it prefers a named reason and otherwise surfaces the raw
+    shape, redacted, because it lands on a chat row."""
+
+    def test_prefers_a_named_reason(self):
+        from kiro_crew.acp.client import compaction_failure_detail
+
+        assert (
+            compaction_failure_detail({"status": {"type": "failed", "reason": "too large"}})
+            == "too large"
+        )
+
+    def test_reads_a_nested_error_object(self):
+        from kiro_crew.acp.client import compaction_failure_detail
+
+        detail = compaction_failure_detail(
+            {"status": {"type": "failed"}, "error": {"message": "throttled"}}
+        )
+        assert detail == "throttled"
+
+    def test_falls_back_to_the_raw_shape(self):
+        from kiro_crew.acp.client import compaction_failure_detail
+
+        detail = compaction_failure_detail({"status": {"type": "failed"}})
+        assert "no reason reported" in detail
+        assert "failed" in detail
+
+    def test_is_bounded_and_redacted(self):
+        from kiro_crew.acp.client import _COMPACTION_DETAIL_MAX_CHARS, compaction_failure_detail
+
+        detail = compaction_failure_detail({"status": {"type": "failed", "error": "x" * 5000}})
+        assert len(detail) == _COMPACTION_DETAIL_MAX_CHARS
+
+        secret = compaction_failure_detail(
+            {"status": {"type": "failed", "error": "aws_secret_access_key=AKIAIOSFODNN7EXAMPLE"}}
+        )
+        assert "AKIAIOSFODNN7EXAMPLE" not in secret
