@@ -58,7 +58,7 @@ from kiro_crew.mcp_gateway.apps import sweep_spool as apps_sweep_spool
 from kiro_crew.mcp_gateway.backend import Backend, BackendGone, spawn_backend
 from kiro_crew.mcp_gateway.backend_tmp import sweep_all_backend_tmp
 from kiro_crew.mcp_gateway.breaker import CircuitBreaker
-from kiro_crew.mcp_gateway.hashing import hash_effective_env, non_secret_env
+from kiro_crew.mcp_gateway.hashing import hash_effective_env, hash_target_env, non_secret_env
 from kiro_crew.mcp_gateway.manager import _scrub_sensitive_env, is_credential_env_key
 from kiro_crew.mcp_gateway.pool import (
     DRAIN_DEADLINE_SECS,
@@ -160,9 +160,11 @@ _REGISTER_TIMEOUT_SECS = 5.0
 #                    a daemon predating the field ignores it and routes the
 #                    register through the shared index, silently co-tenanting a
 #                    server the operator never allowlisted. Such a daemon is
-#                    reachable, because the manager adopts anything answering
-#                    ``pong`` with no version handshake — so one that outlived a
-#                    package upgrade serves new stubs.
+#                    still reachable: the manager now compares the target set a
+#                    ``pong`` reports before adopting (#4569), but a daemon old
+#                    enough to omit that field is adopted unchecked precisely
+#                    because it cannot be assessed — so one that outlived a
+#                    package upgrade still serves new stubs.
 REGISTERED_CAPABILITIES: tuple[str, ...] = ("ensure_backend", "bridge_ping", "poolable_ack")
 # Upper bound on a single control/handshake reply's ``drain()`` (pong, stats,
 # registered, rejected, ready, forward-error — everything sent via
@@ -401,7 +403,9 @@ async def run_gatewayd(
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         try:
-            await _handle_connection(reader, writer, pool, resolver, socket_path, hot_keys)
+            await _handle_connection(
+                reader, writer, pool, resolver, socket_path, hot_keys, stop_event=stop_event
+            )
         except asyncio.CancelledError:
             # Normal on shutdown — propagate for the gather() below.
             raise
@@ -2032,6 +2036,97 @@ def _audit_prewarm_spawn(pool_label: str) -> None:
         logger.debug("SEL audit emit for prewarm spawn failed", exc_info=True)
 
 
+def _served_target_fingerprint() -> str:
+    """Fingerprint of the target set THIS daemon can serve.
+
+    :func:`env_target_resolver` resolves every launch command out of
+    ``os.environ``, and a live process's environment cannot be changed, so this
+    value is constant for the daemon's lifetime and names exactly which servers
+    it can route. Reported in every ``pong`` so a starting
+    :class:`~kiro_crew.mcp_gateway.manager.GatewayManager` can tell an incumbent
+    that matches the specs it is about to write from one that does not — the
+    latter would reject those servers terminally (see :class:`_TargetUnknown`)
+    for the whole life of every session that connects to it.
+
+    Recomputed per call rather than cached at import: the cost is one SHA-256
+    over a handful of keys, and a cache would make the value a snapshot of
+    whenever the module happened to load.
+    """
+    return hash_target_env(os.environ)
+
+
+def _audit_stand_down(reason: str, outcome: str) -> None:
+    """Emit a SEL audit event for a stand-down request.
+
+    A stand-down ends the daemon, so it is the most consequential frame the
+    control surface accepts and belongs in the HMAC-chained SEL alongside the
+    claim/abort/peer decisions. Wrapped defensively — an audit-log failure must
+    never break connection handling.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller="gateway-manager",
+            operation="mcp-gateway.stand_down",
+            outcome=outcome,
+            source="gateway",
+            resources=str(_served_target_fingerprint()),
+            error=reason,
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for stand-down failed", exc_info=True)
+
+
+def _apply_stand_down(frame: dict[str, Any], stop_event: Optional[asyncio.Event]) -> dict[str, Any]:
+    """Yield the socket voluntarily so a fitter daemon can take it.
+
+    Setting ``stop_event`` takes exactly the graceful path SIGTERM takes: accepts
+    stop, attached stubs drain, ``pool.shutdown_all()`` runs, the endpoint is
+    removed, the process exits. That is the whole point of doing it this way
+    round. The alternative — the starting gateway unlinking the socket to take it
+    — is a connect-probe-then-unlink, which in its documented false-stale window
+    steals a LIVE incumbent's endpoint and re-introduces the socket-theft class
+    the flock guard exists to prevent. Here the incumbent decides, and the
+    request only ever arrives over a connection that proves the incumbent is
+    alive, so there is no stale-vs-live judgement to get wrong.
+
+    ``want`` is the fingerprint the caller needs served. A request whose ``want``
+    equals what this daemon already serves is REFUSED: the caller and the daemon
+    agree, so there is nothing to reconcile, and honouring it would turn this
+    into a bare kill switch that a confused caller could aim at a daemon that
+    was serving it correctly. Trust basis for the rest is the same uid-gated
+    owner-only socket that authenticates Register/Claim/Abort.
+    """
+    want = frame.get("want")
+    if not isinstance(want, str) or not want:
+        _audit_stand_down("missing or invalid want fingerprint", "denied")
+        return {"type": "stand-down-rejected", "reason": "missing or invalid 'want' fingerprint"}
+    served = _served_target_fingerprint()
+    if want == served:
+        _audit_stand_down(f"want matches served set {served[:12]}", "denied")
+        return {
+            "type": "stand-down-rejected",
+            "reason": "this daemon already serves the requested target set",
+        }
+    if stop_event is None:
+        # Reached only by a handler wired without a stop event (unit tests
+        # constructing _handle_connection directly). Refuse rather than claim a
+        # shutdown that cannot happen — an accepted-but-inert control frame is
+        # worse than a rejected one, because the caller waits for an endpoint
+        # that never goes away.
+        _audit_stand_down("handler has no stop event", "denied")
+        return {"type": "stand-down-rejected", "reason": "shutdown not wired on this handler"}
+    logger.warning(
+        "gatewayd: standing down on request — this daemon serves target set %s "
+        "but the caller needs %s; draining so a daemon with the requested set "
+        "can bind",
+        served[:12],
+        want[:12],
+    )
+    _audit_stand_down(f"served {served[:12]} != want {want[:12]}", "allowed")
+    stop_event.set()
+    return {"type": "standing-down", "served": served}
+
+
 async def _handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -2039,6 +2134,8 @@ async def _handle_connection(
     resolver: TargetResolver,
     socket_path: Path,
     hot_keys: Optional[HotKeyStore] = None,
+    *,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> None:
     """Process one stub connection end-to-end.
 
@@ -2123,8 +2220,15 @@ async def _handle_connection(
     # with one round-trip without advertising a PoolKey. GatewayManager
     # uses this to confirm the daemon is serving before returning from
     # ``start()``.
+    #
+    # ``targets`` rides along because liveness alone is not enough to decide
+    # whether to ADOPT this daemon: a survivor of a gateway that died without
+    # running its shutdown path answers pong perfectly while serving a target
+    # set from before the specs were last rewritten. Its presence is also how
+    # the manager negotiates the ``stand-down`` frame below — a daemon old
+    # enough to omit this field is old enough not to understand that frame.
     if register.get("type") == "ping":
-        await _write_json_line(writer, {"type": "pong"})
+        await _write_json_line(writer, {"type": "pong", "targets": _served_target_fingerprint()})
         return
 
     # Metrics short-circuit: return a point-in-time pool snapshot (backends,
@@ -2163,6 +2267,16 @@ async def _handle_connection(
     # same uid-gated 0700 socket as Register/Claim.
     if register.get("type") == "abort":
         await _write_json_line(writer, await _apply_abort(register, pool))
+        return
+
+    # Stand-down short-circuit (one-shot control connection from a STARTING
+    # gateway): "you serve a target set I cannot use — yield the socket". The
+    # only frame that ends the daemon, and the reason adoption can now refuse an
+    # unfit incumbent without anyone unlinking a live socket. Trust basis: same
+    # uid-gated owner-only socket as Register/Claim/Abort. Validation, the
+    # same-set refusal and auditing live in ``_apply_stand_down``.
+    if register.get("type") == "stand-down":
+        await _write_json_line(writer, _apply_stand_down(register, stop_event))
         return
 
     # App-call short-circuit (one-shot control connection from the dashboard):
@@ -2504,6 +2618,13 @@ async def _handle_connection(
             # while it has outstanding requests to verify the gateway is still
             # responsive. Reply with ``{"type": "pong"}`` — never forwarded
             # to the backend.
+            #
+            # Deliberately does NOT carry the ``targets`` fingerprint the
+            # health-probe pong carries. The two have different readers: the
+            # manager's adoption gate opens its own one-shot control connection
+            # and reads that one, while this reply answers a stub that is already
+            # bridged and has no use for a routing fingerprint. Adding it here
+            # for shape symmetry would ship a field with no consumer.
             if msg.get("type") == "ping":
                 try:
                     await _write_json_line(writer, {"type": "pong"})

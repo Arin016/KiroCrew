@@ -936,8 +936,10 @@ async def test_manager_offloads_prepare_dir_from_the_event_loop(
 
     # Drive _start_locked as far as prepare_dir, then stop: no incumbent to
     # adopt, nothing stale to clear, and a spawn that fails is swallowed into a
-    # False return.
-    monkeypatch.setattr(manager, "_ping_once", AsyncMock(return_value=False))
+    # False return. _ping_probe (not _ping_once) is the adoption gate — it
+    # returns the pong payload so the fitness check can read the incumbent's
+    # target set; None means nobody is on the socket.
+    monkeypatch.setattr(manager, "_ping_probe", AsyncMock(return_value=None))
     monkeypatch.setattr(manager, "_clear_stale_socket", AsyncMock(return_value=None))
     monkeypatch.setattr(
         manager, "_spawn_once", AsyncMock(side_effect=RuntimeError("stop here"))

@@ -255,7 +255,16 @@ class TestControlFrames:
     async def test_ping_is_answered_with_pong_and_closes(self, peer_ok):
         writer = _FakeWriter()
         await _handle(_ScriptedReader({"type": "ping"}, {"type": "ping"}), writer, _fake_pool())
-        assert writer.frames() == [{"type": "pong"}]
+        # Exactly one frame: the second ping is never read, the handler closes
+        # after the first. The pong carries the fingerprint of the target set
+        # this daemon can serve, which is what the manager's adoption fitness
+        # check reads (#4569) -- asserted by shape here, by value in
+        # test_mcp_gateway_adoption_fitness.py.
+        frames = writer.frames()
+        assert len(frames) == 1
+        assert frames[0]["type"] == "pong"
+        assert isinstance(frames[0]["targets"], str) and frames[0]["targets"]
+        assert set(frames[0]) == {"type", "targets"}
 
     @pytest.mark.asyncio
     async def test_stats_merges_the_warm_pool_hit_tally(self, peer_ok, monkeypatch):

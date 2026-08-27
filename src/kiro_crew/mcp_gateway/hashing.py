@@ -108,6 +108,76 @@ def non_secret_env(
     return {k: v for k, v in env_pairs.items() if k in keep or not is_secret_env_key(k)}
 
 
+#: Env-key prefixes the rewriter writes one entry per stubbed server under,
+#: valued ``"cmd arg arg"``. ``MC_MCP_TARGET_`` is the legacy spelling still
+#: accepted for overlays written by older versions (#928).
+#:
+#: Canonical here rather than in ``resolve_once`` (its previous home) because
+#: ``manager`` and ``gatewayd`` now both need it to agree on a target-set
+#: fingerprint, and a prefix list that two processes compare across a socket is
+#: exactly the kind of constant that must have one definition.
+TARGET_ENV_PREFIXES: tuple[str, ...] = ("KIROCREW_MCP_TARGET_", "MC_MCP_TARGET_")
+
+
+def target_env_pairs(env: Mapping[str, str]) -> dict[str, str]:
+    """Return only the :data:`TARGET_ENV_PREFIXES` entries of ``env``.
+
+    The set of servers a gatewayd process can resolve a launch command for, in
+    the only form that set exists: ``gatewayd.env_target_resolver`` reads these
+    keys straight out of ``os.environ``, so they ARE the daemon's routing table.
+    """
+    return {k: v for k, v in env.items() if any(k.startswith(p) for p in TARGET_ENV_PREFIXES)}
+
+
+def hash_target_env(env: Mapping[str, str]) -> str:
+    """Sorted ``K=V\\0``-delimited SHA-256 over ``env``'s target mappings.
+
+    A daemon's routing table is fixed at spawn (a live process's environment
+    cannot be changed), so this fingerprint identifies for its whole lifetime
+    which servers it can serve and with which command. ``gatewayd`` reports it
+    in its ``pong``; ``manager`` computes it over the environment it is about to
+    write agent specs for, and refuses to adopt an incumbent whose value differs
+    — the daemon would reject exactly the servers whose entry changed.
+
+    Values are folded in, not just keys: a server whose launch command changed
+    is as unservable by the incumbent as one it never had.
+
+    DELIBERATELY OVER-SENSITIVE, and the direction matters. The hash covers every
+    target entry, including one the resolver would never read -- a legacy
+    ``MC_MCP_TARGET_<SERVER>`` shadowed by a modern key for the same server, or an
+    args-disambiguated entry no live pool key asks for. Changing only a shadowed
+    entry therefore moves the fingerprint even though every effective route is
+    identical, and costs one needless broker replacement at startup.
+
+    That is the safe error. Canonicalising to "effective routes" is not cleanly
+    computable here: ``gatewayd.env_target_resolver`` picks between the
+    disambiguated, bare and legacy spellings PER LOOKUP, using the requesting
+    pool key's ``command_args_hash``, which no one knows at start time. An
+    approximation would have to guess, and a guess that collapses two entries the
+    resolver would have distinguished fails the other way -- reporting a daemon
+    fit when it cannot serve a route -- which is the bug this whole fingerprint
+    exists to catch. So the over-sensitivity is kept and paid for in one restart.
+    """
+    return _hash_pairs(target_env_pairs(env))
+
+
+def _hash_pairs(pairs: Mapping[str, str]) -> str:
+    """Sorted ``K=V\\0``-delimited SHA-256 over ``pairs``.
+
+    The one hashing loop behind :func:`hash_effective_env` and
+    :func:`hash_target_env`, shared so the two cannot drift in delimiter or sort
+    order. Extracting it is output-preserving by construction — the byte
+    sequence fed to SHA-256 is unchanged, so no existing ``PoolKey`` moves.
+    """
+    h = hashlib.sha256()
+    for k in sorted(pairs):
+        h.update(k.encode("utf-8"))
+        h.update(b"=")
+        h.update(pairs[k].encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def hash_effective_env(env_pairs: Mapping[str, str], *, identity_keys: Collection[str] = ()) -> str:
     """Sorted ``K=V\\0``-delimited SHA-256 over the NON-SECRET env pairs.
 
@@ -125,10 +195,4 @@ def hash_effective_env(env_pairs: Mapping[str, str], *, identity_keys: Collectio
     hash the daemon does not reproduce, so forwarding fails closed.
     """
     filtered = non_secret_env(env_pairs, identity_keys=identity_keys)
-    h = hashlib.sha256()
-    for k in sorted(filtered):
-        h.update(k.encode("utf-8"))
-        h.update(b"=")
-        h.update(filtered[k].encode("utf-8"))
-        h.update(b"\0")
-    return h.hexdigest()
+    return _hash_pairs(filtered)

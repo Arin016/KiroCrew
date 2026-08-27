@@ -76,6 +76,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from kiro_crew.mcp_gateway.hashing import TARGET_ENV_PREFIXES
 from kiro_crew.platform_compat import kill_and_reap
 from kiro_crew.sandbox import create_subprocess_limited, sandboxed_spawn_argv
 
@@ -831,7 +832,11 @@ async def ensure_resolved(
 
 
 #: Env keys the rewriter writes one per stubbed server, valued ``"cmd arg arg"``.
-_TARGET_PREFIXES = ("KIROCREW_MCP_TARGET_", "MC_MCP_TARGET_")
+#: Re-exported from the ``hashing`` leaf, which owns the canonical tuple because
+#: ``manager`` and ``gatewayd`` compare a fingerprint derived from it across a
+#: socket. Kept under the private name so this module's own call sites are
+#: unchanged.
+_TARGET_PREFIXES = TARGET_ENV_PREFIXES
 
 
 def launch_specs(target_env: Mapping[str, str]) -> list[tuple[str, list[str]]]:
