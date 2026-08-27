@@ -209,10 +209,11 @@ def test_the_response_grants_only_what_the_embedding_frame_grants() -> None:
 def test_an_in_flight_document_is_never_evicted_to_make_room() -> None:
     """The failure mode this replaces was silent, and reachable without an attacker.
 
-    An entry is removed when it is SERVED, so every live entry is one nobody has
-    fetched yet. Dropping the oldest to fit a newer one invalidates a URL some
-    frame is about to load — and because the MINT succeeded, the frontend has no
-    failure to show and that frame just renders blank. A gallery of image-bearing
+    An entry is in flight while nobody has fetched it yet AND for a short grace
+    window after the first fetch, so the frame that owns it may re-issue its own
+    GET. Dropping such an entry to fit a newer one invalidates a URL some frame is
+    about to load -- and because the MINT succeeded, the frontend has no failure
+    to show and that frame just renders blank. A gallery of image-bearing
     artifacts can push several MB of pending documents through at once, so this
     is normal use, not an edge case.
     """
@@ -248,36 +249,43 @@ def test_the_stash_caps_still_bound_it() -> None:
         "_MAX_ENTRIES" in prune and "_MAX_BYTES" in prune
     ), "_prune stopped consulting one of its caps"
 
-    """The control that actually holds when the client binding cannot.
 
-    ``request.remote`` is the PROXY's address whenever the dashboard is reached
-    through one, so every client shares it and the binding is worth nothing in
-    exactly the deployments where a leaked URL is most reachable. Popping the
-    entry before the body is written means a URL that leaks is already spent.
+def test_the_spend_happens_under_the_lock() -> None:
+    """Two concurrent GETs must not each start their own grace window.
+
+    The read and the deadline collapse are one critical section: if the write
+    were outside the lock, the second GET could restore a deadline the first had
+    already shortened, and the URL would stay live for the full mint TTL.
     """
     src = sd.__file__ or ""
     with open(src, encoding="utf-8") as fh:
         body = fh.read()
     serve = body[body.index("async def serve_sandbox_doc") :]
-    assert "_stash.pop(doc_id, None)" in serve, (
-        "the serving handler no longer consumes the entry, so an exfiltrated URL "
-        "can be replayed by anyone sharing the requesting address"
-    )
-    assert "_stash.get(doc_id)" not in serve, (
-        "the handler reads the entry without removing it — that is the replayable "
-        "shape this test exists to prevent"
-    )
+    lock_at = serve.index("with _lock:")
+    get_at = serve.index("_stash.get(doc_id, None)")
+    spend_at = serve.index("min(entry[0], now + _IN_FLIGHT_GRACE_SECS)")
+    assert lock_at < get_at, "the stash read is outside the lock"
+    assert lock_at < spend_at, "the deadline collapse is outside the lock"
 
 
-def test_the_pop_happens_under_the_lock() -> None:
-    """Two concurrent GETs must not both win: the pop is the atomic step."""
+def test_a_served_url_is_spent_rather_than_replayable_for_its_whole_ttl() -> None:
+    """The control that holds when the client binding cannot.
+
+    ``request.remote`` is the PROXY's address whenever the dashboard is reached
+    through one, so every client shares it and the binding is worth nothing in
+    exactly the deployments where a leaked URL is most reachable. What bounds an
+    exfiltrated URL is that serving it collapses its deadline to the grace
+    window — a plain read that left the 15-minute mint TTL in place would hand a
+    co-tenant behind that proxy the whole window to replay it.
+    """
     src = sd.__file__ or ""
     with open(src, encoding="utf-8") as fh:
         body = fh.read()
     serve = body[body.index("async def serve_sandbox_doc") :]
-    lock_at = serve.index("with _lock:")
-    pop_at = serve.index("_stash.pop(doc_id, None)")
-    assert lock_at < pop_at, "the consuming pop is outside the lock"
+    assert "min(entry[0], now + _IN_FLIGHT_GRACE_SECS)" in serve, (
+        "serving no longer shortens the entry's deadline, so an exfiltrated URL "
+        "can be replayed for the full mint TTL by anyone sharing the address"
+    )
 
 
 def test_the_serving_route_is_on_the_auth_bypass_list() -> None:
@@ -330,22 +338,60 @@ async def _mint(html: str, remote: str = "127.0.0.1") -> tuple[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_a_minted_document_is_served_once_and_then_gone() -> None:
-    """Single use is the load-bearing control, so it is proven by serving twice.
+async def test_the_same_frame_can_re_issue_its_own_get() -> None:
+    """The blank-frame defect this fixes, proven by fetching twice back to back.
 
-    The client binding cannot carry this weight: ``request.remote`` is the
-    PROXY's address whenever the dashboard is reached through one, so every
-    client shares it. What actually makes a leaked URL useless is that the frame
-    it was minted for already spent it.
+    A renderer that re-issues the GET it just made (recovery, restore from tray,
+    history navigation — Electron does all three) used to find the document
+    already popped. The 404 lands INSIDE the frame, which nothing in the frontend
+    observes, and the frame stays at ``opacity: 0`` — a permanently blank area.
     """
-    doc_id, token = await _mint("<p>once</p>")
+    doc_id, token = await _mint("<p>reloaded</p>")
 
     first = await sd.serve_sandbox_doc(_serve_req(doc_id, token))
-    assert first.body == b"<p>once</p>"
+    assert first.body == b"<p>reloaded</p>"
+
+    second = await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+    assert second.body == b"<p>reloaded</p>"
+
+
+@pytest.mark.asyncio
+async def test_serving_collapses_the_deadline_to_the_grace_window() -> None:
+    """The re-issue window is seconds, not the 15 minutes the mint handed out."""
+    doc_id, token = await _mint("<p>spent</p>")
+    minted_deadline = sd._stash[doc_id][0]
+
+    await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+
+    served_deadline = sd._stash[doc_id][0]
+    assert served_deadline < minted_deadline, "serving did not spend the entry"
+    assert served_deadline <= time.time() + sd._IN_FLIGHT_GRACE_SECS
+
+
+@pytest.mark.asyncio
+async def test_replaying_inside_the_window_does_not_extend_it() -> None:
+    """Otherwise a fetch loop keeps an exfiltrated URL alive indefinitely."""
+    doc_id, token = await _mint("<p>no extension</p>")
+
+    await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+    after_first = sd._stash[doc_id][0]
+    await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+
+    assert sd._stash[doc_id][0] == after_first, "a replay pushed the deadline out"
+
+
+@pytest.mark.asyncio
+async def test_a_url_is_dead_once_the_grace_window_has_passed() -> None:
+    """Past the window the entry is refused even though no mint has pruned it."""
+    doc_id, token = await _mint("<p>expired</p>")
+    await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+
+    with sd._lock:
+        exp, html = sd._stash[doc_id]
+        sd._stash[doc_id] = (exp - sd._IN_FLIGHT_GRACE_SECS - 1, html)
 
     with pytest.raises(web.HTTPNotFound):
         await sd.serve_sandbox_doc(_serve_req(doc_id, token))
-    assert doc_id not in sd._stash
 
 
 @pytest.mark.asyncio
@@ -438,12 +484,12 @@ async def test_a_mint_with_no_room_is_refused_and_leaves_no_entry(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_a_tampered_token_is_refused_without_spending_the_document() -> None:
-    """Fails closed BEFORE the pop, so a probe cannot burn someone else's URL."""
+async def test_a_tampered_token_is_refused_without_returning_the_document() -> None:
+    """Fails closed BEFORE the stash read, so a probe cannot access the document."""
     doc_id, token = await _mint("<p>hi</p>")
     with pytest.raises(web.HTTPNotFound):
         await sd.serve_sandbox_doc(_serve_req(doc_id, token[:-1] + "x"))
-    assert doc_id in sd._stash, "a rejected request consumed the entry anyway"
+    assert doc_id in sd._stash, "a rejected request removed the entry anyway"
 
 
 @pytest.mark.asyncio
@@ -461,6 +507,29 @@ async def test_an_expired_entry_is_refused_even_with_a_valid_token() -> None:
         sd._stash[doc_id] = (time.time() - 1, b"<p>hi</p>")
     with pytest.raises(web.HTTPNotFound):
         await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+
+
+@pytest.mark.asyncio
+async def test_serve_path_inline_ttl_check_refuses_stale_entry_without_prune() -> None:
+    """The inline TTL guard in serve_sandbox_doc refuses a stale entry even when
+    _prune has not run. This is what makes the grace window real rather than
+    advisory: the entry still sits in the stash (no mint has happened, so no
+    prune has cleared it), but serve_sandbox_doc treats it as absent because its
+    deadline is in the past.
+    """
+    doc_id = "directly-stashed-stale"
+    token = sd._signer.mint(doc_id, "127.0.0.1")
+    # Insert directly into stash with an expiry in the past -- no mint handler
+    # involved, so _prune never ran to clear it.
+    with sd._lock:
+        sd._stash[doc_id] = (time.time() - 60, b"<p>stale</p>")
+    # The entry IS in the stash (not yet pruned)
+    assert doc_id in sd._stash
+    # But serve_sandbox_doc refuses it because the inline TTL check fires
+    with pytest.raises(web.HTTPNotFound):
+        await sd.serve_sandbox_doc(_serve_req(doc_id, token))
+    # The entry was not removed by the serve path -- it just treated it as absent
+    assert doc_id in sd._stash
 
 
 @pytest.mark.asyncio

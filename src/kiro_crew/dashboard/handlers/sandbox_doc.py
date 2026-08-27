@@ -16,9 +16,13 @@ case, whose bytes are not persisted anywhere and so have no other URL to give.
 Security posture, mirroring the webapp-preview channel next door:
 
 * The GET route is on the auth-middleware bypass list, and the **HMAC path token
-  IS the credential**. It is bound to the requesting client address, because the
-  token rides in the frame's own location where model-authored script can read
-  it — an exfiltrated token is useless from another connection.
+  IS the credential**. The first successful GET spends it — the entry's life
+  collapses to a seconds-long grace window that lets the same frame re-issue its
+  own GET and nothing more. That, not the binding below, is what makes an
+  exfiltrated URL useless, because ``request.remote`` is the PROXY's address
+  whenever the dashboard is reached through one. The token is also bound to that
+  address as a cheap second layer for the direct case, since the token rides in
+  the frame's own location where model-authored script can read it.
 * ``Content-Security-Policy: sandbox`` makes the response an opaque origin
   **even when opened top-level**, so the URL existing on the dashboard's own
   origin does not turn model HTML into same-origin script. The sandbox flags
@@ -73,19 +77,22 @@ _lock = threading.Lock()
 _stash: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
 
 
-#: How long a freshly minted document counts as IN FLIGHT and must not be
-#: evicted to make room for a newer one. A frame issues its GET immediately
-#: after the mint resolves, so this only has to cover that round trip.
+#: How long a document may still be legitimately fetched. It covers the two
+#: windows that are the same length for the same reason — a frame issues its GET
+#: immediately after the mint resolves, and a renderer that re-issues that GET
+#: (recovery, restore-from-tray, history navigation) does so just as promptly.
+#: Within this window an entry must not be evicted to make room for a newer one,
+#: and a URL already served may be served again; past it the entry is gone.
 _IN_FLIGHT_GRACE_SECS = 10
 
 
 def _prune(now: float) -> bool:
     """Drop what is safe to drop; report whether the stash is inside its caps.
 
-    Eviction never touches an entry that is still IN FLIGHT. An entry is removed
-    when it is SERVED, so every live entry is one nobody has fetched yet, and
-    dropping the oldest to make room for a newer one would silently invalidate a
-    URL some frame is about to load — the mint succeeded, so the frontend has no
+    Eviction never touches an entry that is still IN FLIGHT — one that nobody has
+    fetched yet, or that was fetched within the last ``_IN_FLIGHT_GRACE_SECS``.
+    Dropping such an entry to make room for a newer one would silently invalidate
+    a URL some frame is about to load — the mint succeeded, so the frontend has no
     failure to show and the frame just renders blank. That is reachable without
     an attacker: a gallery of image-bearing artifacts can push several MB of
     pending documents through here at once.
@@ -97,8 +104,14 @@ def _prune(now: float) -> bool:
         _stash.pop(doc_id, None)
 
     def _evictable() -> str | None:
+        # In flight = minted within the last `_IN_FLIGHT_GRACE_SECS` (the frame's
+        # first GET is still on its way) or served within it (the frame may
+        # re-issue that GET). Both show up as remaining life, so one comparison
+        # covers them: a fresh mint has nearly the full TTL left, and a serve
+        # collapses the deadline into the grace window.
+        cutoff = now + _TOKEN_TTL_SECS - _IN_FLIGHT_GRACE_SECS
         for doc_id, (exp, _) in _stash.items():  # oldest first
-            if (exp - _TOKEN_TTL_SECS) + _IN_FLIGHT_GRACE_SECS <= now:
+            if exp <= cutoff:
                 return doc_id
         return None
 
@@ -147,7 +160,7 @@ async def api_stash_sandbox_doc(request: web.Request) -> web.Response:
 
     # Encode HERE, not at serve time. A document carrying a lone surrogate is
     # representable in JSON and in a Python str but NOT in UTF-8, and encoding it
-    # after the single-use pop turned that into a 500 plus a document that could
+    # after the entry was spent turned that into a 500 plus a document that could
     # never be fetched again. Rejecting at the mint is the honest place: the
     # caller still holds the bytes and gets a reason.
     try:
@@ -176,27 +189,34 @@ async def api_stash_sandbox_doc(request: web.Request) -> web.Response:
 
 
 async def serve_sandbox_doc(request: web.Request) -> web.Response:
-    """``GET /sandbox-doc/{doc_id}/{token}`` — the document itself, ONCE.
+    """``GET /sandbox-doc/{doc_id}/{token}`` — the document, for one load only.
 
     Auth = the HMAC path token (this route is on the middleware bypass list).
     Fails closed as 404 for every invalid condition, so the route is not an
     oracle for which ids exist.
 
-    **Single use.** The entry is popped before the body is written, so a URL that
-    leaks is already spent: the frame it was minted for consumed it. This is the
-    load-bearing control rather than the client binding below, because
-    ``request.remote`` is the PROXY's address whenever the dashboard is reached
-    through one (a tunnel, a reverse proxy), and every client then shares it — the
-    binding is worth nothing in exactly the deployments where a URL is most
-    reachable. The binding stays as a second, cheap layer for the direct case.
+    **Spent on first serve, with a grace window for the SAME load.** The first
+    successful GET collapses the entry's expiry to ``_IN_FLIGHT_GRACE_SECS``, so
+    the URL stops working seconds later instead of lasting out its 15-minute mint
+    TTL. Single use is the load-bearing control rather than the client binding
+    below, because ``request.remote`` is the PROXY's address whenever the
+    dashboard is reached through one (a tunnel, a reverse proxy), and every
+    client then shares it — the binding is worth nothing in exactly the
+    deployments where a URL is most reachable. Collapsing rather than popping
+    keeps that property to within the grace window and buys back the one thing an
+    atomic pop got wrong: a frame that re-issues its own GET (renderer recovery,
+    restore from tray, history navigation — all of which Electron does) found the
+    document already spent and got a 404 INSIDE the frame, which renders as a
+    permanently blank area because the iframe stays at ``opacity: 0`` until
+    ``onLoad`` fires and nothing in the frontend observes the GET.
 
-    The cost is that a frame the BROWSER reloads on its own (rather than a page
-    reload, which remounts the app and mints again) finds its document spent and
-    gets this 404 inside the frame. Nothing in the frontend observes the GET —
-    the document is served with an opaque origin, so the parent cannot read
-    whether it loaded — and the retry control appears only when the MINT itself
-    fails. Recovering a spent URL therefore needs a page reload. Detecting it
-    would take a beacon injected into the document plus a deadline, which is
+    The window is deliberately the same length as the in-flight eviction grace:
+    both answer "how long may this document still be legitimately fetched", and a
+    re-issued GET follows its predecessor by milliseconds, not minutes.
+
+    Recovering a URL spent longer ago still needs a re-mint, and the retry
+    control still appears only when the MINT itself fails. Detecting a spent
+    load would take a beacon injected into the document plus a deadline, which is
     not built; do not describe one here until it is.
     """
     doc_id = request.match_info.get("doc_id", "")
@@ -207,9 +227,15 @@ async def serve_sandbox_doc(request: web.Request) -> web.Response:
         raise web.HTTPNotFound()
     now = time.time()
     with _lock:
-        entry = _stash.pop(doc_id, None)
+        entry = _stash.get(doc_id, None)
         if entry is not None and entry[0] < now:
             entry = None
+        elif entry is not None:
+            # Under the lock, so two concurrent GETs cannot both start their own
+            # window. `min` makes this idempotent: a later serve inside the
+            # window never pushes the deadline out, so replay cannot be kept
+            # alive by fetching in a loop.
+            _stash[doc_id] = (min(entry[0], now + _IN_FLIGHT_GRACE_SECS), entry[1])
     if entry is None:
         _audit("denied", doc_id[:8])
         raise web.HTTPNotFound()
@@ -218,8 +244,8 @@ async def serve_sandbox_doc(request: web.Request) -> web.Response:
     # Already bytes: the encode happened at MINT time, so serving cannot raise.
     # It used to encode here, which meant a document carrying a lone surrogate
     # (JSON accepts "\ud800", Python holds it in a str, UTF-8 cannot represent it)
-    # popped the entry and THEN raised — a 500 for the frame and a document lost
-    # to the single-use pop, with no way to ask for it again.
+    # spent the entry and THEN raised — a 500 for the frame and a document that
+    # could not be asked for again.
     resp = web.Response(body=entry[1], content_type="text/html", charset="utf-8")
     # The load form changed; the trust level must not. `sandbox` gives the
     # document an opaque origin even opened top-level, and the flags are exactly

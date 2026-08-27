@@ -26,8 +26,9 @@ export function useSandboxDoc(srcdoc: string | null | undefined): {
   url: string | null
   /** The last mint attempt failed. `url` may still hold a working document. */
   failed: boolean
-  /** Mint again. Required for recovery: the URL is single-use server-side, so
-   *  re-rendering a spent one recovers nothing. */
+  /** Mint again. Required for recovery: a URL is spent by its first load and
+   *  survives only a seconds-long grace window after it, so re-rendering one
+   *  that was loaded a while ago recovers nothing. */
   retry: () => void
 } {
   const [url, setUrl] = useState<string | null>(null)
