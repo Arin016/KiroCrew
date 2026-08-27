@@ -1,0 +1,15 @@
+[
+  "launch_expanded_on_load=false",
+  "has_your_crews_tab=false",
+  "has_setup_tab=false",
+  "has_cloud_sessions=false",
+  "01-one-page-collapsed",
+  "02-launch-iam",
+  "copy_policy_json_ok=true bytes=8645",
+  "copy_cli_ok=true",
+  "03-iam-json",
+  "04-preflight-and-launch",
+  "launch_disabled=true",
+  "plugin_missing=false",
+  "launch_visible=true"
+]
