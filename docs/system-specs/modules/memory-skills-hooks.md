@@ -1422,6 +1422,20 @@ a hook is therefore **not portable across platforms**:
 Both platforms receive the same `KIROCREW_HOOK_EVENT` / `KIROCREW_HOOK_CONTEXT`
 env vars and the same hook-event JSON on stdin.
 
+**A hook subprocess inherits only an allowlisted slice of the gateway
+environment, not the whole of `os.environ`.** The gateway process holds
+credentials (provider API keys, tokens) in its environment; copying that wholesale
+into every hook command would hand an untrusted shell line those secrets. The
+allowlist (`_HOOK_BASE_ENV_KEYS` in `hooks.py`) preserves only what a hook
+legitimately needs — `PATH`/`PATHEXT`/`COMSPEC`/`SYSTEMROOT`, the home/profile and
+`KIROCREW_HOME` data-home vars, temp-dir and locale vars, and TLS-trust
+(`SSL_CERT_*`, `NO_PROXY`) — plus the two `KIROCREW_HOOK_*` metadata vars set last.
+`HTTP(S)_PROXY` is deliberately dropped (it commonly embeds userinfo credentials).
+The consequence for operators: a hook that relied on an ambient var outside that
+set (e.g. `VIRTUAL_ENV`, `PYTHONPATH`, `JAVA_HOME`, `AWS_PROFILE`, nvm/pyenv vars)
+runs fine in a terminal but fails once fired as a hook; the fix is to add that key
+to `_HOOK_BASE_ENV_KEYS` by name — the allowlist is fail-closed by design.
+
 **Windows spawns through `asyncio.create_subprocess_shell`, not an argv.** cmd.exe
 must receive the operator's command line verbatim: an argv spawn of
 `["cmd", "/c", command]` routes it through `subprocess.list2cmdline`, which
