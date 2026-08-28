@@ -356,14 +356,20 @@ def _scan_key(sid_for_stem: Mapping[str, str]) -> tuple[object, ...]:
 
     Pairing is the rest of it: it decides which unit a transcript belongs to, so a
     session that gained or lost its mapping must not be answered from an older
-    pass. Compared by value rather than hashed — a hash collision here would serve
-    a pass built under different assumptions, and the whole point of the key is
-    that it cannot.
+    pass. The mapping is compared directly by dict equality — still by value,
+    never hashed — because a hash collision here would serve a pass built under
+    different assumptions, and the whole point of the key is that it cannot.
+    Embedding the dict makes the key tuple unhashable, so "never hashed" is
+    enforced by the interpreter rather than by convention, and the hit check
+    is linear — one dict copy plus one dict compare — with no sort. The
+    ``dict()`` copy is load-bearing:
+    it snapshots the pairing, so a caller's later in-place edit cannot mutate
+    the stored key in lockstep and masquerade as a hit.
     """
     return (
         str(kiro_sessions_dir()),
         str(_crew_sessions_dir()),
-        tuple(sorted(sid_for_stem.items())),
+        dict(sid_for_stem),
     )
 
 

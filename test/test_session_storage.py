@@ -1327,6 +1327,155 @@ class TestScanCache:
 
         assert session_storage.list_units(_index()) == []
 
+    def test_a_hit_is_served_for_an_equal_but_distinct_pairing_dict(
+        self, stores: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The key compares the pairing by value, so a fresh dict of equal
+        contents must reuse the pass — callers rebuild the mapping per call."""
+        crew_home, kiro_home = stores
+        stem1 = transcript_stem("dashboard:chat-1")
+        stem2 = transcript_stem("dashboard:chat-2")
+        _cli_half(kiro_home, "aaaa1111", log_bytes=32, age_days=40)
+        _cli_half(kiro_home, "bbbb2222", log_bytes=32, age_days=40)
+        _transcript(crew_home, stem1, size=64, age_days=40)
+        _transcript(crew_home, stem2, size=64, age_days=40)
+
+        session_storage.list_units(_multi_index({stem1: "aaaa1111", stem2: "bbbb2222"}))  # prime
+
+        calls = 0
+        real = session_storage._scan_raw_uncached
+
+        def counted(sid_for_stem):
+            nonlocal calls
+            calls += 1
+            return real(sid_for_stem)
+
+        monkeypatch.setattr(session_storage, "_scan_raw_uncached", counted)
+        # A distinct dict object with equal contents built in the opposite
+        # insertion order, so an order-sensitive comparison would also miss.
+        session_storage.list_units(_multi_index({stem2: "bbbb2222", stem1: "aaaa1111"}))
+
+        assert calls == 0, "an equal-by-value pairing must be served from the cached pass"
+
+    def test_a_repointed_stem_with_unchanged_length_is_a_miss(
+        self, stores: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One stem repointed to a different sid, same mapping length, must
+        re-enumerate.
+
+        This is the behavioural pin for the failure an ``id()``/``len()``
+        memoisation of the pairing would permit: a length-preserving repoint
+        served from a pass built under the old pairing. The deterministic
+        key-level half lives in
+        :meth:`test_scan_key_distinguishes_same_length_mappings` — this test
+        alone cannot force CPython to recycle the first dict's ``id()``.
+        """
+        crew_home, kiro_home = stores
+        stem1 = transcript_stem("dashboard:chat-1")
+        stem2 = transcript_stem("dashboard:chat-2")
+        _cli_half(kiro_home, "aaaa1111", log_bytes=32, age_days=40)
+        _cli_half(kiro_home, "bbbb2222", log_bytes=32, age_days=40)
+        _transcript(crew_home, stem1, size=64, age_days=40)
+        _transcript(crew_home, stem2, size=64, age_days=40)
+
+        session_storage.list_units(_multi_index({stem1: "aaaa1111", stem2: "bbbb2222"}))  # prime
+
+        calls = 0
+        real = session_storage._scan_raw_uncached
+
+        def counted(sid_for_stem):
+            nonlocal calls
+            calls += 1
+            return real(sid_for_stem)
+
+        monkeypatch.setattr(session_storage, "_scan_raw_uncached", counted)
+        # Same keys, same length — only one value repointed.
+        session_storage.list_units(_multi_index({stem1: "aaaa1111", stem2: "aaaa1111"}))
+
+        assert calls == 1, "a repointed pairing must not be answered from the old pass"
+
+    def test_a_callers_in_place_edit_after_priming_is_a_miss(
+        self, stores: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stored key must be a snapshot, not an alias of the caller's dict.
+
+        ``dict(sid_for_stem)`` is the only thing making it one — passing the
+        mapping straight through still satisfies the type annotation. Aliased,
+        a caller's in-place repoint would mutate the stored key in lockstep,
+        so the stale pass would compare EQUAL to the new pairing and be served
+        as a hit — the exact failure the key exists to prevent.
+        """
+        crew_home, kiro_home = stores
+        stem1 = transcript_stem("dashboard:chat-1")
+        stem2 = transcript_stem("dashboard:chat-2")
+        _cli_half(kiro_home, "aaaa1111", log_bytes=32, age_days=40)
+        _cli_half(kiro_home, "bbbb2222", log_bytes=32, age_days=40)
+        _transcript(crew_home, stem1, size=64, age_days=40)
+        _transcript(crew_home, stem2, size=64, age_days=40)
+
+        pairing = {stem1: "aaaa1111", stem2: "bbbb2222"}
+        session_storage.list_units(SessionIndex(stem_to_sid=pairing))  # prime
+
+        calls = 0
+        real = session_storage._scan_raw_uncached
+
+        def counted(sid_for_stem):
+            nonlocal calls
+            calls += 1
+            return real(sid_for_stem)
+
+        monkeypatch.setattr(session_storage, "_scan_raw_uncached", counted)
+        pairing[stem2] = "aaaa1111"  # the caller's own dict, edited in place
+        session_storage.list_units(SessionIndex(stem_to_sid=pairing))
+
+        assert calls == 1, "an in-place repoint must miss; the stored key may not alias it"
+
+    def test_scan_key_distinguishes_same_length_mappings(self) -> None:
+        """Deterministic key-level guard against a length-based pairing key.
+
+        The pairing element must compare unequal for same-length mappings that
+        differ in one value — this is what rules out memoising on
+        ``id()``+``len()`` (CPython reuses ``id()`` after garbage collection,
+        so identity plus length cannot stand in for contents).
+        """
+        a = session_storage._scan_key({"s1": "aaaa", "s2": "bbbb"})
+        b = session_storage._scan_key({"s1": "aaaa", "s2": "aaaa"})
+        assert a[2] != b[2], "same-length repointed mappings must produce unequal keys"
+
+    def test_scan_key_is_unhashable_so_it_can_never_be_a_hash_key(self) -> None:
+        """The docstring's "never hashed" is enforced by the interpreter.
+
+        A future refactor that hashes the key (a dict-keyed cache, a set of
+        keys) must fail loudly at runtime, not silently collide.
+        """
+        with pytest.raises(TypeError):
+            hash(session_storage._scan_key({"a": "1"}))
+
+    def test_scan_key_pairing_equality_matches_the_sorted_tuple_form(self) -> None:
+        """``dict(a) == dict(b)`` iff ``tuple(sorted(a.items())) == tuple(sorted(b.items()))``.
+
+        This pins the equivalence the key relies on: the dict snapshot answers the
+        equality question identically to the sorted-tuple form it replaced, across
+        empty, single-entry, reordered, repointed and disjoint mappings. Compares
+        the pairing element directly so the assertion is about the pairing alone —
+        a store-path difference cannot mask a pairing disagreement.
+        """
+        mappings: list[dict[str, str]] = [
+            {},
+            {"a": "1"},
+            {"b": "1"},  # key differs, value identical
+            {"a": "1", "b": "2"},
+            {"b": "2", "a": "1"},  # same contents, different insertion order
+            {"a": "1", "b": "3"},  # one value repointed, same length
+            {"a": "2", "b": "1"},  # values swapped
+            {"c": "9"},
+        ]
+        for a in mappings:
+            for b in mappings:
+                expected = tuple(sorted(a.items())) == tuple(sorted(b.items()))
+                got = session_storage._scan_key(a)[2] == session_storage._scan_key(b)[2]
+                assert got == expected, f"disagreement on {a!r} vs {b!r}"
+
 
 class TestSharedStoreRefusal:
     """An isolated data home over a shared replay store cannot see who is live."""
