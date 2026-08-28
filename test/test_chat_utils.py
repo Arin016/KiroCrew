@@ -226,3 +226,30 @@ class TestRedactToolField:
     def test_purpose_limit(self):
         result = _redact_tool_field("x" * 10_000, limit=8_000)
         assert "[truncated at 8,000 bytes]" in result
+
+    def test_preserves_mcp_marker_on_truncation(self):
+        """When text exceeds the limit and carries a trailing MCP App marker,
+        the marker must survive truncation so find_marker can still detect it."""
+        marker = "[kirocrew-mcp-app:606dfdf4abcd1234567890abcdef1234]"
+        # Build text that is well over the limit once the marker is appended.
+        body = "x" * 200  # 200 bytes ASCII
+        text = body + " " + marker
+        # Use a limit smaller than the total text so truncation fires.
+        result = _redact_tool_field(text, limit=100)
+        assert "[truncated at 100 bytes]" in result
+        assert marker in result
+
+    def test_mcp_marker_no_truncation_unchanged(self):
+        """When text is under the limit the marker is left in place naturally."""
+        marker = "[kirocrew-mcp-app:abcdef01234567890abcdef012345678]"
+        text = "short output " + marker
+        result = _redact_tool_field(text, limit=1_000_000)
+        assert marker in result
+        assert "truncated" not in result
+
+    def test_no_marker_truncation_unchanged(self):
+        """When text has no MCP App marker, truncation behaviour is unchanged."""
+        text = "y" * 300
+        result = _redact_tool_field(text, limit=100)
+        assert "[truncated at 100 bytes]" in result
+        assert "[kirocrew-mcp-app:" not in result

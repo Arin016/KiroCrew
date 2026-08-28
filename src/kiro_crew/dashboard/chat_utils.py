@@ -152,6 +152,13 @@ def _redact_deep(obj):
 _MAX_TOOL_FIELD = 1_000_000
 _MAX_TOOL_PURPOSE = 8_000  # purpose is a short label — no scenario for more
 
+# Local copy of the MCP App marker pattern (same as MARKER_RE in
+# kiro_crew.mcp_apps_render) to avoid a cross-module import that could become
+# circular in the future.  The marker is appended to the END of tool result
+# text by the gateway's append_marker; we need to detect it here so truncation
+# does not silently destroy it.
+_MCP_APP_MARKER_RE = re.compile(r"\[kirocrew-mcp-app:[0-9a-f]{32}\]")
+
 
 def _redact_tool_field(text: str | None, *, limit: int = _MAX_TOOL_FIELD) -> str:
     """Redact + apply 1 MB safety cap to a tool input/output field. Used for
@@ -162,9 +169,25 @@ def _redact_tool_field(text: str | None, *, limit: int = _MAX_TOOL_FIELD) -> str
     if len(text) * 4 > limit:
         encoded = text.encode("utf-8")
         if len(encoded) > limit:
+            # Before truncating, check whether the text carries an MCP App
+            # marker at or near the end.  The marker is always appended as
+            # the very last token (``text + " " + marker``) by the gateway,
+            # so we only need to inspect the tail.  If truncation would
+            # remove it we re-append it after the sentinel so that
+            # handle_tool_result / find_marker can still detect and render
+            # the associated MCP App.
+            marker_match = _MCP_APP_MARKER_RE.search(text, pos=max(0, len(text) - 80))
+            marker_suffix = ""
+            if marker_match:
+                marker_suffix = " " + marker_match.group(0)
+
             # errors="ignore" cleanly drops a partial trailing multi-byte
             # sequence at the cut point.
-            text = encoded[:limit].decode("utf-8", errors="ignore") + f"\n… [truncated at {limit:,} bytes]"
+            text = (
+                encoded[:limit].decode("utf-8", errors="ignore")
+                + f"\n… [truncated at {limit:,} bytes]"
+                + marker_suffix
+            )
     text, _ = redact_exfiltration_urls(text)
     text, _ = redact_credentials(text)
     return text
