@@ -100,7 +100,7 @@ from kiro_crew.instances.constants import (
 )
 from kiro_crew.instances.constants import SEARCH_REPLY_MAX_BYTES as _SEARCH_REPLY_MAX_BYTES
 from kiro_crew.instances.diagnostics import diagnose_instance, diagnose_instance_ssm
-from kiro_crew.instances.port_allocator import PortAllocator, _is_port_free
+from kiro_crew.instances.port_allocator import PortAllocator, _is_addr_free, _is_port_free
 from kiro_crew.instances.registry import (
     _NO_FORWARDER_PID,
     _UNALLOCATED_PORT,
@@ -901,7 +901,13 @@ def _verify_and_reclaim_forwarder(
         return platform_compat.pgroup_exists(pid) if tree else platform_compat.pid_exists(pid)
 
     def _gone() -> bool:
-        return not _alive() and _is_port_free(port)
+        # Single-address on purpose: the question here is "did OUR forwarder let
+        # go of the port it held", and an ``ssh -L`` child binds 127.0.0.1 alone.
+        # The aggregate ``_is_port_free`` would answer a DIFFERENT question -- "is
+        # this port free for a new forward" -- so an unrelated ::1 listener would
+        # make a fully reclaimed orphan report not-gone and mis-attribute this
+        # reclaim's audited outcome.
+        return not _alive() and _is_addr_free(port, "127.0.0.1")
 
     def _deliver(sig: int) -> None:
         if tree and _SshTunnel._signal_group(pid, sig):

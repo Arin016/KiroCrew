@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -346,6 +347,142 @@ class TestPortAllocator:
         port = s.getsockname()[1]
         s.close()
         assert _is_port_free(port) is True
+
+    @pytest.mark.skipif(not socket.has_ipv6, reason="host has no IPv6 support")
+    def test_is_port_free_rejects_port_held_on_ipv6_loopback_only(self):
+        """A port free on 127.0.0.1 but LISTENing on ::1 counts as in use.
+
+        The forward binds one address, so leaving the other loopback family to a
+        foreign listener makes `localhost:<port>` resolve to whichever socket the
+        client's resolver and the platform's bind precedence pick. The probe must
+        therefore clear every loopback address, not just IPv4.
+        """
+        from kiro_crew.instances.port_allocator import _is_addr_free, _is_port_free
+
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        try:
+            s.bind(("::1", 0))
+        except OSError:  # ::1 not configured on this host
+            s.close()
+            pytest.skip("::1 is not assignable here")
+        s.listen(1)
+        port = s.getsockname()[1]
+        try:
+            # Quick check: the IPv4 half really is free, so only the ::1 half can be
+            # what makes the aggregate probe say "in use".
+            assert _is_addr_free(port, "127.0.0.1") is True
+            assert _is_port_free(port) is False
+        finally:
+            s.close()
+
+    def test_is_port_free_treats_unassignable_address_as_free(self, monkeypatch):
+        """EADDRNOTAVAIL means the address does not exist, not that it is taken.
+
+        Without this, a host with IPv6 compiled in but ::1 not configured would
+        see every candidate port as occupied and connect would never allocate one.
+        """
+        import kiro_crew.instances.port_allocator as pa
+
+        real_socket = socket.socket
+
+        def fake_socket(family, type_):
+            sock = real_socket(family, type_)
+            if family == socket.AF_INET6:
+                sock.close()
+
+                class _Unassignable:
+                    def setsockopt(self, *a):
+                        pass
+
+                    def bind(self, *a):
+                        raise OSError(errno.EADDRNOTAVAIL, "Cannot assign address")
+
+                    def close(self):
+                        pass
+
+                return _Unassignable()
+            return sock
+
+        monkeypatch.setattr(pa.socket, "socket", fake_socket)
+
+        s = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        assert pa._is_port_free(port) is True
+
+    @pytest.mark.parametrize(
+        "creation_errno",
+        [errno.EMFILE, errno.ENFILE, errno.ENOBUFS],
+        ids=["EMFILE", "ENFILE", "ENOBUFS"],
+    )
+    def test_is_port_free_propagates_when_the_probe_cannot_run(self, monkeypatch, creation_errno):
+        """A probe that could not RUN answers neither "free" nor "in use".
+
+        Reading it as free would hand out a port a listener on the unprobed
+        family may hold; reading it as in use would send the allocator through
+        every candidate and fail with a port-exhaustion message naming the wrong
+        cause. So it propagates, which is also what the pre-dual-stack code did
+        (a creation error was never caught).
+        """
+        import kiro_crew.instances.port_allocator as pa
+
+        real_socket = socket.socket
+
+        def fake_socket(family, type_):
+            if family == socket.AF_INET6:
+                raise OSError(creation_errno, "probe could not be run")
+            return real_socket(family, type_)
+
+        monkeypatch.setattr(pa.socket, "socket", fake_socket)
+
+        s = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        with pytest.raises(OSError) as excinfo:
+            pa._is_port_free(port)
+        assert excinfo.value.errno == creation_errno
+
+    @pytest.mark.parametrize(
+        "creation_errno",
+        [errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT],
+        ids=["EAFNOSUPPORT", "EPROTONOSUPPORT"],
+    )
+    def test_is_port_free_treats_absent_family_as_free(self, monkeypatch, creation_errno):
+        """A family the kernel will not create cannot be holding the port.
+
+        Both errnos are reported by IPv6-less kernels depending on the stack.
+        Failing closed here would refuse every candidate port on such a host and
+        `connect` would never allocate one.
+        """
+        import kiro_crew.instances.port_allocator as pa
+
+        real_socket = socket.socket
+
+        def fake_socket(family, type_):
+            if family == socket.AF_INET6:
+                raise OSError(creation_errno, "no such protocol family")
+            return real_socket(family, type_)
+
+        monkeypatch.setattr(pa.socket, "socket", fake_socket)
+
+        s = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        assert pa._is_port_free(port) is True
+
+    def test_allocate_skips_port_held_on_one_loopback_family(self, monkeypatch):
+        """The allocator climbs past a port the aggregate probe rejects."""
+        import kiro_crew.instances.port_allocator as pa
+
+        base = 41000
+        monkeypatch.setattr(
+            pa, "_is_addr_free", lambda port, host: not (port == base and host == "::1")
+        )
+        assert pa.PortAllocator(base_port=base).allocate() == base + 1
 
 
 # ── token mint ──────────────────────────────────────────────────────────────
@@ -5748,6 +5885,46 @@ class TestOrphanForwarderReclaim:
             assert proc.poll() is None, "reclaim signalled a pid while its port was free"
         finally:
             self._cleanup(proc)
+
+    @pytest.mark.skipif(not socket.has_ipv6, reason="host has no IPv6 support")
+    def test_reclaim_ignores_a_foreign_ipv6_listener_on_the_same_port(self, monkeypatch):
+        """A reclaim asks whether OUR forwarder released ITS port, not whether the
+        port is free for a new one.
+
+        An ``ssh -L`` child binds 127.0.0.1 alone, so an unrelated listener on
+        ``::1`` says nothing about whether the orphan let go. Probing both
+        families here would report a fully reclaimed forwarder as ``not_gone``
+        and record that wrong outcome in the SEL audit.
+        """
+        import kiro_crew.instances.ssh_tunnel_manager as stm
+        from kiro_crew import platform_compat as pc
+
+        squatter = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        squatter.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        try:
+            squatter.bind(("::1", 0))
+        except OSError:
+            squatter.close()
+            pytest.skip("::1 is not assignable here")
+        squatter.listen(1)
+        port = squatter.getsockname()[1]
+
+        monkeypatch.setattr(pc, "process_start_time", lambda pid: "identity-A")
+        monkeypatch.setattr(pc, "process_argv_matches_exact", lambda pid, argv: True)
+        monkeypatch.setattr(pc, "pid_exists", lambda pid: False)  # child already exited
+        monkeypatch.setattr(pc, "kill_pid", lambda pid, sig: True)
+        monkeypatch.setattr(stm, "_RECLAIM_TERM_GRACE_SECS", 0.05)
+
+        try:
+            outcome = stm._verify_and_reclaim_forwarder(
+                4242, "identity-A", ["ssh", "-N"], port, False, "instance=t pid=4242"
+            )
+        finally:
+            squatter.close()
+
+        assert (
+            outcome == "reclaimed"
+        ), "a foreign ::1 listener must not make a released IPv4 forward read as not_gone"
 
     def test_sigkill_withheld_when_identity_changes_during_grace(self, monkeypatch):
         """Open-box guard test: if the pid stops matching its recorded
