@@ -1488,6 +1488,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "telemetry.beacon_enabled"
   },
   {
+    "id": "security.agent-identity",
+    "labelKey": "pages.settings.securityPanel.agent_identity",
+    "tab": "security",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "section": "identity"
+    },
+    "label": "Agent identity",
+    "description": "This crew's AgentCore identity. Workload lets the crew reach the gateway without a login. Login vends only gateway-approved MCP and requires a human to sign in. Off leaves this crew unchanged."
+  },
+  {
     "id": "security.denied-commands",
     "labelKey": "pages.settings.securityPanel.denied_commands",
     "tab": "security",

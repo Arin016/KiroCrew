@@ -114,6 +114,16 @@ def register(app: web.Application) -> None:
     # Read-only governance policy viewer — effective Level-1 ∩ Level-2 ceiling
     # across every governed scope (no write path; the ceiling is file-authored).
     app.router.add_get("/api/governance/policy", handlers.api_governance_policy)
+    # This crew's AgentCore identity (Settings → Security). GET is display;
+    # PUT writes the standalone home security_policy.json only (owner cookie,
+    # no app token) — the same trust model as computer-use Settings.
+    app.router.add_get("/api/agentcore/identity", handlers.api_agentcore_identity_get)
+    app.router.add_put("/api/agentcore/identity", handlers.api_agentcore_identity_save)
+    app.router.add_get("/api/agentcore/consent", handlers.api_agentcore_consent_get)
+    # Owner-only Gateway catalog / verify / sync (Settings → Security).
+    app.router.add_get("/api/agentcore/gateway", handlers.api_agentcore_gateway_get)
+    app.router.add_post("/api/agentcore/gateway/verify", handlers.api_agentcore_gateway_verify)
+    app.router.add_post("/api/agentcore/gateway/sync", handlers.api_agentcore_gateway_sync)
 
     # Computer use (Settings > Computer Use). Browser-called and cookie-authed,
     # like the browser-config pair — deliberately NOT in

@@ -335,6 +335,76 @@ export interface ComputerUseConfigData {
   sessions_reset?: number
 }
 
+/** This crew's AgentCore identity as returned by GET /api/agentcore/identity. */
+export interface AgentcoreIdentityData {
+  configured: boolean
+  posture: 'workload' | 'login' | null
+  workload_name: string
+  gateway_url: string
+  source: 'policy' | 'env' | 'unset'
+  writable: boolean
+  write_blocked?: string | null
+  restart_required: boolean
+  extra_installed: boolean
+  extra_code: 'ok' | 'no_install_channel' | 'install_failed' | null
+}
+
+/** Pending 3LO consent after the oauth_endpoints.json allowlist. */
+export interface AgentcoreConsentData {
+  pending: boolean
+  url: string | null
+}
+
+/** One Settings check on the configured AgentCore Gateway. */
+export interface AgentcoreGatewayCheck {
+  id: string
+  ok: boolean
+  detail: string
+}
+
+/** A Gateway target (MCP server, connector, Lambda, …). */
+export interface AgentcoreGatewayTarget {
+  target_id: string
+  name: string
+  target_type: string
+  status: string
+  listing_mode: string
+  last_synchronized_at: string
+  pending_auth: boolean
+  authorization_url: string | null
+  syncable: boolean
+  status_reasons: string[]
+}
+
+/** Data-plane MCP tools/list, or a skip reason when this page cannot list. */
+export interface AgentcoreGatewayTools {
+  reachable: boolean
+  skip_reason: string | null
+  items: Array<{ name: string; description: string }>
+  /** ``proxy`` when tools/list used the same localhost SigV4 path as the agent. */
+  via?: string | null
+}
+
+/** GET /api/agentcore/gateway and POST /verify. */
+export interface AgentcoreGatewayData {
+  code: string
+  posture: 'workload' | 'login' | null
+  workload_name?: string
+  gateway_url: string
+  gateway: {
+    id: string
+    name: string
+    status: string
+    authorizer_type: string
+    gateway_url: string
+    status_reasons: string[]
+  } | null
+  targets: AgentcoreGatewayTarget[]
+  targets_error: string | null
+  tools: AgentcoreGatewayTools
+  checks: AgentcoreGatewayCheck[]
+}
+
 /** Writable computer-use fields sent to PUT /api/computer-use/config. */
 export interface ComputerUseConfigSave {
   enabled: boolean
@@ -1655,6 +1725,8 @@ export interface LaunchJob {
   profile: string
   region: string
   size_key: string
+  agentcore_posture?: 'none' | 'workload' | 'login'
+  agentcore_gateway_url?: string
   tag: string
   status: LaunchJobStatus
   steps: LaunchStep[]
@@ -2225,9 +2297,27 @@ export const api = {
     const s = p.toString()
     return get('/api/cloud/preflight' + (s ? '?' + s : '')).then(j) as Promise<CloudPreflight>
   },
-  cloudIamPolicy: () => get('/api/cloud/iam-policy').then(j) as Promise<{ policy: string }>,
+  cloudIamPolicy: (opts?: { instance?: boolean; posture?: 'workload' | 'login' }) => {
+    const p = new URLSearchParams()
+    if (opts?.instance) {
+      p.set('instance', '1')
+      if (opts.posture) p.set('posture', opts.posture)
+    }
+    const s = p.toString()
+    return get('/api/cloud/iam-policy' + (s ? '?' + s : '')).then(j) as Promise<{
+      policy: string
+      instance_policy?: string
+      instance_posture?: string
+    }>
+  },
   cloudLaunches: () => get('/api/cloud/launch').then(j) as Promise<{ jobs: LaunchJob[] }>,
-  cloudLaunch: (body: { profile: string; region: string; size_key: string }) =>
+  cloudLaunch: (body: {
+    profile: string
+    region: string
+    size_key: string
+    agentcore_posture?: 'none' | 'workload' | 'login'
+    agentcore_gateway_url?: string
+  }) =>
     post('/api/cloud/launch', body).then(j) as Promise<LaunchJob>,
   cloudLaunchStatus: (id: string) =>
     get('/api/cloud/launch/' + encodeURIComponent(id)).then(j) as Promise<LaunchJob>,
@@ -3396,6 +3486,24 @@ export const api = {
   startBrowserView: () => post('/api/browser/view/start', {}).then(j) as Promise<BrowserViewData>,
   // Computer use (desktop automation). The PUT returns the refreshed snapshot so
   // the panel re-renders from server truth rather than its optimistic guess.
+  getAgentcoreIdentity: () =>
+    get('/api/agentcore/identity').then(j) as Promise<AgentcoreIdentityData>,
+  saveAgentcoreIdentity: (body: {
+    posture: 'none' | 'workload' | 'login'
+    gateway_url?: string
+    workload_name?: string
+  }) => put('/api/agentcore/identity', body).then(j) as Promise<AgentcoreIdentityData>,
+  getAgentcoreConsent: () =>
+    get('/api/agentcore/consent').then(j) as Promise<AgentcoreConsentData>,
+  getAgentcoreGateway: () =>
+    get('/api/agentcore/gateway').then(j) as Promise<AgentcoreGatewayData>,
+  verifyAgentcoreGateway: () =>
+    post('/api/agentcore/gateway/verify', {}).then(j) as Promise<AgentcoreGatewayData>,
+  syncAgentcoreGatewayTarget: (targetId: string) =>
+    post('/api/agentcore/gateway/sync', { target_id: targetId }).then(j) as Promise<{
+      code: string
+      target_id: string
+    }>,
   getComputerUseConfig: () => get('/api/computer-use/config').then(j) as Promise<ComputerUseConfigData>,
   saveComputerUseConfig: (body: Partial<ComputerUseConfigSave>) =>
     put('/api/computer-use/config', body).then(j) as Promise<ComputerUseConfigData>,

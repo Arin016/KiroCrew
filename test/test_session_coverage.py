@@ -251,6 +251,7 @@ class TestAdoptProvider:
         """Everything reset describes the OLD transcript. ``agent`` and
         ``approval_policy`` describe the session's role, so they must carry."""
         old, new = _stub_provider(), _stub_provider()
+        principal = object()
         sess = _Session(
             provider=old,
             agent="researcher",
@@ -261,6 +262,7 @@ class TestAdoptProvider:
             provider_switch_replay=True,
             needs_context_reinjection=True,
             first_turn=FirstTurnState.RESUMED,
+            principal=principal,
         )
 
         sess.adopt_provider(new)
@@ -274,10 +276,9 @@ class TestAdoptProvider:
         assert sess.first_turn is FirstTurnState.FRESH, "a replacement is fresh, not resumed"
         assert sess.agent == "researcher"
         assert sess.approval_policy == "auto"
+        assert sess.principal is principal, "principal names the caller, not the transcript"
 
-    @pytest.mark.parametrize(
-        "start", [FirstTurnState.NOTHING_ARMED, FirstTurnState.FRESH]
-    )
+    @pytest.mark.parametrize("start", [FirstTurnState.NOTHING_ARMED, FirstTurnState.FRESH])
     def test_non_resumed_first_turn_states_survive_adoption(self, start) -> None:
         """Only the RESUMED half of the observation is stale on a replacement.
         The production caller recycles a mid-life, already-claimed session
@@ -504,9 +505,7 @@ class TestSessionSharingEligible:
 class TestContinuableKeys:
     def test_cache_hit_needs_no_disk_read(self, mgr) -> None:
         mgr._continuable_keys.add("subagent:a")
-        mgr._continuable_fallback = MagicMock(
-            side_effect=AssertionError("must not consult disk")
-        )
+        mgr._continuable_fallback = MagicMock(side_effect=AssertionError("must not consult disk"))
         assert mgr._is_continuable_key("subagent:a") is True
 
     def test_miss_without_a_fallback_is_stateless(self, mgr) -> None:
@@ -593,9 +592,7 @@ class TestRemoveIfUnclaimed:
         sess.provider.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_an_unclaimed_session_unlinks_its_queued_temp_files(
-        self, mgr, tmp_path
-    ) -> None:
+    async def test_an_unclaimed_session_unlinks_its_queued_temp_files(self, mgr, tmp_path) -> None:
         img = tmp_path / "img.png"
         img.write_bytes(b"fake")
         sess = _register(mgr, "dashboard:1", first_turn=FirstTurnState.FRESH)
@@ -768,9 +765,7 @@ class TestStuckTurnCheck:
     async def test_a_turn_waiting_for_a_human_is_excluded(self, mgr) -> None:
         """That wait has its own budget (tool_approval_timeout_secs); reporting
         it here would put two components on different clocks."""
-        await _busy(
-            mgr, "d1", _parked_provider(_STUCK_TURN_REPORT_SECS + 10, awaiting=True)
-        )
+        await _busy(mgr, "d1", _parked_provider(_STUCK_TURN_REPORT_SECS + 10, awaiting=True))
         mgr.on_stuck_turn = MagicMock()
         await mgr._stuck_turn_check()
         mgr.on_stuck_turn.assert_not_called()

@@ -2073,6 +2073,8 @@ default on; a deny makes the tool refuse outright, and it does NOT fall back to
 the `commands` scope, so denying browsing wholesale means denying both this
 capability AND the `playwright-cli` command),
 `capabilities.publish` (artifact publish chokepoint — see below),
+`capabilities.agentcore` (opt-in agent workload identity + Gateway MCP —
+see below),
 `capabilities.theme_persona` / `capabilities.theme_install`, and
 `capabilities.telemetry` (the anonymous beacon: send gate + both write
 chokepoints — **policy layer only**, see below). Only the live `approval_mode`
@@ -2113,6 +2115,60 @@ surface-agnostic Settings > Security snapshot + the builtin-toggle 409 check, so
 a rule pinned by any profile renders locked and rejects a disable rather than
 surfacing a no-op opt-out (UI success while the bound-profile gate still denies).
 Display-only union — it does not widen enforcement.
+
+`capabilities.agentcore` is a `CapabilityGate` (opt-in: `capability_default=False`,
+like `capabilities.publish` / `capabilities.messaging`). It is a catalog data row
+only — the evaluator is untouched. The inner `posture` field is policy data, not
+a second scope and not a `CapabilityGate` field (`additionalProperties: false`
+stays `enabled` + `scopes`): `workload` (unattended sessions may vend a workload
+access token) or `login` (a human must be present; unattended sessions get no
+Gateway inbound JWT). An `enabled: true` document with a missing or unknown
+`posture` fails closed — the row is treated as disabled, or boot aborts when
+`boot.fail_closed`. A disabled or omitted row does not require `posture`.
+
+The composed posture is a **policy-only** ceiling side field
+(`GovernanceCeiling.agentcore_identity_posture`, Rule 6 — same shape as Slack
+`channels.posture` and `updates`). A profile may enable or disable the
+capability (tightest-wins on `enabled`) but cannot carry `posture`: that key is
+rejected at parse, the same fail-closed raise as `ScopedMap.posture` /
+`updates` / `fallback`. Enable-without-posture is the legal profile shape; it
+cannot turn the seam on alone, because an omitted policy has no stored
+posture. Read the composed value through the public helper
+`agentcore_posture(ceiling) -> "workload" | "login" | None` — do not re-parse
+raw policy JSON. The helper returns the stored posture only when the capability
+is enabled with a known value; `None` when the ceiling is missing, the
+capability is omitted, disabled, or fail-closed-disabled.
+
+Consumption ANDs three conjuncts: the `agent_identity` adapter is on, governance
+permits `capabilities.agentcore`, and `agentcore_posture(ceiling)` is a known
+value. The public `DefaultAgentIdentityProvider` is disabled, so a standalone
+host with no policy is unchanged. Later work consults this row at rebuild /
+Gateway injection; naming it here is what lets a policy pin the capability
+before those chokepoints land.
+
+See-and-configure for a missing row is **this crew's** Settings → Security →
+Agent identity (`GET`/`PUT /api/agentcore/identity`), dashboard-cookie only.
+PUT merges `capabilities.agentcore` into the standalone home
+`security_policy.json` (`_policy_home_path()`). It does not write a fleet
+`KIROCREW_SECURITY_POLICY` override or a signed document (409
+`policy_not_writable`). App tokens are 403 `dashboard_user_required` — the
+same owner-only trust model as computer-use Settings. Owner-dashboard
+PUT hot-applies the home file onto the running ceiling and AWS adapter
+(`apply_agentcore_runtime`) and rebuilds the agent config, so Save is
+enough for inject and login-withhold. `restart_required` stays true
+only when that apply cannot attach the extra. A write to `workload` or
+`login` also installs `kirocrew[agentcore]` into this gateway
+interpreter (`ensure_extra`); GET never pips. The snapshot carries
+`extra_installed` and `extra_code` (`ok` / `no_install_channel` /
+`install_failed` / `null`). PUT posture-on without a workload name
+returns 400 `workload_name_required` — Settings-only does not invent
+`kirocrew`. The RFC default `kirocrew` is used only when launch env
+posture is set and CFN omitted the systemd name. PUT also accepts
+optional `gateway_url` (https MCP URL, no credentials) on the same
+`capabilities.agentcore` row — policy-only, like `posture`. GET
+returns the authored URL (policy first, else launch env). A profile
+cannot carry `gateway_url`. This is not a Remote Crew / launch
+control: a hub launching another box is a different crew.
 
 `capabilities.publish` is a `CapabilityGate` (opt-in: `capability_default=False`)
 with an inner `destinations` `ScopedRuleset` (`identifier` matcher) bounding

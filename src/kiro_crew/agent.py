@@ -79,9 +79,11 @@ from kiro_crew.platform import redact_via_context as redact
 from kiro_crew.platform import safe_context_call
 from kiro_crew.platform.governance import (
     CU_MCP_SERVER,
+    agentcore_posture,
     may_skip_gate_now,
     strip_ungoverned_auto_approve,
 )
+from kiro_crew.platform.governance_profiles import governance_permits
 from kiro_crew.security import is_sensitive_path
 from kiro_crew.sel import (  # circular import: sel imports config which imports agent
     SecurityEvent,
@@ -853,6 +855,164 @@ def _extra_mcp_servers() -> dict[str, dict]:
         log_message="extra_mcp_servers lookup failed; using none",
     )
     return dict(extra) if extra else {}
+
+
+def _merge_edition_mcp(mcp: dict[str, Any]) -> None:
+    """Merge edition extras + the AgentCore Gateway rebuild contribution.
+
+    Extras are ADD-only (setdefault) after secret keys are stripped so a
+    companion ``Authorization`` header cannot land in kirocrew.json. The
+    Gateway server itself is ours: workload posture assigns a URL-only spec;
+    any other posture retracts a leftover entry. Login withhold also drops
+    other remote (``url``) extras — those attach per-session, not at rebuild.
+    """
+    from kiro_crew.platform.agentcore_gateway import (
+        GATEWAY_SERVER_NAME,
+        rebuild_gateway_contribution,
+        strip_secret_spec_keys,
+    )
+
+    login_withhold = _login_mcp_withhold()
+    for name, spec in _extra_mcp_servers().items():
+        if name == GATEWAY_SERVER_NAME or not isinstance(spec, dict):
+            continue
+        cleaned = strip_secret_spec_keys(spec)
+        if login_withhold and cleaned.get("url"):
+            continue
+        mcp.setdefault(name, cleaned)
+    contribution = rebuild_gateway_contribution()
+    if GATEWAY_SERVER_NAME in contribution:
+        mcp[GATEWAY_SERVER_NAME] = contribution[GATEWAY_SERVER_NAME]
+    else:
+        mcp.pop(GATEWAY_SERVER_NAME, None)
+
+
+def _agentcore_capability_permitted() -> bool:
+    """Whether the governance ceiling permits ``capabilities.agentcore``.
+
+    Independent of the CPP adapter. An omitted capability is ungoverned
+    (permitted); a transient lookup degrades to False. Used by login
+    withhold (capability + posture only) and by the three-conjunct
+    identity probe (adapter AND this AND known posture).
+    """
+    return bool(
+        safe_context_call(
+            lambda: getattr(
+                governance_permits(
+                    "capabilities.agentcore",
+                    "",
+                    fail_closed=True,
+                    log_warning=False,
+                ),
+                "permitted",
+                False,
+            ),
+            fallback=False,
+            log_message="agentcore governance lookup failed; treating as disabled",
+        )
+    )
+
+
+def _agent_identity_enabled() -> bool:
+    """Whether the composed agent-identity seam is on.
+
+    True only when the adapter is on AND governance permits
+    ``capabilities.agentcore`` AND the ceiling stores a known posture.
+    Standalone Default returns False without consulting governance, so
+    Gateway/token work stays off. Login MCP withhold is a different
+    predicate (capability + posture only). An omitted capability is
+    ungoverned (permitted), so the known-posture conjunct is what keeps
+    a forced-on adapter off when no row is present. A transient
+    adapter/governance error degrades to False (never to enabled) via
+    ``safe_context_call``. ``PlatformCompositionError`` still aborts.
+    """
+    adapter_on = bool(
+        safe_context_call(
+            lambda: current_context().agent_identity.enabled(),
+            fallback=False,
+            log_message="agent_identity.enabled lookup failed; treating as disabled",
+        )
+    )
+    if not adapter_on:
+        return False
+    if not _agentcore_capability_permitted():
+        return False
+    return bool(
+        safe_context_call(
+            lambda: agentcore_posture(current_context().governance) is not None,
+            fallback=False,
+            log_message="agentcore posture lookup failed; treating as disabled",
+        )
+    )
+
+
+def _note_agent_identity_if_enabled() -> None:
+    """Live consumption of ``ctx.agent_identity``; no-op when the Default is off.
+
+    Gateway rebuild + inbound attach key on this three-conjunct probe. Reading
+    ``status()`` here is display-only and uses an empty-dict fallback so a
+    raised adapter cannot degrade to "enabled".
+    """
+    if not _agent_identity_enabled():
+        return
+    status: dict[str, object] = safe_context_call(
+        lambda: dict(current_context().agent_identity.status()),
+        fallback={},
+        log_message="agent_identity.status lookup failed; omitting status",
+    )
+    logger.debug("agent_identity enabled; status keys=%s", sorted(status))
+
+
+def _login_mcp_withhold() -> bool:
+    """Emit-time gate: withhold non-managed MCP when AgentCore posture is login.
+
+    Same shape as ``kirocrew-computer``'s ``spec_gate``: consulted at rebuild
+    emission, not by mutating source files. True when the capability is
+    permitted AND the ceiling posture is ``login`` — the companion adapter
+    does not have to be on. Gateway/token work stays behind
+    ``_agent_identity_enabled()``.
+    """
+    if not _agentcore_capability_permitted():
+        return False
+    return bool(
+        safe_context_call(
+            lambda: agentcore_posture(current_context().governance) == "login",
+            fallback=False,
+            log_message="agentcore posture lookup failed; not withholding MCP",
+        )
+    )
+
+
+def _strip_leftover_non_managed_mcp(config: dict[str, Any], managed_names: set[str]) -> None:
+    """Drop leftover merge-base servers that are not managed ``kirocrew-*``."""
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+    for name in [n for n in list(servers) if n not in managed_names]:
+        del servers[name]
+
+
+def _record_login_invoke_probe() -> None:
+    """Refuse a Gateway emit when login posture can still IAM-invoke Gateway.
+
+    Rebuild does not emit a Gateway spec under ``login`` (inbound attach
+    does that per session). A successful probe is still a posture mismatch
+    and is recorded to SEL so attach fails closed on the same signal. The
+    public probe defaults False (no mismatch detected, not "IAM inbound
+    is impossible"); a companion must override the live check. This never
+    calls AWS.
+    """
+    from kiro_crew.cloud import iam as cloud_iam
+
+    if not cloud_iam.probe_instance_invoke_gateway():
+        return
+    sel().log_api_access(
+        caller="system",
+        operation="agentcore.posture_mismatch",
+        outcome="denied",
+        source="install_agent",
+        resources="InvokeGateway succeeded under login posture; Gateway spec withheld",
+    )
 
 
 def _extra_mcp_scope_globals() -> list[Path]:
@@ -2058,12 +2218,10 @@ def build_agent_config(*, gated_off: "frozenset[str] | None" = None) -> dict:
             entry["autoApprove"] = list(spec["autoApprove"])
         mcp[name] = entry
 
-    # Edition-contributed MCP servers (PlatformContext).  ADD-only: standalone
-    # contributes {} (unchanged), the Amazon companion adds the internal MCP server etc.
-    # Entries are already kiro-spec-shaped, so we only extend the map — no spec
-    # restructuring, deny_unknown_fields invariant preserved.
-    for name, spec in _extra_mcp_servers().items():
-        mcp.setdefault(name, dict(spec))
+    # Edition-contributed MCP servers (PlatformContext) + AgentCore Gateway.
+    # Extras are ADD-only after secret-key strip; Gateway is URL-only and
+    # retracts when identity is off or posture is not workload.
+    _merge_edition_mcp(mcp)
 
     # Default-model tracking ("managed" vs frozen) is recorded in the
     # agent_state sidecar by the install path (rebuild_agent_config), never as
@@ -2178,12 +2336,10 @@ def _refresh_dynamic_fields(config: dict, *, gated_off: "frozenset[str] | None" 
         if "autoApprove" in spec and is_new:
             entry["autoApprove"] = list(spec["autoApprove"])
 
-    # Edition-contributed MCP servers (PlatformContext).  ADD-only: only seed a
-    # server the user doesn't already have, so user customizations on a refresh
-    # are preserved.  Standalone contributes {} (unchanged); Amazon adds
-    # the internal MCP server etc.  Already kiro-spec-shaped — no restructuring.
-    for name, extra_spec in _extra_mcp_servers().items():
-        mcp.setdefault(name, dict(extra_spec))
+    # Edition-contributed MCP servers (PlatformContext) + AgentCore Gateway.
+    # Same merge as build_agent_config: extras ADD-only after strip; Gateway
+    # assigned or retracted.
+    _merge_edition_mcp(mcp)
 
     # Security: hooks always from bundled config.
     # Hard-fail if bundled defaults are missing — deny-by-default.
@@ -3427,6 +3583,10 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # _gated_off_servers).
     gated_off = _gated_off_servers()
 
+    # Live agent_identity seam. Disabled Default is a no-op so standalone
+    # rebuild stays byte-identical.
+    _note_agent_identity_if_enabled()
+
     if not clean and path.exists():
         # Existing config — preserve user customizations, only refresh
         # security-critical and dynamic fields.
@@ -3455,6 +3615,16 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # the Claude Code provider can be re-enabled later without rework; it must
     # not shadow a Kiro-global entry.
     managed_names = set(_MANAGED_MCP_SERVERS)
+    login_withhold = _login_mcp_withhold()
+    if login_withhold:
+        # Login posture is an emit-time spec_gate (same as kirocrew-computer):
+        # withhold Kiro-global, seam-global, crew-store, leftover
+        # non-managed merge-base entries, and app-contributed servers.
+        # Managed kirocrew-* still emit. A Gateway URL-only spec is not
+        # invented here under login (workload contribution lands in
+        # ``_merge_edition_mcp``).
+        _strip_leftover_non_managed_mcp(config, managed_names)
+        _record_login_invoke_probe()
 
     # App-contributed MCP servers go in FIRST so an app's namespaced entry
     # outranks any same-named leftover in the shared global file (every loop
@@ -3469,67 +3639,74 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # had just stripped (the ceiling now governs that server) lost to the stale
     # grant, the tightening never reached an existing config, and those tools
     # kept skipping the PreToolUse gate.
-    for _app_srv, _app_spec in _collect_app_mcp_servers().items():
-        if _app_srv not in managed_names:
-            config.setdefault("mcpServers", {})[_app_srv] = _app_spec
-            # EXPOSE it: kiro-cli connects entries declared in `mcpServers`, but
-            # an unreferenced server contributes no tools to the agent. `tools`
-            # is the unconditional exposure list (the final
-            # dedup below removes any duplicate); auto-approve stays governed —
-            # the spec's `autoApprove` was already ceiling-filtered in
-            # _collect_app_mcp_servers, and the final allowedTools pass covers the
-            # @ref if it ever lands there.
-            config.setdefault("tools", []).append(f"@{_app_srv}")
+    #
+    # Login withhold skips this loop: the emitted spec is only managed
+    # kirocrew-* (plus a later URL-only Gateway). Apps are neither.
+    if not login_withhold:
+        for _app_srv, _app_spec in _collect_app_mcp_servers().items():
+            if _app_srv not in managed_names:
+                config.setdefault("mcpServers", {})[_app_srv] = _app_spec
+                # EXPOSE it: kiro-cli connects entries declared in `mcpServers`,
+                # but an unreferenced server contributes no tools to the agent.
+                # `tools` is the unconditional exposure list (the final
+                # dedup below removes any duplicate); auto-approve stays
+                # governed — the spec's `autoApprove` was already
+                # ceiling-filtered in _collect_app_mcp_servers, and the final
+                # allowedTools pass covers the @ref if it ever lands there.
+                config.setdefault("tools", []).append(f"@{_app_srv}")
 
-    shared_mcp = _load_json(_KIRO_MCP_JSON).get("mcpServers", {})
-    for name, spec in shared_mcp.items():
-        if isinstance(spec, dict) and name not in managed_names:
-            # Copy so config never aliases the source dict — a later update()
-            # (kirocrew merge) must not mutate shared_mcp, which is reused as a
-            # fallback candidate during command validation below. The copy also
-            # drops our authorship marker: it records who wrote the entry in a
-            # SHARED file and has no meaning in a spec we render ourselves, so
-            # keeping it would put a key in front of the runtime that says nothing
-            # to it.
-            config.setdefault("mcpServers", {}).setdefault(name, without_marker(spec))
-
-    # Merge shared MCP servers from edition-contributed provider globals (CPP
-    # seam) — now LOWER priority than Kiro global; setdefault is a no-op when
-    # Kiro already populated the same key, so these only fill gaps. In OSS the
-    # seam is empty, so NO provider global (e.g. ~/.claude.json) is merged —
-    # keeping rebuild symmetric with discovery + apply/uninstall so a server the
-    # dashboard can't see is never re-merged into sessions. A companion
-    # contributes its Claude Code scope here and manages it end-to-end.
-    # ``extra_shared_mcp`` accumulates the raw per-scope entries (first scope
-    # wins) for the fallback-candidate lookup and shared-server tools sync below
-    # (replaces the old single ``cc_shared_mcp``).
+    shared_mcp: dict[str, Any] = {}
     extra_shared_mcp: dict[str, dict] = {}
-    for scope_global in _extra_mcp_scope_globals():
-        scope_shared_mcp = _load_json(scope_global).get("mcpServers", {})
-        for name, spec in scope_shared_mcp.items():
-            if not isinstance(spec, dict):
-                continue
-            extra_shared_mcp.setdefault(name, spec)
-            if name not in managed_names:
-                # Copy (see note above) so the source dict stays pristine for
-                # the fallback-candidate lookup.
+    kirocrew_mcp: dict[str, Any] = {}
+    if not login_withhold:
+        shared_mcp = _load_json(_KIRO_MCP_JSON).get("mcpServers", {})
+        for name, spec in shared_mcp.items():
+            if isinstance(spec, dict) and name not in managed_names:
+                # Copy so config never aliases the source dict — a later update()
+                # (kirocrew merge) must not mutate shared_mcp, which is reused as a
+                # fallback candidate during command validation below. The copy also
+                # drops our authorship marker: it records who wrote the entry in a
+                # SHARED file and has no meaning in a spec we render ourselves, so
+                # keeping it would put a key in front of the runtime that says nothing
+                # to it.
                 config.setdefault("mcpServers", {}).setdefault(name, without_marker(spec))
 
-    # ~/.kiro/crew/mcp.json overrides kiro mcp.json for the kirocrew agent —
-    # kirocrew-specific config wins in a tie.
-    # Uses update() to merge into existing specs, preserving user-set fields
-    # like autoApprove while letting kirocrew's command/args/env win.
-    # Skip managed servers for the same reason as above.
-    kirocrew_mcp = _load_json(_user_dir() / "mcp.json").get("mcpServers", {})
-    for name, spec in kirocrew_mcp.items():
-        if isinstance(spec, dict) and name not in managed_names:
-            mcps = config.setdefault("mcpServers", {})
-            if name in mcps and isinstance(mcps[name], dict):
-                # mcps[name] is a private copy (globals were copied in above),
-                # so update() does not mutate any source dict.
-                mcps[name].update(spec)
-            else:
-                mcps[name] = dict(spec)
+        # Merge shared MCP servers from edition-contributed provider globals (CPP
+        # seam) — now LOWER priority than Kiro global; setdefault is a no-op when
+        # Kiro already populated the same key, so these only fill gaps. In OSS the
+        # seam is empty, so NO provider global (e.g. ~/.claude.json) is merged —
+        # keeping rebuild symmetric with discovery + apply/uninstall so a server the
+        # dashboard can't see is never re-merged into sessions. A companion
+        # contributes its Claude Code scope here and manages it end-to-end.
+        # ``extra_shared_mcp`` accumulates the raw per-scope entries (first scope
+        # wins) for the fallback-candidate lookup and shared-server tools sync below
+        # (replaces the old single ``cc_shared_mcp``).
+        for scope_global in _extra_mcp_scope_globals():
+            scope_shared_mcp = _load_json(scope_global).get("mcpServers", {})
+            for name, spec in scope_shared_mcp.items():
+                if not isinstance(spec, dict):
+                    continue
+                extra_shared_mcp.setdefault(name, spec)
+                if name not in managed_names:
+                    # Copy (see note above) so the source dict stays pristine for
+                    # the fallback-candidate lookup.
+                    config.setdefault("mcpServers", {}).setdefault(name, without_marker(spec))
+
+        # ~/.kiro/crew/mcp.json overrides kiro mcp.json for the kirocrew agent —
+        # kirocrew-specific config wins in a tie.
+        # Uses update() to merge into existing specs, preserving user-set fields
+        # like autoApprove while letting kirocrew's command/args/env win.
+        # Skip managed servers for the same reason as above.
+        kirocrew_mcp = _load_json(_user_dir() / "mcp.json").get("mcpServers", {})
+        for name, spec in kirocrew_mcp.items():
+            if isinstance(spec, dict) and name not in managed_names:
+                mcps = config.setdefault("mcpServers", {})
+                if name in mcps and isinstance(mcps[name], dict):
+                    # mcps[name] is a private copy (globals were copied in above),
+                    # so update() does not mutate any source dict.
+                    mcps[name].update(spec)
+                else:
+                    mcps[name] = dict(spec)
 
     # Resolve MCP commands to absolute paths and validate.
     #
@@ -3907,9 +4084,13 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
         # must also be added to config['tools'], otherwise kiro-cli exposes the
         # server but not its tools. The public edition contributes none, so this
         # is a no-op there.
+        from kiro_crew.platform.agentcore_gateway import GATEWAY_SERVER_NAME
+
         _register_names = list(_MANAGED_MCP_SERVERS) + [
             n for n in _extra_mcp_servers() if n not in _MANAGED_MCP_SERVERS
         ]
+        if GATEWAY_SERVER_NAME in valid_servers and GATEWAY_SERVER_NAME not in _register_names:
+            _register_names.append(GATEWAY_SERVER_NAME)
         for mcp_name in _register_names:
             ref = f"@{mcp_name}"
             if mcp_name in valid_servers and ref not in config.get("tools", []):
@@ -4217,13 +4398,21 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
 
                 on_disk_app = {_k for _k in on_disk if ":" in _k and _k not in managed_names}
                 for _k in [k for k in servers if ":" in k and k not in managed_names]:
+                    if login_withhold:
+                        del servers[_k]
+                        continue
                     if not _app_of_key_enabled(_k):
                         del servers[_k]
                 for _k, _v in on_disk.items():
-                    # ALWAYS assign, not add-if-missing: on_disk is authoritative
-                    # for app servers, so a concurrent re-registration on a new
-                    # port (same key, new URL) must OVERWRITE our stale snapshot —
-                    # otherwise the dead pre-rebuild URL is persisted.
+                    if login_withhold:
+                        continue
+                    # ALWAYS assign, not add-if-missing: on_disk is
+                    # authoritative for app servers, so a concurrent
+                    # re-registration on a new port (same key, new URL)
+                    # must OVERWRITE our stale snapshot — otherwise the
+                    # dead pre-rebuild URL is persisted. Login withhold
+                    # skips this copy-back: a prior rebuild's
+                    # ``{app}:{server}`` must not survive.
                     if _k in on_disk_app:
                         servers[_k] = _v
             _finalize_and_write()

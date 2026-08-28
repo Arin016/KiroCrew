@@ -74,6 +74,14 @@ kirocrew`). Onto that base:
    Kiro Crew's `command`/`args`/`env` win while user-set fields such as
    `autoApprove` survive.
 
+Steps 1–4 (app-contributed servers, Kiro global, seam globals, crew store)
+and leftover non-managed merge-base servers are skipped when AgentCore
+login withhold is on — see the `spec_gate` section below. The final
+on-disk `{app}:{server}` re-merge under `bridges._mcp_lock` is gated the
+same way, so a prior rebuild's app servers are not copied back. The login
+predicate is capability-on plus posture `login`; the companion identity
+adapter does not have to be enabled.
+
 Kiro global outranks any seam-contributed provider global because Kiro Crew is
 kiro-cli-only. Managed servers are skipped by every merge loop: their
 `command`/`args` are set by `_refresh_dynamic_fields()` and must not be
@@ -140,6 +148,53 @@ that is already resident (~109 MB, per chat process, including every `spawn_run`
 subagent). While the gate is closed the server appears in neither `mcpServers`
 nor `tools`, so nothing is spawned at all. Both loops that write specs honour it,
 and asymmetrically on purpose:
+
+**Login-mode AgentCore withhold is the same emit-time `spec_gate`.** When
+`capabilities.agentcore` is permitted and the ceiling posture is `login`,
+`rebuild_agent_config()` withholds `~/.kiro/settings/mcp.json`,
+seam-contributed provider globals, `~/.kiro/crew/mcp.json`, leftover
+non-managed merge-base entries, and app-contributed MCP servers. The
+companion identity adapter does not have to be on — a fleet that set
+login posture on the Default still withholds. Managed `kirocrew-core` /
+`kirocrew-cron` / `kirocrew-computer` (when that server's own `spec_gate`
+is open) still emit. A Gateway URL-only spec is **not** invented here
+under `login` — `attach_gateway_inbound` writes a `0600` session sidecar
+when a Gateway URL exists. A vend'd JWT becomes the `Authorization`
+header; without one the sidecar is URL-only so kiro-cli can start its
+MCP OAuth challenge (`_kiro.dev/mcp/oauth_request`, already surfaced
+as Authorize). `~/.kiro/agents/kirocrew.json` never holds the bearer.
+If an IAM `InvokeGateway` probe succeeds under
+`login`, rebuild records SEL `agentcore.posture_mismatch` and both rebuild
+and attach omit Gateway. Workload posture emits a URL-only Gateway spec
+at rebuild (IAM inbound, no JWT sidecar). The AWS extra rewrites that
+URL to a localhost SigV4 proxy (`platform/agentcore_sigv4.py`) so
+kiro-cli never presents an unsigned Gateway hostname, and keeps the
+ordinary merge of Kiro defaults. The proxy prefers port `18765`
+(`KIROCREW_AGENTCORE_PROXY_PORT` overrides; bind failure falls back
+to ephemeral). After a gateway restart the agent-file port may be
+stale; `session_gateway_servers` injects the live loopback listen
+URL onto `session/new` (never the unsigned https hostname). Each
+HTTP element is `{name, type: "http", url, headers}` — kiro-cli's
+untagged `McpServer` rejects `{name, url}` and `{name, disabled: true}`.
+A deny sidecar injects a disabled HTTP placeholder. Companion extras that carry `headers` / `Authorization`
+are stripped before the agent file is written. Gateway/token work stays
+behind the three-conjunct identity probe (adapter AND capability AND
+known posture). Gateway is unpooled: each session has its own inbound
+sidecar. An expired inbound sidecar recycles that session's ACP child
+(`SessionManager.remove`, session map preserved) so the next
+`session/new` cannot keep a dead JWT; this is not an mcp_gateway
+blue-green drain. Unattended session keys (`cron:`, `taskrunner:`) never receive a
+login-posture inbound JWT. Workload M2M may keep the agent-file Gateway;
+workload user/OBO without a vaulted owner token writes a deny sidecar so
+`session/new` injects `{name: agentcore-gateway, disabled: true}` and
+outranks the agent-file entry. 3LO consent URLs are allowlisted through
+`security.allow_agentcore_consent_url` (the same `oauth_endpoints.json`
+keystone) and surfaced only on GET `/api/agentcore/consent`, never as
+model-visible text. Settings can list the Gateway's targets and the
+data-plane tool catalog (`GET`/`POST /api/agentcore/gateway`) so an
+operator can verify inbound auth, PENDING_AUTH, and a stale DEFAULT
+listing without opening the AWS console. `ListOauth2CredentialProviders`
+is not on that pane.
 
 - `build_agent_config()` withholds the entry **and pops one arriving from the
   user override file** — a platform gate exists because there is no driver on

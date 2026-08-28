@@ -185,22 +185,24 @@ const WAIVED_BARE_CONTROLS: Record<string, { counts: BareCounts; reason: string 
       'primitive (manual: notifications.volume)',
   },
   'RemoteCrewPanel.tsx': {
-    counts: { input: 2 },
+    counts: { input: 2, SimpleSelect: 1 },
     reason:
       'setup-wizard AWS profile/region convenience fields (localStorage) behind a ' +
-      'non-URL sub-tab a deep link cannot mount',
+      'non-URL sub-tab a deep link cannot mount; the instance-posture SimpleSelect is ' +
+      'launch Policy.json copy, not this-crew identity (that lives on Security)',
   },
   'SecretsPanel.tsx': {
     counts: { input: 2 },
     reason: 'add-secret name/value form — transient CRUD, not persistent knobs',
   },
   'SecurityPanel.tsx': {
-    counts: { Toggle: 5, Checkbox: 2, Input: 3 },
+    counts: { Toggle: 5, Checkbox: 2, Input: 3, input: 2 },
     reason:
       'disable-all + per-rule + custom-rule Toggles are data-driven table rows ' +
       '(manual: security.denied-commands); Checkboxes are confirm-modal acks; ' +
       'Inputs are the rule search filter and the add-custom-deny form ' +
-      '(manual: security.your-custom-denies)',
+      '(manual: security.your-custom-denies); text/url inputs are this-crew ' +
+      'AgentCore identity (manual: security.agent-identity; posture is SettingsSelect)',
   },
   'SettingsSearch.tsx': {
     counts: { input: 1 },

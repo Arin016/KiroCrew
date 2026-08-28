@@ -547,7 +547,9 @@ describe('RemoteCrewPanel', () => {
     const launch = await screen.findByRole('button', { name: /^Launch$/ })
     await waitFor(() => expect(launch).not.toBeDisabled())
     await u.click(launch)
-    await waitFor(() => expect(api.cloudLaunch).toHaveBeenCalledWith({ profile: '', region: 'us-east-1', size_key: 'balanced' }))
+    await waitFor(() => expect(api.cloudLaunch).toHaveBeenCalledWith({
+      profile: '', region: 'us-east-1', size_key: 'balanced',
+    }))
     // Progress card polls the job and renders its steps.
     expect(await screen.findByText('Installing Kiro Crew')).toBeInTheDocument()
   })

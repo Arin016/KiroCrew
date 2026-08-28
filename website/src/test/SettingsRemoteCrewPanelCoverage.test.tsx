@@ -472,6 +472,26 @@ describe('RemoteCrewPanel — AWS prerequisites', () => {
     expect(await screen.findByRole('button', { name: /Copied/ })).toBeInTheDocument()
   })
 
+  it('copies the labeled instance IAM sibling for the selected posture', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(list([]))
+    vi.mocked(api.cloudPreflight).mockResolvedValue(PREFLIGHT_OK)
+    vi.mocked(api.cloudIamPolicy).mockResolvedValue({
+      policy: '{"Version":"2012-10-17"}',
+      instance_policy: '{"Sid":"AgentCoreIdentityForJwt"}',
+      instance_posture: 'login',
+    })
+    const u = setup()
+    renderWithProviders(<RemoteCrewPanel />)
+    await openSetupTab(u)
+
+    await u.selectOptions(await screen.findByLabelText(/Instance posture/), 'login')
+    await u.click(await screen.findByRole('button', { name: /Copy instance policy JSON/ }))
+    await waitFor(() =>
+      expect(api.cloudIamPolicy).toHaveBeenCalledWith({ instance: true, posture: 'login' }),
+    )
+    expect(copyToClipboard).toHaveBeenCalledWith('{"Sid":"AgentCoreIdentityForJwt"}')
+  })
+
   it('surfaces a failure to fetch the IAM policy rather than silently copying nothing', async () => {
     vi.mocked(api.listInstances).mockResolvedValue(list([]))
     vi.mocked(api.cloudPreflight).mockResolvedValue({ ...PREFLIGHT_OK, cloudformation_reachable: false })

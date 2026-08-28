@@ -25,6 +25,7 @@ from kiro_crew.platform.context import (
 from kiro_crew.platform.defaults import (
     DefaultAgentCatalogProvider,
     DefaultAgentExecutableResolver,
+    DefaultAgentIdentityProvider,
     DefaultAgentRuntime,
     DefaultAppRegistryPolicy,
     DefaultAppsLoader,
@@ -133,6 +134,7 @@ def build_default_context(
         security=PolicyAuthority(),  # _NullOverlay → baseline only
         slack_gate=DefaultSlackEnterpriseGate(),
         identity=DefaultIdentityProvider(),
+        agent_identity=DefaultAgentIdentityProvider(),
         embeddings=DefaultEmbeddingSource(),
         mcp_tooling=DefaultMcpToolingProvider(),
         agent_catalog=DefaultAgentCatalogProvider(),
@@ -172,6 +174,31 @@ def bootstrap_context(cfg: "KiroCrewConfig") -> PlatformContext:
     eps = plugin_entry_points()
     profile = resolve_profile(cfg, entry_points=eps)
     ctx = build_default_context(cfg, profile=profile)
+    if profile == PROFILE_STANDALONE:
+        # IaC extra: swap only agent_identity. Does not flip the profile to
+        # a companion and does not import boto3 unless the extra opted in.
+        # A configured policy/env posture also pips kirocrew[agentcore]
+        # into this interpreter so a box that skipped CFN --agentcore still
+        # vends after restart (or on this boot when pip succeeds in time).
+        from kiro_crew.platform.agentcore_aws import (
+            EXTRA_CODE_OK,
+            ensure_extra,
+            extra_available,
+            opted_in,
+            try_aws_agent_identity,
+        )
+
+        if opted_in() and not extra_available():
+            extra_code = ensure_extra()
+            if extra_code != EXTRA_CODE_OK:
+                logger.warning("AgentCore extra not installed at boot: %s", extra_code)
+
+        aws_identity = try_aws_agent_identity()
+        if aws_identity is not None:
+            from dataclasses import replace
+
+            ctx = replace(ctx, agent_identity=aws_identity)
+            logger.info("Attached AWS AgentCore identity adapter (opt-in extra)")
 
     if profile != PROFILE_STANDALONE:
         companion = discover_companion_context(profile, cfg)  # may raise (fail-closed)

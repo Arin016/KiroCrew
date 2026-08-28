@@ -43,7 +43,7 @@ export const CHUNK_BUDGETS = {
   // ceiling catches is a NEW library or surface landing in the catalog chunk.
   // The built-in App Store guidance adds one use-case and one configuration
   // string for each of 23 apps across all 12 shipped catalogs.
-  all: 9750 * KB, // measured 9278 KB after built-in App Store guidance
+  all: 9850 * KB, // AgentCore Settings/catalog strings landed in the eager i18n chunk (~77 KB)
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because

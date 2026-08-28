@@ -595,6 +595,18 @@ def _list_aim_prompts() -> list[dict[str, Any]]:
     return [dict(p) for p in result]
 
 
+# This-crew AgentCore identity + Gateway catalog (Settings → Security).
+from kiro_crew.dashboard.handlers.agentcore_identity import (  # noqa: E402, F401
+    api_agentcore_consent_get,
+    api_agentcore_identity_get,
+    api_agentcore_identity_save,
+)
+from kiro_crew.dashboard.handlers.agentcore_inspect import (  # noqa: E402, F401
+    api_agentcore_gateway_get,
+    api_agentcore_gateway_sync,
+    api_agentcore_gateway_verify,
+)
+
 # Paid-AWS-service consent — the operator's confirmation surface for Amazon
 # Polly (TTS) and Amazon Transcribe (STT). Sole writer of the keystone grant
 # alongside the ``kirocrew aws-consent`` CLI.

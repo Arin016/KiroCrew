@@ -43,6 +43,7 @@ boot holding the chosen adapter for every extension point, plus three carriers:
 | `security` | **concrete** | `PolicyAuthority()` (baseline only) | `PolicyAuthority(overlay=…)` ADD-only |
 | `slack_gate` | adapter | `DefaultSlackEnterpriseGate` (default-open) | fail-closed enterprise allowlist |
 | `identity` | adapter | `DefaultIdentityProvider` (`sso_status.py` stub; `whoami`/`issuer` **RESERVED**) | enterprise SSO / directory |
+| `agent_identity` | adapter | `DefaultAgentIdentityProvider` (disabled: `enabled() -> False`; no workload, no Gateway spec, no tokens). Standalone boot may `dataclasses.replace` this with `AwsAgentIdentityProvider` when `opted_in()` — home-policy or env posture `workload`/`login`, or a named workload plus `KIROCREW_AGENTCORE_AWS=1`. A configured posture also `ensure_extra()`s `kirocrew[agentcore]` into the gateway interpreter (Settings PUT does the same). It does **not** flip the profile or load a `kirocrew.plugins` companion. | edition workload identity + token vending |
 | `embeddings` | adapter | **RESERVED** — `DefaultEmbeddingSource`; the public runtime is the bundled in-process llama-cpp model, so no method is consumed (swap via `embeddings.register_embedding_backend`) | — (slot inert) |
 | `mcp_tooling` | adapter | `DefaultMcpToolingProvider` (all methods empty) | enterprise MCP server + skills + provider MCP scopes |
 | `agent_catalog` | adapter | `DefaultAgentCatalogProvider` (`builtin_agents()` → `[]`) | edition agent-catalog rows |
@@ -297,6 +298,8 @@ added pre-launch landed under this same `1`, with no bump:
   before the core applies its sandbox);
 - the `knowledge` (connector registry), `dashboard` (route/service/login-handler
   contributor), and `jail` (process-isolation) extension points;
+- the `agent_identity` slot (`AgentIdentityProvider` — agent workload identity
+  and token vending, distinct from operator-SSO `identity`);
 - wiring an *existing* but previously-unconsumed Protocol method into a call site
   (e.g. `ProviderRegistry.create_factory` going live, `AppsLoader` bundling
   feature apps) — no shape change, so no bump regardless;
@@ -413,7 +416,74 @@ delegates to that same global. Wired sites:
   `CredentialPolicy` Protocol; no `CONTRACT_VERSION` bump; `DefaultCredentialPolicy`
   returns `frozenset()` so standalone redaction is byte-identical.
 - `agent.py` — `current_context().mcp_tooling.extra_mcp_servers()` merged
-  additively (`setdefault`) into the agent config build + dynamic refresh.
+  additively (`setdefault`) into the agent config build + dynamic refresh
+  after secret-key strip. `agent_identity.gateway_mcp_spec()` contributes
+  a URL-only Gateway server on workload posture via
+  `platform.agentcore_gateway.rebuild_gateway_contribution`. The AWS extra
+  substitutes a `127.0.0.1` SigV4 proxy (`platform/agentcore_sigv4.py`,
+  service `bedrock-agentcore`) for that URL so kiro-cli can
+  `InvokeGateway`. Login posture
+  withholds that spec at rebuild; `bind_session_principal` calls
+  `attach_gateway_inbound`, which writes a `0600` session sidecar —
+  bearer when `vend_gateway_inbound_token` returns a JWT, otherwise
+  URL-only for kiro-cli's MCP OAuth challenge.
+  `acp/client.py` appends `session_gateway_servers(session_key)` onto the
+  existing `session/new` `mcpServers` list. Workload has no sidecar:
+  when identity is on, that helper injects the live loopback SigV4
+  listen URL so session/new outranks a stale agent-file port after a
+  gateway restart. It never injects the unsigned https Gateway
+  hostname. Each injected HTTP element carries ``type: http`` and a
+  ``headers`` array (empty when there is no bearer) so kiro-cli's
+  untagged ``McpServer`` deserializes; a deny sidecar injects a
+  disabled HTTP placeholder rather than `{name, disabled: true}`.
+  An expired inbound sidecar
+  drains that session's ACP child (`SessionManager.remove`, map
+  preserved) before re-attach — Gateway is unpooled, so this does not
+  blue-green the mcp_gateway pool.   Unattended login never
+  attaches; unattended workload user/OBO without
+  `status().vaultedOwnerToken` injects a disabled Gateway. A bind/attach
+  error on those unattended keys writes the same deny sidecar. 3LO
+  consent is `allow_agentcore_consent_url` + owner-only GET
+  `/api/agentcore/consent` (SEL `agentcore.consent_url` /
+  `agentcore.unattended_denied`).   Settings catalog / verify / sync is
+  owner-only `GET`/`POST /api/agentcore/gateway` against
+  `platform/agentcore_inspect.py` (control-plane
+  `bedrock-agentcore-control`; data-plane MCP `tools/list` on
+  workload+IAM through the same localhost SigV4 proxy kiro-cli uses —
+  a green tools check is the agent path, not a direct signed POST to
+  the Gateway hostname; `proxy_unavailable` when that listener cannot
+  start; login skips tools with a sign-in hint). Catalog
+  `invoke_scope` is credential-proved: green when tools/list
+  reached the Gateway through that proxy, or when the Gateway id is
+  `kirocrew-*` and tools were not proved, or on login (JWT inbound).
+  A data-plane 401/403 is invoke-not even on a `kirocrew-*` id
+  (`invoke_denied`). CFN instance + successor still grant Invoke
+  only on `gateway/kirocrew-*` — this check does not widen IAM.
+  Workload
+  catalog also probes `GetWorkloadAccessToken` and discards the body
+  so a wrong or Gateway-linked identity name shows as the `identity`
+  check (`service_linked` / `identity_denied` / `not_named`); login
+  skips that probe. Target type
+  is inferred from `targetConfiguration` (`mcp.lambda` → `LAMBDA`,
+  `mcp.mcpServer` → `MCP_SERVER`) because List/Get often omit
+  `targetType`; Sync is offered only for DEFAULT MCP servers — a
+  Lambda target returns `not_syncable`. Settings authors
+  `capabilities.agentcore.workload_name` (policy-first, then env).
+  Settings-only empty stays unnamed — do not invent `kirocrew`. Launch
+  env posture without a systemd name still uses the RFC default
+  `kirocrew`. `resolved_posture()` is policy-first the same way, so
+  leftover `KIROCREW_AGENTCORE_POSTURE` cannot hide a Settings `login`.
+  Owner-dashboard PUT hot-applies the home file onto the running
+  ceiling and AWS adapter (`apply_agentcore_runtime`) and rebuilds the
+  agent config; `restart_required` stays true only when that apply
+  cannot attach the extra. Login attach
+  writes the https Gateway URL, never the workload SigV4 proxy, even
+  when env posture is still `workload`. The sidecar
+  `Authorization` value is RFC 6750 `Bearer` (the `InboundToken.scheme`
+  field stays `bearer`). Default adapter stays empty. The
+  public `probe_instance_invoke_gateway()` is a no-op False; a companion
+  must override it — False is "no mismatch detected", not "IAM inbound
+  is impossible."
 - `slack/events.py` / `slack/handler.py` / `dashboard/handlers_system.py` —
   Slack enterprise gate + SSO status route through `slack_gate` / `identity`.
 - `mcp_gateway/manager.py` — `GatewayManager._spawn_once` resolves
