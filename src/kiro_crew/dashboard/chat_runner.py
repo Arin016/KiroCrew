@@ -6608,17 +6608,11 @@ async def _run_chat(
                 # to the interactive card. A child WITH full context takes the
                 # same branches as the main agent (mode parity).
                 _child_low_fidelity = event.child_low_fidelity
-                # Verified-identity half of the fidelity split (see
-                # AcpEvent.child_mcp_identity_trusted): a remote MCP server's
-                # tool_call frame streams no rawInput, so args provenance is
-                # unrecoverable — but the _meta.kiro server/tool identity DID
-                # arrive and is non-model-authored. UNCONDITIONAL grant paths
-                # below (trust-all / YOLO / native crew), whose approve decision
-                # consumes no agent-authored event data, honor the grant for
-                # such events; content-matching paths (trusted patterns,
-                # trust-reads) stay gated on the composite fidelity because the
-                # agent-authored title/params ARE their matched input.
-                _child_grant_eligible = not _child_low_fidelity or event.child_mcp_identity_trusted
+                # Verified-identity half of the fidelity split — see
+                # AcpEvent.child_unconditional_grant_eligible for which grant
+                # paths may honor it (unconditional grants: trust-all / YOLO /
+                # native crew) and which must not (content-matching paths).
+                _child_grant_eligible = event.child_unconditional_grant_eligible
                 if _child_low_fidelity:
                     # Diagnostic for a path that is otherwise invisible in
                     # logs: without it a trust-all session watching its

@@ -6158,18 +6158,19 @@ class SubagentManager:
                     )
                     continue
                 if event.child_low_fidelity:
-                    # UNCONDITIONAL parent grant + verified canonical MCP
-                    # identity: parent_policy=auto approves regardless of
-                    # event content, and child_mcp_identity_trusted proves a
-                    # real MCP tool_call frame (non-model-authored _meta.kiro
-                    # identity, resolved non-shell) is behind this request —
-                    # only its ARGUMENTS are unverified, which this grant
-                    # never reads. Honor the grant instead of stalling a
-                    # trusted fan-out on an interactive card per call. The
-                    # hook auto-approve below stays fail-closed for these:
-                    # its auto_approve_tools patterns match the agent-authored
-                    # title, which a child could forge.
-                    if parent_policy == "auto" and event.child_mcp_identity_trusted:
+                    # UNCONDITIONAL parent grant: parent_policy=auto approves
+                    # regardless of event content, so it may honor a request
+                    # that is grant-eligible (see
+                    # AcpEvent.child_unconditional_grant_eligible — inside
+                    # this low-fidelity branch that means the canonical MCP
+                    # identity is verified and only the ARGUMENTS are
+                    # unverified, which this grant never reads). Honor the
+                    # grant instead of stalling a trusted fan-out on an
+                    # interactive card per call. The hook auto-approve below
+                    # stays fail-closed for these: its auto_approve_tools
+                    # patterns match the agent-authored title, which a child
+                    # could forge.
+                    if parent_policy == "auto" and event.child_unconditional_grant_eligible:
                         await self._approve_and_log(
                             client,
                             event.request_id,

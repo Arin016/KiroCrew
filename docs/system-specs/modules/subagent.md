@@ -100,10 +100,13 @@ recoverable command) skips steps 2–3 and is handed to the interactive callback
 with an "UNVERIFIED child request" annotation (headless: rejected), because
 every field a shortcut would judge is agent-authored. One carve-out: when the
 event's canonical MCP identity IS verified (`child_mcp_identity_trusted` — the
-`_meta.kiro` server/tool pair resolved from the tool_call cache, resolved
+`_meta.kiro` server/tool pair resolved from the tool_call cache, carrying the
+explicit `mcp_identity_trusted` provenance flag those cache hits set, resolved
 non-shell; the shape a remote MCP server produces by streaming empty
 `rawInput`), the **unconditional** `parent_policy == "auto"` grant still
-auto-approves: its decision consumes no agent-authored event data, only the
+auto-approves — the call site reads the hoisted
+`AcpEvent.child_unconditional_grant_eligible` property: its decision consumes
+no agent-authored event data, only the
 arguments remain unverified. The hook auto-approve (title-pattern-matched) and
 every content-matching path stay fail-closed on the composite fidelity.
 

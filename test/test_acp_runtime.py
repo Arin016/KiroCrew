@@ -6944,6 +6944,7 @@ def test_child_mcp_identity_trusted_isolates_verified_identity():
             is_shell=False,
             mcp_server_name="example-server",
             tool_name="get-item",
+            mcp_identity_trusted=True,
         )
         base.update(overrides)
         return AcpEvent(**base)
@@ -6964,12 +6965,99 @@ def test_child_mcp_identity_trusted_isolates_verified_identity():
     # Cache-missed identity halves are each fail-closed.
     assert _ev(mcp_server_name="").child_mcp_identity_trusted is False
     assert _ev(tool_name="").child_mcp_identity_trusted is False
+    # THE HARDENING: non-empty identity fields alone are NOT provenance. An
+    # event populated by any path that did not earn the explicit flag (e.g. a
+    # future inline/agent-authored fallback) stays untrusted.
+    assert _ev(mcp_identity_trusted=False).child_mcp_identity_trusted is False
     # Full-fidelity child: the property may hold too, and grant callers use
-    # `not child_low_fidelity or child_mcp_identity_trusted` — both True is
-    # consistent, not contradictory.
+    # ``child_unconditional_grant_eligible`` — both True is consistent, not
+    # contradictory.
     full = _ev(raw_params_trusted=True, raw_tool_params={"itemId": "i-1"})
     assert full.child_low_fidelity is False
     assert full.child_mcp_identity_trusted is True
+
+
+def test_mcp_identity_trusted_defaults_false():
+    """The provenance flag is opt-in at trusted population sites only: a bare
+    construction (the shape any future untrusted path would produce) reads
+    False."""
+    from kiro_crew.acp.types import AcpEvent
+
+    assert AcpEvent(kind="permission_request").mcp_identity_trusted is False
+
+
+def test_child_unconditional_grant_eligible_matches_consumer_shapes():
+    """The hoisted grant-eligibility property is exactly
+    ``not child_low_fidelity or child_mcp_identity_trusted`` — pinned across
+    every fidelity/identity combination the three approval surfaces
+    (dashboard runner, Slack gateway, subagent manager) can see."""
+    from kiro_crew.acp.types import AcpEvent
+
+    # Full-fidelity child (low_fidelity False): eligible regardless of identity.
+    full = AcpEvent(
+        kind="permission_request",
+        sub_session_id="child-a",
+        shell_classified=True,
+        is_shell=False,
+        raw_params_trusted=True,
+        raw_tool_params={"k": "v"},
+    )
+    assert full.child_low_fidelity is False
+    assert full.child_unconditional_grant_eligible is True
+    # Low-fidelity child with verified identity: eligible.
+    identity = AcpEvent(
+        kind="permission_request",
+        sub_session_id="child-a",
+        shell_classified=True,
+        is_shell=False,
+        mcp_server_name="example-server",
+        tool_name="get-item",
+        mcp_identity_trusted=True,
+    )
+    assert identity.child_low_fidelity is True
+    assert identity.child_unconditional_grant_eligible is True
+    # Low-fidelity child, identity unverified: NOT eligible.
+    blind = AcpEvent(kind="permission_request", sub_session_id="child-a")
+    assert blind.child_low_fidelity is True
+    assert blind.child_unconditional_grant_eligible is False
+    # Non-empty identity WITHOUT the provenance flag: still NOT eligible (the
+    # hardening the flag buys, seen from the grant surface).
+    forged = AcpEvent(
+        kind="permission_request",
+        sub_session_id="child-a",
+        shell_classified=True,
+        is_shell=False,
+        mcp_server_name="example-server",
+        tool_name="get-item",
+    )
+    assert forged.child_low_fidelity is True
+    assert forged.child_unconditional_grant_eligible is False
+    # Non-child events are always eligible.
+    assert AcpEvent(kind="permission_request").child_unconditional_grant_eligible is True
+    # Exhaustive equivalence against the un-hoisted expression.
+    for lf_overrides in (
+        {},  # low fidelity (no trusted params)
+        {"raw_params_trusted": True, "raw_tool_params": {"k": "v"}},  # full fidelity
+    ):
+        for id_overrides in (
+            {},
+            {
+                "mcp_server_name": "example-server",
+                "tool_name": "get-item",
+                "mcp_identity_trusted": True,
+            },
+        ):
+            ev = AcpEvent(
+                kind="permission_request",
+                sub_session_id="child-a",
+                shell_classified=True,
+                is_shell=False,
+                **lf_overrides,
+                **id_overrides,
+            )
+            assert ev.child_unconditional_grant_eligible == (
+                not ev.child_low_fidelity or ev.child_mcp_identity_trusted
+            )
 
 
 def test_remote_mcp_empty_rawinput_keeps_identity_through_dispatch():
@@ -7021,7 +7109,88 @@ def test_remote_mcp_empty_rawinput_keeps_identity_through_dispatch():
         assert event.child_low_fidelity is True
         assert event.mcp_server_name == "example-server"
         assert event.tool_name == "get-item"
+        # The real permission builder earns the provenance flag: the identity
+        # pair resolved from the origin-scoped caches, never inline.
+        assert event.mcp_identity_trusted is True
         assert event.child_mcp_identity_trusted is True
+        assert event.child_unconditional_grant_eligible is True
+
+
+def test_permission_event_cache_miss_does_not_earn_identity_flag():
+    """The provenance flag is HIT-derived, never availability-derived: a
+    permission frame whose toolCallId has NO cache entry (wired caches, no
+    preceding tool_call) must read mcp_identity_trusted False — the flag
+    reports where the values CAME FROM, so a future inline fallback that
+    populates the identity fields on a miss stays untrusted."""
+    from kiro_crew.acp._dispatch import build_permission_event
+
+    class _Msg:
+        id = 91
+        method = "session/request_permission"
+        params = {
+            "sessionId": "child-a",
+            "toolCall": {
+                "toolCallId": "tc-never-seen",
+                "title": "@example-server/get-item",
+                "input": {"itemId": "item-0001"},
+            },
+            "options": [{"optionId": "allow_once", "name": "Allow", "kind": "allow_once"}],
+        }
+
+    event, _ = build_permission_event(
+        _Msg(),
+        tool_input_cache={},
+        shell_cache={},
+        raw_params_cache={},
+        mcp_server_name_cache={},
+        tool_name_cache={},
+        cache_scope="child-a",
+    )
+    assert event.mcp_server_name == ""
+    assert event.tool_name == ""
+    assert event.mcp_identity_trusted is False
+    # Asymmetric hit: BOTH reads must hit — a lone server-name entry (a
+    # partial/older writer) earns nothing.
+    event2, _ = build_permission_event(
+        _Msg(),
+        tool_input_cache={},
+        shell_cache={},
+        raw_params_cache={},
+        mcp_server_name_cache={"child-a|tc-never-seen": "example-server"},
+        tool_name_cache={},
+        cache_scope="child-a",
+    )
+    assert event2.mcp_server_name == "example-server"
+    assert event2.tool_name == ""
+    assert event2.mcp_identity_trusted is False
+    event3, _ = build_permission_event(
+        _Msg(),
+        tool_input_cache={},
+        shell_cache={},
+        raw_params_cache={},
+        mcp_server_name_cache={},
+        tool_name_cache={"child-a|tc-never-seen": "get-item"},
+        cache_scope="child-a",
+    )
+    assert event3.mcp_server_name == ""
+    assert event3.tool_name == "get-item"
+    assert event3.mcp_identity_trusted is False
+    # The None-vs-"" distinction is the load-bearing half: a written entry may
+    # legitimately be "" (host shell/builtin tool_call caches "" for both), and
+    # that HIT still earns the flag — deriving trust from value non-emptiness
+    # instead of the hit is exactly the conflation the flag exists to remove.
+    event4, _ = build_permission_event(
+        _Msg(),
+        tool_input_cache={},
+        shell_cache={},
+        raw_params_cache={},
+        mcp_server_name_cache={"child-a|tc-never-seen": ""},
+        tool_name_cache={"child-a|tc-never-seen": ""},
+        cache_scope="child-a",
+    )
+    assert event4.mcp_server_name == ""
+    assert event4.tool_name == ""
+    assert event4.mcp_identity_trusted is True
 
 
 @pytest.mark.asyncio

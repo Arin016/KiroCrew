@@ -1752,18 +1752,19 @@ class GatewayOrchestrator:
             # or a foreign event type) must not accidentally enter the
             # restricted path on a truthy non-bool.
             _child_lf = getattr(event, "child_low_fidelity", False) is True
-            # Verified-identity half of the fidelity split (see
-            # AcpEvent.child_mcp_identity_trusted): grant-eligible when full
-            # fidelity OR the canonical MCP server/tool identity resolved from
-            # the tool_call cache (arguments unverified). UNCONDITIONAL
-            # shortcuts below — ones whose approve decision consumes no
-            # agent-authored event data (per-source auto-approve, --approval
-            # yolo, the YOLO override, slot trust) — honor their grant for
-            # such events; the 'reads' mode stays gated on the composite
-            # ``_child_lf`` because it MATCHES the agent-authored title.
-            # Same strict ``is True`` rationale as ``_child_lf``.
+            # Hoisted grant-eligibility — see
+            # AcpEvent.child_unconditional_grant_eligible for which shortcuts
+            # below may honor it (per-source auto-approve, --approval yolo,
+            # the YOLO override, slot trust) and which must not (the 'reads'
+            # mode MATCHES the agent-authored title). The outer
+            # ``not _child_lf`` short-circuit keeps a foreign event type or
+            # mock — which never entered the restricted path via the strict
+            # ``_child_lf`` probe — eligible without consulting an attribute
+            # it may not have; the property is only reached for a genuinely
+            # low-fidelity event, with the same strict ``is True`` rationale
+            # as ``_child_lf``.
             _child_grant_eligible = (not _child_lf) or (
-                getattr(event, "child_mcp_identity_trusted", False) is True
+                getattr(event, "child_unconditional_grant_eligible", False) is True
             )
             # Background callers pass the authoritative parent session key. Prefer it
             # over a request-ID resolver because tool permission IDs are opaque UUIDs,

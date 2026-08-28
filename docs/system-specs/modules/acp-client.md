@@ -100,8 +100,12 @@ absent `rawInput`, so the params cache stays empty and every child permission
 request for such a tool is low-fidelity (`AcpEvent.child_low_fidelity`). The
 `_meta.kiro` identity caches are written unconditionally from the same frame, so
 the permission event still carries the verified `mcp_server_name`/`tool_name`
-pair; `AcpEvent.child_mcp_identity_trusted` exposes that verified-identity half
-(arguments unverified) for the unconditional grant paths documented in
+pair plus the explicit `mcp_identity_trusted` provenance flag (set only when
+BOTH cache reads hit — mirroring `raw_params_trusted`, so an inline fallback
+can never count as verified); `AcpEvent.child_mcp_identity_trusted` exposes
+that verified-identity half (arguments unverified) and
+`AcpEvent.child_unconditional_grant_eligible` hoists the grant-eligibility
+expression for the unconditional grant paths documented in
 `security.md` § Child-fidelity split.
 
 The handshake also branches on the backend:
