@@ -877,9 +877,17 @@ class CapabilityGate:
             for k, v in raw_scopes.items()
             if isinstance(v, dict)
         }
-        enabled = d.get("enabled")
+        if "enabled" not in d:
+            enabled_flag = default_enabled
+        else:
+            enabled = d["enabled"]
+            if not isinstance(enabled, bool):
+                raise PlatformCompositionError(
+                    f"CapabilityGate.enabled must be a boolean, got {enabled!r}"
+                )
+            enabled_flag = enabled
         return CapabilityGate(
-            enabled=bool(enabled) if enabled is not None else default_enabled,
+            enabled=enabled_flag,
             scopes=scopes,
         )
 
