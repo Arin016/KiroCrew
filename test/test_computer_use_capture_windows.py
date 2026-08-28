@@ -604,8 +604,8 @@ class TestEnsureShotsDir:
         assert made == [str(target)]
 
     def test_the_tighten_runs_ONCE_per_process(self, monkeypatch, tmp_path) -> None:
-        """``restrict_to_owner`` shells out to icacls on Windows; once per screenshot
-        would put a subprocess on the capture path."""
+        """``restrict_to_owner`` rewrites a DACL on Windows; once per screenshot
+        would put that on the capture path."""
         calls: list = []
         monkeypatch.setattr(C, "shots_dir", lambda: str(tmp_path / "s"))
         monkeypatch.setattr(C, "_dir_ready", False)

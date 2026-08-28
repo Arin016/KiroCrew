@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit as _urlsplit
 
-from kiro_crew import __version__, model_registry, platform_compat
+from kiro_crew import __version__, model_registry, platform_compat, windows_acl
 
 # Leaf module (stdlib + platform_compat only) — no import cycle with config.
 from kiro_crew.atomic_write import atomic_write
@@ -969,17 +969,22 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     ``atomic_write``'s ``mode`` routes through ``fchmod_safe``, which applies the
     mode on POSIX and is a documented no-op on Windows.
 
-    **This deliberately does NOT call ``platform_compat.restrict_to_owner``.**
-    That helper shells out to ``icacls`` on Windows (``subprocess.run``, 10s
-    timeout), and this function is called from ``async`` request handlers and from
-    ``KiroCrewConfig.save()`` — so invoking it here would put a blocking subprocess
-    on the gateway's asyncio event loop, freezing every task including the liveness
-    heartbeat (the ``no-blocking-call-on-event-loop`` rule; the repo offloads that
-    helper via ``asyncio.to_thread`` everywhere else for exactly this reason).
-    Omitting it is no worse than the truncate-then-write this replaced, which
-    applied no DACL either, while ``mode`` still tightens the POSIX case and new
-    files are created ``0600``. A caller that needs a hard owner-only guarantee on
-    Windows must offload ``restrict_to_owner`` itself, off the loop.
+    **Windows gets a real owner-only DACL, not just the inert mode.** This used
+    to deliberately skip ``platform_compat.restrict_to_owner`` because that helper
+    shelled out to ``icacls`` — a blocking subprocess this function could not
+    afford, being called from ``async`` request handlers and from
+    ``KiroCrewConfig.save()``. That constraint no longer exists: the lockdown is
+    applied in-process through ``advapi32`` (measured at 0.24 ms, against 313 ms
+    for the subprocess it replaced), so it is safe on the event loop and the
+    reason to omit it is gone. Since ``config.json`` can carry inline provider
+    tokens and API keys, applying it is the correct default rather than a duty
+    pushed onto each caller.
+
+    The two guarantees do not collide, because they apply on different platforms:
+    mode preservation is a POSIX concept (Windows has no bits to preserve), and
+    the DACL is a Windows concept. Hence the platform branch below rather than
+    passing both to ``atomic_write``, which refuses ``restrict_to_owner=True``
+    alongside a wider explicit ``mode``.
 
     **Symlinks are followed, not replaced.** ``os.replace`` renames over the link
     itself, turning a symlinked ``config.json`` into a regular file and orphaning
@@ -994,12 +999,68 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
             path = path.resolve()
     except OSError:
         pass
+    # Decide the Windows lockdown HERE, before the stat and the mkdir below and
+    # before anything atomic_write does -- every one of those is a round-trip on a
+    # network-homed data home, and this function runs inline on the event loop
+    # (async dashboard handlers reach it on every config write). A DACL write to a
+    # UNC or mapped-drive path is an unbounded SMB round-trip, so it has to be
+    # ruled out before the work starts rather than part way through.
+    #
+    # This sits just AFTER the symlink resolve rather than at the very top of the
+    # function, and deliberately: a config symlinked into a dotfiles repo (which
+    # the docstring above calls a normal setup) can point at a DIFFERENT volume
+    # than the link, so classifying before resolving would classify the wrong one.
+    # The resolve is two stats; the earliest CORRECT point is here.
+    lock_down = platform_compat.IS_POSIX
+    if not platform_compat.IS_POSIX:
+        try:
+            lock_down = windows_acl.volume_is_local(path)
+        except Exception:
+            # A descriptor API that cannot be loaded cannot tell us the volume is
+            # local, and the lockdown would have failed on this host anyway.
+            lock_down = False
+        if not lock_down:
+            logger.warning(
+                "config write: %s is on a non-local volume, so the owner-only "
+                "DACL was SKIPPED to avoid blocking the event loop on SMB; the "
+                "file may be readable by other local users",
+                path,
+            )
     try:
         mode = _stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     except OSError:
         mode = 0o600
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, json.dumps(data, indent=2) + "\n", fsync=fsync, mode=mode)
+    payload = json.dumps(data, indent=2) + "\n"
+    if platform_compat.IS_POSIX:
+        atomic_write(path, payload, fsync=fsync, mode=mode)
+    elif lock_down:
+        # Windows: the mode bits above are inert (fchmod_safe is a documented
+        # no-op), so there is nothing to preserve and no conflict with
+        # restrict_to_owner's implied 0600. Taking the lockdown here rather than
+        # leaving it to callers also closes the window a post-write lockdown
+        # would leave: atomic_write applies the DACL to the temp file BEFORE any
+        # content reaches it, so an inline credential never exists in a file
+        # readable by other local accounts.
+        #
+        # restrict_on_error="warn", not the default "raise": config.json must not
+        # become unwritable because a DACL could not be applied. Same trade-off
+        # sel.py and dashboard/refresh_tokens.py already take, and strictly
+        # better than the previous behavior, which applied no DACL at all.
+        atomic_write(
+            path,
+            payload,
+            fsync=fsync,
+            restrict_to_owner=True,
+            restrict_on_error="warn",
+        )
+    else:
+        # Non-local volume: exactly the write this branch did before the lockdown
+        # was added, so a network-homed data home is no worse off than before and
+        # a local one is now protected. The residual is real and declared -- the
+        # file keeps its inherited ACL. Making this function's filesystem work
+        # async is the cause-level fix and is tracked separately (#6353).
+        atomic_write(path, payload, fsync=fsync, mode=mode)
 
 
 def update_config_locked(
@@ -8437,14 +8498,15 @@ class KiroCrewConfig:
             # Enforce restrictive permissions on the credential file. POSIX
             # only: on Windows mode bits are meaningless (a chmod there
             # toggles the read-only attribute and succeeds without narrowing
-            # who can read), and the real owner-only lockdown —
-            # ``platform_compat.restrict_to_owner`` — spawns ``icacls``, a
-            # blocking subprocess this reader must never run: it is called
-            # from async request handlers on the gateway's event loop (the
-            # same constraint ``write_config_atomically`` documents). Windows
-            # enforcement therefore lives where the file is WRITTEN — the
-            # setup wizard and the dashboard credential writers all apply
-            # ``restrict_to_owner`` off the loop at write time.
+            # who can read), and the real owner-only lockdown --
+            # ``platform_compat.restrict_to_owner`` -- is not applied on this
+            # READ path. It no longer spawns a subprocess, so the reason is no
+            # longer cost: it is that a reader has no business rewriting a
+            # descriptor it did not create, and doing so here would apply the
+            # DACL of whichever process happened to read the file next.
+            # Windows enforcement therefore lives where the file is WRITTEN --
+            # the setup wizard and the dashboard credential writers all apply
+            # ``restrict_to_owner`` at write time.
             try:
                 if platform_compat.IS_POSIX and ep.stat().st_mode & 0o077:
                     ep.chmod(0o600)
