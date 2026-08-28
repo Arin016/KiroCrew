@@ -283,8 +283,16 @@ decided by the shared `normalizeModelKey`
 (`website/src/lib/model.ts`, mirroring the backend `_normalize_model_key`): dotted vs
 dashed spellings and case fold, and `auto`/`default` fold to "no pin", so an honored
 pin whose wire spelling differs does not false-flag. Wave-digest completions
-(`wave_chunk_meta`/`wave_final_meta`) do NOT yet carry model fields — batch members
-are unauditable for now (scoped increment; tracked as follow-up).
+(`wave_chunk_meta`/`wave_final_meta`) carry no structured model field, but each
+member's **served** model is surfaced inline in the digest body
+(`ok_lines`/`fail_lines`) that both the parent LLM and the card already read —
+`— \`id\` ✅ task · model <served>` — so batch members are auditable for which
+model actually ran. Only the served id is shown (no requested/downgrade
+qualifier): a raw requested-vs-resolved inequality is not the card's downgrade
+fold and would false-amber every member of a normal `auto`-pinned wave, so the
+amber-downgrade signal stays a single-completion concern until this shares the
+card's fold (or #5339's registry fold). The value is redacted through the
+display context before it enters the broadcast digest text.
 ## Completion Injection
 
 Subagent results are routed back to the **originating session** via
