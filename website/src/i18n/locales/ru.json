@@ -8744,6 +8744,7 @@
         "subagents": "Субагенты",
         "model_label": "Модель: {{model}}",
         "model_downgraded": "Запрошено {{requested}}, использовано {{resolved}}",
+        "model_effective": "Работает на {{model}} (бэкэнд выбирает модель)",
         "waiting_for_output": "Ожидание вывода…",
         "waiting_to_start_queued_behind_the_concurrency_l": "ожидает запуска — в очереди из-за лимита одновременных запусков",
         "workflows": "Рабочие процессы",

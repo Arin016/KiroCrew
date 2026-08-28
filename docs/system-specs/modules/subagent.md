@@ -259,7 +259,8 @@ Every subagent card names the model the run actually ran on, so a model-pinned
 review's real model is auditable. `SubagentInfo` carries two fields: `requested_model`
 — the EFFECTIVE pin, i.e. the per-spawn `model` OR, when empty, the
 `agent.role_models['subagent']` config pin (AGENTS.md's documented way to pin a
-subagent model), resolved once at spawn — and `resolved_model`, the id the live
+subagent model), resolved once at spawn; `"auto"` when completely unpinned (no
+per-spawn model, no role pin) — and `resolved_model`, the id the live
 session actually served, read via the provider's public `served_model` accessor
 (`_resolved_model_of`, which normalizes the `DEFAULT_MODEL` "auto" sentinel to `""`
 = unknown). `resolved_model` is captured at spawn (ACP reports it immediately) and
@@ -278,8 +279,10 @@ agent pill and flags a **downgrade** — an amber chip plus a persistent
 on BOTH the completion card AND the **live** Subagents-panel row (`ActivityViewer`),
 so a mis-pinned run is visible mid-flight, not only at completion. Because the pin
 rides `subagent_done` (and its reconnect replay), a downgraded run that completes
-before a reconnect rehydrates its card with the amber flag intact. "Same model" is
-decided by the shared `normalizeModelKey`
+before a reconnect rehydrates its card with the amber flag intact. For unpinned
+spawns `requested_model="auto"` records the sentinel so the frontend shows a neutral
+chip rather than hiding the column. "Same model" is decided by the shared
+`normalizeModelKey`
 (`website/src/lib/model.ts`, mirroring the backend `_normalize_model_key`): dotted vs
 dashed spellings and case fold, and `auto`/`default` fold to "no pin", so an honored
 pin whose wire spelling differs does not false-flag. Wave-digest completions

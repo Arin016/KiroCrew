@@ -8618,6 +8618,7 @@
         "subagents": "Sous-agents",
         "model_label": "Modèle : {{model}}",
         "model_downgraded": "Demandé {{requested}}, servi {{resolved}}",
+        "model_effective": "Exécution sur {{model}} (le backend sélectionne le modèle)",
         "waiting_for_output": "En attente de la sortie…",
         "waiting_to_start_queued_behind_the_concurrency_l": "en attente de démarrage — mis en file derrière la limite de concurrence",
         "workflows": "Workflows",

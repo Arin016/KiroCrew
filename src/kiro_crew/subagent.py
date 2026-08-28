@@ -1352,7 +1352,8 @@ class SubagentInfo:
     # downgrade comparison must use: a config-pinned run served a different model
     # is exactly the "unverifiable pin" this feature exists to catch, and keying
     # off the bare per-spawn ``model`` would miss it (Design review on #3582).
-    # "" ⇒ no pin (the provider default). Resolved once at spawn.
+    # ``"auto"`` ⇒ unpinned (no per-spawn pin, no role pin — the provider picks
+    # the model). Resolved once at spawn.
     requested_model: str = ""
     # Per-call reasoning-effort override (spawn_run ``reasoning_effort``).
     # Wins over the ``role_efforts['subagent']`` pin; ``""`` defers to it.
@@ -5558,10 +5559,13 @@ class SubagentManager:
         # keep deferring to the provider's configured default, exactly as before.
         eff_model = info.model or _subagent_default_model()
         # Record the EFFECTIVE pin (per-spawn OR the role_models['subagent']
-        # config pin) as the requested side of the downgrade comparison — keying
-        # off the bare per-spawn ``model`` would miss a config-pinned run served a
-        # different model (Design review on #3582).
-        info.requested_model = eff_model
+        # config pin, via ``_subagent_default_model()``) as the requested side of
+        # the downgrade comparison — keying off the bare per-spawn ``model`` would
+        # miss a config-pinned run served a different model (Design review #3582).
+        # For completely unpinned spawns (no per-spawn pin, no role pin) ``eff_model``
+        # is ``""``; fall back to the literal ``"auto"`` sentinel so the frontend
+        # can show a neutral chip instead of nothing at all (#5869).
+        info.requested_model = eff_model or "auto"
         if eff_model:
             extra_kwargs["model"] = eff_model
         # Sub-agent reasoning effort (per-call override -> role_efforts['subagent']

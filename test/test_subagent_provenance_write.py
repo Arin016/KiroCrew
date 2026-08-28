@@ -239,3 +239,43 @@ def test_update_state_reports_write_vs_skip(tmp_path: object) -> None:
     assert state is not None and state["requested_model"] == "model-req"
     # No folder / no state.json: the merge is skipped and reported as such.
     assert update_state("prov-rc-missing", requested_model="model-req") is False
+
+
+@pytest.mark.asyncio
+async def test_unpinned_spawn_records_requested_model_auto() -> None:
+    """An unpinned spawn (no per-spawn model, no role-model pin) records
+    ``requested_model="auto"`` rather than ``""`` so the frontend can show a
+    neutral chip instead of hiding the model column entirely (#5869).
+    ``isModelDowngrade("auto", <any>)`` is already guarded to return False, so
+    this never triggers a false amber warning."""
+    sessions = _mock_sessions(served_model="claude-opus-4.8")
+    manager = SubagentManager(
+        sessions=sessions,
+        ctx_builder=_mock_ctx_builder(),
+        is_yolo=lambda: True,
+    )
+    # No per-spawn model pin; simulate no role-model config pin either.
+    info = SubagentInfo(id="prov-auto01", task="unpinned task", model="")
+    manager._agents[info.id] = info
+
+    provenance: list[dict[str, Any]] = []
+
+    def _spy_update(agent_id: str, **kwargs: Any) -> bool:
+        if "requested_model" in kwargs:
+            provenance.append(dict(kwargs))
+        return True
+
+    with (
+        patch("kiro_crew.subagent.Stats"),
+        patch("kiro_crew.subagent.sel"),
+        patch("kiro_crew.subagent.update_state", side_effect=_spy_update),
+        # Patch _subagent_default_model to return "" (no role pin configured);
+        # with eff_model="" the assignment simplifies to "auto" directly.
+        patch("kiro_crew.subagent._subagent_default_model", return_value=""),
+    ):
+        await manager._run_inner(info, f"subagent:{info.id}")
+
+    assert provenance, "provenance write must still happen for an unpinned spawn"
+    assert (
+        provenance[0]["requested_model"] == "auto"
+    ), f"unpinned spawn must record requested_model='auto', got {provenance[0]['requested_model']!r}"
