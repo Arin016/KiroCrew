@@ -1782,8 +1782,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "Уже завершено — расшифровка в «Прежних сессиях».",
           "couldn_t_start": "не удалось запустить",
-          "resume": "Продолжить"
+          "resume": "Продолжить",
+          "start_over": "Начать заново"
         },
         "aiSummaryCard": {
           "ai_summary": "ИИ-сводка",

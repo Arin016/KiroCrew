@@ -1718,8 +1718,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "すでに完了。記録は「以前のセッション」にあります。",
           "couldn_t_start": "開始できませんでした",
-          "resume": "再開"
+          "resume": "再開",
+          "start_over": "やり直す"
         },
         "aiSummaryCard": {
           "ai_summary": "AI要約",

@@ -1710,8 +1710,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "पहले ही पूरा — प्रतिलेख पुराने सत्र में।",
           "couldn_t_start": "शुरू नहीं हो सका",
-          "resume": "फिर शुरू करें"
+          "resume": "फिर शुरू करें",
+          "start_over": "फिर से शुरू करें"
         },
         "aiSummaryCard": {
           "ai_summary": "AI सारांश",

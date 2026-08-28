@@ -307,7 +307,9 @@
       },
       "components": {
         "agentSessionButton": {
-          "resume": "Resume"
+          "already_finished_its_session_was_closed": "Already finished — transcript under Older Sessions.",
+          "resume": "Resume",
+          "start_over": "Start over"
         },
         "aiSummaryCard": {
           "outdated": "outdated",

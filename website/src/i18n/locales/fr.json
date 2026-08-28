@@ -1790,8 +1790,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "Déjà terminé — transcription sous Sessions précédentes.",
           "couldn_t_start": "impossible à démarrer",
-          "resume": "Reprendre"
+          "resume": "Reprendre",
+          "start_over": "Recommencer"
         },
         "aiSummaryCard": {
           "ai_summary": "Résumé IA",

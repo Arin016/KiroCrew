@@ -1674,8 +1674,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "已经完成 — 记录在“以前的会话”中。",
           "couldn_t_start": "无法启动",
-          "resume": "恢复"
+          "resume": "恢复",
+          "start_over": "重新开始"
         },
         "aiSummaryCard": {
           "ai_summary": "AI 摘要",

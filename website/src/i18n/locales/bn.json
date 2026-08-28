@@ -1710,8 +1710,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "ইতিমধ্যে সম্পন্ন — প্রতিলিপি পুরোনো সেশনে।",
           "couldn_t_start": "শুরু করা যায়নি",
-          "resume": "আবার শুরু করো"
+          "resume": "আবার শুরু করো",
+          "start_over": "আবার শুরু করুন"
         },
         "aiSummaryCard": {
           "ai_summary": "AI সারসংক্ষেপ",

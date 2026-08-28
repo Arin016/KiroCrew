@@ -1746,8 +1746,10 @@
       },
       "components": {
         "agentSessionButton": {
+          "already_finished_its_session_was_closed": "Ya finalizado: transcripción en Sesiones anteriores.",
           "couldn_t_start": "no se pudo iniciar",
-          "resume": "Reanudar"
+          "resume": "Reanudar",
+          "start_over": "Empezar de nuevo"
         },
         "aiSummaryCard": {
           "ai_summary": "Resumen de IA",
