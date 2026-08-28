@@ -516,8 +516,10 @@ def deploy(
     :func:`aws.run_aws` for the (long) deploy call so a caller running deploy on
     a background thread can terminate the child on Ctrl+C.
     ``agentcore_posture`` of ``workload`` or ``login`` creates an Amazon
-    Bedrock AgentCore standalone WorkloadIdentity and uses the successor
-    instance boundary.
+    Bedrock AgentCore standalone WorkloadIdentity and CreateRole's the
+    instance under the successor boundary. That policy must already
+    exist (``iam-boundary --agentcore``); the generated launcher cannot
+    CreateRole it, so AgentCore launches need admin credentials.
     """
     if not dry_run:
         aws.assert_human_action("cloudformation:CreateStack")
@@ -539,7 +541,6 @@ def deploy(
     posture = iam.normalize_agentcore_posture(agentcore_posture)
     workload_name = iam.agentcore_workload_name(tag, posture)
     agentcore_gateway_url = iam.normalize_agentcore_gateway_url(agentcore_gateway_url)
-    boundary_name = iam.AGENTCORE_BOUNDARY_NAME if posture != "none" else iam.BOUNDARY_NAME
 
     if ship_source is None:
         ship_source = source_mod.find_repo_root() is not None
@@ -584,7 +585,14 @@ def deploy(
     # InstanceRole is capped by it. Done before the source upload so a
     # boundary-create failure (e.g. missing iam:CreatePolicy) surfaces before we
     # ship anything to S3.
-    boundary_arn = source_mod.ensure_instance_boundary(profile, region, name=boundary_name)
+    # none-posture CreateRole uses the original boundary (generated
+    # launcher grant). AgentCore posture GetPolicy's the admin-pre-created
+    # successor and passes that ARN — the CreateRole IAM gate then
+    # requires admin credentials. Do not CreatePolicy the successor here.
+    if posture in ("workload", "login"):
+        boundary_arn = source_mod.require_agentcore_boundary(profile, region)
+    else:
+        boundary_arn = source_mod.ensure_instance_boundary(profile, region)
 
     # Package + upload the local source so the box installs from S3 (no GitHub
     # access needed). Fall back to a git clone only if source shipping is off.
