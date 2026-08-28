@@ -2970,6 +2970,30 @@ class DashboardConfig:
             "to the peer it was established from.",
         ),
     )
+    qr_session_persist_across_restart: bool = field(
+        default=False,
+        metadata=_meta(
+            "Phone Sign-In Survives A Gateway Restart",
+            'REQUIRES BOTH: "Phone Sign-In Lasts Until Restart" must also be ON, '
+            "and tailnet identity trust must be configured "
+            "(`dashboard.tailscale.trust_identity` with a non-empty "
+            "`allowed_logins`). Without either one this setting is ignored and a "
+            "warning naming the missing prerequisite is logged. Note the first "
+            'requirement is NOT a contradiction: "Lasts Until Restart" is what '
+            "issues the renewable credential, and this setting then removes the "
+            "restart bound from it -- turning that one OFF instead leaves a "
+            "session that expires on a fixed clock, with nothing to renew. "
+            "What it does: let a scanned phone stay signed in across gateway "
+            "restarts, so one scan lasts until the refresh credential's own "
+            "30-day lifetime lapses. OFF by default because a restart is "
+            "otherwise a hard sign-out that needs no recorded state. The "
+            "identity requirement is not optional bookkeeping: behind "
+            "`tailscale serve` every request reaches the gateway from 127.0.0.1, "
+            "so without a daemon-verified peer identity the session is a bearer "
+            "credential any tailnet peer could replay, and outliving the process "
+            "is exactly what makes that matter.",
+        ),
+    )
     restore_window_minutes: int = field(
         default=30,
         metadata=_meta(
@@ -7751,6 +7775,9 @@ class KiroCrewConfig:
                 restore_sessions=dashboard_data.get("restore_sessions", False),
                 qr_session_until_restart=_safe_bool(
                     dashboard_data.get("qr_session_until_restart"), True
+                ),
+                qr_session_persist_across_restart=_safe_bool(
+                    dashboard_data.get("qr_session_persist_across_restart"), False
                 ),
                 restore_window_minutes=dashboard_data.get("restore_window_minutes", 30),
                 surface_channel_sessions=dashboard_data.get("surface_channel_sessions", True),

@@ -29,7 +29,6 @@ from kiro_crew.dashboard.state import VALID_MEMORY_MODES, DashboardState
 from kiro_crew.dashboard.token_auth import (
     MAX_SESSION_TTL_SECS,
     _b64url_decode,
-    _cookie_port_from_host,
 )
 from kiro_crew.messaging.link import is_channel_session_key
 from kiro_crew.messaging.privacy_mode import hydrate as _hydrate_conv_flags
@@ -1527,15 +1526,18 @@ def _caller_bounds(request: web.Request) -> tuple[dict[str, str], int]:
     payload: a caller whose bounds cannot be established gets a bounded
     (no-refresh, default-TTL-capped) link rather than an unbounded one.
 
-    **Extraction order must mirror the middleware's, query param before cookie.**
-    Only the credential the middleware actually validated has a verified
-    signature; the other one was never checked. The middleware prefers
-    ``?token=`` (``token_auth`` middleware and ``_extract_and_validate``, both
-    ``request.query.get("token") or request.cookies.get(...)``), so reading the
-    cookie first would let a request that authenticated with a bounded query
-    token have its bounds read from an unverified, attacker-settable cookie —
-    dropping ``no_refresh`` and raising the TTL ceiling to the full maximum,
-    which is precisely the ceiling-escape this function exists to prevent.
+    **Read the credential the middleware VALIDATED, not a re-extracted one.**
+    Only that credential has a verified signature; the other one was never
+    checked. ``token_auth`` publishes it as ``request["auth_token"]`` for
+    exactly this reason: its own extraction prefers ``?token=`` but falls back
+    to the session cookie when the query token is invalid, so re-deriving with
+    a fixed query-then-cookie order could pick the credential that was NOT
+    validated — letting a request that authenticated with a bounded cookie have
+    its bounds read from an unverified, attacker-settable query token, dropping
+    ``no_refresh`` and raising the TTL ceiling to the full maximum, which is
+    precisely the ceiling-escape this function exists to prevent. When no
+    credential was published (a surface that authenticated by another means),
+    the mint is bounded fail-closed the same way an unreadable payload is.
 
     **A non-positive remaining lifetime is never rounded up.** Clamping it to a
     floor of one second would let a caller whose own session has just run out
@@ -1544,9 +1546,8 @@ def _caller_bounds(request: web.Request) -> tuple[dict[str, str], int]:
     indefinitely from a session that should already be dead. Report ``0`` and
     let the caller be refused.
     """
-    port = request.app.get("port", 7777)
-    cookie_name = f"mc_token_{_cookie_port_from_host(request, port)}"
-    token = request.query.get("token", "") or request.cookies.get(cookie_name, "")
+    published = request.get("auth_token", "")
+    token = published if isinstance(published, str) else ""
     carried: dict[str, str] = {}
     ttl_ceiling = MAX_SESSION_TTL_SECS
     if not token:

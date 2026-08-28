@@ -23,6 +23,7 @@ from kiro_crew.dashboard.token_auth import (
     app_token_path_allowed,
     bind_token_ip,
     check_token_ip,
+    claims_an_app_unverified,
     generate_token,
     is_consumed,
     mark_consumed,
@@ -398,6 +399,147 @@ async def test_cookie_not_reset_when_present() -> None:
     assert resp.status == 200
     # Cookie should NOT be re-set on cookie-based auth
     assert "mc_token_5476" not in resp.cookies
+
+
+# -- Stale ?token= must not veto a valid session cookie (query→cookie fallback) --
+
+
+@pytest.mark.asyncio
+async def test_expired_query_token_falls_back_to_valid_cookie() -> None:
+    """Re-opening a bookmarked link replays a long-expired ``?token=`` alongside
+    the still-valid session cookie that link was exchanged for. The dead query
+    token must be ignored, not act as a one-vote veto over the live cookie."""
+    mw = token_auth_middleware()
+    with patch("kiro_crew.dashboard.token_auth.time") as mock_time:
+        mock_time.time.return_value = 1000.0
+        stale = generate_token("staleuser", ttl_seconds=300)
+    cookie = generate_token("staleuser", ttl_seconds=3600)
+    bind_token_ip(cookie, "127.0.0.1")
+    mark_consumed(cookie)
+
+    req = _make_request(query={"token": stale}, cookies={"mc_token_5476": cookie})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    # Fallback lands on the COOKIE path: no token→session exchange, no re-set.
+    assert "mc_token_5476" not in resp.cookies
+
+
+@pytest.mark.asyncio
+async def test_expired_query_token_without_cookie_still_denied() -> None:
+    """The fallback adds no capability: a dead query token alone stays denied
+    (the SPA-shell carve-out aside — this data path is not a shell request)."""
+    mw = token_auth_middleware()
+    with patch("kiro_crew.dashboard.token_auth.time") as mock_time:
+        mock_time.time.return_value = 1000.0
+        stale = generate_token("staleuser2", ttl_seconds=300)
+    req = _make_request(path="/api/status", query={"token": stale})
+    resp = await mw(req, _ok_handler)
+    assert resp.status in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_expired_query_token_with_expired_cookie_denied() -> None:
+    """When BOTH credentials are dead, the query token's failure reason stands
+    (the credential the caller actually presented) and the request is denied."""
+    mw = token_auth_middleware()
+    with patch("kiro_crew.dashboard.token_auth.time") as mock_time:
+        mock_time.time.return_value = 1000.0
+        stale = generate_token("staleuser3", ttl_seconds=300)
+        dead_cookie = generate_token("staleuser3", ttl_seconds=300)
+    req = _make_request(
+        path="/api/status", query={"token": stale}, cookies={"mc_token_5476": dead_cookie}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_valid_query_token_still_wins_over_cookie() -> None:
+    """The fallback fires only on an INVALID query token. A valid one keeps
+    today's precedence — including its token→session exchange (fresh cookie)."""
+    mw = token_auth_middleware()
+    fresh = generate_token("precedence", ttl_seconds=300)
+    cookie = generate_token("someoneelse", ttl_seconds=3600)
+    bind_token_ip(cookie, "127.0.0.1")
+    mark_consumed(cookie)
+    req = _make_request(query={"token": fresh}, cookies={"mc_token_5476": cookie})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+    assert resp.cookies.get("mc_token_5476") is not None
+
+
+@pytest.mark.asyncio
+async def test_internal_path_expired_query_token_falls_back_to_cookie() -> None:
+    """The internal-path helper (_extract_and_validate_token) applies the same
+    rule: a stale ``?token=`` on a polled internal path must not 401 a request
+    whose session cookie is still valid."""
+    with patch("kiro_crew.dashboard.token_auth.time") as mock_time:
+        mock_time.time.return_value = 1000.0
+        stale = generate_token("intuser", ttl_seconds=300)
+    cookie = generate_token("intuser", ttl_seconds=3600)
+    bind_token_ip(cookie, "127.0.0.1")
+    mark_consumed(cookie)
+    mw = token_auth_middleware(internal_paths=frozenset({"/api/spawn"}), internal_secret="s")
+    req = _make_request(
+        path="/api/spawn", query={"token": stale}, cookies={"mc_token_5476": cookie}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_expired_app_token_does_not_fall_back_to_user_cookie() -> None:
+    """An expired APP token must NOT adopt the dashboard user's cookie.
+
+    An installed app's UI is served from this same origin, so the browser sends
+    the user's session cookie alongside the app's own ``?token=``. If the
+    fallback fired here, ``app_name`` would come back empty, the app-scope gate
+    would become a no-op, and an app whose token merely expired would silently
+    gain the user's full API reach. It must stay denied so the app re-exchanges
+    its secret instead.
+    """
+    mw = token_auth_middleware()
+    with patch("kiro_crew.dashboard.token_auth.time") as mock_time:
+        mock_time.time.return_value = 1000.0
+        stale_app = generate_token("appsub", ttl_seconds=300, app="someapp")
+    cookie = generate_token("realuser", ttl_seconds=3600)
+    bind_token_ip(cookie, "127.0.0.1")
+    mark_consumed(cookie)
+
+    req = _make_request(
+        path="/api/status", query={"token": stale_app}, cookies={"mc_token_5476": cookie}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_internal_path_expired_app_token_does_not_fall_back_to_cookie() -> None:
+    """The internal-path helper applies the same app-token exception."""
+    with patch("kiro_crew.dashboard.token_auth.time") as mock_time:
+        mock_time.time.return_value = 1000.0
+        stale_app = generate_token("appsub2", ttl_seconds=300, app="someapp")
+    cookie = generate_token("realuser2", ttl_seconds=3600)
+    bind_token_ip(cookie, "127.0.0.1")
+    mark_consumed(cookie)
+    mw = token_auth_middleware(internal_paths=frozenset({"/api/spawn"}), internal_secret="s")
+    req = _make_request(
+        path="/api/spawn", query={"token": stale_app}, cookies={"mc_token_5476": cookie}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status in (401, 403)
+
+
+def test_claims_an_app_unverified_only_ever_refuses() -> None:
+    """The unverified reader answers True only for a payload that names an app.
+
+    Garbage and app-less payloads answer False, so the claim can never widen the
+    fallback — it can only withhold it.
+    """
+    assert claims_an_app_unverified(generate_token("u", ttl_seconds=60, app="a")) is True
+    assert claims_an_app_unverified(generate_token("u", ttl_seconds=60)) is False
+    assert claims_an_app_unverified("not-a-token") is False
+    assert claims_an_app_unverified("") is False
 
 
 # -- Cookie keyed by browser-facing (Host) port for tunneled multi-instance --
