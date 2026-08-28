@@ -1012,6 +1012,9 @@ interface HistoryItem {
 interface AgentInfo {
   name: string
   source: string
+  /** Default session color (#rrggbb) for this agent, applied at render time to
+   *  sessions created by it that carry no explicit per-session color. */
+  session_color?: string
 }
 
 type SessionFilterKey = 'unread' | 'running' | 'pinned' | 'recent'
@@ -1695,11 +1698,24 @@ const SessionRow = memo(function SessionRow({
     // a custom color is frozen. Muted-text legibility still goes through the
     // same APCA boost via boostFor.
     const customHex = typeof s.color_hex === 'string' && s.color_hex ? s.color_hex : null
-    const rowColor = customHex ?? (ci != null ? paletteColors[ci] : null)
+    // Agent default color, resolved at RENDER time (not creation): a session
+    // with no explicit per-session color inherits its agent's session_color.
+    // Deriving it here rather than persisting at creation means it applies to
+    // EVERY origin (dashboard, channel, cron, subagent — anything with s.agent),
+    // needs no event-loop config I/O, and re-tints live when the agent's color
+    // is edited. An explicit per-session color_hex/color_index still wins.
+    const agentHex = (!customHex && ci == null && s.agent)
+      ? (() => {
+          const c = installedAgents.find(a => a.name === s.agent)?.session_color
+          return typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c) ? c : null
+        })()
+      : null
+    const frozenHex = customHex ?? agentHex
+    const rowColor = frozenHex ?? (ci != null ? paletteColors[ci] : null)
     const boostStyle: Record<string, string> = {}
-    if (customHex) {
-      boostStyle['--session-color'] = customHex
-      const cb = boostFor(customHex)
+    if (frozenHex) {
+      boostStyle['--session-color'] = frozenHex
+      const cb = boostFor(frozenHex)
       if (cb.mutedColors[0]) boostStyle['--session-muted'] = cb.mutedColors[0]
     } else if (rowColor && ci != null) {
       boostStyle['--session-color'] = rowColor

@@ -631,6 +631,24 @@ def _safe_float(
     return result
 
 
+_COLOR_HEX_RE = _re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _safe_color(value: object) -> str:
+    """Return a valid lowercase ``#rrggbb`` hex color, or ``""`` on junk.
+
+    config.json is hand-editable, so a non-string or malformed value must
+    collapse to empty (no agent color) rather than crash the load or propagate
+    to an inline CSS style attribute.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    v = value.strip().lower()
+    if _COLOR_HEX_RE.match(v):
+        return v
+    return ""
+
+
 def _session_work_dir(session_key: str | None) -> Path:
     """Return a per-session subdirectory under workspace_root()."""
     root = workspace_root()
@@ -3627,6 +3645,18 @@ class KiroCrewAgentConfig:
             "Per-agent override for watchdog.tool_stall_hard_cap_secs on sessions "
             "running this agent. 0 inherits the global cap (default 1h). Applies "
             "ONLY to UNKNOWN verdicts — a WORKING session is never acted on.",
+        ),
+    )
+    session_color: str = field(
+        default="",
+        metadata=_meta(
+            "Session Color",
+            "Default session color for sessions created by this agent. Accepts "
+            "a CSS hex color string (#rrggbb, lowercase). Applied at render time "
+            "to any session this agent started that has no color of its own, so "
+            "editing it re-tints those sessions live. A color set on the session "
+            "itself (a manual pick or the dashboard default-color policy) always "
+            "takes precedence. Empty means no agent color.",
         ),
     )
     telegram_account: str = field(
@@ -7405,6 +7435,7 @@ class KiroCrewConfig:
                             entry.get("watchdog_tool_stall_hard_cap_secs", 0.0), 0.0, lo=0.0
                         ),
                         telegram_account=entry.get("telegram_account", ""),
+                        session_color=_safe_color(entry.get("session_color", "")),
                     )
 
         # Migrate workspaces from flat or structured format
