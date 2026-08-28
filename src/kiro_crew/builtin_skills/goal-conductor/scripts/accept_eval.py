@@ -94,13 +94,40 @@ def _tail(text: str) -> str:
     return text[-EVIDENCE_TAIL_CHARS:] if len(text) > EVIDENCE_TAIL_CHARS else text
 
 
-def _run(argv, cwd=None):
+def _spawn_direct(argv, timeout, cwd=None):
+    """Spawn a script-built argv directly, as the CLI door always has."""
+    return subprocess.run(  # noqa: S603 - argv array, no shell, script-built
+        [str(a) for a in argv],
+        cwd=cwd or None,
+        capture_output=True,
+        text=True,
+        # Pin the decode instead of inheriting the locale: on Windows the
+        # default is the ANSI code page, which mangles a check's UTF-8
+        # output, and `errors="replace"` keeps genuinely undecodable bytes
+        # from raising - a check's OUTPUT must never turn its verdict into a
+        # crash, since the evidence is only ever read by a human.
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _run(argv, cwd=None, spawn=None):
     """Run one SCRIPT-BUILT check without a shell; return (verdict, evidence).
 
     Every caller must pass an argv it constructed itself. The guard below is an
     internal invariant, not a spec gate: reaching it with something outside
     ``_SELF_BUILT_COMMANDS`` means a handler leaked spec input into an exec path,
     so it refuses rather than runs.
+
+    ``spawn`` is the injection point for a caller reaching this script through a
+    door that is NOT the ``execute_bash`` approval prompt: the argv is built
+    here and the LOGICAL name is asserted here, but such a caller may need the
+    binary resolved to a trusted absolute path and the child spawned through an
+    audited chokepoint. Only the spawn is injectable -- the verdict mapping
+    below (exit 0 = pass, gh's exit 8 = pending, timeout/OSError = error) stays
+    the single spelling of what an exit code MEANS, so both doors classify the
+    same result identically. It defaults to :func:`_spawn_direct`.
     """
     raw = str(argv[0])
     if raw not in _SELF_BUILT_COMMANDS:
@@ -110,20 +137,7 @@ def _run(argv, cwd=None):
             "no spec field may name a command",
         )
     try:
-        proc = subprocess.run(  # noqa: S603 - argv array, no shell, script-built
-            [str(a) for a in argv],
-            cwd=cwd or None,
-            capture_output=True,
-            text=True,
-            # Pin the decode instead of inheriting the locale: on Windows the
-            # default is the ANSI code page, which mangles a check's UTF-8
-            # output, and `errors="replace"` keeps genuinely undecodable bytes
-            # from raising - a check's OUTPUT must never turn its verdict into a
-            # crash, since the evidence is only ever read by a human.
-            encoding="utf-8",
-            errors="replace",
-            timeout=TIMEOUT_SECS,
-        )
+        proc = (spawn or _spawn_direct)(argv, TIMEOUT_SECS, cwd)
     except subprocess.TimeoutExpired:
         return ("error", f"timed out after {TIMEOUT_SECS}s")
     except FileNotFoundError:
@@ -138,7 +152,21 @@ def _run(argv, cwd=None):
     return ("fail", f"exit {proc.returncode}: {output}")
 
 
-def _evaluate(item):
+def _exists_direct(path):
+    """Answer "is it there" by name, as the CLI door always has."""
+    return Path(path).exists()
+
+
+def _evaluate(item, spawn=None, exists=None):
+    """Evaluate one acceptance spec.
+
+    ``spawn`` and ``exists`` are the two injection points for a caller reaching
+    this script through a door that is NOT the ``execute_bash`` approval prompt.
+    The kind dispatch, the argv construction and the verdict vocabulary all stay
+    here -- only HOW the check touches the machine is replaceable, because a door
+    with no prompt in front of it needs a trusted binary and a descriptor-pinned
+    probe where the CLI door was content with a PATH lookup and a name.
+    """
     accept = item.get("accept") or {}
     kind = accept.get("kind")
     if kind == "pr_checks":
@@ -151,13 +179,23 @@ def _evaluate(item):
         repo = accept.get("repo")
         if repo:
             argv += ["--repo", str(repo)]
-        return _run(argv)
+        return _run(argv, spawn=spawn)
     if kind == "file":
         path = accept.get("path")
         if not isinstance(path, str) or not path:
             return ("error", "file spec needs a path")
-        want = bool(accept.get("exists", True))
-        have = Path(path).exists()
+        want = accept.get("exists", True)
+        # NOT bool(...): `{"exists": "false"}` is a truthy string, so coercing
+        # would silently invert the verdict and report the OPPOSITE of what the
+        # spec asked. A spec's own type error must never become a confident
+        # wrong answer, so it is an error verdict instead.
+        if not isinstance(want, bool):
+            return (
+                "error",
+                "file spec's 'exists' must be true or false (JSON boolean), got "
+                f"{type(want).__name__}",
+            )
+        have = (exists or _exists_direct)(path)
         verdict = "pass" if have == want else "fail"
         return (verdict, f"{path} {'exists' if have else 'does not exist'}")
     if kind == "human_approval":
@@ -176,14 +214,19 @@ def _evaluate(item):
     return ("error", f"unknown accept kind {kind!r}")
 
 
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-        items = payload["items"]
-        assert isinstance(items, list)
-    except Exception:
-        print(json.dumps({"error": 'stdin must be JSON: {"items": [...]}'}))
-        return 2
+def evaluate_items(items, evaluate=None):
+    """Evaluate a batch of work items into a list of result dicts.
+
+    ``evaluate`` is the per-item callable, defaulting to ``_evaluate``. It is
+    injectable so a caller reaching this script through a different, already
+    auto-approved door -- the ``conductor_accept_eval`` MCP tool, which does not
+    pass through the ``execute_bash`` prompt this script's invariant assumes --
+    can wrap the per-item handler with its own in-band gate WITHOUT copying this
+    loop. The loop is the one spelling of the per-item contract (guard, id
+    fallback, "one bad spec must not hide the rest"), so it must not be
+    duplicated by any caller.
+    """
+    handler = evaluate or _evaluate
     results = []
     for position, item in enumerate(items):
         # ID extraction happens INSIDE the guard. A non-object entry
@@ -197,11 +240,22 @@ def main() -> int:
             if not isinstance(item, dict):
                 raise TypeError(f"item must be a JSON object, got {type(item).__name__}")
             item_id = str(item.get("id", item_id))
-            verdict, evidence = _evaluate(item)
+            verdict, evidence = handler(item)
         except Exception as exc:  # one bad spec must not hide the rest
             verdict, evidence = "error", f"evaluator bug on this item: {exc}"
         results.append({"id": item_id, "verdict": verdict, "evidence": evidence})
-    print(json.dumps({"results": results}, indent=2))
+    return results
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+        items = payload["items"]
+        assert isinstance(items, list)
+    except Exception:
+        print(json.dumps({"error": 'stdin must be JSON: {"items": [...]}'}))
+        return 2
+    print(json.dumps({"results": evaluate_items(items)}, indent=2))
     return 0
 
 

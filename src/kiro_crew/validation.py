@@ -2670,6 +2670,28 @@ SESSION_READ_MESSAGE_SCHEMA = ToolSchema(
     ],
 )
 
+# ── Conductor tool schemas (kirocrew-dashboard) ──
+
+CONDUCTOR_ACCEPT_EVAL_SCHEMA = ToolSchema(
+    tool_name="conductor_accept_eval",
+    fields=[
+        FieldSpec("items", list, required=True, item_type=dict, max_items=64),
+    ],
+)
+
+CONDUCTOR_LEDGER_ENTRY_SCHEMA = ToolSchema(
+    tool_name="conductor_ledger_entry",
+    fields=[
+        FieldSpec(
+            "mode",
+            str,
+            required=True,
+            allowed=frozenset({"encode", "decode", "validate", "rotate"}),
+        ),
+        FieldSpec("payload", dict, required=True),
+    ],
+)
+
 # ── Schema Registry ──
 
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
@@ -2891,6 +2913,8 @@ MCP_DASHBOARD_SCHEMAS: dict[str, ToolSchema] = {
     "chat_folder_create": CHAT_FOLDER_CREATE_SCHEMA,
     "chat_folder_move": CHAT_FOLDER_MOVE_SCHEMA,
     "chat_folder_move_session": CHAT_FOLDER_MOVE_SESSION_SCHEMA,
+    "conductor_accept_eval": CONDUCTOR_ACCEPT_EVAL_SCHEMA,
+    "conductor_ledger_entry": CONDUCTOR_LEDGER_ENTRY_SCHEMA,
 }
 
 MCP_COMPUTER_SCHEMAS: dict[str, ToolSchema] = {

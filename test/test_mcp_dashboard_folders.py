@@ -1478,4 +1478,6 @@ class TestAdvertisedSet:
             "session_stop",
             "session_send",
             "session_read_message",
+            "conductor_accept_eval",
+            "conductor_ledger_entry",
         }

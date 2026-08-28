@@ -345,7 +345,13 @@ class TestWhatThisSetGrants:
         "session_send",
         "session_read_message",
     }
-    GRANTED_TOOLS = FOLDER_TOOLS | SESSION_TOOLS
+    #: The conductor-specific tools: acceptance evaluator and ledger codec,
+    #: individually grantable without trusting arbitrary shell.
+    CONDUCTOR_TOOLS = {
+        "conductor_accept_eval",
+        "conductor_ledger_entry",
+    }
+    GRANTED_TOOLS = FOLDER_TOOLS | SESSION_TOOLS | CONDUCTOR_TOOLS
 
     def test_the_set_is_exactly_the_folder_tools(self) -> None:
         from kiro_crew import mcp_dashboard
@@ -359,7 +365,7 @@ class TestWhatThisSetGrants:
         assert {t["name"] for t in mcp_dashboard._list_tools()} == self.GRANTED_TOOLS
 
     def test_session_driving_tools_ship_with_the_folder_tools(self) -> None:
-        """This set deliberately bundles two capability classes.
+        """This set deliberately bundles multiple capability classes.
 
         The earlier ratchet here asserted the OPPOSITE — that nothing which
         messages or stops another session may join the folder set. That guard
@@ -370,7 +376,7 @@ class TestWhatThisSetGrants:
 
         The ratchet is inverted rather than deleted, because the property worth
         protecting did not go away: what the set contains must be a decision, not
-        an accident. If either class disappears from the server, this fails and
+        an accident. If any class disappears from the server, this fails and
         whoever changed it has to say which half they meant to drop.
         """
         from kiro_crew import mcp_dashboard
@@ -378,10 +384,13 @@ class TestWhatThisSetGrants:
         names = {t["name"] for t in mcp_dashboard._tool_definitions()}
         folder = {n for n in names if n.startswith("chat_folder_")}
         session = {n for n in names if n.startswith("session_")}
+        conductor = {n for n in names if n.startswith("conductor_")}
         assert folder, "the folder-organization tools left this set"
         assert session, "the session-control tools left this set"
+        assert conductor, "the conductor tools left this set"
         # Nothing else rides along unannounced.
-        assert names == folder | session, (
-            f"{sorted(names - folder - session)} is neither folder organization nor "
-            "session control — name the class it belongs to before adding it here"
+        assert names == folder | session | conductor, (
+            f"{sorted(names - folder - session - conductor)} is neither folder "
+            "organization, session control, nor conductor tools — name the class "
+            "it belongs to before adding it here"
         )

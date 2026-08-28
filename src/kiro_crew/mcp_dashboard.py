@@ -30,17 +30,41 @@ centrally by ``run_mcp_stdio_loop`` + the ``mcp_core`` request helpers), which
 log can tell an agent's move from the user's own, and from any future internal
 caller's.
 
-Why the set needs no second gate behind the assignment: these tools grant no
-read the agent does not already have (``list_sessions`` in ``kirocrew-core`` is
-always available and already returns every session's title and key), they cannot
-delete a folder or a conversation, and the worst outcome is a sidebar the user
-has to tidy. Contrast the keystone leaves in ``security.py``
+Why the FOLDER AND SESSION tools need no second gate behind the assignment: they
+grant no read the agent does not already have (``list_sessions`` in
+``kirocrew-core`` is always available and already returns every session's title
+and key), they cannot delete a folder or a conversation, and the worst outcome is
+a sidebar the user has to tidy. Contrast the keystone leaves in ``security.py``
 (``computer_use.json``, ``browser-mode-enabled``, the Ops Mission Control mode):
 each grants reach OUTSIDE Kiro Crew — desktop input synthesis, the operator's
 logged-in browser, writes against production incident tooling — or is the
 security floor itself, and each is therefore stored where the agent cannot write.
 
-The rule that follows, and the reason the tool set is ratcheted in
+**The two ``conductor_*`` tools are NOT in that first group, and this paragraph
+is the honest statement of it.** ``conductor_accept_eval`` probes the filesystem
+and spawns ``gh`` with the operator's ambient credentials; that is reach outside
+Kiro Crew by the definition above. What stands in for a keystone leaf today is
+narrower, and worth naming exactly because it is not the same thing:
+
+* the reach is bounded IN BAND on the dispatch path, not by the caller's grant —
+  see ``conductor_scripts._gate_accept`` (absolute path, inside the
+  agent-writable roots, through ``hooks.validate_file_path``, then probed through
+  a ``pinned_fs`` descriptor walk; ``owner/name`` repo required) and
+  ``_audited_spawn`` (``resolve_gh`` + ``run_gh``: trusted binary, minimal env,
+  fail-closed SEL event before the spawn);
+* they are AUTO-APPROVED for the conductor alone, via that installer's
+  ``_CONDUCTOR_DASHBOARD_GRANTS``. Another agent assigned this server for the
+  folder tools MOUNTS them but does not auto-approve them, so its calls prompt.
+
+What that does NOT settle, and a reader should not infer from the ratchet test
+passing: mounting is per-SERVER, so for a future agent that grants the set
+wholesale the in-band bound above — not an assignment decision — is the whole
+authorization story. Whether that suffices, or whether these two belong in a
+conductor-scoped server or behind their own keystone leaf, was raised in review
+on #6160's fix and is left to a maintainer rather than settled by the change that
+introduced them.
+
+The rule this follows, and the reason the tool set is ratcheted in
 ``test_mcp_dashboard_registration.py``: a capability whose blast radius DOES
 require authorization needs its own keystone leaf, and being merely unreferenced
 in the default spec is not that. Session control (driving or stopping another
@@ -62,10 +86,13 @@ paths, never waved through on the lenient walk.
 
 from __future__ import annotations
 
+import json
 import logging
 import re as _re
 from typing import Any
 from urllib.parse import quote
+
+from kiro_crew import conductor_scripts
 
 # Same cross-module reuse as ``mcp_computer``: the authenticated loopback client
 # to the gateway lives in ``mcp_core``. Importing it costs 341ms/40MB in this
@@ -86,6 +113,8 @@ from kiro_crew.validation import (
     CHAT_FOLDER_MOVE_SCHEMA,
     CHAT_FOLDER_MOVE_SESSION_SCHEMA,
     CHAT_FOLDER_TREE_SCHEMA,
+    CONDUCTOR_ACCEPT_EVAL_SCHEMA,
+    CONDUCTOR_LEDGER_ENTRY_SCHEMA,
     MCP_DASHBOARD_SCHEMAS,
     SESSION_CREATE_SCHEMA,
     SESSION_READ_MESSAGE_SCHEMA,
@@ -338,6 +367,86 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["target"],
+            },
+        },
+        {
+            "name": "conductor_accept_eval",
+            "description": (
+                "Run the conductor's deterministic acceptance evaluator over a batch of "
+                "work items (at most 64 per call). Each item carries an acceptance spec "
+                "(pr_checks, file, or human_approval); the evaluator builds its own argv "
+                "from the spec fields and returns a verdict per item. This is the "
+                "non-shell interface to accept_eval.py: individually grantable without "
+                "trusting arbitrary shell. Because it is auto-approvable, this door "
+                "bounds its own inputs: a 'file' path must be absolute and inside the "
+                "project or workspace root, and 'pr_checks' must name an explicit "
+                "owner/name repo. A spec outside those bounds gets a 'refused' verdict."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "description": (
+                            "Work items to evaluate, at most 64. Each is an object with "
+                            "'id' (string) and 'accept' (object with 'kind' plus "
+                            "kind-specific fields)."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Item identifier."},
+                                "accept": {
+                                    "type": "object",
+                                    "description": (
+                                        "Acceptance spec: {kind: 'pr_checks', pr: <int>, "
+                                        "repo: <owner/name, required>} "
+                                        "or {kind: 'file', path: <absolute path inside the "
+                                        "project or workspace root>, exists?: <bool>} "
+                                        "or {kind: 'human_approval'}."
+                                    ),
+                                },
+                            },
+                            "required": ["id", "accept"],
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+        },
+        {
+            "name": "conductor_ledger_entry",
+            "description": (
+                "The conductor's ledger item-entry codec: encode, decode, validate, or "
+                "rotate work-item entries for the session ledger's artifacts map. This is "
+                "the non-shell interface to ledger_entry.py: individually grantable "
+                "without trusting arbitrary shell. Each mode reads a payload and returns "
+                "a structured result; domain problems are {ok: false, error: {...}}, "
+                "never crashes."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["encode", "decode", "validate", "rotate"],
+                        "description": (
+                            "Operation: encode (fields->string), decode (string->fields), "
+                            "validate (check bounds before write), rotate (collapse/drop "
+                            "terminal entries)."
+                        ),
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": (
+                            "Mode-specific input. encode: {accept, session, round, status, "
+                            "since?, fails?}. decode: {value}. validate: {artifacts}. "
+                            "rotate: {artifacts}."
+                        ),
+                    },
+                },
+                "required": ["mode", "payload"],
             },
         },
     ]
@@ -1161,6 +1270,24 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             return redact(f"Unfiled session `{slot_key}` to the top level.")
         folder_label = _chat_folder_paths(chat_folders).get(fld_id, fld_id)
         return redact(f"Moved session `{slot_key}` into `{folder_label}` (id={fld_id}).")
+
+    if name == "conductor_accept_eval":
+        args = validate_tool_args(args, CONDUCTOR_ACCEPT_EVAL_SCHEMA)
+        # The batch loop lives in the script (one spelling of the per-item
+        # contract); the bridge injects this door's in-band spec gate.
+        return json.dumps({"results": conductor_scripts.evaluate_items(args["items"])}, indent=2)
+
+    if name == "conductor_ledger_entry":
+        args = validate_tool_args(args, CONDUCTOR_LEDGER_ENTRY_SCHEMA)
+        try:
+            result = conductor_scripts.ledger_mode(args["mode"], args["payload"])
+        except Exception as exc:
+            return json.dumps(
+                {"ok": False, "error": {"code": "internal_error", "detail": str(exc)}},
+                indent=2,
+            )
+        return json.dumps(result, indent=2)
+
     return f"Error: unknown tool '{name}'"
 
 

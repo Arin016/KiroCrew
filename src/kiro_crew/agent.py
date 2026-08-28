@@ -4446,9 +4446,10 @@ file-writing tool, and a work item never goes to `spawn_run`,
 dispatch, verify and report on.
 
 **Acceptance is the evaluator's verdict, never your reading of a child's
-transcript.** Shell access exists to run the `goal-conductor` skill's two
-bundled scripts: `scripts/accept_eval.py` for acceptance verdicts,
-`scripts/ledger_entry.py` for the ledger's item-entry format.
+transcript.** The verdict comes from the `conductor_accept_eval` MCP tool (the
+deterministic evaluator), and the ledger's item-entry format is owned by
+`conductor_ledger_entry` (the codec). Both are auto-approved on your grant
+list, so patrol never blocks on an approval for them.
 
 **Patrol with `monitor_start`, never with `wait`.** Arm it with the full cycle
 instructions AND the exit condition, then end the turn; call `autonudge_stop`
@@ -4575,6 +4576,8 @@ _CONDUCTOR_DASHBOARD_GRANTS: tuple[str, ...] = (
     "@kirocrew-dashboard/chat_folder_create",
     "@kirocrew-dashboard/session_create",
     "@kirocrew-dashboard/session_read_message",
+    "@kirocrew-dashboard/conductor_accept_eval",
+    "@kirocrew-dashboard/conductor_ledger_entry",
 )
 
 
@@ -4583,15 +4586,16 @@ def _install_conductor_agent() -> None:
 
     Derives from the kirocrew agent (resolved MCP invocations, security hooks)
     but narrows to the conductor's charter: session control + core tools +
-    shell for the bundled skill scripts (acceptance evaluator + ledger entry
-    codec), and **no tool that can write a
+    the bundled evaluator and codec as MCP tools (acceptance evaluator +
+    ledger entry codec via ``conductor_accept_eval`` and
+    ``conductor_ledger_entry``), and **no tool that can write a
     file** — not ``fs_write``, and not ``code`` either, which governance classes
     under ``filesystem.write`` because it writes files and can shell out. That
     is what makes "never does a work item's work itself" a property of the spec
     rather than of the prompt. The ``kirocrew-dashboard`` server is the opt-in
-    per-agent set (folder + session-control tools); this installer granting it IS
-    the explicit per-agent assignment that set requires — it is deliberately
-    absent from the default agent's spec.
+    per-agent set (folder + session-control tools + conductor tools); this
+    installer granting it IS the explicit per-agent assignment that set
+    requires — it is deliberately absent from the default agent's spec.
 
     ``@kirocrew-dashboard`` is MOUNTED whole but auto-approved only verb by verb,
     via ``_CONDUCTOR_DASHBOARD_GRANTS`` (see its comment for the per-verb
@@ -4610,11 +4614,13 @@ def _install_conductor_agent() -> None:
     ingests untrusted content by design and the server-side gates bound which
     target is reachable, not what is done to it.
 
-    ``execute_bash`` is withheld for a different reason that is worth keeping
-    distinct: ``allowedTools`` is name-scoped with no argument matching, so
-    trusting the two bundled scripts cannot be told apart from trusting arbitrary
-    shell. There is no per-argument form of that grant the way there is a per-tool
-    form of the MCP one.
+    ``conductor_accept_eval`` and ``conductor_ledger_entry`` are granted because
+    they satisfy the invariant: the evaluator reads and computes (no mutation of
+    user-visible state), and the ledger codec encodes/validates/rotates entry
+    values (creates new values, never mutates existing user-visible state). They
+    replace the prior ``execute_bash`` approach where ``allowedTools`` had no
+    argument matching and trusting the two bundled scripts could not be told
+    apart from trusting arbitrary shell.
 
     The operating procedure ships as the ``goal-conductor`` builtin skill, NOT
     ``conductor``: that skill name is owned by the generated delegation skill
@@ -4633,7 +4639,6 @@ def _install_conductor_agent() -> None:
     )
     config["prompt"] = _CONDUCTOR_SYSTEM_PROMPT
     config["tools"] = [
-        "execute_bash",
         "fs_read",
         # ``web_fetch`` serves the charter's own worked example (reading an issue
         # list during triage). Deliberately NOT mounted: ``web_search`` (nothing
@@ -4668,10 +4673,12 @@ def _install_conductor_agent() -> None:
     # state, or reach the machine — and it is bounded by the mounted catalog.
     # Withholding it made the ONE call that unblocks every deferred
     # session-control tool prompt first, so an unattended patrol cycle stalled
-    # on the load rather than on the work. ``execute_bash`` stays withheld for
-    # the reason recorded above it: ``allowedTools`` has no argument matching,
-    # so trusting the two bundled scripts cannot be told apart from trusting
-    # arbitrary shell.
+    # on the load rather than on the work. ``execute_bash`` is not withheld here
+    # because it is no longer MOUNTED at all: the reason recorded above it —
+    # ``allowedTools`` has no argument matching, so trusting the two bundled
+    # scripts cannot be told apart from trusting arbitrary shell — is why they
+    # are reached through ``conductor_accept_eval`` / ``conductor_ledger_entry``
+    # instead, which ARE per-tool grantable.
     for ref in (
         "session",
         "report",

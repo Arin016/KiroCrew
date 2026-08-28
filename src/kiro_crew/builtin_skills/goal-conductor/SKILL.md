@@ -16,11 +16,11 @@ Your four jobs, none of which can be delegated to a work item:
 
 Everything else belongs in a work item. This spec has **no `fs_write`** — that
 is deliberate. If a task needs a file written, it is a work item, not something
-you do. `execute_bash` IS granted, for exactly one purpose: running this
-skill's bundled scripts — the acceptance evaluator (`scripts/accept_eval.py`)
-and the ledger entry codec (`scripts/ledger_entry.py`). Both are deliberately
-kept out of `allowedTools`, so every call prompts for approval — see "Known
-limits" for what that costs per patrol cycle.
+you do. The acceptance evaluator and ledger entry codec are available as
+individually-grantable MCP tools on the `kirocrew-dashboard` server:
+`conductor_accept_eval` for acceptance verdicts, and `conductor_ledger_entry`
+for the durable ledger item-entry format. Both are auto-approved, so patrol
+never blocks on an approval for them.
 
 ## What is a work item
 
@@ -135,9 +135,9 @@ Then for each item in the round:
    `artifacts`, under an `item-<n>` key — the durable item entry carrying its
    acceptance spec, session key, round, status and read cursor. **Never
    hand-write the entry value: encode it with the bundled codec**
-   (`scripts/ledger_entry.py`, same directory as the evaluator — see "The
-   ledger item-entry codec" below). **Before any dispatch write that would
-   push the map past the entry cap, `rotate` the combined current-plus-new
+   (`conductor_ledger_entry` MCP tool — see "The ledger item-entry codec"
+   below). **Before any dispatch write that would push the map past the
+   entry cap, `rotate` the combined current-plus-new
    map and write THAT back** — the ledger's own cap handling blindly ages out
    the oldest entry, active or not, so the codec must be the thing that
    decides what drops (and a `cap_exceeded_all_active` error means do not
@@ -159,23 +159,24 @@ Each cycle:
    a substitute.
 2. **Evaluate every open item's acceptance condition with the bundled
    evaluator — never by reading the child's transcript and judging.** Build
-   the items JSON from your ledger and run:
+   the items array from your ledger and call:
 
-   ```bash
-   printf '%s' '{"items":[{"id":"item-1","accept":{"kind":"pr_checks","pr":123,"repo":"owner/name"}}]}' \
-     | python3 <this skill's dir>/scripts/accept_eval.py
+   ```
+   conductor_accept_eval(items=[
+     {"id": "item-1", "accept": {"kind": "pr_checks", "pr": 123, "repo": "owner/name"}},
+     ...
+   ])
    ```
 
-   **Resolve `<this skill's dir>` from where this SKILL.md was actually loaded
-   from** — the skill index names its absolute path. Do NOT hardcode
-   `~/.kiro/crew/skills/goal-conductor`: a `KIROCREW_HOME` override moves the
-   skills root, so on such an install that path does not exist and every
-   evaluator call would fail before patrol ever ran.
-
-   Build the items JSON from the `item-*` entries in your ledger's `artifacts`
-   — decode each stored value with the codec (`ledger_entry.py decode`), never
-   by eyeballing the string — and evaluate **every open item in ONE call** —
-   each invocation costs one approval prompt.
+   Build the items array from the `item-*` entries in your ledger's `artifacts`
+   — decode each stored value with the codec (`conductor_ledger_entry` with
+   mode `decode`), never by eyeballing the string — and evaluate **every open
+   item in ONE call, up to the tool's cap of 64 items**. Past 64 the call is
+   rejected by schema validation, so split into consecutive calls of at most 64
+   — the cap yields, not the batching rule, and nothing about a verdict changes
+   when it is split. A round with more than 64 open items is itself the signal
+   to look at: the ledger's own entry cap is the binding limit long before this
+   one, so `rotate` first.
 
    Verdicts: `pass` / `fail` are final for this cycle. `pending` means keep
    waiting. `refused` means the spec asked for something the evaluator will not
@@ -200,20 +201,13 @@ Each cycle:
 3. For items still running, `session_read_message` with the `since` cursor you
    stored last cycle — this answers "is it moving / did it ask a question",
    never "did it succeed". Store the returned `next_since` back into that item's
-   `artifacts` entry (a fresh `ledger_entry.py encode` with the new cursor) —
-   held only in context it is lost on compaction, and the next cycle then
-   re-reads the transcript from the top.
+   `artifacts` entry (a fresh `conductor_ledger_entry` encode with the new
+   cursor) — held only in context it is lost on compaction, and the next cycle
+   then re-reads the transcript from the top.
 4. `session_ledger_record` only what changed — but an item's `artifacts` entry is
    rewritten whole, so include the fields you are not changing.
 5. **Say nothing unless there is a real signal.** An item passing acceptance,
    failing it, asking a question, or stalling. Never post "nothing changed".
-
-**Shell exists for the bundled scripts, not for work.** `execute_bash` is
-granted so patrol can run `accept_eval.py` and `ledger_entry.py`. Running a
-work item's build, test, or fix yourself through it is the boundary violation
-this skill exists to prevent — if you need a command run to MAKE something
-true, that is a work item; the bundled scripts only CHECK and ENCODE what is
-already true.
 
 ### Close the round
 
@@ -282,7 +276,7 @@ What goes where:
   is forbidden anyway — so an acceptance spec that lives only in your context is
   a spec patrol cannot rebuild.
 
-  **The entry format is owned by the bundled codec, `scripts/ledger_entry.py`
+  **The entry format is owned by the bundled codec, `conductor_ledger_entry`
   — never hand-write or hand-parse a value.** See "The ledger item-entry
   codec" below for the four operations. Record the entry in the same
   `session_ledger_record` call that marks the item dispatched, and rewrite it
@@ -292,22 +286,27 @@ What goes where:
 
 ## The ledger item-entry codec
 
-`scripts/ledger_entry.py` (same directory as the evaluator — resolve it the
-same way) is the single owner of the item-entry format. It exists because the
-two failure modes it prevents are silent: the ledger's `artifacts` field is a
-map of string to STRING — a nested object is rejected with
-`artifacts_not_string_map` and **nothing persists** — and an oversized value is
-silently TRUNCATED at the ledger's cap, corrupting the stored JSON. The codec
-knows the ledger's real bounds and refuses before the write instead.
+`conductor_ledger_entry` is the MCP tool interface to the ledger entry codec
+(backed by `scripts/ledger_entry.py` in this skill's directory). It is the
+single owner of the item-entry format. It exists because the two failure modes
+it prevents are silent: the ledger's `artifacts` field is a map of string to STRING — a nested object is rejected with `artifacts_not_string_map` and
+**nothing persists** — and an oversized value is silently TRUNCATED at the
+ledger's cap, corrupting the stored JSON. The codec knows the ledger's real
+bounds and refuses before the write instead.
 
-Every mode reads JSON on stdin and writes JSON on stdout; domain problems come
-back as `{"ok": false, "error": {...}}`, never a crash:
+Every mode takes a `payload` object and returns a structured result; domain
+problems come back as `{"ok": false, "error": {...}}`, never crashes:
 
 - **encode** — fields in, the single-line string value out:
 
-  ```bash
-  printf '%s' '{"accept":{"kind":"pr_checks","pr":123,"repo":"o/r"},"session":"<session key>","round":2,"status":"running","since":"<next_since cursor>"}' \
-    | python3 <this skill's dir>/scripts/ledger_entry.py encode
+  ```
+  conductor_ledger_entry(mode="encode", payload={
+    "accept": {"kind": "pr_checks", "pr": 123, "repo": "o/r"},
+    "session": "<session key>",
+    "round": 2,
+    "status": "running",
+    "since": "<next_since cursor>"
+  })
   ```
 
   Put the returned `value` under the `item-<n>` key. `since` is optional.
@@ -343,9 +342,8 @@ back as `{"ok": false, "error": {...}}`, never a crash:
   untouched active entries oldest in the age-out order and make `dropped`
   meaningless. This is the one place "write only deltas" does not apply.
 
-Batch your codec calls like evaluator calls — each invocation costs one
-approval prompt, so one `rotate` (or one `validate` of the whole map) per
-cycle beats one call per item.
+Both `conductor_accept_eval` and `conductor_ledger_entry` are auto-approved on
+the conductor's grant list, so calling them never blocks on an approval prompt.
 
 ## Cost discipline
 
@@ -365,21 +363,18 @@ watches, and that cost grows with the loop's own history.
   If you see that error, say which switch to flip; do not retry.
 - **Reads and creates do not prompt; anything that touches another session does.**
   Auto-approved by name: `chat_folder_tree`, `chat_folder_create`,
-  `session_create`, `session_read_message` — so a patrol cycle that wakes on a
-  nudge with nobody at the keyboard never blocks. **`chat_folder_move_session`,
+  `session_create`, `session_read_message`, `conductor_accept_eval`,
+  `conductor_ledger_entry` — so a patrol cycle that wakes on a nudge with nobody
+  at the keyboard never blocks. **`chat_folder_move_session`,
   `session_send` and `session_stop` are deliberately NOT auto-approved**, because
   each writes to a session that is not yours: filing rewrites another session's
   folder, a seed runs as the target's own turn, and a stop discards the target's
   in-flight work. You ingest external content by design, so the prompt is the only
   call-time check on all three. Expect an approval per item at dispatch (one to
   file it, one to seed it) and one if you ever stop an item — all of which happen
-  right after the user approved a plan, not mid-patrol. `execute_bash` also still
-  prompts, so **each patrol cycle blocks on one approval for the
-  `accept_eval.py` invocation** plus one per codec call. Size the nudge interval
-  for that, and batch: one evaluator call per cycle carrying every open item, one
-  codec call per map-wide operation. On a host with a governance ceiling even the
-  granted verbs prompt; if you see approvals where this says you should not, that
-  is why.
+  right after the user approved a plan, not mid-patrol. On a host with a
+  governance ceiling even the granted verbs prompt; if you see approvals where
+  this says you should not, that is why.
 - **`session_send` reports delivery, not completion.** `started: true` means the
   target began a turn on your message; `started: false` means it queued. Neither
   says the work succeeded — acceptance is still the domain assertion's job.
@@ -387,17 +382,36 @@ watches, and that cost grows with the loop's own history.
   app-scoped sessions, channel-linked or mirrored sessions, crew-mode sessions,
   and sessions in another workspace are all refused by the shared guard. Plan
   work items onto plain persistent dashboard sessions only.
-- **Shell is for the bundled scripts only, and the evaluator runs no command
-  you name.** `execute_bash` exists so patrol can run `accept_eval.py` and
-  `ledger_entry.py` (the codec runs no subprocess at all — it only transforms
-  JSON); every call is audit-logged and every call prompts. The evaluator
-  accepts **no command, argv array, or shell string from a spec** — it builds
-  every argv it runs from a fixed template, so `pr_checks` becomes `gh pr
-  checks <n>` and nothing else executes. That is deliberate and load-bearing:
-  this script is invoked as an approved wrapper, so a spec that could name a
-  command would turn it into a general way to run one, and Kiro Crew's
-  denied-command floor cannot see inside it (the floor reads the
-  `execute_bash` string, which says `python3 accept_eval.py`). Widening
-  happens by adding a purpose-built kind that constructs its own argv — never
-  by accepting one. A `refused` verdict is a spec to re-express, never a list
-  to route around.
+- **The evaluator runs no command you name.** The evaluator accepts **no command,
+  argv array, or shell string from a spec** — it builds every argv it runs from
+  a fixed template, so `pr_checks` becomes `gh pr checks <n>` and nothing else
+  executes. That is deliberate and load-bearing: a spec that could name a command
+  would turn the evaluator into a general way to run one. Widening happens by
+  adding a purpose-built kind that constructs its own argv — never by accepting
+  one. A `refused` verdict is a spec to re-express, never a list to route around.
+- **`conductor_accept_eval` being auto-approved means its outward-reaching fields
+  are bounded in band instead.** No approval prompt fires on this door, and the
+  spec's fields arrive nested where the gate's argument classifier cannot see
+  them, so nothing upstream checks them at call time. What this door therefore
+  requires, all of it a spec to re-express rather than a limit to route around:
+  - `file.path` must be **absolute** — a relative path would resolve against the
+    MCP server's directory, not your session's.
+  - `file.path` must sit **inside the project or workspace root**. A work item's
+    output lives there; `/etc/hosts` and `~/.ssh/*` are not reachable from here at
+    all, and a sensitive path or an untrusted UNC host is `refused` by the same
+    filesystem gate the dashboard's own file I/O uses. The verdict reports the
+    canonical, symlink-resolved path that was actually checked.
+  - The existence probe is **descriptor-pinned**: if a directory on the way to the
+    path turns into a symbolic link between the check and the probe, the answer is
+    `refused`, not an answer about wherever the link now points. On a platform that
+    cannot pin a walk at all, the `file` kind is `refused` outright — use a
+    `pr_checks` condition there.
+  - `exists` must be a real JSON **boolean**. `"false"` is a non-empty string, so
+    accepting it would silently invert your verdict; it is an `error` instead.
+  - `pr_checks.repo` is **required**, as `owner/name` in a safe charset. Omitting
+    it would let `gh` pick the repository from the server process's directory and
+    hand you a confident verdict about the wrong repo; the charset bound is
+    because `gh` runs with the operator's ambient credentials.
+  - `gh` itself is resolved to a trusted absolute path and spawned through the
+    app's audited chokepoint, so a `gh` planted in a tree you can write cannot be
+    the one that runs.
