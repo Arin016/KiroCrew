@@ -1282,37 +1282,72 @@ async def _start_run(
 
     async def worker() -> None:
         proc: Any = None
+        spawn_task: asyncio.Task | None = None
         try:
             try:
-                proc = await create_subprocess_limited(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    cwd=cwd,
-                    env=env,
-                    # Kernel RLIMIT ceilings: sync/provision execute
-                    # worktree-controlled pip/npm code; on hosts without
-                    # delegated cgroup v2 the scope limiter is a no-op, so
-                    # the per-process rlimit backstop must be present. Build
-                    # variant: vite/npm need thousands of descriptors — the
-                    # default 1024 NOFILE hard cap EMFILEs the SPA build.
-                    profile=RLIMIT_PROFILE_BUILD,
-                    # Own process group so a timeout kill reaps descendants
-                    # (pip/npm children), not just the immediate CLI process.
-                    start_new_session=platform_compat.IS_POSIX,
-                    creationflags=(
-                        subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-                        if platform_compat.IS_WINDOWS else 0
-                    ),
+                # Spawn on a child task and shield the await. A CancelledError
+                # (gateway shutdown cancels in-flight run tasks) that arrives
+                # WHILE asyncio is mid-exec would otherwise abandon the child:
+                # the OS process is already forked+exec'd but the Process handle
+                # is never returned, so nothing can reap it and it outlives the
+                # gateway, still mutating the shared checkout. The spawn runs to
+                # completion on its own task regardless of our cancellation; the
+                # handler below retrieves the handle from ``spawn_task`` and
+                # reaps it even when the shielded await itself raised.
+                spawn_task = asyncio.ensure_future(
+                    create_subprocess_limited(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        cwd=cwd,
+                        env=env,
+                        # Kernel RLIMIT ceilings: sync/provision execute
+                        # worktree-controlled pip/npm code; on hosts without
+                        # delegated cgroup v2 the scope limiter is a no-op, so
+                        # the per-process rlimit backstop must be present. Build
+                        # variant: vite/npm need thousands of descriptors — the
+                        # default 1024 NOFILE hard cap EMFILEs the SPA build.
+                        profile=RLIMIT_PROFILE_BUILD,
+                        # Own process group so a timeout kill reaps descendants
+                        # (pip/npm children), not just the immediate CLI process.
+                        start_new_session=platform_compat.IS_POSIX,
+                        creationflags=(
+                            subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+                            if platform_compat.IS_WINDOWS else 0
+                        ),
+                    )
                 )
+                proc = await asyncio.shield(spawn_task)
             except OSError as exc:
                 async with _RUNS_LOCK:
                     _RUNS[rid]["status"] = "done"
                     _RUNS[rid]["exit_code"] = -1
                     _RUNS[rid]["output"].append(f"[error] spawn failed: {exc}")
                 return
-            if rid in _ACTIVE_RUNS:
-                _ACTIVE_RUNS[rid] = (_ACTIVE_RUNS[rid][0], proc)
+            # Stamp the live process handle under the admission lock and
+            # re-check the shutdown flag in the SAME critical section. The
+            # parent registered this run as ``(task, None)`` before the child
+            # existed; cleanup snapshots ``(task, proc)`` tuples and only kills
+            # a proc it can SEE. Without this guard a child spawned in the
+            # window between registration and this stamp is invisible to a
+            # cleanup that already snapshotted -- it skips _kill_tree (proc was
+            # None) and only cancels the task, orphaning the child to keep
+            # mutating the shared checkout after the gateway exits. If shutdown
+            # already snapshotted, reap the just-spawned child ourselves and
+            # abort, since our cancellation may not have arrived yet.
+            async with _SHUTDOWN_ADMISSION_LOCK:
+                if _SHUTDOWN_IN_PROGRESS:
+                    await _kill_tree(proc.pid)
+                    await platform_compat.kill_and_reap(proc)
+                    async with _RUNS_LOCK:
+                        _RUNS[rid]["status"] = "done"
+                        _RUNS[rid]["exit_code"] = -1
+                        _RUNS[rid]["output"].append(
+                            "[shutdown] run aborted: gateway stopping"
+                        )
+                    return
+                if rid in _ACTIVE_RUNS:
+                    _ACTIVE_RUNS[rid] = (_ACTIVE_RUNS[rid][0], proc)
             assert proc.stdout is not None
             timed_out = False
             deadline = asyncio.get_event_loop().time() + _RUN_DEADLINE_S
@@ -1356,6 +1391,39 @@ async def _start_run(
                 else:
                     _RUNS[rid]["status"] = "done"
                     _RUNS[rid]["exit_code"] = rc
+        except asyncio.CancelledError:
+            # Gateway shutdown cancels in-flight run tasks. The child runs in
+            # its own process group and would outlive us, continuing to mutate
+            # the shared checkout after the gateway exits. ``asyncio.shield``
+            # re-raises the cancellation immediately while the inner spawn keeps
+            # running detached, so ``proc`` may still be None here with the
+            # child forked-or-forking. Drain ``spawn_task`` to COMPLETION before
+            # reaping: a single ``await asyncio.shield(spawn_task)`` is not
+            # enough because a SECOND cancellation (e.g. a shutdown hard-timeout
+            # following the first cancel) lands on that await too, and swallowing
+            # it into ``proc = None`` would abandon the very child this handler
+            # exists to reap. So re-await the shield until the spawn task is
+            # actually done, absorbing repeat cancellations only for the drain,
+            # then recover the handle, kill/reap the tree, and re-raise so the
+            # task still reports cancelled. An OSError result means the spawn
+            # itself failed and there is no child to reap.
+            if proc is None and spawn_task is not None:
+                while not spawn_task.done():
+                    try:
+                        await asyncio.shield(spawn_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except OSError:
+                        break
+                if spawn_task.done():
+                    try:
+                        proc = spawn_task.result()
+                    except (OSError, asyncio.CancelledError):
+                        proc = None
+            if proc is not None and proc.returncode is None:
+                await _kill_tree(proc.pid)
+                await platform_compat.kill_and_reap(proc)
+            raise
         except Exception as exc:  # noqa: BLE001
             # readline() raising (e.g. a single output line exceeding the
             # 64 KiB stream limit -> ValueError/LimitOverrunError) lands
