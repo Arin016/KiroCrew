@@ -4515,7 +4515,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         // a rejected response, a queued acceptance, or the abort-timeout path:
         // there delivery of THIS row is unknown, which is what the indicator
         // exists to say (see `confirmedDelivered`).
-        dispatch(confirmOptimisticSend({ slot, sendId }))
+        // The receipt carries the server-minted user-row `mid` (when the send
+        // dispatched immediately); handing it to the reconcile stamps it onto
+        // this optimistic bubble so message-pinning works this turn instead of
+        // only after the chat_done refresh.
+        dispatch(confirmOptimisticSend({ slot, sendId, mid: typeof body.mid === 'string' ? body.mid : undefined }))
       }
       if (body.ok && !body.queued && cardAtSend && slot === entrySendSlot) {
         // Immediate dispatch confirmed (`ok`): the message consumed the slot's

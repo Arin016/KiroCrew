@@ -537,7 +537,7 @@ export default function ChatPane({
         // "no card and no ask" skipped the body entirely, which would have skipped
         // this confirmation too. `confirmedDelivered` accepts only an IMMEDIATE
         // dispatch: a queued acceptance is not a receipt for this bubble.
-        if (confirmedDelivered(body)) dispatch(confirmOptimisticSend({ slot: slotKey, sendId }))
+        if (confirmedDelivered(body)) dispatch(confirmOptimisticSend({ slot: slotKey, sendId, mid: typeof body.mid === 'string' ? body.mid : undefined }))
         if (!cardAtSend && !askAtSend) return
         // `ok` only: a QUEUED acceptance is still cancellable — the queued
         // path retires at its queue_pop instead (removeQueuedMessage).

@@ -8525,6 +8525,70 @@ class TestApiChatAgentPassing:
             mock_emit.assert_called_once_with("slot-r", "new-agent", outcome="denied_running")
 
 
+class TestApiChatSendReceiptMid:
+    """The immediate-dispatch receipt carries the user row's server-minted `mid`.
+
+    The dashboard renders the user turn optimistically and no `chat_message`
+    user echo is broadcast for a dashboard send (`append` defaults
+    `broadcast_user=False`), so the send receipt is the only channel that can
+    hand the client the row's stable id before the chat_done refresh. The
+    message-pin control is gated on `meta.mid`, so a missing id keeps the
+    just-sent message unpinnable for the whole turn.
+    """
+
+    @pytest.mark.asyncio
+    async def test_immediate_dispatch_receipt_carries_the_user_row_mid(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+
+        async def fake_run_chat(st, sl, msg, *, _directive_user_origin):
+            sl.append("chunk", "ack", "chunk")
+
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers._run_chat", fake_run_chat)
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat?ws=1",
+                json={"message": "hello", "slot": "mid-slot"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+
+        assert data["ok"] is True
+        # The receipt id must be the SAME id stamped on the appended user row —
+        # that is the identity the client stamps on the optimistic bubble and
+        # the pin endpoint keys on.
+        slot = state._slots["mid-slot"]
+        user_rows = [m for m in slot.messages if m["role"] == "user"]
+        assert user_rows, "the send must have appended a user row"
+        row_mid = user_rows[-1]["meta"]["mid"]
+        assert row_mid
+        assert data["mid"] == row_mid
+
+    @pytest.mark.asyncio
+    async def test_queued_send_receipt_carries_no_mid(self, tmp_path, monkeypatch):
+        """A busy slot queues the message and broadcasts its own queue card; the
+        optimistic bubble is not this row's receipt, so no `mid` is returned
+        (mirrors `confirmedDelivered`, which excludes a queued acceptance)."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("busy-slot")
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        slot.task = mock_task  # slot.running is True → the busy/queue branch
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat?ws=1",
+                json={"message": "queue me", "slot": "busy-slot"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+
+        assert data["queued"] is True
+        assert "mid" not in data
+
+
 # ── Plan action & auto-run tests ──
 
 

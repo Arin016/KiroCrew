@@ -1104,6 +1104,44 @@ describe('confirmOptimisticSend — the send response retires the pending state'
     expect(state.messages[0].meta?.sendId).toBe('s-confirm-1')
   })
 
+  it('stamps the receipt mid on the confirmed bubble so it becomes pinnable this turn', () => {
+    let state = reducer(withSlot, appendMessage({
+      role: 'user', content: 'ship it', cls: '', ts: '2026-08-16T10:00:00.000Z',
+      meta: { sendId: 's-mid-1' },
+    }))
+    // The optimistic bubble is born with NO mid (the pin control is gated on it).
+    expect(state.messages[0].meta?.mid).toBeUndefined()
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-mid-1', mid: 'm-server-42' }))
+
+    expect(state.messages[0].meta?.mid).toBe('m-server-42')
+    expect(state.messages[0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('leaves the bubble without a mid when the receipt carried none (queued/steer send)', () => {
+    let state = reducer(withSlot, appendMessage({
+      role: 'user', content: 'ship it', cls: '', ts: '2026-08-16T10:00:00.000Z',
+      meta: { sendId: 's-nomid' },
+    }))
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-nomid' }))
+
+    expect(state.messages[0].meta?.mid).toBeUndefined()
+    expect(state.messages[0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('never overwrites a mid a refresh already reconciled (identity is stable once assigned)', () => {
+    let state = reducer(withSlot, appendMessage({
+      role: 'user', content: 'ship it', cls: '', ts: '2026-08-16T10:00:00.000Z',
+      meta: { sendId: 's-existing', mid: 'm-already-here' },
+    }))
+
+    state = reducer(state, confirmOptimisticSend({ slot: 'slot-1', sendId: 's-existing', mid: 'm-late-different' }))
+
+    expect(state.messages[0].meta?.mid).toBe('m-already-here')
+    expect(state.messages[0].meta?.optimistic).toBeUndefined()
+  })
+
   it('confirms only the matching send, leaving a sibling in-flight bubble pending', () => {
     let state = reducer(withSlot, appendMessage({ role: 'user', content: 'first', cls: '', ts: '2026-08-16T10:00:00.000Z', meta: { sendId: 's-a' } }))
     state = reducer(state, appendMessage({ role: 'user', content: 'second', cls: '', ts: '2026-08-16T10:00:01.000Z', meta: { sendId: 's-b' } }))

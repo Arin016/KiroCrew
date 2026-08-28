@@ -3092,8 +3092,8 @@ const chatSlice = createSlice({
      *  pushes into the active `messages` while `appendSlotMessage` may have used
      *  `slotMessages[slot]`, and the user can switch sessions while the POST is
      *  in flight. `sendId` is unique per send, so scanning both cannot mis-hit. */
-    confirmOptimisticSend(state, action: PayloadAction<{ slot: string; sendId: string }>) {
-      const { slot, sendId } = action.payload
+    confirmOptimisticSend(state, action: PayloadAction<{ slot: string; sendId: string; mid?: string }>) {
+      const { slot, sendId, mid } = action.payload
       if (isUnsafeKey(slot)) return
       const confirm = (msgs: ChatMessage[] | undefined): boolean => {
         if (!msgs) return false
@@ -3103,6 +3103,15 @@ const chatSlice = createSlice({
           if (m.role !== 'user' || m.meta?.sendId !== sendId) continue
           const meta = { ...(m.meta || {}) }
           delete meta.optimistic
+          // Stamp the server-minted row id the receipt carried back. The bubble
+          // was appended client-side with only a `sendId` (no server identity),
+          // and no `chat_message` echo carries the `mid` for a dashboard send,
+          // so this is the only point it can land before the chat_done refresh.
+          // The message-pin control is gated on `meta.mid`, so without it the
+          // just-sent message cannot be pinned for the whole turn. Only set when
+          // the row has none yet — never overwrite a `mid` a refresh already
+          // reconciled (identity must not change once assigned).
+          if (mid && !meta.mid) meta.mid = mid
           m.meta = meta
           return true
         }

@@ -624,7 +624,18 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # agent itself decides whether to operate a browser or read with web_fetch
     # (the system prompt and the kirocrew-commands / web-browse skills tell it
     # how), so the backend injects nothing here.
-    slot.append("user", message, "msg msg-u", meta=_redact_meta(user_meta) if user_meta else None)
+    # Capture the server-minted `meta.mid` off the appended row so the send
+    # receipt can carry it back (see the receipts below). The dashboard renders
+    # this user turn optimistically and no `chat_message` user echo is broadcast
+    # for it (`append` defaults `broadcast_user=False`), so the receipt is the
+    # ONLY channel that can hand the client this row's stable id before the
+    # `chat_done` refresh rebuilds the transcript from disk. Without it, the
+    # message-pin control (keyed on `meta.mid`) stays withheld for the whole
+    # turn.
+    _user_row = slot.append(
+        "user", message, "msg msg-u", meta=_redact_meta(user_meta) if user_meta else None
+    )
+    _user_mid = _user_row.get("meta", {}).get("mid")
 
     # Note: untitled slots display as "New Session…" via _ChatSlot.display_title
     # (serialization layer), so there's no bare chat-N flash to patch here. The
@@ -818,7 +829,15 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     state.push_slots_update()
 
     if ws_mode:
-        return web.json_response({"ok": True, "slot": slot.key})
+        # Carry the server-minted user-row `mid` back (see the append above). A
+        # confirmed dashboard send reconciles it onto the optimistic bubble so
+        # the message-pin control lights up immediately instead of only after
+        # the chat_done refresh. Omitted when absent so the receipt shape is
+        # unchanged for callers that never minted one.
+        _receipt: dict[str, Any] = {"ok": True, "slot": slot.key}
+        if _user_mid:
+            _receipt["mid"] = _user_mid
+        return web.json_response(_receipt)
 
     resp = web.StreamResponse()
     resp.content_type = "text/event-stream"
