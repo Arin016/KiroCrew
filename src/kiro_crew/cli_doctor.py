@@ -561,7 +561,17 @@ def _doctor_mcp_tools(agent_path: Path, issues: list[str]) -> None:
             if name not in _OPT_IN_MCPS:
                 issues.append(f"{ref} config")
             continue
-        if ref not in tools and name not in _OPT_IN_MCPS and name not in gated_off:
+        if name in gated_off:
+            # A gated-off server that still has an mcpServers entry is a stale
+            # leftover (e.g. config copied from a macOS host, or the platform
+            # changed). The driver is unavailable so probing would fail or time
+            # out. Print informational and skip — do not auto-mount, do not warn
+            # about missing tools ref, and do not probe.
+            print(
+                f"  {ref}: ℹ️  spec gate closed — stale entry can be removed"
+            )
+            continue
+        if ref not in tools and name not in _OPT_IN_MCPS:
             # Mounting an opt-in server IS granting it: the `@` ref is what makes
             # kiro-cli load it. Doctor repairs a broken always-on mount, but it
             # must never hand an agent a set the user did not assign.

@@ -2283,31 +2283,25 @@ class TestMcpToolsSpecGate:
         assert "missing from mcpServers" in out
         assert "@kirocrew-computer config" in issues
 
-    def test_gated_off_server_present_in_mcpservers_is_not_auto_mounted(
+    def test_gated_off_server_present_in_mcpservers_is_not_probed(
         self, monkeypatch, tmp_path: Path, capsys
     ) -> None:
         """A gated-off server that has an mcpServers entry but no tools ref
-        must NOT be auto-mounted into tools."""
+        must NOT be auto-mounted into tools, must NOT print the misleading
+        'unreachable' warning, and must NOT be probed."""
         monkeypatch.setattr(
             cli_doctor, "_gated_off_servers", lambda: frozenset({"kirocrew-computer"})
         )
         monkeypatch.setattr(cli_doctor, "_MANAGED_MCPS", ("kirocrew-computer",))
         monkeypatch.setattr(cli_doctor, "_OPT_IN_MCPS", ())
-        monkeypatch.setattr(cli_doctor, "may_skip_gate_now", lambda ref: True)
+
+        # If probe_server is ever called, that means the gated-off server was
+        # not skipped. Blow up loudly so the test fails.
+        async def _probe_must_not_be_called(info):
+            raise AssertionError("probe_server must not be called for a gated-off server")
+
+        monkeypatch.setattr(cli_doctor, "probe_server", _probe_must_not_be_called)
         monkeypatch.setattr(cli_doctor, "warm_backend", lambda: None)
-
-        # probe_server is async; provide a coroutine that returns a simple result
-        class _FakeProbeResult:
-            def __init__(self):
-                self.name = "kirocrew-computer"
-                self.status = "ok"
-                self.tools = ["tool1"]
-                self.error = None
-
-        async def _fake_probe(info):
-            return _FakeProbeResult()
-
-        monkeypatch.setattr(cli_doctor, "probe_server", _fake_probe)
 
         agent_path = self._write_agent(tmp_path, {
             "tools": [],
@@ -2317,6 +2311,14 @@ class TestMcpToolsSpecGate:
         issues: list[str] = []
         cli_doctor._doctor_mcp_tools(agent_path, issues)
 
+        out = capsys.readouterr().out
+        # Should print informational about stale entry
+        assert "spec gate closed" in out
+        assert "stale entry can be removed" in out
+        # Must NOT print the misleading "unreachable" warning
+        assert "unreachable" not in out
         # The tools ref should NOT have been added
         rewritten = json.loads(agent_path.read_text(encoding="utf-8"))
         assert "@kirocrew-computer" not in rewritten.get("tools", [])
+        # No issues appended
+        assert issues == []
