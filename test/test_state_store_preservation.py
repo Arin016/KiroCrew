@@ -260,3 +260,61 @@ class TestTagBoardsPreservation:
         st.save_tag_boards()
         on_disk = json.loads(path.read_text(encoding="utf-8"))
         assert [c["id"] for c in on_disk] == ["c1"]
+
+
+# --------------------------------------------------------------------------- #
+# Shared helpers (#6326) — the partition/append mechanics all four stores share
+# --------------------------------------------------------------------------- #
+class TestPartitionPreserving:
+    """Direct coverage of the extracted ``_partition_preserving`` helper.
+
+    The four stores keep their own predicates; this asserts the shared
+    mechanics: order-preserving split into (active, unparsed), and a single
+    preserving-N warning emitted only when a row is dropped.
+    """
+
+    def test_splits_preserving_order(self):
+        raw = [{"id": "a"}, "bad", {"id": "b"}, {"no": "id"}]
+        active, unparsed = DashboardState._partition_preserving(
+            raw,
+            lambda r: isinstance(r, dict) and bool(r.get("id")),
+            "entr(ies)",
+            "tags.json",
+        )
+        assert active == [{"id": "a"}, {"id": "b"}]
+        assert unparsed == ["bad", {"no": "id"}]
+
+    def test_all_valid_produces_no_unparsed_and_no_warning(self, caplog):
+        raw = [{"id": "a"}, {"id": "b"}]
+        with caplog.at_level("WARNING", logger="kiro_crew.dashboard.state"):
+            active, unparsed = DashboardState._partition_preserving(
+                raw, lambda r: bool(r.get("id")), "entr(ies)", "tags.json"
+            )
+        assert active == raw
+        assert unparsed == []
+        assert not [r for r in caplog.records if "Preserving" in r.message]
+
+    def test_warns_once_with_count_noun_and_file(self, caplog):
+        raw = ["x", {"id": "ok"}, "y"]
+        with caplog.at_level("WARNING", logger="kiro_crew.dashboard.state"):
+            _, unparsed = DashboardState._partition_preserving(
+                raw,
+                lambda r: isinstance(r, dict) and bool(r.get("id")),
+                "chat pin record(s)",
+                "chat_pins.json",
+            )
+        assert unparsed == ["x", "y"]
+        warnings = [r.message for r in caplog.records if "Preserving" in r.message]
+        assert len(warnings) == 1
+        assert (
+            "Preserving 2 malformed chat pin record(s) while loading chat_pins.json" in warnings[0]
+        )
+
+    def test_empty_input_is_noop(self, caplog):
+        with caplog.at_level("WARNING", logger="kiro_crew.dashboard.state"):
+            active, unparsed = DashboardState._partition_preserving(
+                [], lambda r: True, "entr(ies)", "tags.json"
+            )
+        assert active == []
+        assert unparsed == []
+        assert not [r for r in caplog.records if "Preserving" in r.message]

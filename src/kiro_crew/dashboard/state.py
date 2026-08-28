@@ -7324,15 +7324,9 @@ class DashboardState:
                         and not isinstance(f.get("order"), bool)
                     )
 
-                valid = [f for f in loaded if _is_valid(f)]
-                unparsed = [f for f in loaded if not _is_valid(f)]
-                if unparsed:
-                    logger.warning(
-                        "Preserving %d malformed entr(ies) while loading %s "
-                        "(kept verbatim, not active)",
-                        len(unparsed),
-                        self._CRON_FOLDERS_FILE,
-                    )
+                valid, unparsed = self._partition_preserving(
+                    loaded, _is_valid, "entr(ies)", self._CRON_FOLDERS_FILE
+                )
                 self._cron_folders = valid
                 self._unparsed_cron_folder_entries = unparsed
         except Exception:
@@ -7509,14 +7503,9 @@ class DashboardState:
                 and bool(pin.get("pinned_at"))
             )
 
-        valid = [pin for pin in raw if _is_valid(pin)]
-        unparsed = [pin for pin in raw if not _is_valid(pin)]
-        if unparsed:
-            logger.warning(
-                "Preserving %d malformed chat pin record(s) while loading "
-                "chat_pins.json (kept verbatim, not active)",
-                len(unparsed),
-            )
+        valid, unparsed = self._partition_preserving(
+            raw, _is_valid, "chat pin record(s)", self._CHAT_PINS_FILE
+        )
         self._chat_pins = valid
         self._unparsed_chat_pin_entries = unparsed
 
@@ -7686,18 +7675,16 @@ class DashboardState:
             if file_existed:
                 raw = json.loads(tags_path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
-                    self._tags = [t for t in raw if isinstance(t, dict) and t.get("id")]
                     # Keep rows the active list dropped verbatim so the seed/
                     # back-fill save below (and every later save) round-trips
                     # them back instead of erasing a hand-edited-but-typo'd row
                     # at boot with no user action (#5792).
-                    unparsed = [t for t in raw if not (isinstance(t, dict) and t.get("id"))]
-                    if unparsed:
-                        logger.warning(
-                            "Preserving %d malformed tag entr(ies) while loading "
-                            "tags.json (kept verbatim, not active)",
-                            len(unparsed),
-                        )
+                    self._tags, unparsed = self._partition_preserving(
+                        raw,
+                        lambda t: isinstance(t, dict) and bool(t.get("id")),
+                        "tag entr(ies)",
+                        self._TAGS_FILE,
+                    )
                     self._unparsed_tag_entries = unparsed
                 else:
                     # Valid JSON but not a list (e.g. {}): the vocabulary
@@ -7737,17 +7724,15 @@ class DashboardState:
             if columns_path.exists():
                 raw = json.loads(columns_path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
-                    self._tag_boards = [c for c in raw if isinstance(c, dict) and c.get("id")]
                     # Preserve dropped columns verbatim so a later save
                     # round-trips them rather than erasing a hand-edited-but-
                     # typo'd column (#5792).
-                    unparsed_cols = [c for c in raw if not (isinstance(c, dict) and c.get("id"))]
-                    if unparsed_cols:
-                        logger.warning(
-                            "Preserving %d malformed sidebar column(s) while "
-                            "loading tag_boards.json (kept verbatim, not active)",
-                            len(unparsed_cols),
-                        )
+                    self._tag_boards, unparsed_cols = self._partition_preserving(
+                        raw,
+                        lambda c: isinstance(c, dict) and bool(c.get("id")),
+                        "sidebar column(s)",
+                        self._TAG_BOARDS_FILE,
+                    )
                     self._unparsed_tag_board_entries = unparsed_cols
                     # Prune column tag_ids missing from the vocabulary: tag
                     # deletion commits the vocab write first (crash-atomic),
@@ -7804,7 +7789,8 @@ class DashboardState:
         """
         unparsed = getattr(self, "_unparsed_tag_board_entries", [])
         self._atomic_write_json(
-            config_dir() / self._TAG_BOARDS_FILE, [*self._tag_boards, *unparsed]
+            config_dir() / self._TAG_BOARDS_FILE,
+            [*self._tag_boards, *unparsed],
         )
 
     def save_tag_boards_snapshot(self, snapshot: list[dict]) -> None:
@@ -7825,6 +7811,42 @@ class DashboardState:
         """
         unparsed = getattr(self, "_unparsed_tag_board_entries", [])
         self._atomic_write_json_strict(config_dir() / self._TAG_BOARDS_FILE, [*snapshot, *unparsed])
+
+    @staticmethod
+    def _partition_preserving(
+        raw: list[Any],
+        predicate: Callable[[Any], bool],
+        noun: str,
+        source_file: str,
+    ) -> tuple[list[Any], list[Any]]:
+        """Split ``raw`` into ``(active, unparsed)`` by ``predicate``.
+
+        The shared "partition malformed rows at load, keep them verbatim so a
+        later save round-trips them back" mechanic behind ``load_cron_folders``,
+        ``load_chat_pins``, ``load_tags`` and the tag-board load (all #5792).
+        A row is active when ``predicate`` returns truthy; every other row is
+        collected into ``unparsed`` so the caller's save path can re-append it
+        (``[*active, *unparsed]``) at write time rather than silently erasing
+        bytes a hand-edit left in a shape the loader could not validate.
+
+        When any row is preserved, logs the shared preserving-N warning at
+        WARNING level. ``noun`` supplies the per-store wording (``"entr(ies)"``,
+        ``"chat pin record(s)"``, ``"tag entr(ies)"``, ``"sidebar column(s)"``)
+        and ``source_file`` names the file, so the emitted messages stay
+        identical to the hand-rolled copies this replaced.
+        """
+        active: list[Any] = []
+        unparsed: list[Any] = []
+        for row in raw:
+            (active if predicate(row) else unparsed).append(row)
+        if unparsed:
+            logger.warning(
+                "Preserving %d malformed %s while loading %s " "(kept verbatim, not active)",
+                len(unparsed),
+                noun,
+                source_file,
+            )
+        return active, unparsed
 
     @staticmethod
     def _atomic_write_json_strict(path: Path, data: Any) -> None:
