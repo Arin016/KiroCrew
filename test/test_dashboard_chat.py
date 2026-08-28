@@ -10779,6 +10779,8 @@ class TestFolderCRUD:
         ]
         mock_cfg = MagicMock()
         mock_cfg.dashboard.default_project = ""
+        mock_cfg.agents = {}
+        mock_cfg.default_agent = ""
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
         )
