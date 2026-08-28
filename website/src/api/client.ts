@@ -2430,7 +2430,11 @@ export const api = {
   // every slot shares", so workspace skills leak between chats on different
   // projects and vanish entirely when two chats disagree (#2457, #3551).
   // agent, when given, scopes the listing to that agent's own skill:// mapping;
-  // an agent with no explicit mapping keeps the unfiltered listing.
+  // an agent with no explicit mapping keeps the unfiltered listing. When the
+  // mapping IS applied the server answers with the envelope
+  // {skills, agent_scoped: true, agent} instead of the bare array, so the
+  // picker can cue the scope (and tell "nothing mapped" from "nothing exists").
+  // Consume through lib/skillsPayload.ts unwrapSkills() rather than assuming an array.
   skills: (sessionKey?: string, agent?: string) =>
     get('/api/skills' + (agent ? '?agent=' + encodeURIComponent(agent) : ''),
         sessionKey).then(j),

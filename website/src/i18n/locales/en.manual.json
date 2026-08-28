@@ -2150,7 +2150,11 @@
     },
     "skillPickerMenu": {
       "no_matching_skills_ctrl_enter_sends": "No matching skills — Ctrl+Enter sends the message",
-      "no_matching_skills_enter_sends": "No matching skills — Enter sends the message"
+      "no_matching_skills_enter_sends": "No matching skills — Enter sends the message",
+      "no_skills_mapped_to_agent": "No skills mapped to {{agent}}",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "No skills mapped to {{agent}} — Ctrl+Enter sends the message",
+      "no_skills_mapped_to_agent_enter_sends": "No skills mapped to {{agent}} — Enter sends the message",
+      "scoped_to_agent": "Scoped to agent {{agent}}"
     },
     "snipOverlay": {
       "could_not_capture_the_selected_region_please_try": "Could not capture the selected region. Please try again."

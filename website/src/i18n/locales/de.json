@@ -6942,6 +6942,10 @@
       "no_matching_skills": "Keine passenden Skills",
       "no_matching_skills_ctrl_enter_sends": "Keine passenden Skills — Ctrl+Enter sendet die Nachricht",
       "no_matching_skills_enter_sends": "Keine passenden Skills — Enter sendet die Nachricht",
+      "no_skills_mapped_to_agent": "Keine Skills für {{agent}} zugeordnet",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "Keine Skills für {{agent}} zugeordnet — Ctrl+Enter sendet die Nachricht",
+      "no_skills_mapped_to_agent_enter_sends": "Keine Skills für {{agent}} zugeordnet — Enter sendet die Nachricht",
+      "scoped_to_agent": "Auf Agent {{agent}} beschränkt",
       "trust_needed_badge": "Vertrauen nötig",
       "trust_needed_hint": "Aus diesem Projekt. Auswählen, um zu prüfen und dem Ordner zu vertrauen."
     },

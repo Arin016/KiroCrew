@@ -7051,6 +7051,10 @@
       "no_matching_skills": "Nessuna skill corrispondente",
       "no_matching_skills_ctrl_enter_sends": "Nessuna skill corrispondente — Ctrl+Invio invia il messaggio",
       "no_matching_skills_enter_sends": "Nessuna skill corrispondente — Invio invia il messaggio",
+      "no_skills_mapped_to_agent": "Nessuna skill mappata a {{agent}}",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "Nessuna skill mappata a {{agent}} — Ctrl+Invio invia il messaggio",
+      "no_skills_mapped_to_agent_enter_sends": "Nessuna skill mappata a {{agent}} — Invio invia il messaggio",
+      "scoped_to_agent": "Limitato all’agente {{agent}}",
       "trust_needed_badge": "Richiede attendibilità",
       "trust_needed_hint": "Da questo progetto. Selezionala per esaminarla e considerare attendibile la cartella."
     },

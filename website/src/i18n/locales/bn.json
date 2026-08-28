@@ -6942,6 +6942,10 @@
       "no_matching_skills": "মিলে যাওয়া কোনো স্কিল নেই",
       "no_matching_skills_ctrl_enter_sends": "মিলে যাওয়া কোনো স্কিল নেই — Ctrl+Enter বার্তা পাঠাবে",
       "no_matching_skills_enter_sends": "মিলে যাওয়া কোনো স্কিল নেই — Enter বার্তা পাঠাবে",
+      "no_skills_mapped_to_agent": "{{agent}}-এ কোনো স্কিল ম্যাপ করা নেই",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "{{agent}}-এ কোনো স্কিল ম্যাপ করা নেই — Ctrl+Enter বার্তা পাঠাবে",
+      "no_skills_mapped_to_agent_enter_sends": "{{agent}}-এ কোনো স্কিল ম্যাপ করা নেই — Enter বার্তা পাঠাবে",
+      "scoped_to_agent": "এজেন্ট {{agent}}-এ সীমাবদ্ধ",
       "trust_needed_badge": "বিশ্বাস দরকার",
       "trust_needed_hint": "এই প্রকল্প থেকে। যাচাই করে ফোল্ডার বিশ্বাস করতে এটি বেছে নাও।"
     },

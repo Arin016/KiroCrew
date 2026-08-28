@@ -7160,6 +7160,10 @@
       "no_matching_skills": "Нет подходящих навыков",
       "no_matching_skills_ctrl_enter_sends": "Нет подходящих навыков — Ctrl+Enter отправит сообщение",
       "no_matching_skills_enter_sends": "Нет подходящих навыков — Enter отправит сообщение",
+      "no_skills_mapped_to_agent": "Нет навыков, сопоставленных с {{agent}}",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "Нет навыков, сопоставленных с {{agent}} — Ctrl+Enter отправит сообщение",
+      "no_skills_mapped_to_agent_enter_sends": "Нет навыков, сопоставленных с {{agent}} — Enter отправит сообщение",
+      "scoped_to_agent": "Ограничено агентом {{agent}}",
       "trust_needed_badge": "Нужно доверие",
       "trust_needed_hint": "Из этого проекта. Выбери его, чтобы просмотреть и доверять папке."
     },

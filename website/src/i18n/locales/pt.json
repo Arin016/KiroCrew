@@ -7051,6 +7051,10 @@
       "no_matching_skills": "Nenhuma habilidade correspondente",
       "no_matching_skills_ctrl_enter_sends": "Nenhuma habilidade correspondente — Ctrl+Enter envia a mensagem",
       "no_matching_skills_enter_sends": "Nenhuma habilidade correspondente — Enter envia a mensagem",
+      "no_skills_mapped_to_agent": "Nenhuma habilidade mapeada para {{agent}}",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "Nenhuma habilidade mapeada para {{agent}} — Ctrl+Enter envia a mensagem",
+      "no_skills_mapped_to_agent_enter_sends": "Nenhuma habilidade mapeada para {{agent}} — Enter envia a mensagem",
+      "scoped_to_agent": "Limitado ao agente {{agent}}",
       "trust_needed_badge": "Precisa de confiança",
       "trust_needed_hint": "Deste projeto. Escolha-a para revisar e confiar na pasta."
     },

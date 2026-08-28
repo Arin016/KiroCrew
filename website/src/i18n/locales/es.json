@@ -7051,6 +7051,10 @@
       "no_matching_skills": "No hay skills coincidentes",
       "no_matching_skills_ctrl_enter_sends": "No hay skills coincidentes: Ctrl+Enter envía el mensaje",
       "no_matching_skills_enter_sends": "No hay skills coincidentes: Enter envía el mensaje",
+      "no_skills_mapped_to_agent": "No hay skills mapeadas a {{agent}}",
+      "no_skills_mapped_to_agent_ctrl_enter_sends": "No hay skills mapeadas a {{agent}}: Ctrl+Enter envía el mensaje",
+      "no_skills_mapped_to_agent_enter_sends": "No hay skills mapeadas a {{agent}}: Enter envía el mensaje",
+      "scoped_to_agent": "Limitado al agente {{agent}}",
       "trust_needed_badge": "Requiere confianza",
       "trust_needed_hint": "De este proyecto. Selecciónala para revisarla y confiar en la carpeta."
     },
