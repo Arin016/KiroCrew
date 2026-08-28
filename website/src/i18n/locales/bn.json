@@ -11106,6 +11106,25 @@
       "truncated_showing_first_200kb": "… সংক্ষিপ্ত করা হয়েছে (প্রথম 200KB দেখানো হচ্ছে) …",
       "no_archives_with_compaction_hint": "কোনো আর্কাইভ নেই। সেশন ফাইল রোটেট (>2MB) বা কম্প্যাক্ট হলে আর্কাইভ তৈরি হয়। স্বয়ংক্রিয় কম্প্যাকশন <settingRef/> দ্বারা নিয়ন্ত্রিত হয়।"
     },
+    "sessionBreakdown": {
+      "header_meta": "{{subs}} সাব-এজেন্ট · {{running}} চলমান",
+      "legend_history": "ইতিহাস",
+      "legend_lessons": "শিক্ষা",
+      "legend_memory": "মেমরি",
+      "legend_skill": "স্কিল",
+      "legend_skillidx": "স্কিল সূচি",
+      "legend_sys": "এজেন্ট",
+      "node_caption": "{{model}} · {{turns}} টার্ন · নিজস্ব উইন্ডো",
+      "occupancy": "উইন্ডোর {{pct}}%",
+      "stalled": "থমকে গেছে",
+      "status_done": "সম্পন্ন",
+      "status_error": "শেষ হয়েছে",
+      "status_running": "চলমান",
+      "title": "সেশন বিশ্লেষণ",
+      "tool_count": "{{count}} টুল",
+      "unknown_agent": "সাব-এজেন্ট",
+      "unknown_model": "অজানা"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "{{days}} দিনের বেশি পুরোনো — {{count}}টি সেশন · {{size}}",

@@ -11268,6 +11268,25 @@
       "truncated_showing_first_200kb": "… tronqué (affichage des premiers 200KB) …",
       "no_archives_with_compaction_hint": "Aucune archive. Les archives sont créées lorsque les fichiers de session sont rotés (>2MB) ou compactés. La compaction automatique est contrôlée par <settingRef/>."
     },
+    "sessionBreakdown": {
+      "header_meta": "{{subs}} sous-agents · {{running}} en cours",
+      "legend_history": "historique",
+      "legend_lessons": "leçons",
+      "legend_memory": "mémoire",
+      "legend_skill": "skill",
+      "legend_skillidx": "index des skills",
+      "legend_sys": "agent",
+      "node_caption": "{{model}} · {{turns}} tours · sa propre fenêtre",
+      "occupancy": "{{pct}} % de la fenêtre",
+      "stalled": "bloqué",
+      "status_done": "terminé",
+      "status_error": "arrêté",
+      "status_running": "en cours",
+      "title": "Détail de la session",
+      "tool_count": "{{count}} outils",
+      "unknown_agent": "sous-agent",
+      "unknown_model": "inconnu"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_many": "Plus de {{days}} jours — {{count}} sessions · {{size}}",

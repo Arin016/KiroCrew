@@ -11106,6 +11106,25 @@
       "truncated_showing_first_200kb": "… छोटा किया गया (पहले 200KB दिखाए जा रहे हैं) …",
       "no_archives_with_compaction_hint": "कोई आर्काइव नहीं। सत्र फ़ाइलें रोटेट (>2MB) या कॉम्पैक्ट होने पर आर्काइव बनाए जाते हैं। स्वतः-संघनन <settingRef/> द्वारा नियंत्रित होता है।"
     },
+    "sessionBreakdown": {
+      "header_meta": "{{subs}} सब-एजेंट · {{running}} चल रहे",
+      "legend_history": "इतिहास",
+      "legend_lessons": "सीख",
+      "legend_memory": "मेमोरी",
+      "legend_skill": "स्किल",
+      "legend_skillidx": "स्किल सूची",
+      "legend_sys": "एजेंट",
+      "node_caption": "{{model}} · {{turns}} टर्न · अपनी विंडो",
+      "occupancy": "विंडो का {{pct}}%",
+      "stalled": "रुका हुआ",
+      "status_done": "पूर्ण",
+      "status_error": "समाप्त",
+      "status_running": "चल रहा",
+      "title": "सेशन विश्लेषण",
+      "tool_count": "{{count}} टूल",
+      "unknown_agent": "सब-एजेंट",
+      "unknown_model": "अज्ञात"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "{{days}} दिन से पुराने — {{count}} सत्र · {{size}}",

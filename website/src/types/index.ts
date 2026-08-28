@@ -925,6 +925,12 @@ export interface SubagentActivity {
    *  compared against `model` via `isModelDowngrade` to render the amber chip on
    *  the live card (#5326). */
   requestedModel?: string
+  /** The sub-agent's OWN session key, where it writes its per-turn context
+   *  rows. Carried on the `subagent_spawn`/`subagent_done`/snapshot frames
+   *  (backend `conversation_key or subagent:<id>`). The Session Breakdown tree
+   *  uses it to fetch this node's own context-trace so each node shows the
+   *  composition of ITS window, not the parent's. Absent for native cards. */
+  childSession?: string
   status: 'pending' | 'running' | 'tool' | 'done' | 'error' | 'stopped'
   streaming: string; lastTool: string
   startedAt: number; elapsed: number; error?: string

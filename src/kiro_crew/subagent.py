@@ -2625,6 +2625,10 @@ class SubagentManager:
                 "outcome": info.outcome,
                 "task": _redact(info.task),
                 "agent": _redact(info.agent),
+                # The sub-agent's own session key (see build_subagent_snapshot):
+                # lets a client fetch this node's own context-trace even after
+                # it has finished.
+                "child_session": info.conversation_key or f"subagent:{info.id}",
                 # The model actually served (issue #3582). By the terminal
                 # report this is the authoritative value on every provider — the
                 # CC/raw path has completed at least one turn, so its
@@ -5743,10 +5747,13 @@ class SubagentManager:
                 "agent": agent or "",
                 "model": info.resolved_model,
                 # The requested pin is caller-supplied (spawn_run.model), so it
-                # is redacted like every other free-text field on the frame — an
+                # is redacted like every other free-text field on the frame -- an
                 # unavailable/AKIA-shaped pin must never reach the dashboard
                 # socket raw (GPT review on #5326).
                 "requested_model": _redact(info.requested_model),
+                # The sub-agent's own session key (see build_subagent_snapshot):
+                # lets a client fetch this node's own context-trace.
+                "child_session": info.conversation_key or f"subagent:{info.id}",
             },
         )
         # Stream results to disk for orchestrated chat.

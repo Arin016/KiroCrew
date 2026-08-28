@@ -10944,6 +10944,25 @@
       "truncated_showing_first_200kb": "… 切り詰め（最初の 200KB を表示）…",
       "no_archives_with_compaction_hint": "アーカイブはありません。セッションファイルがローテーション（>2MB）またはコンパクト化されるときに作成されます。自動コンパクションは <settingRef/> で制御されます。"
     },
+    "sessionBreakdown": {
+      "header_meta": "サブエージェント {{subs}} 件 · 実行中 {{running}} 件",
+      "legend_history": "履歴",
+      "legend_lessons": "学習",
+      "legend_memory": "メモリ",
+      "legend_skill": "スキル",
+      "legend_skillidx": "スキル索引",
+      "legend_sys": "エージェント",
+      "node_caption": "{{model}} · {{turns}} ターン · 自身のウィンドウ",
+      "occupancy": "ウィンドウの {{pct}}%",
+      "stalled": "停滞",
+      "status_done": "完了",
+      "status_error": "終了",
+      "status_running": "実行中",
+      "title": "セッション内訳",
+      "tool_count": "ツール {{count}} 件",
+      "unknown_agent": "サブエージェント",
+      "unknown_model": "不明"
+    },
     "sessionStorage": {
       "age_option_other": "{{days}} 日以上前 — {{count}} セッション · {{size}}",
       "back_to_disk": "システム · パフォーマンス › ディスク",

@@ -7263,6 +7263,25 @@
       "select_an_archive_to_view_its_contents": "Select an archive to view its contents.",
       "no_archives_with_compaction_hint": "No archives. Archives are created when session files are rotated (>2MB) or compacted. Auto-compaction is controlled by <settingRef/>."
     },
+    "sessionBreakdown": {
+      "header_meta": "{{subs}} sub-agents · {{running}} running",
+      "legend_history": "history",
+      "legend_lessons": "lessons",
+      "legend_memory": "memory",
+      "legend_skill": "skill",
+      "legend_skillidx": "skill index",
+      "legend_sys": "agent",
+      "node_caption": "{{model}} · {{turns}} turns · its own window",
+      "occupancy": "{{pct}}% of window",
+      "stalled": "stalled",
+      "status_done": "done",
+      "status_error": "ended",
+      "status_running": "running",
+      "title": "Session Breakdown",
+      "tool_count": "{{count}} tools",
+      "unknown_agent": "sub-agent",
+      "unknown_model": "unknown"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "Older than {{days}} days — {{count}} session · {{size}}",

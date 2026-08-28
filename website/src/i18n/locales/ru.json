@@ -11430,6 +11430,25 @@
       "truncated_showing_first_200kb": "... обрезано (показаны первые 200KB) ...",
       "no_archives_with_compaction_hint": "Архивов нет. Архивы создаются при ротации файлов сессий (>2MB) или их сжатии. Автоматическое сжатие управляется через <settingRef/>."
     },
+    "sessionBreakdown": {
+      "header_meta": "{{subs}} субагентов · {{running}} активно",
+      "legend_history": "история",
+      "legend_lessons": "уроки",
+      "legend_memory": "память",
+      "legend_skill": "навык",
+      "legend_skillidx": "индекс навыков",
+      "legend_sys": "агент",
+      "node_caption": "{{model}} · {{turns}} ходов · собственное окно",
+      "occupancy": "{{pct}} % окна",
+      "stalled": "застрял",
+      "status_done": "готово",
+      "status_error": "завершено",
+      "status_running": "активно",
+      "title": "Разбор сессии",
+      "tool_count": "{{count}} инструментов",
+      "unknown_agent": "субагент",
+      "unknown_model": "неизвестно"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_few": "Старше {{days}} дней — {{count}} сессии · {{size}}",

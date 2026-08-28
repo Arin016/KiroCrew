@@ -11106,6 +11106,25 @@
       "truncated_showing_first_200kb": "… gekürzt (erste 200 KB werden angezeigt) …",
       "no_archives_with_compaction_hint": "Keine Archive. Archive werden erstellt, wenn Sitzungsdateien rotiert (>2 MB) oder verdichtet werden. Die automatische Komprimierung wird über <settingRef/> gesteuert."
     },
+    "sessionBreakdown": {
+      "header_meta": "{{subs}} Unteragenten · {{running}} aktiv",
+      "legend_history": "Verlauf",
+      "legend_lessons": "Lektionen",
+      "legend_memory": "Speicher",
+      "legend_skill": "Skill",
+      "legend_skillidx": "Skill-Index",
+      "legend_sys": "Agent",
+      "node_caption": "{{model}} · {{turns}} Runden · eigenes Fenster",
+      "occupancy": "{{pct}} % des Fensters",
+      "stalled": "blockiert",
+      "status_done": "fertig",
+      "status_error": "beendet",
+      "status_running": "aktiv",
+      "title": "Sitzungsaufschlüsselung",
+      "tool_count": "{{count}} Tools",
+      "unknown_agent": "Unteragent",
+      "unknown_model": "unbekannt"
+    },
     "sessionStorage": {
       "age_option_one": "Älter als {{days}} Tage — {{count}} Sitzung · {{size}}",
       "age_option_other": "Älter als {{days}} Tage — {{count}} Sitzungen · {{size}}",

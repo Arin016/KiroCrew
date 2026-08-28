@@ -10794,6 +10794,25 @@
       "no_matches_for_query": "[Ñø ɱàţçĥèş ƒøŕ \"{{query}}\". ················]",
       "truncated_showing_first_200kb": "[… ţŕùñçàţèð (şĥøẁìñğ ƒìŕşţ 200ĶƁ) … ··················]"
     },
+    "sessionBreakdown": {
+      "header_meta": "[{{subs}} şùƀ-àğèñţş · {{running}} ŕùññìñğ ···············]",
+      "legend_history": "[ĥìşţøŕý ···········]",
+      "legend_lessons": "[ĺèşşøñş ···········]",
+      "legend_memory": "[ɱèɱøŕý ·········]",
+      "legend_skill": "[şķìĺĺ ········]",
+      "legend_skillidx": "[şķìĺĺ ìñðèẋ ··········]",
+      "legend_sys": "[àğèñţ ········]",
+      "node_caption": "[{{model}} · {{turns}} ţùŕñş · ìţş øẁñ ẁìñðøẁ ··················]",
+      "occupancy": "[{{pct}}% øƒ ẁìñðøẁ ··········]",
+      "stalled": "[şţàĺĺèð ···········]",
+      "status_done": "[ðøñè ······]",
+      "status_error": "[èñðèð ········]",
+      "status_running": "[ŕùññìñğ ···········]",
+      "title": "[Şèşşìøñ Ɓŕèàķðøẁñ ···············]",
+      "tool_count": "[{{count}} ţøøĺş ·········]",
+      "unknown_agent": "[şùƀ-àğèñţ ··············]",
+      "unknown_model": "[ùñķñøẁñ ···········]"
+    },
     "sessionMemoryCard": {},
     "sessionStorage": {
       "age_option_one": "[Øĺðèŕ ţĥàñ {{days}} ðàýş — {{count}} şèşşìøñ · {{size}} ·····················]",
