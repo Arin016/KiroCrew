@@ -457,3 +457,231 @@ describe('mochi context menu — focus returns to the opener on close (#6267 rev
     }
   })
 })
+
+/*
+ * ───── crew-companion ContextMenu: the role="menu" keyboard contract ─────
+ *
+ * The crew-companion `ContextMenu` is a separately-vendored sibling of the mochi
+ * copy above. It now carries the same `role="menu"` + `useMenuKeyboard` wiring,
+ * and the tests below pin that contract identically — ensuring arrow navigation,
+ * Tab containment, and the action/dismiss paths all work on this surface too.
+ */
+
+const ccItems: ContextMenuEntry[] = [
+  { label: 'Change avatar', action: 'gallery' },
+  { label: 'Settings', action: 'settings' },
+  { separator: true },
+  { label: 'Turn off companion', action: 'quit', danger: true },
+]
+
+function renderCrewCompanionMenu(handlers: { onAction?: (a: string) => void; onClose?: () => void } = {}) {
+  return render(
+    <ContextMenu
+      x={10}
+      y={10}
+      items={ccItems}
+      onAction={handlers.onAction ?? (() => {})}
+      onClose={handlers.onClose ?? (() => {})}
+    />,
+  )
+}
+
+function ccMenuRows(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+}
+
+describe('crew-companion context menu - role="menu" keyboard contract', () => {
+  it('moves DOM focus onto the first menuitem when the menu opens', () => {
+    const { container } = renderCrewCompanionMenu()
+    const rows = ccMenuRows(container)
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toHaveFocus()
+  })
+
+  it('ArrowDown walks the menuitems in order, skips the separator, and wraps last -> first', () => {
+    const { container } = renderCrewCompanionMenu()
+    const rows = ccMenuRows(container)
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+    expect(rows[1]).toHaveFocus()
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+    expect(rows[2]).toHaveFocus()
+    // Wrap at the end
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+    expect(rows[0]).toHaveFocus()
+  })
+
+  it('ArrowUp wraps first -> last and then walks back up, skipping the separator', () => {
+    const { container } = renderCrewCompanionMenu()
+    const rows = ccMenuRows(container)
+    fireEvent.keyDown(document.body, { key: 'ArrowUp' })
+    expect(rows[2]).toHaveFocus()
+    fireEvent.keyDown(document.body, { key: 'ArrowUp' })
+    expect(rows[1]).toHaveFocus()
+  })
+
+  it('Home and End jump to the boundary menuitems', () => {
+    const { container } = renderCrewCompanionMenu()
+    const rows = ccMenuRows(container)
+    fireEvent.keyDown(document.body, { key: 'End' })
+    expect(rows[2]).toHaveFocus()
+    fireEvent.keyDown(document.body, { key: 'Home' })
+    expect(rows[0]).toHaveFocus()
+  })
+
+  it('contains Tab inside the menu: last -> first, and Shift-Tab first -> last', () => {
+    const { container } = renderCrewCompanionMenu()
+    const rows = ccMenuRows(container)
+    rows[2].focus()
+    fireEvent.keyDown(document.body, { key: 'Tab' })
+    expect(rows[0]).toHaveFocus()
+    fireEvent.keyDown(document.body, { key: 'Tab', shiftKey: true })
+    expect(rows[2]).toHaveFocus()
+  })
+
+  it('PIN: Enter on the focused menuitem still fires onAction and closes', () => {
+    const onAction = vi.fn()
+    const onClose = vi.fn()
+    const { container } = renderCrewCompanionMenu({ onAction, onClose })
+    const rows = ccMenuRows(container)
+    rows[1].focus()
+    fireEvent.keyDown(rows[1], { key: 'Enter' })
+    expect(onAction).toHaveBeenCalledWith('settings')
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('PIN: Escape still closes the menu', () => {
+    vi.useFakeTimers()
+    try {
+      const onClose = vi.fn()
+      renderCrewCompanionMenu({ onClose })
+      vi.advanceTimersByTime(60)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('PIN: entering and moving focus does not self-close the menu', () => {
+    vi.useFakeTimers()
+    try {
+      const onClose = vi.fn()
+      const { container } = renderCrewCompanionMenu({ onClose })
+      vi.advanceTimersByTime(60)
+      const rows = ccMenuRows(container)
+      expect(rows[0]).toHaveFocus()
+      expect(onClose).not.toHaveBeenCalled()
+      fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+      expect(rows[1]).toHaveFocus()
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+/*
+ * ───── crew-companion ContextMenu: focus RESTORE on close ─────
+ *
+ * Same shape as the mochi focus-restore tests above: a controlled host that
+ * unmounts the menu on close, with a real focusable opener button.
+ */
+
+function CrewCompanionMenuHost({ onAction }: { onAction?: (action: string) => void }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button data-testid="cc-opener" onClick={() => setOpen(true)}>Open menu</button>
+      <button data-testid="cc-elsewhere">Somewhere else</button>
+      {open ? (
+        <ContextMenu
+          x={10}
+          y={10}
+          items={ccItems}
+          onAction={(action) => onAction?.(action)}
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+describe('crew-companion context menu - focus returns to opener on close', () => {
+  function openFromOpener(onAction?: (action: string) => void) {
+    const utils = render(<CrewCompanionMenuHost onAction={onAction} />)
+    const opener = utils.getByTestId('cc-opener')
+    opener.focus()
+    expect(opener).toHaveFocus()
+    fireEvent.click(opener)
+    const rows = ccMenuRows(utils.container)
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toHaveFocus()
+    return { ...utils, opener, rows }
+  }
+
+  it('Escape unmounts the menu and returns focus to the opener', () => {
+    vi.useFakeTimers()
+    try {
+      const { container, opener } = openFromOpener()
+      act(() => { vi.advanceTimersByTime(60) })
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(ccMenuRows(container)).toHaveLength(0)
+      expect(opener).toHaveFocus()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clicking a menuitem unmounts the menu and returns focus to the opener', () => {
+    const onAction = vi.fn()
+    const { container, opener, rows } = openFromOpener(onAction)
+    fireEvent.click(rows[1])
+    expect(onAction).toHaveBeenCalledWith('settings')
+    expect(ccMenuRows(container)).toHaveLength(0)
+    expect(opener).toHaveFocus()
+  })
+
+  it('Enter on the focused menuitem unmounts the menu and returns focus to the opener', () => {
+    const onAction = vi.fn()
+    const { container, opener, rows } = openFromOpener(onAction)
+    fireEvent.keyDown(rows[0], { key: 'Enter' })
+    expect(onAction).toHaveBeenCalledWith('gallery')
+    expect(ccMenuRows(container)).toHaveLength(0)
+    expect(opener).toHaveFocus()
+  })
+
+  it('PIN: an action that moves focus elsewhere ends with focus where the ACTION put it, not on the opener', () => {
+    let elsewhere: HTMLElement | null = null
+    const utils = render(<CrewCompanionMenuHost onAction={() => { elsewhere?.focus() }} />)
+    elsewhere = utils.getByTestId('cc-elsewhere')
+    const opener = utils.getByTestId('cc-opener')
+    opener.focus()
+    fireEvent.click(opener)
+    const rows = ccMenuRows(utils.container)
+    expect(rows[0]).toHaveFocus()
+    fireEvent.click(rows[1])
+    expect(ccMenuRows(utils.container)).toHaveLength(0)
+    expect(elsewhere).toHaveFocus()
+    expect(opener).not.toHaveFocus()
+  })
+
+  it('PIN: dismissing by an outside click leaves focus where the click put it', () => {
+    vi.useFakeTimers()
+    try {
+      const utils = render(<CrewCompanionMenuHost />)
+      const opener = utils.getByTestId('cc-opener')
+      const elsewhere = utils.getByTestId('cc-elsewhere')
+      opener.focus()
+      fireEvent.click(opener)
+      expect(ccMenuRows(utils.container)[0]).toHaveFocus()
+      act(() => { vi.advanceTimersByTime(60) })
+      elsewhere.focus()
+      fireEvent.mouseDown(document.body)
+      expect(ccMenuRows(utils.container)).toHaveLength(0)
+      expect(elsewhere).toHaveFocus()
+      expect(opener).not.toHaveFocus()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

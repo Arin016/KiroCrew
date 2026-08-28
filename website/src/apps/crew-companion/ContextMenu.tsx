@@ -4,7 +4,9 @@ import React from 'react'
  * Used by PetWidget (overlay) and ChatPanel (chat window).
  * Handles edge clamping, click-outside dismiss, and optional hitbox reporting for overlay use.
  */
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+
+import { useMenuKeyboard } from '../../hooks/useMenuKeyboard'
 import { petBridge } from './petBridge'
 
 const api = petBridge
@@ -36,6 +38,39 @@ const MENU_MIN_W = 160
 
 export function ContextMenu({ x, y, items, reportHitbox, onAction, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement>(null)
+
+  useMenuKeyboard({ enabled: true, containerRef: menuRef })
+
+  /*
+   * The element that was focused when this menu MOUNTED — the row, bubble or
+   * pet the user right-clicked (or reached with the keyboard). Captured during
+   * the first RENDER on purpose, not in an effect: render runs before
+   * `useMenuKeyboard`'s focus-entry effect moves focus onto the first row, so
+   * this is the last moment the opener is still `document.activeElement`.
+   * `undefined` is the "not yet captured" sentinel — `activeElement` itself can
+   * in principle be null, and using null for both would re-run the capture on a
+   * later render and latch a menu ROW as the opener.
+   */
+  const opener = useRef<Element | null | undefined>(undefined)
+  if (opener.current === undefined) opener.current = document.activeElement
+
+  /*
+   * Give focus back when the menu goes away.
+   *
+   * `useLayoutEffect`, NOT `useEffect`: React runs layout cleanups synchronously
+   * as it walks the deleted subtree, while the menu is STILL in the document and
+   * still holds focus; passive cleanups are deferred until after the commit, by
+   * which point the DOM node is gone and the browser has already reset
+   * `activeElement` to `<body>`.
+   */
+  useLayoutEffect(() => {
+    const menu = menuRef.current
+    return () => {
+      if (menu?.contains(document.activeElement)) {
+        ;(opener.current as HTMLElement | null)?.focus?.()
+      }
+    }
+  }, [])
 
   // Clamp position so menu stays within viewport
   const [clampedX, setClampedX] = React.useState(x)
@@ -127,6 +162,7 @@ export function ContextMenu({ x, y, items, reportHitbox, onAction, onClose }: Pr
       ) : null}
       <div
         ref={menuRef}
+        role="menu"
         style={{
           position: 'fixed', left: clampedX, top: clampedY, zIndex: 99999,
         /*
@@ -151,7 +187,7 @@ export function ContextMenu({ x, y, items, reportHitbox, onAction, onClose }: Pr
     >
       {items.map((entry, i) => {
         if ('separator' in entry && entry.separator) {
-          return <div key={`sep-${i}`} style={{ height: 1, background: 'var(--border, rgba(255,255,255,0.15))', margin: '2px 0' }} />
+          return <div key={`sep-${i}`} role="separator" style={{ height: 1, background: 'var(--border, rgba(255,255,255,0.15))', margin: '2px 0' }} />
         }
         const item = entry as ContextMenuItem
         return (
