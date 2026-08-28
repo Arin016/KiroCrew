@@ -112,6 +112,12 @@ reimplement this. It consumes the provider (LLM) event stream and:
    (default `APPROVAL_INTERACTIVE` = deny-by-default unless a decider resolves).
    Injected predicates preserve hook auto-approval (`spawn_run`) and
    per-session Trust without the driver depending on any channel module.
+   A hook auto-approve for a **shell** command is honoured only after the
+   name-grant check confirms each program name still resolves to the program
+   it appears to name; a shadowed or agent-writable resolution falls through
+   to the rest of the ladder instead (on a channel without a decider that
+   means deny-by-default). On Windows the check cannot model the shell's
+   lookup, so name-based shell auto-approve is declined entirely there.
 3. Emits neutral `OutputEvent`s (`TEXT_CHUNK`, `THINKING`, `TOOL_CALL`, `PROMPT_CHOICE`, `COMPACTION`, `DONE`, `STEER_CONSUMED`) to the `Renderer`.
 4. SEL-audits each approval decision.
 5. Consumes **session-directive markers**. The session-bound MCP tools (`monitor_start`, `monitor_update`, `autonudge_stop`, `set_project`, `suggest_followup`, `ask_question` — `session_directive.DIRECTIVE_TOOLS`) are stateless: they validate their arguments and return a marker instead of resolving a session. When a `directive_consumer` is injected (`messaging.dispatch.build_directive_consumer`, bound to the turn's session key), the driver decodes the marker off `EVENT_TOOL_RESULT` and applies it through `dashboard.session_directive_apply.apply_session_directive` — the same applier the dashboard's `chat_runner` uses. A marker is honoured only when the tool call it arrived under was observed as an MCP call from `kirocrew-core` with a canonical directive-tool name (`_meta.kiro.*`), so a shell command that forges the bytes on stdout is ignored, and native sub-agent tool calls are refused. Omit the consumer and markers are ignored.
