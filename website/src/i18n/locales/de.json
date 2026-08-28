@@ -12032,6 +12032,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "Unterbricht immer — kann nicht stummgeschaltet oder herabgesetzt werden",
         "app": "App",
+        "category_agent": "Proaktive Agentennachrichten",
+        "category_agent_description": "Wenn der Agent Ihnen proaktiv außerhalb eines Chats eine Nachricht sendet",
         "category_all": "Standard (alle Kategorien)",
         "category_all_description": "Ausweichton, wenn keine kategoriespezifische Überschreibung festgelegt ist",
         "category_approval": "Genehmigung",
@@ -12042,6 +12044,8 @@
         "category_heartbeat_description": "Ergebnisse von Heartbeat-Aufgaben",
         "category_hook": "Webhook",
         "category_hook_description": "Auslöser externer Hooks",
+        "category_skills": "Skills",
+        "category_skills_description": "Neue Skill-Kandidaten, die auf Ihre Genehmigung warten",
         "category_subagent": "Subagent",
         "category_subagent_description": "Abschlüsse von Hintergrund-Subagenten",
         "category_taskrunner": "Aufgaben",

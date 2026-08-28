@@ -12033,6 +12033,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "সব সময় বাধা দেয় — মিউট বা কমানো যায় না",
         "app": "app",
+        "category_agent": "এজেন্টের নিজে থেকে পাঠানো বার্তা",
+        "category_agent_description": "যখন এজেন্ট চ্যাটের বাইরে নিজে থেকে আপনাকে বার্তা পাঠায়",
         "category_all": "ডিফল্ট (সব বিভাগ)",
         "category_all_description": "কোনো বিভাগ-নির্দিষ্ট শব্দ ঠিক করা না থাকলে যেটা বাজবে",
         "category_approval": "অনুমোদন",
@@ -12043,6 +12045,8 @@
         "category_heartbeat_description": "Heartbeat টাস্কের ফলাফল",
         "category_hook": "ওয়েবহুক",
         "category_hook_description": "বাইরের হুক ট্রিগার",
+        "category_skills": "স্কিল",
+        "category_skills_description": "আপনার অনুমোদনের অপেক্ষায় থাকা নতুন স্কিল প্রার্থী",
         "category_subagent": "সাবএজেন্ট",
         "category_subagent_description": "ব্যাকগ্রাউন্ড সাবএজেন্ট শেষ হলে",
         "category_taskrunner": "টাস্ক",

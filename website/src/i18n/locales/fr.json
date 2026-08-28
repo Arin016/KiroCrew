@@ -12201,6 +12201,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "Interrompt toujours — impossible de mettre en sourdine ou d’abaisser la priorité",
         "app": "app",
+        "category_agent": "Messages proactifs de l’agent",
+        "category_agent_description": "Lorsque l’agent vous envoie un message proactif en dehors d’un chat",
         "category_all": "Par défaut (toutes les catégories)",
         "category_all_description": "Son de repli lorsqu’aucun remplacement propre à une catégorie n’est défini",
         "category_approval": "Approbation",
@@ -12211,6 +12213,8 @@
         "category_heartbeat_description": "Résultats des tâches heartbeat",
         "category_hook": "Webhook",
         "category_hook_description": "Déclenchements de hooks externes",
+        "category_skills": "Compétences",
+        "category_skills_description": "Nouvelles compétences candidates en attente de votre approbation",
         "category_subagent": "Sous-agent",
         "category_subagent_description": "Fins de sous-agents en arrière-plan",
         "category_taskrunner": "Tâches",

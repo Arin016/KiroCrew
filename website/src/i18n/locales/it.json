@@ -12200,6 +12200,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "Interrompe sempre — non può essere silenziato né abbassato",
         "app": "app",
+        "category_agent": "Messaggi proattivi dell’agente",
+        "category_agent_description": "Quando l’agente ti invia un messaggio proattivo fuori da una chat",
         "category_all": "Predefinito (tutte le categorie)",
         "category_all_description": "Suono di riserva quando non è impostata alcuna sostituzione per categoria",
         "category_approval": "Approvazione",
@@ -12210,6 +12212,8 @@
         "category_heartbeat_description": "Risultati delle attività heartbeat",
         "category_hook": "Webhook",
         "category_hook_description": "Attivazioni di hook esterni",
+        "category_skills": "Skill",
+        "category_skills_description": "Nuove skill candidate in attesa della tua approvazione",
         "category_subagent": "Subagente",
         "category_subagent_description": "Completamenti dei subagenti in background",
         "category_taskrunner": "Attività",

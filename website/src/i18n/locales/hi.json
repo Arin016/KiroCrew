@@ -12033,6 +12033,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "हमेशा टोकता है — इसे म्यूट या कम नहीं किया जा सकता",
         "app": "app",
+        "category_agent": "एजेंट के अपने आप भेजे गए संदेश",
+        "category_agent_description": "जब एजेंट चैट के बाहर खुद से तुम्हें संदेश भेजे",
         "category_all": "डिफ़ॉल्ट (सभी श्रेणियाँ)",
         "category_all_description": "जब किसी श्रेणी के लिए अलग सेटिंग न हो तो फ़ॉलबैक ध्वनि",
         "category_approval": "मंज़ूरी",
@@ -12043,6 +12045,8 @@
         "category_heartbeat_description": "हार्टबीट कार्य के नतीजे",
         "category_hook": "वेबहुक",
         "category_hook_description": "बाहरी हुक ट्रिगर",
+        "category_skills": "स्किल्स",
+        "category_skills_description": "तुम्हारी मंज़ूरी की प्रतीक्षा में नए स्किल कैंडिडेट",
         "category_subagent": "सब-एजेंट",
         "category_subagent_description": "बैकग्राउंड सब-एजेंट पूरे होने पर",
         "category_taskrunner": "कार्य",
