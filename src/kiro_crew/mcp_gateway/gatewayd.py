@@ -2224,10 +2224,50 @@ async def _handle_connection(
     # the safe default in both directions: an overlay written before the flag
     # existed never silently starts sharing, and a malformed frame cannot widen
     # a connection's blast radius beyond itself.
-    exclusive_stub_uuid = "" if register.get("poolable") is True else stub_uuid
+    poolable_requested = register.get("poolable") is True
+    exclusive_stub_uuid = "" if poolable_requested else stub_uuid
+
+    # Retreat: a server OBSERVED behaving per-client while shared is not pooled
+    # again, whatever the overlay still says. This is the consuming half of the
+    # hazard ledger. Without it, recording a hazard changed a label on the MCP
+    # page and nothing else, so "share by default, retreat when observed" had no
+    # retreat -- the ledger's own evidence never reached a routing decision.
+    #
+    # The identity-checked read is the right one precisely BECAUSE this acts on
+    # the verdict: it answers for the program this launch actually runs, so an
+    # upgrade or a config edit re-earns pooling instead of leaving the server
+    # stranded on evidence about the build it replaced.
+    #
+    # Per-connection and per-key, so nothing global is switched off: every other
+    # server keeps pooling, and this one still gets a working PRIVATE backend --
+    # the same topology it would have with no gateway at all. The cost of a
+    # wrong retreat is therefore lost process reuse, never a broken server.
+    if poolable_requested:
+        observed = hazards.observed_codes(
+            pool_key.server_name,
+            hazards.launch_identity(
+                pool_key.command_args_hash,
+                pool_key.effective_env_hash,
+                pool_key.binary_version,
+            ),
+        )
+        if observed:
+            exclusive_stub_uuid = stub_uuid
+            logger.warning(
+                "hazard retreat: serving %r a private backend because %s was "
+                "observed while it was shared",
+                pool_key.server_name,
+                ", ".join(observed),
+            )
 
     def _release_reservation() -> None:
         """Release the hand-out reservation this connection actually took.
+
+        Keyed on the OUTCOME, because that is what decides which acquire path
+        ran: ``pool.get_or_create`` reserves, ``pool.acquire_exclusive`` does
+        not. A hazard-retreated connection therefore reserved nothing even
+        though it asked to pool, so releasing on the REQUEST would decrement a
+        digest this connection never reserved.
 
         A private backend takes none: it never enters the shared index, so no
         sweeper can reclaim it between hand-out and attach. Releasing one anyway
@@ -2235,9 +2275,10 @@ async def _handle_connection(
         ``poolable`` is not a PoolKey dimension, so a pooled connection with an
         identical PoolKey shares the digest. That pairing is reachable whenever
         the allowlist changes under a daemon that outlives the gateway: the old
-        overlay's stub still registers poolable while the new one does not. The
-        stray decrement would drop the pooled connection's eviction protection
-        before its stub attaches.
+        overlay's stub still registers poolable while the new one does not, and
+        now also whenever a retreat lands beside a concurrent pooled connection
+        on the same key. The stray decrement would drop the pooled connection's
+        eviction protection before its stub attaches.
         """
         if not exclusive_stub_uuid:
             pool.unreserve(pool_key)
@@ -3012,14 +3053,43 @@ async def _respawn_backend_for_stub(
         )
         return None
 
+    # A respawn must honour the ledger too, or the retreat has a hole exactly
+    # where it matters most. The recycle that follows an unroutable server
+    # request comes straight back here, so re-pooling would hand the SAME stubs
+    # a shared backend for the server just observed misbehaving -- and no new
+    # register happens to re-decide it, so the retreat would not take effect
+    # until those sessions reconnected.
+    #
+    # ONE local drives both the acquire below and the release in the ``finally``,
+    # because those two must agree: only ``pool.get_or_create`` reserves, so a
+    # release keyed on a different predicate than the acquire would decrement a
+    # digest this respawn never reserved and drop a concurrent pooled
+    # connection's eviction protection.
+    respawn_exclusive_uuid = stub_uuid if old_backend.exclusive_token else ""
+    if not respawn_exclusive_uuid and hazards.observed_codes(
+        pool_key.server_name,
+        hazards.launch_identity(
+            pool_key.command_args_hash,
+            pool_key.effective_env_hash,
+            pool_key.binary_version,
+        ),
+    ):
+        respawn_exclusive_uuid = stub_uuid
+        logger.warning(
+            "hazard retreat on respawn: %r comes back private because a "
+            "hazard is on record for this launch",
+            pool_key.server_name,
+        )
+
     try:
         new_backend, _ = await _acquire_backend(
             pool,
             pool_key,
             resolver,
             # A respawn must not silently promote a private backend into the
-            # shared bucket: the replacement inherits the original binding.
-            exclusive_stub_uuid=stub_uuid if old_backend.exclusive_token else "",
+            # shared bucket: the replacement inherits the original binding,
+            # unless the ledger has since argued against sharing it at all.
+            exclusive_stub_uuid=respawn_exclusive_uuid,
         )
     except (_TargetUnknown, BackendUnavailable, PoolAtCapacity, OSError) as exc:
         logger.info(
@@ -3097,8 +3167,11 @@ async def _respawn_backend_for_stub(
     finally:
         # A private backend never took a reservation, and releasing one would
         # decrement a POOLED connection sharing this digest (see
-        # ``_release_reservation`` in the connection handler).
-        if not old_backend.exclusive_token:
+        # ``_release_reservation`` in the connection handler). Read the SAME
+        # local the acquire used, not ``old_backend.exclusive_token``: a hazard
+        # retreat above can make this respawn private while the old backend was
+        # pooled, and the two must not disagree.
+        if not respawn_exclusive_uuid:
             pool.unreserve(pool_key)
     new_writer_task = asyncio.create_task(
         _drain_inbox_to_stub(new_inbox, writer, stub_uuid),
