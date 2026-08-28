@@ -5151,7 +5151,10 @@
       "save": "保存",
       "set_a_goal": "设定目标",
       "start_loop": "启动循环",
-      "stop_loop": "停止循环"
+      "stop_loop": "停止循环",
+      "watches_next": "下次",
+      "watches_note": "只在出现真实信号时唤醒智能体。可在“计划”页面管理。",
+      "watches_title": "零 token 监视"
     },
     "bottomTerminalPanel": {
       "close_terminal": "关闭终端",

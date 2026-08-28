@@ -5244,7 +5244,10 @@
       "save": "Speichern",
       "set_a_goal": "Ein Ziel festlegen",
       "start_loop": "Schleife starten",
-      "stop_loop": "Schleife stoppen"
+      "stop_loop": "Schleife stoppen",
+      "watches_next": "nächste",
+      "watches_note": "Sie wecken den Agenten nur bei einem echten Signal. Verwaltung auf der Seite „Zeitplan“.",
+      "watches_title": "Überwachungen ohne Tokenverbrauch"
     },
     "bottomTerminalPanel": {
       "close_terminal": "Terminal schließen",

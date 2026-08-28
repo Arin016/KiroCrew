@@ -5151,7 +5151,10 @@
       "save": "저장",
       "set_a_goal": "목표 설정",
       "start_loop": "루프 시작",
-      "stop_loop": "루프 중지"
+      "stop_loop": "루프 중지",
+      "watches_next": "다음",
+      "watches_note": "실제 신호가 있을 때만 에이전트를 깨웁니다. 스케줄 페이지에서 관리하세요.",
+      "watches_title": "토큰을 쓰지 않는 감시"
     },
     "bottomTerminalPanel": {
       "close_terminal": "터미널 닫기",

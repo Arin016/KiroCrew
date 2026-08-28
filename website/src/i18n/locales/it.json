@@ -5337,7 +5337,10 @@
       "save": "Salva",
       "set_a_goal": "Imposta un obiettivo",
       "start_loop": "Avvia il ciclo",
-      "stop_loop": "Arresta il ciclo"
+      "stop_loop": "Arresta il ciclo",
+      "watches_next": "prossima",
+      "watches_note": "Svegliano l'agente solo con un segnale reale. Gestiscili nella pagina Pianificazione.",
+      "watches_title": "Monitoraggi senza token"
     },
     "bottomTerminalPanel": {
       "close_terminal": "Chiudi il terminale",

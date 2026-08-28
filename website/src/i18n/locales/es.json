@@ -5337,7 +5337,10 @@
       "save": "Guardar",
       "set_a_goal": "Establecer un objetivo",
       "start_loop": "Iniciar el bucle",
-      "stop_loop": "Detener el bucle"
+      "stop_loop": "Detener el bucle",
+      "watches_next": "siguiente",
+      "watches_note": "Solo despiertan al agente ante una señal real. Gestiónalas en la página Programación.",
+      "watches_title": "Vigilancias sin consumo de tokens"
     },
     "bottomTerminalPanel": {
       "close_terminal": "Cerrar la terminal",

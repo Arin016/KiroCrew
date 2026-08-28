@@ -5244,7 +5244,10 @@
       "save": "सहेजें",
       "set_a_goal": "लक्ष्य सेट करें",
       "start_loop": "लूप शुरू करें",
-      "stop_loop": "लूप रोकें"
+      "stop_loop": "लूप रोकें",
+      "watches_next": "अगला",
+      "watches_note": "ये वास्तविक संकेत मिलने पर ही एजेंट को जगाते हैं। शेड्यूल पेज पर प्रबंधित करें।",
+      "watches_title": "टोकन-मुक्त निगरानी"
     },
     "bottomTerminalPanel": {
       "close_terminal": "टर्मिनल बंद करें",

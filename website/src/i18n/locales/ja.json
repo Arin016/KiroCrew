@@ -5151,7 +5151,10 @@
       "save": "保存",
       "set_a_goal": "目標を設定",
       "start_loop": "ループ開始",
-      "stop_loop": "ループ停止"
+      "stop_loop": "ループ停止",
+      "watches_next": "次回",
+      "watches_note": "実際のシグナルがあったときだけエージェントを起こします。管理は「スケジュール」ページから。",
+      "watches_title": "トークンを消費しない監視"
     },
     "bottomTerminalPanel": {
       "terminal_is_in_its_own_window": "ターミナルは別ウィンドウで開いています",

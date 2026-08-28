@@ -5337,7 +5337,10 @@
       "save": "Enregistrer",
       "set_a_goal": "Définir un objectif",
       "start_loop": "Démarrer la boucle",
-      "stop_loop": "Arrêter la boucle"
+      "stop_loop": "Arrêter la boucle",
+      "watches_next": "prochaine",
+      "watches_note": "Elles ne réveillent l'agent qu'en cas de signal réel. Gérez-les depuis la page Planification.",
+      "watches_title": "Surveillances sans jetons"
     },
     "bottomTerminalPanel": {
       "close_terminal": "Fermer le terminal",

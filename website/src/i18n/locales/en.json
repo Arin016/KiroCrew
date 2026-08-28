@@ -3935,7 +3935,10 @@
       "max_cycles_0": "Max cycles (0 = ∞)",
       "max_cycles_0_infinite": "Max cycles (0 = infinite)",
       "set_a_goal": "Set a goal",
-      "stop_loop": "Stop loop"
+      "stop_loop": "Stop loop",
+      "watches_next": "next",
+      "watches_note": "They wake the agent only on a real signal. Manage them on the Schedule page.",
+      "watches_title": "Zero-token watches"
     },
     "bottomTerminalPanel": {
       "terminal_is_in_its_own_window": "Terminal is in its own window",
