@@ -1361,7 +1361,9 @@
       }
     },
     "artifactBody": {
-      "artifact": "Artifact: {{slug}}"
+      "artifact": "Artifact: {{slug}}",
+      "no_longer_showing": "This artifact is no longer showing",
+      "show_artifact": "Show artifact"
     },
     "artifactChatPanel": {
       "agent_chat": "Agent chat",
