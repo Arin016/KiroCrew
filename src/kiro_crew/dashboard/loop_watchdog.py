@@ -23,16 +23,11 @@ fed by the async heartbeat calling :meth:`LoopStallWatchdog.beat` every tick:
    it fires even when the loop thread is wedged in a syscall *and* the
    GIL-dependent daemon check below would be starved; when it fires it dumps
    *all* thread stacks and then ``_exit()``s the process in one atomic step.
-   Because the process dumps and dies on its own, there is no race with the
-   external Electron liveness probe (the probe is reduced to a backstop), and
-   the mechanism is fully cross-platform and needs no root — unlike an
+   The mechanism is fully cross-platform and needs no root — unlike an
    out-of-process ``py-spy`` capture, which macOS blocks without elevated
-   ``task_for_pid`` privileges.  ``exit_after`` (25s) is kept below the external
-   probe's kill window — that probe trips after ``failure_threshold`` (3)
-   consecutive failed polls at a 10s cadence, i.e. ≳20s — so this in-process
-   path generally wins and the dump is captured.  The two budgets are close
-   (25s vs ≳20s) rather than comfortably separated, so they must be kept in sync
-   if either side is tuned; see :class:`LoopStallWatchdog` for the exact timing.
+   ``task_for_pid`` privileges. Desktop launches use a 25s exit budget near
+   Electron's independent liveness window. Managed services have no Electron
+   probe, use a wider budget, and receive the soft diagnostic dump first.
 
    **Journal visibility:** hard-exit dumps land in the dedicated file only (not
    stderr/journal) because ``faulthandler.dump_traceback_later`` targets a single
@@ -61,15 +56,39 @@ from __future__ import annotations
 
 import faulthandler
 import logging
+import os
 import sys
 import threading
 import time
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from kiro_crew.dashboard.stall_enrichment import collect_stall_enrichment
 
 logger = logging.getLogger("kiro_crew.dashboard.loop_watchdog")
+
+_MANAGED_SERVICE_ENV = "KIROCREW_SERVICE_MANAGED"
+_DIRECT_EXIT_AFTER_DEFAULT = 25.0
+_MANAGED_EXIT_AFTER_DEFAULT = 90.0
+
+
+def resolve_exit_after(
+    configured_budget: float,
+    environ: Mapping[str, str] | None = None,
+) -> float:
+    """Widen the unchanged default for managed services.
+
+    Newly rendered systemd and launchd definitions carry an explicit marker.
+    ``INVOCATION_ID`` also recognizes systemd units installed by an older
+    Kiro Crew version, so upgrading the package fixes their policy without
+    requiring a service re-install. Any non-default configured budget is an
+    operator choice and is preserved on every launch path.
+    """
+    source = os.environ if environ is None else environ
+    managed = source.get(_MANAGED_SERVICE_ENV) == "1" or bool(source.get("INVOCATION_ID"))
+    if managed and configured_budget == _DIRECT_EXIT_AFTER_DEFAULT:
+        return _MANAGED_EXIT_AFTER_DEFAULT
+    return configured_budget
 
 
 def _default_dump(file: "typing.IO[str] | typing.Any | None" = None) -> None:
@@ -125,35 +144,26 @@ class LoopStallWatchdog:
     Two layers, both fed by :meth:`beat` (called from the async heartbeat):
 
     * the C-level ``faulthandler`` armed timer that dumps **and exits** at
-      ``exit_after`` seconds of silence — authoritative; portable / no-root and
-      it beats the external liveness probe so the dump is never lost to a race;
+      ``exit_after`` seconds of silence — authoritative and portable / no-root;
       and
     * the daemon-thread :meth:`check` that dumps **without** exiting at
       ``stall_after`` seconds — a soft observability fallback.
 
-    With the default config (``exit_after=25`` < ``stall_after=30``) the armed
-    timer ``_exit()``s the process before the soft dump's threshold is reached,
-    so :meth:`check` only actually emits when the armed timer is **disabled or
-    could not be armed** — i.e. ``exit_after=None`` (a dashboard-only process) or
-    an ``arm_later`` failure that degrades to soft-only.  It is a fallback, not a
-    second live layer in the gateway's default configuration.
+    When ``exit_after`` is below ``stall_after`` (the desktop default), the
+    armed timer exits before the soft threshold. When it is above
+    ``stall_after`` (the managed-service default), the soft dump records the
+    transient stall and the hard timer exits only if recovery never arrives.
 
     Args:
         stall_after: Seconds of heartbeat silence before the soft daemon-thread
-            dump fires.  Only reachable when the armed timer is off/failed (see
-            above).  Should comfortably exceed the heartbeat interval (default
-            heartbeat is 5s, so 30s ≈ 6 missed ticks avoids false positives).
+            dump fires. Should comfortably exceed the heartbeat interval
+            (default heartbeat is 5s, so 30s ≈ 6 missed ticks avoids false
+            positives).
         exit_after: Seconds of silence before the authoritative
             ``dump_traceback_later(exit=True)`` fires.  The timer is re-armed
             only on each :meth:`beat`, so the real silence tolerated before
-            ``_exit`` is ``exit_after`` minus up to one heartbeat interval (≈20s
-            at the 5s default heartbeat).  Kept below the external liveness
-            probe's kill window — the probe needs ``failure_threshold`` (3)
-            consecutive failed polls at its poll interval (10s), i.e. ≳20s — so
-            this in-process path generally wins and the faulthandler dump is
-            captured rather than lost to the probe's SIGKILL.  The two budgets
-            are close, so keep them in sync if either side is tuned.  ``None``
-            disables the armed timer (only the soft dump remains).
+            ``_exit`` is ``exit_after`` minus up to one heartbeat interval.
+            ``None`` disables the armed timer (only the soft dump remains).
         poll_interval: How often the daemon thread evaluates liveness.
         now: Monotonic clock, injectable for tests.
         dump: Soft stack-dump callback, injectable for tests.  Defaults to
@@ -163,6 +173,8 @@ class LoopStallWatchdog:
             Defaults to :func:`_default_arm_later`.
         cancel_later: Cancels the armed timer, injectable for tests.  Defaults
             to :func:`_default_cancel_later`.
+        environ: Process environment used to identify a managed service,
+            injectable for deterministic tests. Defaults to :data:`os.environ`.
         enrich_after: Seconds of heartbeat silence before the daemon thread
             emits stall enrichment (stall UTC timestamp + this process's
             established TCP sockets with rx/tx queue depths) to the logger at
@@ -194,9 +206,12 @@ class LoopStallWatchdog:
         enrich_after: float = 15.0,
         enrich: "Callable[[float], list[str]] | None" = None,
         log: logging.Logger | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         self._stall_after = stall_after
-        self._exit_after = exit_after
+        self._exit_after = (
+            None if exit_after is None else resolve_exit_after(exit_after, environ)
+        )
         self._poll_interval = poll_interval
         self._now = now
         self._dump_file = dump_file

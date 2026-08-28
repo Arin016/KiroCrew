@@ -133,6 +133,9 @@ def _make_armed(exit_after: float | None = 25.0):
         arm_later=lambda t: arms.append(t),
         cancel_later=lambda: cancels.append(1),
         log=logging.getLogger("test.loop_watchdog"),
+        # Keep the fixture deterministic when tests themselves run under a
+        # systemd-managed CI worker that exports INVOCATION_ID.
+        environ={},
     )
     return wd, arms, cancels
 

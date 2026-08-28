@@ -7,11 +7,11 @@ every thread's stack and calls ``os._exit()`` — skipping every ``except``,
 but the user was never told a crash happened: a monitoring loop that was
 mid-round simply stopped, with fixes written and never committed.
 
-Two gaps are covered here:
+Three contracts are covered here:
 
-* the hard-exit budget was a hard-coded 25s with no config knob, so a host doing
-  heavy subprocess work (long builds, bursts of child reaping) could not widen
-  it to stop brief wedges being treated as death; and
+* the hard-exit budget is configurable rather than hard-coded;
+* managed services use a wider budget than Electron-supervised desktop runs;
+  and
 * a dump is re-detected on every start for up to 7 days, so notifying about it
   unconditionally would turn one stall into a week of identical alerts.
 """
@@ -27,6 +27,7 @@ from kiro_crew.config.loader import (
     _clamp_security_bounds,
 )
 from kiro_crew.dashboard.crash_dump_store import claim_dump_notification
+from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog, resolve_exit_after
 
 
 def _dump(tmp_path: Path, name: str = "loopstall-20260803T000000Z.txt") -> Path:
@@ -73,6 +74,29 @@ class TestClaimDumpNotification:
 class TestLoopStallBudgetConfig:
     def test_default_preserves_existing_behaviour(self) -> None:
         assert KiroCrewConfig().dashboard.loop_stall_exit_after_secs == 25
+
+    def test_managed_service_uses_the_wider_budget(self) -> None:
+        assert resolve_exit_after(25, {"KIROCREW_SERVICE_MANAGED": "1"}) == 90
+        assert resolve_exit_after(25, {"INVOCATION_ID": "legacy-unit"}) == 90
+        assert resolve_exit_after(25, {}) == 25
+
+    def test_operator_budget_is_preserved_for_managed_services(self) -> None:
+        assert resolve_exit_after(60, {"KIROCREW_SERVICE_MANAGED": "1"}) == 60
+        assert resolve_exit_after(60, {"INVOCATION_ID": "legacy-unit"}) == 60
+
+    def test_watchdog_arms_with_the_managed_service_budget(self) -> None:
+        arms: list[float] = []
+        watchdog = LoopStallWatchdog(
+            exit_after=25,
+            environ={"KIROCREW_SERVICE_MANAGED": "1"},
+            arm_later=arms.append,
+            cancel_later=lambda: None,
+        )
+        watchdog.start()
+        try:
+            assert arms == [90]
+        finally:
+            watchdog.stop()
 
     def test_configured_value_is_read(self, tmp_path, monkeypatch) -> None:
         import json
