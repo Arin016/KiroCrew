@@ -539,25 +539,38 @@ frames are dropped rather than counted against the current turn.
 An inbound frame carrying an `id` **and** a `method` but no `params.sessionId`
 is a request that names no session — it expects exactly one response, so the
 reader answers it itself with `-32601 Method not found`
-(`_answer_ownerless_request`, run off the reader loop like the KAS auth
-callback) and never broadcasts it. Broadcasting would hand it to every
+(`_answer_ownerless_request`, run off the reader loop) and never broadcasts
+it. Broadcasting would hand it to every
 registered session's dispatch loop, each of which would reply `-32601` on the
 shared stdin — one request id, N responses, widening with session sharing. Only
 true notifications (method, no id) broadcast. The routed case — an unknown
 request **with** a `sessionId` — still gets its single per-session reply from
 that session's dispatch loop (`server_request_unknown`).
 
-**KAS auth callbacks are retained and bounded off-loop answers.**
-`_kiro/auth/getAccessToken` is connection-scoped and may shell out before writing
-its response, so the reader schedules it without blocking stdout demux but keeps
-a strong reference in `_answer_tasks`. It shares `_max_answer_tasks` with other
-off-loop answers because every path ultimately contends for the same stdin; a
-separate token cap would allow the combined resource total to exceed the bound.
-The done callback removes completed tasks. At capacity, the reader uses the same
-bounded discrimination wait as permission answers: one completion admits the
-callback, while no progress within the bound marks the runtime dead so pending
-waiters resolve explicitly. Server-to-client requests never take the notification
-counted-drop path, because that would leave the remote requester unanswered.
+**Crew answers no credential callback; kiro-cli's relay owns KAS auth.** KAS is
+reached as `kiro-cli acp --agent-engine v3 --auth-method cli`, whose relay
+forwards unrelated NDJSON frames byte-for-byte and consumes
+`_kiro/auth/getAccessToken` itself, resolving tokens from kiro-cli's own store.
+Crew therefore never sees that frame and holds no KAS token. One consequence is
+recorded in `ACP_BACKENDS_KIRO_IDENTITY_STORE`: because the relay signs in from
+kiro-cli's store, a KAS runtime is retired by an external `kiro-cli logout` on
+the same terms as the kiro backend. A second is that the KAS process gets no OS
+sandbox of its own — the relay spawns its server without `--sandbox` and the
+agent resolves an absent config to a no-op backend — so Crew's own sandbox stays
+engaged for this backend and KAS is excluded from
+`ACP_BACKENDS_INTERNAL_SANDBOX`.
+
+**Off-loop answers are bounded.** The remaining off-loop answer is the
+unroutable-permission auto-reject, which can block on stdin `drain()` before
+writing its response, so the reader schedules it without blocking stdout demux
+but keeps a strong reference in `_answer_tasks` under `_max_answer_tasks` —
+every path ultimately contends for the same stdin, so a second per-kind cap
+would allow the combined resource total to exceed the bound. The done callback
+removes completed tasks. At capacity the reader uses a bounded discrimination
+wait: one completion admits the pending answer, while no progress within the
+bound marks the runtime dead so pending waiters resolve explicitly.
+Server-to-client requests never take the notification counted-drop path, because
+that would leave the remote requester unanswered.
 
 **Unroutable frames are counted, not logged per frame.** The reader drops any
 frame it cannot route; the drop itself is correct and unchanged, but logging one

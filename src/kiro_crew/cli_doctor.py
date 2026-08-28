@@ -20,8 +20,12 @@ from pathlib import Path
 from kiro_crew import __version__ as _mc_version
 from kiro_crew import agent_state, dep_sync, diagnostics, platform_compat, sandbox
 from kiro_crew._bootstrap import _source_checkout_root
-from kiro_crew.acp import kas_assets, kas_auth
 from kiro_crew.acp.client import KIRO_CLI_BIN
+from kiro_crew.acp.kas_transport import (
+    KAS_RELAY_ENGINE,
+    KAS_RELAY_ENGINE_FLAG,
+    build_kas_argv,
+)
 from kiro_crew.acp.types import ACP_BACKEND_KAS
 from kiro_crew.agent import AGENT_FILENAME
 from kiro_crew.agent_discovery import (
@@ -73,7 +77,7 @@ from kiro_crew.embeddings import (
     resolve_custom_model,
     verify_vendored_libs,
 )
-from kiro_crew.kiro_cli import mcp_governance_may_apply
+from kiro_crew.kiro_cli import mcp_governance_may_apply, resolve_kiro_cli
 from kiro_crew.mcp_cleanup import ALWAYS_ON_BIN_MCP_SERVERS as _ALWAYS_ON_MCPS
 from kiro_crew.mcp_cleanup import KIROCREW_BIN_MCP_SERVERS as _MANAGED_MCPS
 from kiro_crew.mcp_cleanup import OPT_IN_BIN_MCP_SERVERS as _OPT_IN_MCPS
@@ -1755,18 +1759,39 @@ def _doctor_headless_auth(issues: list[str]) -> None:
         print(f"{_INDENT}{line.strip()}" if line.strip() else "")
 
 
-def _kas_version_label(script: "Path") -> str:
-    """Derive the extracted-bundle version label from the KAS script path.
+#: Bare flag name (no leading dashes) used to tell "this kiro-cli predates engine
+#: selection" apart from "it offers engines but not ours". Derived from the
+#: transport constant so the two can never drift.
+_KAS_ENGINE_FLAG_NAME = KAS_RELAY_ENGINE_FLAG.lstrip("-")
 
-    Bundles live at ``{data_dir}/kas/{version}/.../acp-server.js`` (see
-    :mod:`kiro_crew.acp.kas_assets`), so the version is the path component whose
-    parent directory is named ``kas``. Returns ``"unknown"`` for an unexpected
-    layout rather than raising — this is a diagnostic, not a gate.
+
+def _kas_relay_help(binary: str) -> str | None:
+    """``acp --help`` text for this kiro-cli, or ``None`` when the probe FAILED.
+
+    Read from help output because there is no machine-readable capability surface
+    for the engine selector. ``None`` means only one thing — the probe could not
+    run (spawn error, timeout) — so the caller reports genuinely-unknown as
+    unknown. Help text that RAN and simply lacks the engine selector is returned
+    as-is, not as ``None``: a kiro-cli too old to offer ``--agent-engine`` cannot
+    serve KAS at all, and reporting that as "unknown" would let a broken
+    configuration pass the readiness check and fail later at spawn instead.
+
+    Local binary, argv list, no shell, no credential involved.
     """
-    for parent in script.parents:
-        if parent.parent is not None and parent.parent.name == "kas":
-            return parent.name
-    return "unknown"
+    try:
+        proc = subprocess.run(  # noqa: S603 - argv list, no shell, local binary
+            [binary, "acp", "--help"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+            # Pinned UTF-8 rather than bare text=True: help output is decoded
+            # here, and a platform-locale decode could mangle the flag name this
+            # probe searches for and report a supported kiro-cli as unreadable.
+            **UTF8_TEXT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return f"{proc.stdout}\n{proc.stderr}"
 
 
 def _doctor_kas(issues: list[str]) -> None:
@@ -1774,10 +1799,12 @@ def _doctor_kas(issues: list[str]) -> None:
 
     KAS is opt-in (``agent.acp_backend = "kas"``); when it is not selected this
     is silent so a kiro-cli / Claude Code install sees no KAS noise. When it IS
-    selected, KAS runs from kiro-cli's extracted bundle and obtains its token
-    from kiro-cli, so this surfaces the two things that make a selected KAS
-    backend fail at session-create time: missing assets and an unobtainable
-    token. The token probe prints only the expiry, never the token bytes.
+    selected, KAS is served by kiro-cli's own ACP relay (see
+    :mod:`kiro_crew.acp.kas_transport`), so the thing that makes a selected KAS
+    backend fail at session-create time is a kiro-cli whose ``acp`` subcommand
+    cannot select the KAS engine. Credentials are deliberately NOT probed here:
+    the relay resolves tokens from kiro-cli's own store, so the kiro-cli
+    sign-in check already reported above is the same signal.
     """
     # Positive backend test (not ``!= ACP_BACKEND_KAS``): an inequality would
     # silently capture every harness added later — see the harness-parity gate.
@@ -1786,37 +1813,41 @@ def _doctor_kas(issues: list[str]) -> None:
 
 
 def _report_kas_backend(issues: list[str]) -> None:
-    """Print the KAS diagnostic block (assets + bundle version + token probe).
+    """Print the KAS diagnostic block (relay binary + engine support).
 
     Split from :func:`_doctor_kas` so the backend-selection check there stays a
     positive ``== ACP_BACKEND_KAS`` rather than an early-return on inequality.
     """
     print("\nKAS backend")
-    node = kas_assets.find_kas_node()
-    script = kas_assets.find_kas_server_script()
-    print(f"  node:        {'✅ ' + str(node) if node else '❌ not found'}")
-    if script:
-        print(f"  bundle:      ✅ {_kas_version_label(script)}")
-    else:
-        print("  bundle:      ❌ KAS server script not found")
-    if not (node and script):
-        print("               Fix: install kiro-cli and run it once so it unpacks its")
-        print("               KAS bundle (or set KIROCREW_KAS_NODE / KIROCREW_KAS_SCRIPT).")
-        issues.append("KAS backend selected but assets missing")
+    binary = resolve_kiro_cli()
+    if not binary:
+        print(f"  relay:       ❌ {KIRO_CLI_BIN} not found")
+        print("               Fix: install kiro-cli; it serves KAS over its acp relay.")
+        issues.append("KAS backend selected but kiro-cli is not installed")
+        return
 
-    # Token status — a bounded live probe through kiro-cli. Advisory: an
-    # unobtainable token is usually a transient login state, not a broken
-    # install, so it warns rather than failing the doctor run.
-    try:
-        resp = asyncio.run(kas_auth.resolve_kas_access_token(timeout=8.0))
-    except kas_auth.KasAuthCallbackError as exc:
-        print(f"  token:       ⚠️  not obtainable: {exc}")
-        print("               Fix: sign in with `kiro-cli login`.")
-    except Exception as exc:  # noqa: BLE001 - diagnostic must never abort the run
-        print(f"  token:       ⚠️  probe error: {exc}")
+    print(f"  relay:       ✅ {' '.join(build_kas_argv(binary))}")
+    help_text = _kas_relay_help(binary)
+    if help_text is None:
+        # The probe itself failed, so nothing is known either way. Advisory: a
+        # diagnostic must not invent a verdict it could not establish.
+        print("  engine:      ⚠️  could not read `acp --help`; engine support unknown")
+        return
+    # Two distinct failures, both definite: the flag is absent entirely (a
+    # kiro-cli predating engine selection) or it is present without this engine.
+    if f"--{_KAS_ENGINE_FLAG_NAME}" not in help_text:
+        print(f"  engine:      ❌ this kiro-cli has no --{_KAS_ENGINE_FLAG_NAME} flag")
+        print("               Fix: update kiro-cli, or switch agent.acp_backend to kiro.")
+        issues.append(
+            f"kiro-cli is too old to select the KAS engine (no --{_KAS_ENGINE_FLAG_NAME})"
+        )
+    elif KAS_RELAY_ENGINE in help_text:
+        print(f"  engine:      ✅ {KAS_RELAY_ENGINE} supported")
     else:
-        expires = resp.get("expiresAt")
-        print(f"  token:       ✅ obtained via kiro-cli (expires {expires})")
+        print(f"  engine:      ❌ this kiro-cli does not offer engine {KAS_RELAY_ENGINE}")
+        print("               Fix: update kiro-cli, or switch agent.acp_backend to kiro.")
+        issues.append(f"kiro-cli does not support the KAS engine ({KAS_RELAY_ENGINE})")
+    print("  token:       ➖ owned by kiro-cli (see the sign-in check above)")
 
 
 def _doctor_agents_janitor(issues: list[str], sweep_backups: bool) -> None:

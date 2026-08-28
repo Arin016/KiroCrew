@@ -47,8 +47,8 @@ from kiro_crew.acp.types import (
     EVENT_TEXT_CHUNK,
     JSONRPC_METHOD_NOT_FOUND,
     METHOD_COMMANDS_EXECUTE,
-    METHOD_KAS_AUTH_GET_ACCESS_TOKEN,
     METHOD_MCP_OAUTH_REQUEST,
+    METHOD_REQUEST_PERMISSION,
     METHOD_SESSION_LOAD,
     METHOD_SESSION_NEW,
     METHOD_SESSION_TERMINATE,
@@ -111,6 +111,15 @@ async def _start_reader(rt: AcpRuntime) -> asyncio.Task:
     task = asyncio.ensure_future(rt._reader_loop())
     await asyncio.sleep(0)  # let the loop reach its first readline
     return task
+
+
+def _permission_msg(request_id: int) -> JsonRpcMessage:
+    """A server→client permission REQUEST, the shape the answerer is given."""
+    return JsonRpcMessage(
+        id=request_id,
+        method=METHOD_REQUEST_PERMISSION,
+        params={"sessionId": "sA", "options": []},
+    )
 
 
 async def _stop_reader(task: asyncio.Task) -> None:
@@ -334,9 +343,14 @@ async def test_ownerless_request_answered_once_not_broadcast():
 
 
 @pytest.mark.asyncio
-async def test_kas_auth_waits_for_shared_answer_capacity_then_answers():
-    """A temporary full cap delays, rather than drops, the next KAS answer."""
-    rt, reader, _ = _make_runtime()
+async def test_permission_answer_waits_for_shared_answer_capacity_then_answers():
+    """A temporary full cap delays, rather than drops, the next auto-answer.
+
+    Drives the unroutable-permission answerer, the one caller of the shared
+    admission wait. (It was written against KAS's credential callback, which was
+    the second caller until kiro-cli's ACP relay took ownership of auth.)
+    """
+    rt, _reader, _ = _make_runtime()
     rt._max_answer_tasks = 1
     first_started = asyncio.Event()
     second_started = asyncio.Event()
@@ -345,8 +359,9 @@ async def test_kas_auth_waits_for_shared_answer_capacity_then_answers():
     release_second = asyncio.Event()
     capacity_checks = 0
 
-    async def blocked_answer(request_id: int | str) -> None:
-        if request_id == 1:
+    async def blocked_answer(msg, session_id, *, reason="x") -> None:
+        del session_id, reason
+        if msg.id == 1:
             first_started.set()
             await release_first.wait()
         else:
@@ -362,20 +377,20 @@ async def test_kas_auth_waits_for_shared_answer_capacity_then_answers():
             second_capacity_check.set()
         return await wait_for_capacity(*args, **kwargs)
 
-    rt._answer_get_access_token = blocked_answer  # type: ignore[method-assign]
+    rt._answer_unroutable_permission = blocked_answer  # type: ignore[method-assign]
     rt._wait_for_answer_capacity = observed_capacity  # type: ignore[method-assign]
-    task = await _start_reader(rt)
     try:
-        _feed(reader, {"id": 1, "method": METHOD_KAS_AUTH_GET_ACCESS_TOKEN})
+        await rt._spawn_answer_task(_permission_msg(1), "sA")
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
         assert len(rt._answer_tasks) == 1
 
-        _feed(reader, {"id": 2, "method": METHOD_KAS_AUTH_GET_ACCESS_TOKEN})
+        second = asyncio.ensure_future(rt._spawn_answer_task(_permission_msg(2), "sA"))
         await asyncio.wait_for(second_capacity_check.wait(), timeout=1.0)
         assert not second_started.is_set()
 
         release_first.set()
         await asyncio.wait_for(second_started.wait(), timeout=1.0)
+        await second
         assert len(rt._answer_tasks) == 1
         assert sum(rt._dropped_frames.values()) == 0
 
@@ -389,7 +404,6 @@ async def test_kas_auth_waits_for_shared_answer_capacity_then_answers():
         release_first.set()
         release_second.set()
         await asyncio.gather(*rt._answer_tasks, return_exceptions=True)
-        await _stop_reader(task)
 
 
 @pytest.mark.asyncio
@@ -414,9 +428,9 @@ async def test_ownerless_response_with_null_result_is_not_answered():
 
 
 @pytest.mark.asyncio
-async def test_kas_auth_cap_timeout_marks_runtime_dead_without_growth():
-    """A wedged shared cap fails the runtime instead of losing a KAS request."""
-    rt, reader, _ = _make_runtime()
+async def test_answer_cap_timeout_marks_runtime_dead_without_growth():
+    """A wedged shared cap fails the runtime instead of losing a request."""
+    rt, _reader, _ = _make_runtime()
     rt._max_answer_tasks = 1
     rt._answer_cap_wait_secs = 0.0
     first_started = asyncio.Event()
@@ -425,8 +439,9 @@ async def test_kas_auth_cap_timeout_marks_runtime_dead_without_growth():
     marked_dead = asyncio.Event()
     dead_reasons: list[str] = []
 
-    async def blocked_answer(request_id: int | str) -> None:
-        if request_id == 1:
+    async def blocked_answer(msg, session_id, *, reason="x") -> None:
+        del session_id, reason
+        if msg.id == 1:
             first_started.set()
             await release_first.wait()
         else:
@@ -437,24 +452,22 @@ async def test_kas_auth_cap_timeout_marks_runtime_dead_without_growth():
         rt._dead = True
         marked_dead.set()
 
-    rt._answer_get_access_token = blocked_answer  # type: ignore[method-assign]
+    rt._answer_unroutable_permission = blocked_answer  # type: ignore[method-assign]
     rt._mark_dead = mark_dead  # type: ignore[method-assign]
-    task = await _start_reader(rt)
     try:
-        _feed(reader, {"id": 1, "method": METHOD_KAS_AUTH_GET_ACCESS_TOKEN})
+        await rt._spawn_answer_task(_permission_msg(1), "sA")
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
 
-        _feed(reader, {"id": 2, "method": METHOD_KAS_AUTH_GET_ACCESS_TOKEN})
+        await rt._spawn_answer_task(_permission_msg(2), "sA")
         await asyncio.wait_for(marked_dead.wait(), timeout=1.0)
 
         assert not second_started.is_set()
         assert len(rt._answer_tasks) == 1
         assert sum(rt._dropped_frames.values()) == 0
-        assert dead_reasons and "KAS auth" in dead_reasons[0]
+        assert dead_reasons and "permission" in dead_reasons[0]
     finally:
         release_first.set()
         await asyncio.gather(*rt._answer_tasks, return_exceptions=True)
-        await _stop_reader(task)
 
 
 # ── Response routing by id ──

@@ -239,16 +239,6 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # version into versions.txt. The binary name is a module constant; a
         # resource ceiling / sandbox adds nothing to a `--version` call.
         "diagnostics.py::_kiro_cli_version",
-        # KAS auth callback token fetch (--auth=acp-callback): a single fixed
-        # argv ``[<kiro-cli>, "chat", "_", "get-kas-token"]`` with a 20s timeout,
-        # no shell and no agent-influenced arguments — the subcommand tail is a
-        # module constant and the binary is the same kiro-cli Crew already spawns
-        # as its agent runtime (``resolve_kiro_cli``). Deliberately NOT
-        # sandbox-routed: kiro-cli must reach its OWN auth/token store to mint the
-        # KAS access token (same reason ``gh`` is not routed), which a sandbox
-        # would hide and break the callback. The child is SIGKILLed on timeout or
-        # task cancellation, so it never orphans.
-        "acp/kas_auth.py::resolve_kas_access_token",
         # Tailnet origin derivation + forwarded-peer whois (RFC:
         # rfc-tailnet-dashboard-access): one fixed argv — ``["<tailscale>",
         # "status", "--json"]`` or ``["<tailscale>", "whois", "--json",
@@ -786,12 +776,14 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # fetch, no mutation. Same classification as the other fixed-argv
         # doctor probes (``_detect_userspace_oom_killer``, ``_detect_linger``).
         "cli_doctor.py::_git_line",
-        # NOT a subprocess spawn here: the AST heuristic matches ``asyncio.run``
-        # (attr ``run`` on base ``asyncio``), used only to drive the async KAS
-        # token probe from the synchronous doctor. The actual child process is
-        # spawned inside ``acp/kas_auth.py::resolve_kas_access_token``, which is
-        # allowlisted separately above (kiro-cli reaching its own token store).
-        "cli_doctor.py::_report_kas_backend",
+        # ``<kiro-cli> acp --help`` readiness probe for the KAS backend: fixed
+        # argv (subcommand and flag are module constants), 15s-capped, no shell,
+        # no agent-influenced arguments, and no credential involved — it reads
+        # help text to confirm this kiro-cli can select the KAS engine at all.
+        # Crew no longer mints a KAS token anywhere; the relay resolves tokens
+        # from kiro-cli's own store (see ``acp/kas_transport.py``), so the former
+        # ``chat _ get-kas-token`` spawn is gone rather than moved.
+        "cli_doctor.py::_kas_relay_help",
         # ``systemctl is-active <unit>`` probes for the memory-pressure
         # preparedness check: argv is hardcoded (systemd-oomd/earlyoom unit
         # names), no agent influence, 5s-capped, read-only query.

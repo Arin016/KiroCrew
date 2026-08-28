@@ -827,7 +827,6 @@ test/test_issue_triage_workflow.py
 test/test_kas_agents.py
 test/test_kas_display_mapping.py
 test/test_kas_mode_binding.py
-test/test_kas_spawn.py
 test/test_kas_subagent_progress.py
 test/test_kiro_prerequisite.py
 test/test_kiro_usage_api.py

@@ -1349,15 +1349,24 @@ def inject_kiro_cli_api_key(env: MutableMapping[str, str]) -> MutableMapping[str
 
 
 def strip_kiro_cli_api_key(env: MutableMapping[str, str]) -> MutableMapping[str, str]:
-    """Remove kiro-cli's model credential from a foreign child's environment.
+    """Remove kiro-cli's model credential from a child that does not consume it.
 
-    Counterpart to :func:`inject_kiro_cli_api_key` for the non-kiro-cli ACP
-    backends (the dormant Claude seam, KAS): the credential is kiro-cli's
-    alone, and it is deliberately NOT in ``sandbox._AGENT_DENIED_ENV_KEYS``, so
-    without this an inherited copy in the raw ``os.environ`` snapshot would
-    ride into a foreign agent process. Matches the platform env-key convention
-    (exact on POSIX, case-folded on Windows) so a differently-cased Windows
-    spelling cannot slip past. Mutates *env* in place and returns it.
+    Counterpart to :func:`inject_kiro_cli_api_key` for every ACP backend other
+    than kiro (the dormant Claude seam, and KAS): the credential authenticates
+    kiro-cli's OWN v2 agent loop, and it is deliberately NOT in
+    ``sandbox._AGENT_DENIED_ENV_KEYS``, so without this an inherited copy in the
+    raw ``os.environ`` snapshot would ride into an agent process that has no use
+    for it.
+
+    "Foreign process" is no longer the right framing for KAS: Crew reaches it
+    through kiro-cli's ACP relay, so the child IS a kiro-cli. The strip still
+    applies because the v3 engine resolves its tokens from kiro-cli's OIDC store
+    (``--auth-method cli``) and never reads this variable — the test is what the
+    child's engine consumes, not which binary it is.
+
+    Matches the platform env-key convention (exact on POSIX, case-folded on
+    Windows) so a differently-cased Windows spelling cannot slip past. Mutates
+    *env* in place and returns it.
     """
     matched = [k for k in env if platform_compat.env_key_allowed(k, _KIRO_API_KEY_ONLY)]
     for k in matched:

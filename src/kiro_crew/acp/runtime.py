@@ -51,15 +51,7 @@ from kiro_crew.acp.kas_agents import (
     KasAgentTranslationError,
     build_kas_custom_agents,
 )
-from kiro_crew.acp.kas_assets import (
-    KasAssetsMissing,
-    build_kas_argv,
-    resolve_kas_entry,
-)
-from kiro_crew.acp.kas_auth import (
-    KasAuthCallbackError,
-    resolve_kas_access_token,
-)
+from kiro_crew.acp.kas_transport import build_kas_argv
 from kiro_crew.acp.session_handle import (
     AcpRequestTimeout,
     AcpRuntimeDead,
@@ -74,9 +66,7 @@ from kiro_crew.acp.types import (
     ACP_BACKENDS_INTERNAL_SANDBOX,
     ACP_BACKENDS_KIRO_IDENTITY_STORE,
     ACP_CLIENT_CAPABILITIES,
-    KAS_AUTH_CALLBACK_ERROR_CODE,
     KAS_CLIENT_CAPABILITIES,
-    METHOD_KAS_AUTH_GET_ACCESS_TOKEN,
     METHOD_KAS_SESSION_DELETE,
     METHOD_MCP_OAUTH_REQUEST,
     METHOD_MCP_SERVER_INIT_FAILURE,
@@ -654,10 +644,6 @@ class AcpRuntime:
             str(mcp_gateway_settings_mcp_json) if mcp_gateway_settings_mcp_json else None
         )
         self._mcp_gateway_socket = str(mcp_gateway_socket) if mcp_gateway_socket else None
-        # First KAS auth callback per runtime is logged at INFO as a positive
-        # "KAS is actively serving this runtime" signal; later ones drop to
-        # DEBUG so a long-lived runtime does not spam the log on every refresh.
-        self._kas_auth_logged = False
         # Whether sessions on this runtime should hold drain_init() open for
         # slow MCP servers (the no-report ceiling). A runtime whose agent is
         # KNOWN to have zero MCP servers — the kirocrew-lite background runtime,
@@ -930,10 +916,14 @@ class AcpRuntime:
         only kiro-cli needs its agent file materialized first.
         """
         if self._acp_backend == ACP_BACKEND_KAS:
-            node, script = await asyncio.to_thread(resolve_kas_entry)
-            # No --agent: KAS takes custom agents over the wire in session/new
+            # KAS is reached through kiro-cli's own ACP relay, so it resolves the
+            # same trusted binary as the kiro backend. No --agent: KAS takes
+            # custom agents over the wire in session/new
             # (_meta.kiro.customAgents), not from a CLI flag.
-            return build_kas_argv(node, script)
+            kas_bin = await _resolve_kiro_bin_for_spawn()
+            if not kas_bin:
+                raise AcpRuntimeError(f"{KIRO_CLI_BIN} not found in PATH")
+            return build_kas_argv(kas_bin)
 
         kiro_bin = await _resolve_kiro_bin_for_spawn()
         if not kiro_bin:
@@ -971,8 +961,6 @@ class AcpRuntime:
         try:
             argv = await self._resolve_spawn_argv()
         except _KiroExecutableTrustError as exc:
-            raise AcpRuntimeError(str(exc)) from exc
-        except KasAssetsMissing as exc:
             raise AcpRuntimeError(str(exc)) from exc
 
         # OSS sandbox.wrap_argv supports (argv, mode, strip_python_env). The
@@ -1030,6 +1018,13 @@ class AcpRuntime:
                 strip_kiro_cli_api_key,
             )
 
+            # KIRO_API_KEY is kiro-cli's own MODEL credential for its v2
+            # agent loop, so only the kiro backend is handed it. KAS takes the
+            # strip branch even though its process is now a kiro-cli (the ACP
+            # relay): the v3 engine authenticates from kiro-cli's OIDC store via
+            # --auth-method cli and never reads this variable, so injecting it
+            # would widen credential exposure for a consumer that does not
+            # exist. Unchanged from when KAS was a bare Node process.
             if self._acp_backend == ACP_BACKEND_KIRO:
                 inject_kiro_cli_api_key(env)
             else:
@@ -1866,38 +1861,13 @@ class AcpRuntime:
                     continue
 
                 # Inbound server→client REQUEST (method + id, no result/error).
-                # The KAS auth callback is connection-level: it carries NO
-                # sessionId, so it cannot be routed to a session and must be
-                # answered by the runtime itself. Handle it OFF this loop —
-                # shelling out to kiro-cli for a token must not block stdout
-                # demux for every other multiplexed session. Everything else
-                # (e.g. session/request_permission, which IS session-scoped and
-                # carries a sessionId) falls through to the routing below
-                # unchanged.
-                if (
-                    msg.id is not None
-                    and msg.result is None
-                    and msg.error is None
-                    and msg.is_method(METHOD_KAS_AUTH_GET_ACCESS_TOKEN)
-                ):
-                    # Token resolution can outlive a reader-loop tick and the
-                    # eventual stdin write can block. Retain it in the same
-                    # bounded set as other off-loop answers: a separate token
-                    # cap would let their combined total exceed the real
-                    # resource ceiling. Because this is a request, capacity
-                    # uses the same bounded progress-or-dead admission as
-                    # permission answers; counted-drop is only valid for
-                    # notifications that do not require a response.
-                    if not await self._wait_for_answer_capacity(
-                        msg, request_kind="KAS auth"
-                    ):
-                        continue
-                    answer_task = asyncio.ensure_future(
-                        self._answer_get_access_token(msg.id)
-                    )
-                    self._answer_tasks.add(answer_task)
-                    answer_task.add_done_callback(self._answer_tasks.discard)
-                    continue
+                # Crew answers no connection-level request of its own: the KAS
+                # engine's credential callback (_kiro/auth/getAccessToken) is
+                # served by kiro-cli's relay, not by this host (see
+                # :mod:`kiro_crew.acp.kas_transport`). A request that still
+                # arrives without a sessionId is therefore unroutable and is
+                # answered -32601 by _answer_ownerless_request below, rather
+                # than being left to hang.
 
                 # Route notifications by sessionId
                 session_id = (msg.params or {}).get("sessionId")
@@ -2107,82 +2077,6 @@ class AcpRuntime:
                 request_id, _JSONRPC_METHOD_NOT_FOUND, "Method not found"
             )
         except AcpRuntimeDead:
-            pass
-
-    async def _answer_get_access_token(self, request_id: int | str) -> None:
-        """Answer KAS's ``_kiro/auth/getAccessToken`` callback (see :mod:`kas_auth`).
-
-        Runs OFF the reader loop. Resolves a fresh access token by shelling out
-        to kiro-cli and hands it straight back to KAS. The token is a transient
-        local here — never cached, never logged. On any failure KAS is sent a
-        JSON-RPC error (which it treats as an expired token, prompting re-login)
-        rather than being left to hang on the callback.
-        """
-        # Defensive: only KAS is spawned with --auth=acp-callback, so no other
-        # backend ever sends this. Deliver on the KAS path; refuse elsewhere
-        # rather than shell out for a credential.
-        if self._acp_backend == ACP_BACKEND_KAS:
-            await self._deliver_kas_access_token(request_id)
-            return
-        try:
-            await self.send_error(
-                request_id, KAS_AUTH_CALLBACK_ERROR_CODE, "Method not found"
-            )
-        except AcpRuntimeDead:
-            pass
-
-    async def _deliver_kas_access_token(self, request_id: int | str) -> None:
-        """Resolve a KAS token via kiro-cli and hand it back, leak-safe.
-
-        Split from :meth:`_answer_get_access_token` so backend dispatch stays a
-        positive ``== ACP_BACKEND_KAS`` check (harness-parity H5); this body is
-        only ever reached on the KAS path.
-        """
-        # Positive liveness signal: this callback fires ONLY when a running
-        # KAS process asks Kiro Crew for a token, so reaching here is direct
-        # proof KAS is serving this runtime. No token is logged — only the
-        # fact of the callback, deduped to once-per-runtime at INFO.
-        if not self._kas_auth_logged:
-            self._kas_auth_logged = True
-            logger.info(
-                "KAS auth callback served — backend=kas agent=%s (PID %s)",
-                self._agent or "<none>",
-                self._pid,
-            )
-        else:
-            logger.debug(
-                "KAS auth callback served — agent=%s (PID %s)",
-                self._agent or "<none>",
-                self._pid,
-            )
-        try:
-            result = await resolve_kas_access_token()
-        except KasAuthCallbackError as exc:
-            # str(exc) is token-free by construction (see kas_auth), so it is
-            # safe to log and to return as the error reason.
-            logger.warning("KAS auth callback failed: %s", exc)
-            try:
-                await self.send_error(request_id, KAS_AUTH_CALLBACK_ERROR_CODE, str(exc))
-            except AcpRuntimeDead:
-                pass
-            return
-        except Exception as exc:  # noqa: BLE001
-            # An UNEXPECTED exception's message could carry unredacted bytes, so
-            # log only its type and return a generic reason — never str(exc).
-            # Also: a token task must never crash the single-owner runtime.
-            logger.warning("KAS auth callback error: %s", type(exc).__name__)
-            try:
-                await self.send_error(
-                    request_id, KAS_AUTH_CALLBACK_ERROR_CODE, "auth callback failed"
-                )
-            except AcpRuntimeDead:
-                pass
-            return
-
-        try:
-            await self.send_response(request_id, result)
-        except AcpRuntimeDead:
-            # Process gone before we could answer; nothing to do.
             pass
 
     def saw_not_logged_in(self) -> bool:
