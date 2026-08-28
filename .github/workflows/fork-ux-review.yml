@@ -471,12 +471,23 @@ jobs:
                  (pressed/selected/expanded) when the diff adds them.
                - Never color-only encoding: status conveyed by color pairs with
                  text, icon, or shape.
+               - Resizable panels: a drag handle is an ARIA window splitter —
+                 focusable, arrow-key operable, reporting its position — never
+                 a pointer-only div styled as a divider.
             7. CONSISTENCY & HABITUATION:
                - One term per operation everywhere — flag synonym drift
                  (Remove/Delete/Discard for the same act) against sibling code.
                - Theme tokens and existing ui/ primitives over hand-rolled
                  components or hardcoded colors; platform convention over novel
                  widgets for standard jobs.
+               - Interaction-primitive reuse: when the diff ADDS pointer/
+                 keyboard interaction machinery (drag-to-resize, splitter,
+                 sortable list, collapse/expand, roving focus), Grep hooks/ and
+                 components/ (not just ui/) for an existing shared
+                 implementation of the same gesture. A second implementation is
+                 a finding EVEN when visually identical: behavior divergence —
+                 keyboard path, hover feedback, drag physics, persistence — is
+                 what breaks habituation, and it never shows in a screenshot.
                - Habituation: flag diffs that MOVE or REORDER existing controls
                  without functional need (breaks muscle memory), and duplicate
                  new paths to an already-reachable action.
