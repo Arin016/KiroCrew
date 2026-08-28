@@ -6103,9 +6103,14 @@ class SubagentManager:
                 # increment is parent-scoped.
                 info.last_tool = event.title or ""
                 self._note_tool_dispatch(info, event)
-                # Persist turn state for orphan recovery diagnostics
+                # Persist turn state for orphan recovery diagnostics.
+                # Off-loop (to_thread): update_state does a synchronous
+                # fsync, so a slow/NFS FS must not freeze the gateway
+                # heartbeat on every tool-call event (#6288).
                 try:
-                    update_state(info.id, turns=turns, last_tool=event.title or "")
+                    await asyncio.to_thread(
+                        update_state, info.id, turns=turns, last_tool=event.title or ""
+                    )
                 except Exception:
                     pass
                 await self._fire_event(
