@@ -2222,3 +2222,101 @@ class TestCronHealth:
         self._run(monkeypatch, tmp_path)
 
         assert path.read_bytes() == before, "doctor must not mutate crons.json"
+
+
+class TestMcpToolsSpecGate:
+    """Spec-gate awareness in _doctor_mcp_tools.
+
+    When a managed server's spec_gate is closed (e.g. kirocrew-computer on
+    Linux), its absence from mcpServers is informational, not an error, and
+    it must not be auto-mounted into tools.
+    """
+
+    def _write_agent(self, tmp_path: Path, body: dict) -> Path:
+        agent = tmp_path / "agent.md"
+        agent.write_text(json.dumps(body), encoding="utf-8")
+        return agent
+
+    def test_gated_off_server_missing_from_mcpservers_is_informational(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        """A gated-off always-on server absent from mcpServers prints an
+        informational line and does NOT append to issues."""
+        monkeypatch.setattr(
+            cli_doctor, "_gated_off_servers", lambda: frozenset({"kirocrew-computer"})
+        )
+        monkeypatch.setattr(cli_doctor, "_MANAGED_MCPS", ("kirocrew-computer",))
+        monkeypatch.setattr(cli_doctor, "_OPT_IN_MCPS", ())
+
+        agent_path = self._write_agent(tmp_path, {
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+        })
+        issues: list[str] = []
+        cli_doctor._doctor_mcp_tools(agent_path, issues)
+
+        out = capsys.readouterr().out
+        assert "spec gate closed" in out
+        assert issues == []
+
+    def test_non_gated_server_missing_from_mcpservers_reports_error(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        """A non-gated always-on server absent from mcpServers still reports
+        the error and appends to issues (existing behavior preserved)."""
+        monkeypatch.setattr(
+            cli_doctor, "_gated_off_servers", lambda: frozenset()
+        )
+        monkeypatch.setattr(cli_doctor, "_MANAGED_MCPS", ("kirocrew-computer",))
+        monkeypatch.setattr(cli_doctor, "_OPT_IN_MCPS", ())
+
+        agent_path = self._write_agent(tmp_path, {
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {},
+        })
+        issues: list[str] = []
+        cli_doctor._doctor_mcp_tools(agent_path, issues)
+
+        out = capsys.readouterr().out
+        assert "missing from mcpServers" in out
+        assert "@kirocrew-computer config" in issues
+
+    def test_gated_off_server_present_in_mcpservers_is_not_auto_mounted(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        """A gated-off server that has an mcpServers entry but no tools ref
+        must NOT be auto-mounted into tools."""
+        monkeypatch.setattr(
+            cli_doctor, "_gated_off_servers", lambda: frozenset({"kirocrew-computer"})
+        )
+        monkeypatch.setattr(cli_doctor, "_MANAGED_MCPS", ("kirocrew-computer",))
+        monkeypatch.setattr(cli_doctor, "_OPT_IN_MCPS", ())
+        monkeypatch.setattr(cli_doctor, "may_skip_gate_now", lambda ref: True)
+        monkeypatch.setattr(cli_doctor, "warm_backend", lambda: None)
+
+        # probe_server is async; provide a coroutine that returns a simple result
+        class _FakeProbeResult:
+            def __init__(self):
+                self.name = "kirocrew-computer"
+                self.status = "ok"
+                self.tools = ["tool1"]
+                self.error = None
+
+        async def _fake_probe(info):
+            return _FakeProbeResult()
+
+        monkeypatch.setattr(cli_doctor, "probe_server", _fake_probe)
+
+        agent_path = self._write_agent(tmp_path, {
+            "tools": [],
+            "allowedTools": [],
+            "mcpServers": {"kirocrew-computer": {"command": "/usr/bin/test", "args": []}},
+        })
+        issues: list[str] = []
+        cli_doctor._doctor_mcp_tools(agent_path, issues)
+
+        # The tools ref should NOT have been added
+        rewritten = json.loads(agent_path.read_text(encoding="utf-8"))
+        assert "@kirocrew-computer" not in rewritten.get("tools", [])

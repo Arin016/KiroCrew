@@ -27,7 +27,7 @@ from kiro_crew.acp.kas_transport import (
     build_kas_argv,
 )
 from kiro_crew.acp.types import ACP_BACKEND_KAS
-from kiro_crew.agent import AGENT_FILENAME
+from kiro_crew.agent import AGENT_FILENAME, _gated_off_servers
 from kiro_crew.agent_discovery import (
     _read_agent_spec,
     project_agent_files,
@@ -525,9 +525,15 @@ def _doctor_mcp_tools(agent_path: Path, issues: list[str]) -> None:
     config_changed = False
 
     probe_targets = []
+    gated_off = _gated_off_servers()
     for name in _MANAGED_MCPS:
         ref = f"@{name}"
         if name not in mcps:
+            # A server whose spec gate is closed on this platform is legitimately
+            # absent — the installer never writes it. Report informational only.
+            if name in gated_off:
+                print(f"  {ref}: \u2139\ufe0f  spec gate closed (not supported on this platform)")
+                continue
             # An opt-in set is granted per agent, so its absence from THIS spec is
             # the normal state, not a broken install. Say nothing and probe
             # nothing; the always-on servers below are the ones whose absence
@@ -555,7 +561,7 @@ def _doctor_mcp_tools(agent_path: Path, issues: list[str]) -> None:
             if name not in _OPT_IN_MCPS:
                 issues.append(f"{ref} config")
             continue
-        if ref not in tools and name not in _OPT_IN_MCPS:
+        if ref not in tools and name not in _OPT_IN_MCPS and name not in gated_off:
             # Mounting an opt-in server IS granting it: the `@` ref is what makes
             # kiro-cli load it. Doctor repairs a broken always-on mount, but it
             # must never hand an agent a set the user did not assign.
