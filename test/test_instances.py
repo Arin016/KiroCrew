@@ -6099,12 +6099,14 @@ class TestProxyHandlerPolicy:
         await api_instances_proxy(req)
         assert writes == ["write"]  # no write_eof on the dead transport
 
+    @pytest.mark.asyncio
+    async def test_non_owner_identity_is_refused(self, tmp_path, monkeypatch):
         """A Slack-minted dashboard identity passes _guard but must NOT reach
         the peer: the proxy executes with the owner's manager-held credential."""
         from kiro_crew.dashboard.handlers import source_providers as sp
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status")
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots")
         monkeypatch.setattr(sp, "is_owner_dashboard_request", lambda r: False)
         monkeypatch.setattr(sp, "stale_owner_session_response", lambda r: None)
         resp = await api_instances_proxy(req)
@@ -6115,7 +6117,7 @@ class TestProxyHandlerPolicy:
     async def test_disabled_feature_is_403(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status", enabled=False)
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", enabled=False)
         resp = await api_instances_proxy(req)
         assert resp.status == 403
 
@@ -6134,15 +6136,92 @@ class TestProxyHandlerPolicy:
         req = self._req(tmp_path, monkeypatch, path="assets/main.js")
         resp = await api_instances_proxy(req)
         assert resp.status == 400
+        assert _body(resp)["code"] == "proxy_path_denied"
 
     @pytest.mark.asyncio
     async def test_peer_instances_plane_is_refused_no_chaining(self, tmp_path, monkeypatch):
+        """The allowlist subsumes the old explicit deny: `api/instances` is not
+        an allowed prefix, so one hub still cannot chain through a peer into a
+        third machine's SSH control plane."""
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
         req = self._req(tmp_path, monkeypatch, path="api/instances/other/proxy/api/status")
         resp = await api_instances_proxy(req)
         assert resp.status == 400
-        assert "chaining" in _body(resp)["error"]
+        assert _body(resp)["code"] == "proxy_path_denied"
+
+    @pytest.mark.asyncio
+    async def test_peer_token_route_is_refused_with_denied_shape(self, tmp_path, monkeypatch):
+        """A peer's credential-minting route must never be proxied: its JSON
+        reply passes the content-type gate, so a deny-only policy would carry
+        a minted peer token back through the hub in-band. The allowlist is the
+        no-remote-credential-on-hub invariant, pinned here rather than in prose."""
+        from kiro_crew.dashboard.handlers_instances import api_instances_proxy
+
+        req = self._req(tmp_path, monkeypatch, path="api/token/local")
+        resp = await api_instances_proxy(req)
+        assert resp.status == 400
+        assert _body(resp)["code"] == "proxy_path_denied"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "api/token/local",  # GET /api/token/local mints a dashboard token
+            "api/apps/someapp/token",  # POST /api/apps/{name}/token
+            "api/webhooks/tokens",  # POST /api/webhooks/tokens
+            "api/status",  # harmless, but not part of the chat surface either
+            "api",  # the bare prefix names no endpoint
+            "api/chatx/slots",  # allowed prefix must match whole segments
+        ],
+    )
+    def test_paths_outside_the_chat_allowlist_are_refused(self, raw):
+        """The vet policy is a positive prefix allowlist (`api/chat` today):
+        anything the feature never asked for is refused by default instead of
+        proxied silently — including every future sensitive peer endpoint."""
+        from kiro_crew.dashboard.handlers_instances import (
+            _PROXY_PATH_DENIED_REASON,
+            _proxy_canonical_path,
+        )
+
+        path, reason = _proxy_canonical_path(raw)
+        assert path == ""
+        assert reason == _PROXY_PATH_DENIED_REASON
+
+    def test_bare_chat_prefix_itself_is_forwarded(self):
+        """`POST /api/chat` is the primary send route the feature rides on —
+        the prefix itself must pass, not only paths strictly beneath it."""
+        from kiro_crew.dashboard.handlers_instances import _proxy_canonical_path
+
+        assert _proxy_canonical_path("api/chat") == ("api/chat", "")
+        assert _proxy_canonical_path("/api/chat/") == ("api/chat", "")
+
+    def test_allowlist_constant_is_pinned_exactly(self):
+        """Widening the proxied surface must be a REVIEWED act: this pins the
+        constant's exact value, so adding a row (e.g. the deferred api/ws)
+        fails here until the test is updated alongside it. The shape floor
+        (every row >= 2 segments, rooted at `api`) guards the fail-open edits
+        an exact pin alone would also catch — kept separate so the failure
+        message names the broken invariant."""
+        from kiro_crew.dashboard.handlers_instances import _PROXY_ALLOWED_PREFIXES
+
+        assert _PROXY_ALLOWED_PREFIXES == (("api", "chat"),)
+        for prefix in _PROXY_ALLOWED_PREFIXES:
+            # An empty row prefix-matches EVERYTHING and a one-segment row
+            # restores the whole peer /api/ surface; both must be impossible.
+            assert len(prefix) >= 2
+            assert prefix[0] == "api"
+            assert all(isinstance(seg, str) and seg for seg in prefix)
+
+    def test_malformed_allowlist_row_fails_closed(self, monkeypatch):
+        """Even if a bad edit ships an empty or one-segment row, the vet must
+        not widen: rows shallower than two segments are ignored, so the
+        policy degrades to refusing more, never to forwarding more."""
+        from kiro_crew.dashboard import handlers_instances as hi
+
+        monkeypatch.setattr(hi, "_PROXY_ALLOWED_PREFIXES", ((), ("api",)))
+        path, reason = hi._proxy_canonical_path("api/token/local")
+        assert path == ""
+        assert reason
 
     @pytest.mark.parametrize(
         "raw",
@@ -6202,7 +6281,7 @@ class TestProxyHandlerPolicy:
     async def test_disallowed_method_is_405(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status", method="OPTIONS")
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", method="OPTIONS")
         resp = await api_instances_proxy(req)
         assert resp.status == 405
 
@@ -6210,7 +6289,7 @@ class TestProxyHandlerPolicy:
     async def test_missing_manager_is_503(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard.handlers_instances import api_instances_proxy
 
-        req = self._req(tmp_path, monkeypatch, path="api/status", manager=None)
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", manager=None)
         resp = await api_instances_proxy(req)
         assert resp.status == 503
 
@@ -6246,7 +6325,7 @@ class TestProxyHandlerPolicy:
 
         req = self._req(tmp_path, monkeypatch, path="assets/x.js")
         assert _body(await api_instances_proxy(req))["code"] == "proxy_path_denied"
-        req = self._req(tmp_path, monkeypatch, path="api/status", method="OPTIONS")
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", method="OPTIONS")
         assert _body(await api_instances_proxy(req))["code"] == "proxy_method_not_allowed"
-        req = self._req(tmp_path, monkeypatch, path="api/status", manager=None)
+        req = self._req(tmp_path, monkeypatch, path="api/chat/slots", manager=None)
         assert _body(await api_instances_proxy(req))["code"] == "instances_manager_unavailable"
