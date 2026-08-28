@@ -8368,13 +8368,12 @@ class GatewayOrchestrator:
         cycled; the change only ever matters to sessions created later, and the
         next start builds their routing from this config.
 
-        Restarting to shorten that wait actively destroys work. The drain gives
-        in-flight tool calls ``DRAIN_SECS`` to finish and then cancels them, and
-        the stub does not re-handshake afterwards -- ``handshake()`` has a single
-        call site at startup, and the post-``initialize`` path deliberately does
-        not fall back to a per-session exec (kiro-cli never re-sends
-        ``initialize``, so an exec'd server would reject every later call). An
-        attached session therefore loses those servers for the rest of its life.
+        Restarting to shorten that wait still destroys work: the drain gives
+        in-flight tool calls ``DRAIN_SECS`` to finish and then cancels them.
+        The stub re-attaches to the replacement daemon afterwards, so those
+        servers are no longer lost for the session's life -- but a cancelled call
+        is still a cancelled call, and the restart buys the running session
+        nothing, because its toolset was fixed at ``session/new``.
 
         Rewriting the agent specs without restarting is worse still: a new
         session would route a server through the stub while the running daemon
