@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -945,59 +944,22 @@ async def _handle_draft_pr(request: web.Request) -> web.StreamResponse:
 
 
 def ledger_admin_record(fp: str, pr_ref: str) -> None:
-    """Append a ``filed`` ledger row carrying the pull-request reference.
+    """Record a manually-drafted ``filed`` pull request in the ledger.
 
-    Append-only rather than a rewrite: the ledger is the run's audit trail, and
-    the latest row for a fingerprint is what readers treat as current, so adding
-    a row records the new fact without mutating history.
+    Delegates to :func:`ledger_admin.record_filed`, which appends the row while holding
+    the module's ``_LEDGER_LOCK`` — the SAME lock ``forget`` / ``purge`` hold across their
+    read → decide → append. Sharing that one lock domain is load-bearing: a filed write
+    that appended outside it could land its row between a concurrent ``forget``'s read and
+    its ``purged`` append, and ``purged`` (last-write-wins) would then hide the just-filed
+    pull request and re-open the locus, so the loop drafts a SECOND PR for a change already
+    up for review. The helper also carries ``kind``/``target`` and writes ``cr`` (never
+    ``pr``) so the row survives ``spine.ledger.LedgerEntry(**row)`` and enters the dedup
+    index; see its docstring for why that shape matters.
 
-    The reference goes in ``cr``, and ``kind``/``target`` are always present, because
-    ``spine.ledger.Ledger._load()`` does ``LedgerEntry(**row)`` inside a bare
-    ``except: continue`` that exists to tolerate a torn final line. ``LedgerEntry`` is a
-    fixed-field dataclass with ``cr`` and REQUIRED ``kind``/``target``, so a row spelled
-    ``pr``, or one missing either field, raises ``TypeError`` and is silently discarded:
-    this ``filed`` marker would never enter the dedup index, and after the retry cooldown
-    the loop would re-discover the locus and draft a SECOND pull request for a change
-    already filed. ``backend/ledger_admin.py`` documents the same hazard for its purge
-    event, and ``_purged_event`` is the shape followed here. Readers accept both
-    spellings (``progress.read_findings``, ``prUrlOf``), so the UI link still renders.
+    A write failure is logged inside the helper and swallowed here: the pull request is
+    already published, so a bookkeeping miss must not surface as a caller error.
     """
-
-    row: dict[str, Any] = {
-        "fp": fp,
-        "status": "filed",
-        "cr": pr_ref,
-        "note": "manually drafted from the queued change",
-        "ts": time.time(),
-    }
-    path = store.ledger_path()
-    existing = ""
-    if path.exists():
-        try:
-            existing = path.read_text(encoding="utf-8")
-        except OSError:
-            existing = ""
-    # Preserve the target/kind from the finding's prior rows so the new row is
-    # still identifiable in the list view.
-    for line in reversed(existing.splitlines()):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            prior = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(prior, dict) and str(prior.get("fp") or "") == fp:
-            row.setdefault("kind", prior.get("kind") or "")
-            row.setdefault("target", prior.get("target") or "")
-            break
-    # Unconditionally, even when no prior row was found: `kind` and `target` are
-    # REQUIRED dataclass fields, so omitting them fails `LedgerEntry(**row)` exactly
-    # like the wrong key spelling would, and the row would be dropped just as silently.
-    row.setdefault("kind", "")
-    row.setdefault("target", "")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row) + "\n")
+    ledger_admin.record_filed(fp, pr_ref)
 
 
 # ── per-PR watcher sessions ──────────────────────────────────────────────────
@@ -1381,6 +1343,7 @@ async def _handle_run_start(_request: web.Request) -> web.StreamResponse:
     repo or a wider budget than what the config endpoints allow. Building the driver
     is blocking (git, provider probe), so the whole call runs off the event loop.
     """
+
     # Read the config INSIDE the lock, together with the start it feeds. Read outside, a
     # retarget landing between the read and the start means the run operates on the repo
     # that was just replaced while the UI shows the new one. `_build_driver` re-enters the
