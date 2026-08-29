@@ -822,6 +822,13 @@ independently load-bearing:
   URL, which is the coordinate-shaped class the bullet above refuses to take from
   an agent-writable file. A failed fetch keeps the previous snapshot rather than
   clearing it — a CDN blip must not start 403ing art on an already-listed row.
+  A cold load can outrun the warmup: the Library card list gates only on the
+  installed-apps query (a local read) while the catalog fetch rides the store
+  listing, so its `<img>` requests can reach the gate first and an `<img>` does
+  not retry a 403. That first paint is the residual, against a prior state where
+  the art was refused on every load; closing it needs the render gated on the
+  store listing or a second non-network source for the allowlist, both in a
+  different layer.
   This admits the repo to the membership test and nothing more: the clone-host
   trust gate still applies unchanged, and `_repo_key_owner_count` enumerates the
   bundled and external sources itself, so a catalog-only repo counts zero owners

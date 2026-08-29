@@ -588,11 +588,17 @@ def _remember_vouched_repos(entries: list[dict[str, Any]]) -> None:
 def vouched_repos() -> frozenset[str]:
     """Clone URLs the catalog vouched for, for the ``/api/apps/blob`` SSRF gate.
 
-    Empty until a fresh catalog fetch has succeeded in this process, which is the
-    ordering that matters in practice: the store listing that renders a blob URL
-    performs that fetch before the browser requests the bytes. A surface that
-    somehow renders one first degrades to today's 403 for that one request, never
-    to a widened gate.
+    Empty until a fresh catalog fetch has succeeded in this process, and a cold
+    load CAN outrun it: the Library card list gates only on the installed-apps
+    query (``GET /api/apps``, a local read) while the catalog fetch rides the
+    separate store listing, so its ``<img>`` requests can reach the gate first.
+    Such a request 403s and an ``<img>`` does not retry, so that art stays missing
+    until the next load. Still strictly better than the state this replaces, where
+    a catalog-only app's art was refused on EVERY load rather than the first one
+    after a start — closing the window needs either the render gated on the store
+    listing or a second, non-network source for the allowlist, both of which are
+    changes to a different layer than this one. Whatever else happens, an unwarmed
+    snapshot degrades to a refusal, never to a widened gate.
     """
     return _VOUCHED_REPOS
 
