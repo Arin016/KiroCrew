@@ -8,9 +8,25 @@ const MOBILE_QUERY = `(max-width: ${MOBILE_BREAKPOINT - 1}px)`
 
 const mql = typeof window !== 'undefined' ? window.matchMedia(MOBILE_QUERY) : null
 
+// A single missed or deferred `change` delivery used to strand the breakpoint;
+// these only notify — getSnapshot still reads mql.matches, so a no-op wake bails.
+const WINDOW_RECHECK_EVENTS = ['orientationchange', 'resize', 'pageshow'] as const
+// visibilitychange fires at the document, not the window.
+const DOCUMENT_RECHECK_EVENTS = ['visibilitychange'] as const
+
 function subscribe(cb: () => void) {
   mql?.addEventListener('change', cb)
-  return () => mql?.removeEventListener('change', cb)
+  if (typeof window !== 'undefined') {
+    for (const type of WINDOW_RECHECK_EVENTS) window.addEventListener(type, cb)
+    for (const type of DOCUMENT_RECHECK_EVENTS) document.addEventListener(type, cb)
+  }
+  return () => {
+    mql?.removeEventListener('change', cb)
+    if (typeof window !== 'undefined') {
+      for (const type of WINDOW_RECHECK_EVENTS) window.removeEventListener(type, cb)
+      for (const type of DOCUMENT_RECHECK_EVENTS) document.removeEventListener(type, cb)
+    }
+  }
 }
 
 function getSnapshot() {
