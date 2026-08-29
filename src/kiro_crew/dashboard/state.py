@@ -155,6 +155,7 @@ def _slots_ws_frame(
     channel_trusted: bool,
     gitlab_hosts_gen: object,
     folders: object,
+    folders_gen: object,
 ) -> str:
     """Serialize the dashboard-user ``slots`` WS frame.
 
@@ -185,6 +186,7 @@ def _slots_ws_frame(
             "channelTrusted": channel_trusted,
             "gitlabHostsGeneration": gitlab_hosts_gen,
             "folders": folders,
+            "foldersGeneration": folders_gen,
         }
     )
 
@@ -5143,6 +5145,10 @@ class DashboardState:
         # construction, so building it off-loop is safe — and it stays valid
         # across the loop changes this long-lived state survives (#4800).
         self._folders_lock = LoopBoundLock()
+        # Identifies the current folder-TREE snapshot; bumped by mutate_folders
+        # (the store's only writer) on each confirmed write. See
+        # folders_generation() for what the client does with it.
+        self._folders_generation = 0
         # Tag vocabulary: list of {id, name, color, order}. User-managed.
         self._tags: list[dict[str, Any]] = []
         # Malformed tags.json entries dropped at load time, kept verbatim so a
@@ -7704,6 +7710,26 @@ class DashboardState:
                 raise
             return removed
 
+    def folders_generation(self) -> int:
+        """Monotonic counter identifying the current folder-tree snapshot.
+
+        Rides the ``slots`` WS frame so an already-open tab can tell that the
+        folder store actually CHANGED and invalidate its cached
+        ``['chat-folders']`` query. Without it a folder created by anything other
+        than this tab's own mutation — an agent, a second tab, another device —
+        stayed invisible until a reload: the query carries the app-wide
+        ``staleTime: Infinity``, so nothing expires it, and the tree the frame
+        already carries cannot be written into the cache directly (that would
+        clobber an in-flight optimistic edit and, lacking ``history_count``, mark
+        the query fresh so the real GET never runs). A generation is the small
+        signal that lets the client re-GET instead of guess.
+
+        Read through ``getattr`` because this is reachable from the slots-push
+        hot path, which also runs on a ``__new__``-built state that never ran
+        ``__init__`` (several endpoint suites build their fixture that way).
+        """
+        return int(getattr(self, "_folders_generation", 0) or 0)
+
     async def mutate_folders(self, mutate: Callable[[list[dict[str, Any]]], tuple[bool, _T]]) -> _T:
         """Serialize one read-modify-write of the folder store; persist off-loop.
 
@@ -7751,6 +7777,12 @@ class DashboardState:
             except Exception:
                 self._folders[:] = before
                 raise
+            # After the confirmed write, never before it: a failed persist
+            # restores `before`, and a generation bumped for a rolled-back
+            # mutation would make every client re-GET state that never changed —
+            # and, worse, would let the NEXT real change land on the same number
+            # if it raced the rollback.
+            self._folders_generation = self.folders_generation() + 1
             return value
 
     async def read_folders(self, read: Callable[[list[dict[str, Any]]], _T]) -> _T:
@@ -8521,6 +8553,10 @@ class DashboardState:
                 # to dict entries carrying a string "id" so a corrupt store degrades
                 # to a smaller/empty tree instead of crashing the broadcast.
                 "folders": _safe_folder_tree(getattr(self, "_folders", None)),
+                # Lets the client distinguish "the tree changed" from "a session
+                # blinked": this frame fires on routine slot activity, so the
+                # tree alone is not a change signal.
+                "foldersGeneration": self.folders_generation(),
             }
         )
         # The owner frame is the owner's ONLY slots frame — `_send_ws_all` skips
@@ -8541,6 +8577,7 @@ class DashboardState:
                     channel_trusted=ch_trusted,
                     gitlab_hosts_gen=gitlab_hosts_generation(),
                     folders=_safe_folder_tree(getattr(self, "_folders", None)),
+                    folders_gen=self.folders_generation(),
                 )
             )
 
@@ -8652,6 +8689,7 @@ class DashboardState:
                     channel_trusted=bool(ws_data["channelTrusted"]),
                     gitlab_hosts_gen=note.get("gitlabHostsGeneration"),
                     folders=note.get("folders"),
+                    folders_gen=note.get("foldersGeneration"),
                 )
             elif msg_type == "slot_title":
                 ws_data = {"key": note["key"], "title": note["title"]}
