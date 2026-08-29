@@ -135,6 +135,68 @@ describe('ChatPanel — optimistic model/effort selectors', () => {
       d.resolve({})
     })
 
+    it('shows the picked subagent (role) model in the trigger before the PATCH settles', async () => {
+      const d = deferred()
+      patchConfigMock.mockImplementationOnce(() => d.promise as never)
+      seed({ model: 'claude-opus-4.8', role_models: { subagent: 'auto' } })
+      wrap(<ChatPanel />)
+      await waitFor(() => expect(modelsMock).toHaveBeenCalled())
+
+      await openSelect('Subagent Model')
+      fireEvent.click(screen.getByRole('option', { name: 'claude-haiku-4.5' }))
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Subagent Model' })).toHaveTextContent(
+          'claude-haiku-4.5'
+        )
+      )
+      // Distinct path from the background role model: a copy-paste of the
+      // background field name would surface here.
+      expect(patchConfigMock).toHaveBeenCalledWith('agent.role_models.subagent', 'claude-haiku-4.5')
+      d.resolve({})
+    })
+
+    it('shows the picked background effort in the trigger before the PATCH settles', async () => {
+      const d = deferred()
+      patchConfigMock.mockImplementationOnce(() => d.promise as never)
+      // Default model is reasoning-capable and the role model stays on auto, so
+      // bgEffortSupported resolves via defaultModel and the row is enabled.
+      // (subEffortSupported resolves the same way for the subagent case.)
+      seed({ model: 'claude-opus-4.8', role_efforts: { background: '' } })
+      wrap(<ChatPanel />)
+
+      await openSelect('Background Effort')
+      fireEvent.click(screen.getByRole('option', { name: 'High' }))
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Background Effort' })).toHaveTextContent(
+          'High'
+        )
+      )
+      expect(patchConfigMock).toHaveBeenCalledWith('agent.role_efforts.background', 'high')
+      d.resolve({})
+    })
+
+    it('shows the picked subagent effort in the trigger before the PATCH settles', async () => {
+      const d = deferred()
+      patchConfigMock.mockImplementationOnce(() => d.promise as never)
+      seed({ model: 'claude-opus-4.8', role_efforts: { subagent: '' } })
+      wrap(<ChatPanel />)
+
+      await openSelect('Subagent Effort')
+      fireEvent.click(screen.getByRole('option', { name: 'High' }))
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Subagent Effort' })).toHaveTextContent(
+          'High'
+        )
+      )
+      // Distinct path from the background effort: the field-name difference is
+      // exactly what this assertion guards.
+      expect(patchConfigMock).toHaveBeenCalledWith('agent.role_efforts.subagent', 'high')
+      d.resolve({})
+    })
+
     it('shows the picked fallback model in the trigger before the PATCH settles', async () => {
       const d = deferred()
       patchConfigMock.mockImplementationOnce(() => d.promise as never)
@@ -206,6 +268,55 @@ describe('ChatPanel — optimistic model/effort selectors', () => {
       await waitFor(() =>
         expect(screen.getByRole('combobox', { name: 'Background Model' })).toHaveTextContent(
           'Auto'
+        )
+      )
+    })
+
+    it('reverts the subagent role model and shows the failure banner when the PATCH rejects', async () => {
+      seed({ model: 'claude-opus-4.8', role_models: { subagent: 'auto' } })
+      patchConfigMock.mockImplementationOnce(() => Promise.reject(new Error('boom')) as never)
+      wrap(<ChatPanel />)
+      await waitFor(() => expect(modelsMock).toHaveBeenCalled())
+
+      await openSelect('Subagent Model')
+      fireEvent.click(screen.getByRole('option', { name: 'claude-haiku-4.5' }))
+
+      expect(await screen.findByText(/Failed to save/)).toBeInTheDocument()
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Subagent Model' })).toHaveTextContent(
+          'Auto'
+        )
+      )
+    })
+
+    it('reverts the background effort and shows the failure banner when the PATCH rejects', async () => {
+      seed({ model: 'claude-opus-4.8', role_efforts: { background: '' } })
+      patchConfigMock.mockImplementationOnce(() => Promise.reject(new Error('boom')) as never)
+      wrap(<ChatPanel />)
+
+      await openSelect('Background Effort')
+      fireEvent.click(screen.getByRole('option', { name: 'High' }))
+
+      expect(await screen.findByText(/Failed to save/)).toBeInTheDocument()
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Background Effort' })).toHaveTextContent(
+          'Model default'
+        )
+      )
+    })
+
+    it('reverts the subagent effort and shows the failure banner when the PATCH rejects', async () => {
+      seed({ model: 'claude-opus-4.8', role_efforts: { subagent: '' } })
+      patchConfigMock.mockImplementationOnce(() => Promise.reject(new Error('boom')) as never)
+      wrap(<ChatPanel />)
+
+      await openSelect('Subagent Effort')
+      fireEvent.click(screen.getByRole('option', { name: 'High' }))
+
+      expect(await screen.findByText(/Failed to save/)).toBeInTheDocument()
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Subagent Effort' })).toHaveTextContent(
+          'Model default'
         )
       )
     })
