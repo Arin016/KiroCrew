@@ -733,7 +733,15 @@ def autonudge_stop(name: str, args: dict[str, Any]) -> str:
     return session_directive.encode(
         "autonudge_stop",
         {"reason": args.get("reason", "").strip()},
-        "Stopping the auto-nudge loop on this session (if one is active).",
+        # NOT a confirmation, and worded so a model cannot read it as one: this
+        # tool resolves no session, so it cannot know whether a loop is bound
+        # here. The consumer applies the stop and records the real outcome —
+        # including "nothing was stopped" when the binding resolves no loop —
+        # onto the transcript, so a caller that reads this as success would be
+        # acting on an unverified claim.
+        "Stop REQUESTED for this session's auto-nudge loop. This is not "
+        "confirmation that a loop was found or stopped; the applied outcome is "
+        "recorded separately and may report that nothing was stopped.",
     )
 
 
