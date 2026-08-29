@@ -21,6 +21,7 @@ import stat
 import sys
 import time
 import urllib.parse
+from email.utils import formatdate
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ from kiro_crew.apps.dependency_ledger import (
     classify_for_uninstall,
     declared_capability_keys,
 )
+from kiro_crew.apps.dev_mode import dev_mode_granted_root, is_dev_mode_cached
 from kiro_crew.apps.event_bus import build_broadcast_fn
 from kiro_crew.apps.execution import app_execution_denied
 from kiro_crew.apps.hooks_integration import (
@@ -123,6 +125,7 @@ from kiro_crew.config.loader import (
 )
 from kiro_crew.cron import CronStoreBusy, CronStoreUnreadable
 from kiro_crew.executors import subprocess_executor
+from kiro_crew.hooks import _fd_real_path
 from kiro_crew.pinned_fs import (
     PinnedPathRefusal,
     is_reparse_point,
@@ -2447,40 +2450,325 @@ async def handle_app_config(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "name": name})
 
 
-async def handle_app_ui_file(request: web.Request) -> web.Response:
-    """GET /apps/{name}/ui/{path:.*} — serve app UI bundle files."""
+#: Ceiling on one UI-bundle file this route will serve. With streaming (see
+#: :func:`handle_app_ui_file`) the ceiling no longer bounds gateway memory —
+#: per-request memory is one :data:`_UI_STREAM_CHUNK` regardless of file size —
+#: it bounds the WORK one unauthenticated request can command (bytes read and
+#: sent per request; the route bypasses token auth). Measured reality: the
+#: largest UI asset a bundled app in this tree ships is ~9 KB
+#: (``website/public/apps/agent-worlds/ui/index.mjs`` — the scaffold's vite
+#: config externalizes react/react-dom/the SDK, so bundles stay small). 8 MiB
+#: is ~900x that, matches the posture already accepted for ``_ART_MAX_BYTES``
+#: above, and still clears any plausible self-bundled entry chunk. The one
+#: class it can refuse is the sourcemap of an app that bundles a very heavy
+#: dependency — a ``.map`` 404 degrades only devtools debugging of that app,
+#: never the app itself.
+_UI_MAX_BYTES = 8 * 1024 * 1024
+
+#: Read granularity when streaming a UI file from its validated descriptor.
+#: This — not the file size — is what one in-flight request pins in memory, so
+#: N slow clients cost N chunks, not N files. 256 KiB keeps the thread-hop
+#: count low (an 8 MiB worst case is 32 hops) while staying far below any
+#: amplification concern.
+_UI_STREAM_CHUNK = 256 * 1024
+
+#: Max concurrent requests HOLDING AN OPEN DESCRIPTOR on this route. Acquired
+#: before `_open_ui_file` and released after the descriptor closes: bounding
+#: only the streaming loop would let every QUEUED request already hold an fd
+#: while waiting for a slot, so slow-paced unauthenticated GETs could walk the
+#: gateway to `EMFILE`. Under this scope at most 8 descriptors exist at once
+#: and everyone else waits fd-less. It also bounds the per-chunk `to_thread`
+#: hops on the SHARED default executor (same reason `_BLOB_FETCH_SEMAPHORE`
+#: bounds git fetches). Refusals and body-less 304s hold a slot only for
+#: microseconds; 8 comfortably covers a dashboard loading assets in parallel.
+_UI_STREAM_SEMAPHORE = asyncio.Semaphore(8)
+
+
+def _open_ui_file(name: str, file_path: str) -> tuple[int, os.stat_result] | str:
+    """An OPEN validated descriptor for *file_path* under *name*'s ui/ root
+    plus its ``fstat``, or a refusal code: ``"invalid"`` (containment failure
+    -> 400, the status this route has always answered escapes with) or
+    ``"not_found"`` (-> 404). On the tuple path the CALLER owns closing the fd.
+
+    Handing back the descriptor rather than a path is the security-relevant
+    part, and it is the same fix :func:`_read_declared_art` carries (#6794):
+    validating a path and then handing it to ``FileResponse`` opens it a SECOND
+    time, so the app that owns this directory can swap a validated name for a
+    symlink between the check and that open and have the gateway read the
+    target instead — and the gateway is NOT sandboxed, so this launders a read
+    the app's own code can be refused. This route serves the SAME app-owned
+    directory with a BROADER extension allowlist (``.json``, ``.mjs``), so it
+    must not keep the weaker open. One open, validated as a DESCRIPTOR, is the
+    only shape without that window; everything after it reads the fd, which
+    cannot be re-pointed.
+
+    One thread hop for the whole decision — resolve, containment, open and
+    stat — because every part is a blocking syscall and the gateway runs on one
+    event loop (``no-blocking-call-on-event-loop``).
+    """
+    ui_root = apps_dir() / name / "ui"
+    target = ui_root / file_path
+    try:
+        # Resolved ONCE, here, because `pin_parent` requires the CALLER to do
+        # it: resolving inside would re-follow whatever an ancestor points at by
+        # then. The ui root itself is resolved THROUGH: the documented dev-mode
+        # setup links ui/ at the developer's source tree, so the ROOT being a
+        # link is legitimate — containment is proven against wherever it really
+        # lands, not against the link's own name.
+        resolved_root = Path(os.path.realpath(ui_root))
+        # But a root that lands OUTSIDE the app's own install directory is only
+        # legitimate under the OPERATOR's dev-mode grant. Without this check an
+        # app could ship `ui` as a symlink to a credential directory
+        # (`ui -> ~/.docker`) and have this UNAUTHENTICATED route (the
+        # `/apps/{name}/ui/` token-auth bypass) serve `config.json` — `.json`
+        # is in the allowlist — laundering a read the app's own sandboxed code
+        # is refused. `dev_mode_granted_root`, not `is_dev_mode`: the latter
+        # reads only the app's own writable `installed.json`, which the app
+        # could edit to authorize itself — the grant is the operator record
+        # at the apps ROOT (written by the dev-mode toggle, never by the
+        # startup reconcile, and refused outright for sensitive targets), and
+        # it BINDS the specific resolved root granted: the current root must
+        # EQUAL it, so a grant left behind by a crash, an update, or a
+        # reinstall authorizes only the exact tree the operator approved,
+        # never wherever `ui` points now. The disk reads are paid only on
+        # this exceptional path.
+        #
+        # The containment ANCHOR resolves only the gateway-owned apps root
+        # and then appends the literal `name` — it must NOT re-resolve
+        # through the app's own entry (`realpath(apps_dir()/name)`): the two
+        # realpath calls in this function would then race, and an app
+        # alternating its install entry between them could get an escaping
+        # `resolved_root` accepted as "inside the install". The apps root
+        # itself is not app-writable, so this anchor cannot be swapped; an
+        # install entry that IS a link makes its resolved ui root land
+        # outside this anchor and take the grant path like any other escape.
+        resolved_install = Path(os.path.realpath(apps_dir())) / name
+        try:
+            resolved_root.relative_to(resolved_install)
+        except ValueError:
+            if str(resolved_root) != dev_mode_granted_root(name):
+                return "invalid"
+        resolved_parent = Path(os.path.realpath(target.parent))
+        # The PARENT containment is load-bearing, not belt-and-braces:
+        # `pin_parent`'s contract is that a component swapped BEFORE parent
+        # resolution is followed by that resolution, so an already-symlinked
+        # ancestor is caught only here.
+        resolved_parent.relative_to(resolved_root)
+        # The full path too: a link at the FINAL name whose target escapes the
+        # root is answered 400 like every other escape (the contract this route
+        # has always had). This is a pre-check, not the enforcement — the pinned
+        # open below refuses ANY link at the final name, escaping or not.
+        Path(os.path.realpath(target)).relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        # `RuntimeError` because path resolution raises THAT — not an OSError —
+        # on a symlink loop, and the app that plants one is the app whose UI
+        # this serves.
+        return "invalid"
+
+    # `O_NONBLOCK` is what makes the descriptor checks REACHABLE, not an
+    # optimisation: opening a FIFO blocks until a writer appears, and this runs
+    # inside `asyncio.to_thread`, so an app shipping a FIFO as a UI asset would
+    # park a thread-pool worker forever. With the flag the open returns
+    # immediately and `S_ISREG` below refuses it. On a plain file it changes
+    # nothing. Same rationale as `_read_declared_art`.
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    if supports_pinned_walk():
+        try:
+            fd = open_in_pinned_parent(
+                str(resolved_parent),
+                Path(file_path).name,
+                flags=flags,
+                mode=0o600,
+                what="app UI bundle file",
+            )
+        except (PinnedPathRefusal, OSError, ValueError):
+            # `ValueError` is NOT redundant with `OSError`: `os.open` raises it
+            # — never an OSError — for a name the OS layer cannot encode (an
+            # embedded NUL, a lone surrogate). Such a name survives every
+            # earlier check: the extension allowlist reads the suffix AFTER the
+            # bad byte, and containment resolves the PARENT, which is clean when
+            # the bad byte sits in the final component.
+            return "not_found"
+    else:
+        # Windows: no `O_NOFOLLOW` and no descriptor-relative open, so the
+        # pinned walk is unavailable. An unprivileged process there cannot
+        # create a FILE symlink at all, so the reachable swap is a junction —
+        # refused by the reparse-point probe. Same degradation as the art
+        # route; the ui-root link (dev mode) sits ABOVE the resolved root and
+        # is deliberately outside the screen. The probe is name-based, so a
+        # junction planted BETWEEN the probe and the open would still be
+        # followed — which is why the DESCRIPTOR's own final path is
+        # validated below, after the open, closing the residual window on
+        # the descriptor rather than the name.
+        try:
+            if any(
+                is_reparse_point(p)
+                for p in (target, *target.parents)
+                if p == resolved_root or resolved_root in p.parents or p == target
+            ):
+                return "not_found"
+            fd = os.open(target, flags)
+        except (OSError, ValueError):
+            return "not_found"
+        # Race-free containment on the OPENED handle: resolve the descriptor's
+        # final path (`GetFinalPathNameByHandleW` there; /proc/F_GETPATH on
+        # the POSIX hosts the tests run on) and require it to still sit under
+        # the resolved root. Fail closed when it cannot be read — on this
+        # branch the descriptor is the only trustworthy witness.
+        fd_real = _fd_real_path(fd)
+        if fd_real is None:
+            os.close(fd)
+            return "not_found"
+        try:
+            Path(fd_real).relative_to(resolved_root)
+        except ValueError:
+            os.close(fd)
+            return "not_found"
+
+    try:
+        st = os.fstat(fd)
+        # `st_nlink != 1` is the one gate that can see a HARDLINK: the alias
+        # shares the target's inode, so `is_symlink()` is False, `realpath`
+        # yields the alias's own name (containment passes), and `O_NOFOLLOW`
+        # has no link to refuse. Checked on the DESCRIPTOR, which is what makes
+        # it race-free. Inline rather than `pinned_fs.refuse_hardlink_alias`
+        # for the same double-close reason `_read_declared_art` documents.
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_nlink != 1
+            or st.st_size > _UI_MAX_BYTES
+        ):
+            os.close(fd)
+            return "not_found"
+    except OSError:
+        os.close(fd)
+        return "not_found"
+    return fd, st
+
+
+async def handle_app_ui_file(request: web.Request) -> web.StreamResponse:
+    """GET /apps/{name}/ui/{path:.*} — serve app UI bundle files.
+
+    Serves bytes STREAMED from a pinned descriptor (see :func:`_open_ui_file`)
+    rather than handing a validated path to ``FileResponse``, which re-opens it
+    and re-introduces the check-then-reopen window #6794 closed on the art
+    route. Streaming rather than buffering is itself load-bearing: this route
+    is UNAUTHENTICATED (the ``/apps/{name}/ui/`` token-auth bypass), so a
+    buffered body would let N outstanding requests each pin a whole file in
+    gateway memory — with streaming, per-request memory is one chunk
+    (:data:`_UI_STREAM_CHUNK`) regardless of file size or client speed.
+    Behaviour contract preserved: 400 on ``..``/absolute/escaping paths, 403 on
+    a disallowed extension, 404 on a missing file, Content-Type from
+    ``_CONTENT_TYPES``, and conditional requests (If-None-Match /
+    If-Modified-Since) still answer a body-less 304.
+    """
     name = request.match_info["name"]
     file_path = request.match_info.get("path", "")
     if ".." in file_path or file_path.startswith("/"):
         return web.json_response({"error": "invalid path"}, status=400)
-    from pathlib import Path
-
     ext = Path(file_path).suffix.lower()
     if ext not in _ALLOWED_EXTENSIONS:
         return web.json_response({"error": f"file type {ext!r} not allowed"}, status=403)
-    full_path = apps_dir() / name / "ui" / file_path
-    if not full_path.is_file():
-        return web.json_response({"error": "not found"}, status=404)
-    ui_root = (apps_dir() / name / "ui").resolve()
-    try:
-        full_path.resolve().relative_to(ui_root)
-    except ValueError:
-        return web.json_response({"error": "invalid path"}, status=400)
-    content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
-    # Dev-mode apps: never cache — the file-watch live-reload reloads on every
-    # change and must always see the latest bytes. Use the in-memory cache
-    # (maintained by the dev-mode watcher) so this hot path does NO disk IO on
-    # the event loop for every asset served (no-blocking-call-on-event-loop).
-    # Everything else: no-cache (NOT no-store) — the browser may cache but MUST
-    # revalidate each load. FileResponse answers conditional requests
-    # (If-Modified-Since / If-None-Match from its Last-Modified/ETag) with a
-    # body-less 304, so unchanged files stay cheap while app updates are picked
-    # up on a plain refresh. A long ``public,max-age=...`` instead would serve an
-    # app's UI stale for that whole window after an update.
-    from kiro_crew.apps.dev_mode import is_dev_mode_cached
-
-    cache = "no-store" if is_dev_mode_cached(name) else "no-cache"
-    return web.FileResponse(full_path, headers={"Content-Type": content_type, "Cache-Control": cache})  # type: ignore[return-value]
+    # The semaphore is acquired BEFORE the descriptor exists and released only
+    # after it is closed. Bounding just the streaming loop would cap streams at
+    # 8 while every QUEUED request already held an open fd waiting for a slot —
+    # an unauthenticated client could then drive the gateway to `EMFILE` with
+    # slow-paced GETs. Under this scope, at most 8 requests hold a descriptor
+    # at any instant and everyone else waits fd-less. The refusal paths inside
+    # (400/403/404, body-less 304) hold their slot only microseconds.
+    async with _UI_STREAM_SEMAPHORE:
+        result = await asyncio.to_thread(_open_ui_file, name, file_path)
+        if result == "invalid":
+            return web.json_response({"error": "invalid path"}, status=400)
+        if isinstance(result, str):
+            return web.json_response({"error": "not found"}, status=404)
+        fd, st = result
+        try:
+            content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
+            # Dev-mode apps: never cache — the file-watch live-reload reloads on
+            # every change and must always see the latest bytes. `is_dev_mode_cached`
+            # is the watcher-maintained in-memory flag, so this hot path does NO
+            # disk IO on the event loop for the mode lookup
+            # (no-blocking-call-on-event-loop). Everything else: no-cache (NOT
+            # no-store) — the browser may cache but MUST revalidate each load. The
+            # validators are derived from the DESCRIPTOR being served, not a second
+            # stat of the path, so unchanged files stay a body-less 304 while app
+            # updates are picked up on a plain refresh. A long
+            # ``public,max-age=...`` instead would serve an app's UI stale for that
+            # whole window after an update.
+            cache = "no-store" if is_dev_mode_cached(name) else "no-cache"
+            etag_value = f"{st.st_ino:x}-{st.st_size:x}-{st.st_mtime_ns:x}"
+            # `nosniff` because the Content-Type is derived from the EXTENSION, not
+            # the bytes; the CSP neuters a scripted `.svg` opened as a TOP-LEVEL
+            # document on the dashboard's own origin (a response CSP does not apply
+            # when the bytes are consumed as a subresource, so module/style/img
+            # loads are unaffected). Same pair, same reasons, as the art route.
+            headers = {
+                "Cache-Control": cache,
+                "ETag": f'"{etag_value}"',
+                "Last-Modified": formatdate(st.st_mtime, usegmt=True),
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "X-Content-Type-Options": "nosniff",
+            }
+            # aiohttp's parsed accessors, not raw header strings: If-None-Match may
+            # carry a list, a weak `W/"..."` form, or `*`, and If-Modified-Since
+            # needs HTTP-date parsing that forces UTC (a raw `parsedate_to_datetime`
+            # hands back a NAIVE datetime for `-0000`/asctime forms, which
+            # `.timestamp()` then reads as server-LOCAL time — a stale 304 for up to
+            # a whole UTC offset after an app update). Mirrors what `FileResponse`
+            # did.
+            if_none_match = request.if_none_match
+            if if_none_match:
+                # RFC 7232 §3.2: If-None-Match uses the WEAK comparison, so a weak
+                # form of the current tag matches too.
+                if (len(if_none_match) == 1 and if_none_match[0].value == "*") or any(
+                    t.value == etag_value for t in if_none_match
+                ):
+                    return web.Response(status=304, headers=headers)
+            else:
+                # RFC 7232 §3.3: If-Modified-Since is evaluated only when no
+                # If-None-Match was sent. Both sides are second-granular (HTTP
+                # dates carry no sub-second part, so `st_mtime` is truncated).
+                since = request.if_modified_since
+                if since is not None and int(st.st_mtime) <= since.timestamp():
+                    return web.Response(status=304, headers=headers)
+            resp = web.StreamResponse(status=200, headers={**headers, "Content-Type": content_type})
+            # Length pinned to the fstat that was validated: a file the app GROWS
+            # after the open must not stream past the length the client was told,
+            # so the loop below caps at `remaining` as well as EOF.
+            resp.content_length = st.st_size
+            await resp.prepare(request)
+            remaining = st.st_size
+            # The enclosing `_UI_STREAM_SEMAPHORE` scope (acquired before the
+            # open, released after the close) is what bounds this loop's
+            # `to_thread` hops on the shared default executor — no second
+            # acquisition here: a nested acquire under the same semaphore
+            # would deadlock once 8 holders each waited for a 9th permit.
+            while remaining > 0:
+                chunk = await asyncio.to_thread(os.read, fd, min(_UI_STREAM_CHUNK, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                await resp.write(chunk)
+            await resp.write_eof()
+            return resp
+        finally:
+            # Off the loop: `os.close` is on the no-blocking-call-on-event-loop
+            # deny list (it can block in the kernel), and this `finally` runs on
+            # the loop for every request, error paths included. `shield` is
+            # load-bearing, not decoration: a client disconnect CANCELS this
+            # handler, and an unshielded `to_thread` awaited during cancellation
+            # can have its work item cancelled while still queued — the close
+            # never runs and the descriptor leaks, on an UNAUTHENTICATED route
+            # where repeated connect-then-drop would walk the gateway into
+            # RLIMIT_NOFILE. Shielded, the close task runs to completion even
+            # when this await is interrupted.
+            await asyncio.shield(asyncio.to_thread(os.close, fd))
 
 
 async def handle_app_dev_mode(request: web.Request) -> web.Response:
