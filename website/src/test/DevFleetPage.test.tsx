@@ -308,7 +308,8 @@ describe('DevFleetPage', () => {
       worktrees: FLEET.worktrees.map((w) =>
         w.name === 'unprov' ? { ...w, provision_run_id: 'run-prov-dead' } : w),
     }
-    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+    let dismissBody: unknown = null
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url, opts) => {
       const u = typeof url === 'string' ? url : (url as Request).url
       if (u.includes('/fleet')) return Promise.resolve(new Response(JSON.stringify(FLEET_WITH_FAILED), { status: 200 }))
       if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 51200 }), { status: 200 }))
@@ -316,6 +317,10 @@ describe('DevFleetPage', () => {
         return Promise.resolve(new Response(JSON.stringify({
           status: 'done', exit_code: 1, output: ['npm ERR! build failed'], started: Date.now() / 1000 - 300,
         }), { status: 200 }))
+      }
+      if (u.includes('/pod/provision/dismiss')) {
+        dismissBody = JSON.parse(String(opts?.body))
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, dismissed: true }), { status: 200 }))
       }
       return Promise.resolve(new Response('{}', { status: 200 }))
     })
@@ -325,6 +330,64 @@ describe('DevFleetPage', () => {
     // The last log line renders twice (inline strip + expanded <pre> panel).
     await waitFor(() => expect(screen.getByText('Provision failed (exit 1)')).toBeInTheDocument(), { timeout: 3000 })
     expect(screen.getAllByText('npm ERR! build failed').length).toBeGreaterThanOrEqual(2)
+    fireEvent.click(screen.getByLabelText('Dismiss provision status'))
+    await waitFor(() => expect(dismissBody).toEqual({ name: 'unprov', run_id: 'run-prov-dead' }))
+    await waitFor(() => expect(screen.queryByText('Provision failed (exit 1)')).toBeNull())
+  })
+
+  it('a slow dismiss does not erase a replacement failure that arrived while it was in flight', async () => {
+    // Regression: dismissProv awaits the server round-trip, so a REPLACEMENT
+    // provision can fail and reattach to the same worktree before the response
+    // lands. Deleting the strip unconditionally then hid the NEW failure (and
+    // its log) until the next reload. The clear is now guarded on the run id
+    // the user actually dismissed.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let rid = 'run-prov-dead'
+    let releaseDismiss: (() => void) | null = null
+    const dismissPending = new Promise<void>((resolve) => { releaseDismiss = resolve })
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      if (u.includes('/fleet')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          ...FLEET,
+          worktrees: FLEET.worktrees.map((w) => (w.name === 'unprov' ? { ...w, provision_run_id: rid } : w)),
+        }), { status: 200 }))
+      }
+      if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 51200 }), { status: 200 }))
+      if (u.includes('/run?id=run-prov-dead')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          status: 'done', exit_code: 1, output: ['old failure'], started: Date.now() / 1000 - 300,
+        }), { status: 200 }))
+      }
+      if (u.includes('/run?id=run-prov-new')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          status: 'done', exit_code: 2, output: ['new failure'], started: Date.now() / 1000 - 10,
+        }), { status: 200 }))
+      }
+      if (u.includes('/pod/provision/dismiss')) {
+        return dismissPending.then(() => new Response(JSON.stringify({ ok: true, dismissed: true }), { status: 200 }))
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    })
+    try {
+      renderPage()
+      await waitFor(() => expect(screen.getByText('Provision failed (exit 1)')).toBeInTheDocument(), { timeout: 3000 })
+
+      // Dismiss the OLD failure; the POST stays in flight.
+      fireEvent.click(screen.getByLabelText('Dismiss provision status'))
+
+      // A replacement provision fails and the next fleet poll reattaches it.
+      rid = 'run-prov-new'
+      await act(async () => { await vi.advanceTimersByTimeAsync(13000) })
+      await waitFor(() => expect(screen.getByText('Provision failed (exit 2)')).toBeInTheDocument(), { timeout: 3000 })
+
+      // The stale dismissal now resolves — it must leave the new strip alone.
+      releaseDismiss!()
+      await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+      expect(screen.getByText('Provision failed (exit 2)')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('reattached polling keeps the fetched log prefix and marks a scrolled gap', async () => {
@@ -1340,6 +1403,7 @@ describe('DevFleetPage', () => {
       const u = typeof url === 'string' ? url : (url as Request).url
       if (u.includes('/fleet')) return Promise.resolve(new Response(JSON.stringify(FLEET), { status: 200 }))
       if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 51200 }), { status: 200 }))
+      if (u.includes('/pod/provision/dismiss')) return Promise.resolve(new Response(JSON.stringify({ ok: true, dismissed: true }), { status: 200 }))
       if (u.includes('/pod/provision')) return Promise.resolve(new Response(JSON.stringify({ ok: true, run_id: 'run-f' }), { status: 200 }))
       if (u.includes('/run?id=run-f')) return Promise.resolve(new Response(JSON.stringify({ status: 'done', exit_code: 1, output: ['npm ERR! boom', 'FATAL: npm run build failed'] }), { status: 200 }))
       return Promise.resolve(new Response('{}', { status: 200 }))
@@ -1988,6 +2052,9 @@ describe('provision singleflight guard (issue #5294)', () => {
       const u = typeof url === 'string' ? url : (url as Request).url
       if (u.includes('/fleet')) return Promise.resolve(new Response(JSON.stringify(FLEET_UNPROV), { status: 200 }))
       if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 51200 }), { status: 200 }))
+      if (u.includes('/pod/provision/dismiss')) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, dismissed: true }), { status: 200 }))
+      }
       if (u.includes('/pod/provision')) {
         posts++
         return Promise.resolve(new Response(JSON.stringify({ ok: true, run_id: 'run-retry-' + posts }), { status: 200 }))

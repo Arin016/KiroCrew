@@ -2256,10 +2256,11 @@ async def _provision_reattach_ids() -> dict[str, str]:
 
     A run id is exposed while the run is still executing, or when it finished
     unsuccessfully (the failed stepper + log must survive a reload). A failed
-    id persists until a newer provision for the same checkout overwrites it,
-    the run is evicted from the bounded registry, or the gateway restarts —
-    the UI dismiss is client-side only, so a reload after dismissing re-shows
-    the failure. Successful runs are omitted: the refreshed fleet row already
+    id persists until the UI dismisses it (POST /api/pod/provision/dismiss
+    forgets the id server-side, so a reload after dismissing does NOT re-show
+    the failure), a newer provision for the same checkout overwrites it, the
+    run is evicted from the bounded registry, or the gateway restarts.
+    Successful runs are omitted: the refreshed fleet row already
     reports the built state, so there is nothing to reattach to. Run ids
     evicted from the bounded run registry are omitted too — the UI could not
     fetch their output anyway.
@@ -2976,6 +2977,18 @@ async def _pod_provision(name: str) -> dict:
         )
         _PROVISION_INFLIGHT[name] = rid
     return {"ok": True, "run_id": rid}
+
+
+async def _pod_provision_dismiss(name: str, run_id: str) -> dict:
+    """Forget one terminal provision run without racing a replacement run."""
+    async with _PROVISION_LOCK:
+        if _PROVISION_INFLIGHT.get(name) != run_id:
+            return {"ok": True, "dismissed": False}
+        async with _RUNS_LOCK:
+            if _RUNS.get(run_id, {}).get("status") == "running":
+                return {"ok": False, "error": "cannot dismiss a running provision"}
+        _PROVISION_INFLIGHT.pop(name, None)
+    return {"ok": True, "dismissed": True}
 
 
 # --- disk aggregation ---
@@ -4558,13 +4571,28 @@ async def api_dev_fleet_sync(request: web.Request) -> web.Response:
     return web.json_response(result, status=code)
 
 
-async def _json_body(request: web.Request) -> tuple[dict | None, web.Response | None]:
-    """Parse a JSON object body; (body, None) on success, (None, 400) otherwise."""
+async def _json_body(
+    request: web.Request, *, code: str | None = None
+) -> tuple[dict | None, web.Response | None]:
+    """Parse a JSON object body; (body, None) on success, (None, 400) otherwise.
+
+    Pass ``code`` for endpoints whose error contract promises a
+    machine-readable ``code`` on every failure response; the rejection then
+    carries it alongside the human-readable ``error``.
+    """
     try:
         body = await request.json() if request.content_length else {}
     except ValueError:
+        if code:
+            return None, web.json_response(
+                {"error": "invalid JSON body", "code": code}, status=400
+            )
         return None, web.json_response({"error": "invalid JSON body"}, status=400)
     if not isinstance(body, dict):
+        if code:
+            return None, web.json_response(
+                {"error": "body must be an object", "code": code}, status=400
+            )
         return None, web.json_response({"error": "body must be an object"}, status=400)
     return body, None
 
@@ -4689,6 +4717,38 @@ async def api_dev_fleet_pod_token(request: web.Request) -> web.Response:
 @_audited("dev_fleet_pod_provision")
 async def api_dev_fleet_pod_provision(request: web.Request) -> web.Response:
     return await _pod_name_action(request, _pod_provision)
+
+
+@_audited("dev_fleet_pod_provision_dismiss")
+async def api_dev_fleet_pod_provision_dismiss(request: web.Request) -> web.Response:
+    body, err = await _json_body(request, code="invalid_body")
+    if err is not None:
+        return err
+    assert body is not None
+    name = body.get("name")
+    run_id = body.get("run_id")
+    if not isinstance(name, str) or not name:
+        return web.json_response(
+            {"error": "'name' must be a non-empty string", "code": "invalid_name"}, status=400
+        )
+    if not isinstance(run_id, str) or not run_id:
+        return web.json_response(
+            {"error": "'run_id' must be a non-empty string", "code": "invalid_run_id"}, status=400
+        )
+    target, ferr = await _find_worktree(name)
+    if target is None:
+        return web.json_response({"error": ferr, "code": "invalid_worktree"}, status=400)
+    result = await _pod_provision_dismiss(name, run_id)
+    if result.get("ok"):
+        return web.json_response(result, status=200)
+    return web.json_response(
+        {
+            "ok": False,
+            "error": result.get("error", "cannot dismiss provision"),
+            "code": "provision_dismiss_conflict",
+        },
+        status=409,
+    )
 
 
 @_audited("dev_fleet_rebase")
@@ -6101,6 +6161,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/pod/restart", api_dev_fleet_pod_restart)
     app.router.add_post("/api/pod/token", api_dev_fleet_pod_token)
     app.router.add_post("/api/pod/provision", api_dev_fleet_pod_provision)
+    app.router.add_post("/api/pod/provision/dismiss", api_dev_fleet_pod_provision_dismiss)
     app.router.add_post("/api/rebase", api_dev_fleet_rebase)
     app.router.add_post("/api/restart-gateway", api_dev_fleet_restart_gateway)
     app.router.add_post("/api/make-live", api_dev_fleet_make_live)
