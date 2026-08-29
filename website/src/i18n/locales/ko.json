@@ -358,13 +358,6 @@
       }
     },
     "autoTriagePipeline": {
-      "manifest": {
-        "description": "Kiro Crew 자체 자동 트리아지 파이프라인의 읽기 전용 3단계 보기. 여섯 단계와 처리량, 단계 안의 이슈, 각 이슈의 에이전트 세션 비용을 보여줍니다.",
-        "display_name": "Kiro Crew 자동 분류 파이프라인",
-        "page_label": "자동 분류 파이프라인",
-        "use_case_1": "Issue Radar의 크루 작업이 전체 제공 파이프라인에서 어디에 쌓이거나 다시 열리거나 대기 중인지 확인합니다.",
-        "configuration_1": "Issue Radar에서 저장소를 연결해 크루 원장이 단계 이벤트를 수집하게 한 다음, 이 앱을 활성화하고 선택기에서 해당 저장소를 고르세요."
-      },
       "pipeline": {
         "subtitle": "크루 작업 항목마다 레인 하나씩, 모든 단계를 가로질러 표시 — 각 항목이 어느 단계에 있고 어디에 쌓이고 있는지 한눈에 확인하세요.",
         "refresh": "파이프라인 새로고침",
@@ -395,10 +388,6 @@
         "empty_row_2": "색으로 상태를 한눈에 알 수 있습니다: 편집 중, 검사 대기, 완료.",
         "empty_row_3": "체류 라벨은 각 단계에 머문 시간을 보여주므로 막힌 항목이 눈에 띕니다.",
         "empty_footer": "Issue Radar에서 crew를 설정하여 파이프라인을 시작하세요.",
-        "no_repo_title": "연결된 리포지토리 없음",
-        "no_repo_body": "파이프라인은 연결된 리포지토리의 crew 작업 항목마다 하나의 레인을 그립니다. 아직 연결된 리포지토리가 없습니다 — 하나를 연결하면 해당 crew 작업 항목이 여기에 표시됩니다.",
-        "repo_picker_label": "리포지토리 전환",
-        "repo_picker_prefix": "리포",
         "legend_editing": "편집 중",
         "legend_waiting": "대기 중",
         "legend_released": "릴리스됨",
@@ -442,16 +431,14 @@
         "header_awaiting_ci": "CI 대기",
         "header_addressing_review": "리뷰 대응",
         "header_awaiting_merge": "병합 대기",
-        "header_resolved": "해결됨"
+        "header_resolved": "해결됨",
+        "page_label": "자동 분류 파이프라인"
       },
       "global": {
         "unattributed_label": "리포지토리가 없는 이벤트",
-        "unattributed_note": "이벤트가 리포지토리를 명시하기 전에 기록되어 어느 리포지토리에도 귀속할 수 없습니다.",
+        "unattributed_note": "이벤트가 저장소를 기록하기 전에 작성되었으므로 어느 저장소에도 귀속할 수 없으며, 아래 단계 수치에도 포함되지 않습니다.",
         "repos_label": "리포지토리",
-        "repos_note": "이 보드는 이들을 함께 집계하며 아직 개별로 표시할 수 없습니다.",
-        "tab_pipeline": "파이프라인",
-        "tab_lanes": "항목 레인",
-        "tablist_label": "자동 분류 파이프라인 보기",
+        "repos_note": "기록에는 다른 저장소의 이벤트도 포함됩니다. 이 보드는 위에서 선택한 저장소만 표시합니다.",
         "title": "파이프라인",
         "subtitle": "분류 파이프라인의 각 단계와 각 단계에 있는 항목, 그리고 지금까지 처리한 수",
         "refresh": "새로고침",
@@ -515,7 +502,10 @@
         "total_sessions": "세션",
         "toggle_detail": "항목 #{{number}} 세부 정보 표시",
         "liveness_checking": "세션 확인 중",
-        "liveness_unknown": "세션 상태를 확인할 수 없음"
+        "liveness_unknown": "세션 상태를 확인할 수 없음",
+        "tab_pipeline": "파이프라인",
+        "tab_lanes": "항목 레인",
+        "tablist_label": "자동 분류 파이프라인 보기"
       }
     },
     "channels": {
@@ -2392,7 +2382,8 @@
         "registry": {
           "overview": "개요",
           "tagging": "태그 지정",
-          "graph": "그래프"
+          "graph": "그래프",
+          "pipeline": "파이프라인"
         },
         "settings": {
           "generalSettings": {
@@ -2597,6 +2588,10 @@
           "empty_unavailable_title": "의존성 데이터를 사용할 수 없음",
           "empty_unavailable_blurb": "그래프를 불러오지 못했습니다. 이 저장소에서 deps 라우트가 아직 활성화되지 않았을 수 있습니다. 활성화 후 다시 시도하세요.",
           "retry": "다시 시도"
+        },
+        "pipelineDashboard": {
+          "github_only": "분류 파이프라인은 GitHub 저장소만 지원합니다",
+          "github_only_hint": "예약 작업이 GitHub만 읽고 쓰므로 이 보드에는 이 저장소의 파이프라인 데이터가 없습니다."
         }
       },
       "welcomeCarousel": {
@@ -9472,7 +9467,14 @@
       "cutover_staged_run_cmd_to_finish_or_cancel": "전환 준비 완료: 게이트웨이가 다음에 시작될 때 이 워크트리가 라이브로 전환됩니다. 마무리하려면 `{{cmd}}`을(를) 실행하고, 되돌리려면 이 행의 메뉴 → 준비된 전환 취소를 사용하세요. 그전까지 게이트웨이는 이전 체크아웃으로 계속 실행됩니다.",
       "keeps_the_live_checkout_the_live_target_and_disc": "라이브 체크아웃이 라이브 대상으로 유지되고 {{staged}}(으)로 준비된 전환은 취소됩니다(아무것도 재시작되지 않음)",
       "restarting_completes_the_pending_cutover_boots": "재시작하면 대기 중인 전환이 완료됩니다: 게이트웨이는 현재 체크아웃이 아닌 '{{staged}}'(으)로 다시 시작됩니다. 대시보드가 잠시 연결이 끊겼다가 자동으로 다시 연결됩니다. 되돌리려면 준비된 전환 취소를 사용하세요.",
-      "no_checkout_found_action": "아래 환경 변수를 설정하거나, 설정을 유지하려면 {{productName}} 데이터 디렉터리(기본값 ~/.kiro/crew)의 config.json에 dev_fleet.repo_path를 추가한 후 게이트웨이를 다시 시작하세요."
+      "no_checkout_found_action": "아래 환경 변수를 설정하거나, 설정을 유지하려면 {{productName}} 데이터 디렉터리(기본값 ~/.kiro/crew)의 config.json에 dev_fleet.repo_path를 추가한 후 게이트웨이를 다시 시작하세요.",
+      "pr_closed_not_on_main": "PR 닫힘 — main에 없음",
+      "pr_closed_uncommitted_changes": "PR 닫힘 — 커밋되지 않은 변경 사항",
+      "remove_closed_pr": "제거 — 닫힌 PR (main에 없음)",
+      "closed_pr_not_on_main_hint": "닫혔고 병합되지 않은 PR — 내용이 main에 없으므로 제거하면 영구적으로 삭제됩니다. 선택하기 전에 확인하세요.",
+      "closed_has_unmerged_commits": "닫힌 PR — main에 없는 커밋이 있음",
+      "pr_closed_but_branch_has_newer_commits": "PR 닫힘 — 브랜치에 더 새로운 커밋이 있음",
+      "pr_closed_but_verification_unavailable_retry": "PR 닫힘, 검증 불가 — 다시 시도하세요"
     },
     "developer": {
       "agentBackendTab": {

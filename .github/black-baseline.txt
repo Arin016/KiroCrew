@@ -203,7 +203,6 @@ src/kiro_crew/cron_history.py
 src/kiro_crew/cron_script.py
 src/kiro_crew/dashboard/cautious_boot.py
 src/kiro_crew/dashboard/channel_folders.py
-src/kiro_crew/dashboard/channel_slots.py
 src/kiro_crew/dashboard/chat_auto_tag.py
 src/kiro_crew/dashboard/chat_folder_suggest.py
 src/kiro_crew/dashboard/chat_nav.py
@@ -246,7 +245,6 @@ src/kiro_crew/dashboard/routes/skills.py
 src/kiro_crew/dashboard/session_directive_apply.py
 src/kiro_crew/dashboard/session_health.py
 src/kiro_crew/dashboard/session_memory.py
-src/kiro_crew/dashboard/session_transfer.py
 src/kiro_crew/dashboard/slowloris.py
 src/kiro_crew/dashboard/stale_asset_watchdog.py
 src/kiro_crew/dashboard/system_notices.py
@@ -519,7 +517,6 @@ test/test_bootstrap.py
 test/test_brand_name_gate.py
 test/test_browser_cli_launch.py
 test/test_browser_cli_snapshots.py
-test/test_browser_cli_view.py
 test/test_browser_recording_skill.py
 test/test_bug_proposal_skip_status_default.py
 test/test_bug_validation_send_message_schema.py

@@ -741,6 +741,41 @@ async def _live_worktree_path(*, fresh: bool = False) -> str | None:
     return _LIVE_WORKTREE
 
 
+# owner/repo capture, shared by identity normalization and the fallback scan.
+_REPO_PATH_RE = re.compile(r"[:/]([^/]+/[^/]+?)(?:\.git)?$")
+
+
+def _normalize_repo_identity(url: str) -> tuple[str, str] | None:
+    """Return a ``(host, owner/repo)`` identity for a git remote URL, or None.
+
+    Normalizes across the spellings git accepts for the same repository so two
+    aliases of one repo compare equal:
+
+    - ``https://github.com/owner/Repo.git`` and ``git@github.com:owner/repo``
+      collapse to the same identity;
+    - a trailing ``.git`` is stripped and the whole identity is lowercased;
+    - the host is part of the identity, so ``owner/repo`` on two different
+      forges stays distinct.
+
+    Returns None when no ``owner/repo`` can be extracted.
+    """
+    url = url.strip()
+    m = _REPO_PATH_RE.search(url)
+    if not m:
+        return None
+    owner_repo = m.group(1).lower()
+    # Host: scp-style ``user@host:owner/repo`` or a URL with a scheme.
+    host = ""
+    scp = re.match(r"(?:[^@/]+@)?([^/:]+):", url)
+    if scp and "://" not in url:
+        host = scp.group(1).lower()
+    else:
+        scheme = re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/]+@)?([^/:]+)", url)
+        if scheme:
+            host = scheme.group(1).lower()
+    return (host, owner_repo)
+
+
 async def _load_fallback_repos() -> None:
     global _FALLBACK_REPOS
     try:
@@ -749,7 +784,20 @@ async def _load_fallback_repos() -> None:
         # No checkout, no remotes to enumerate; the fallback list stays empty.
         return
     repos: list[str] = []
+    seen: set[tuple[str, str]] = set()
     upstream = await _upstream_remote()
+    # Resolve upstream's own repo identity so a duplicate alias that merely
+    # points at the SAME repository as upstream (e.g. an ``origin`` left in
+    # place after the tracking remote was renamed) is not mistaken for a
+    # pre-rename fork. Without this, ``merge-base --is-ancestor`` is trivially
+    # true for identical refs and upstream's own repo enters the fallback list,
+    # so the derived ``<reponame>-wt-`` prefix flags every worktree as legacy.
+    upstream_identity: tuple[str, str] | None = None
+    rc_up, up_url, _ = await _run_cmd(
+        ["git", "-C", repo, "remote", "get-url", upstream], timeout=5,
+    )
+    if rc_up == 0:
+        upstream_identity = _normalize_repo_identity(up_url)
     rc, out, _err = await _run_cmd(["git", "-C", repo, "remote"], timeout=5)
     if rc == 0:
         for remote in out.split():
@@ -765,10 +813,21 @@ async def _load_fallback_repos() -> None:
             rc3, url, _ = await _run_cmd(
                 ["git", "-C", repo, "remote", "get-url", remote], timeout=5,
             )
-            if rc3 == 0:
-                m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", url.strip())
-                if m:
-                    repos.append(m.group(1))
+            if rc3 != 0:
+                continue
+            identity = _normalize_repo_identity(url)
+            if identity is None:
+                continue
+            # Skip a remote that names the SAME repository as upstream — it is
+            # an alias, not a distinct fork. This keeps the genuine pre-rename
+            # case (a different repo whose main is an ancestor of upstream's)
+            # while removing upstream's own name from the fallback list.
+            if upstream_identity is not None and identity == upstream_identity:
+                continue
+            if identity in seen:
+                continue
+            seen.add(identity)
+            repos.append(identity[1])
     _FALLBACK_REPOS = repos
 
 
@@ -1841,6 +1900,19 @@ async def _pr_status_cached(branch: str, head_oid: str | None = None) -> dict | 
 
 def _is_pr_merged(pr: dict | None) -> bool:
     return (pr or {}).get("state") == "MERGED"
+
+
+def _is_pr_closed(pr: dict | None) -> bool:
+    """True when the PR was CLOSED without merging.
+
+    Distinct from ``_is_pr_merged``: a merged PR's content is on the base branch
+    by definition, so its worktree is safe to delete. A closed-unmerged PR was
+    declined or superseded, and its worktree can still hold the only copy of
+    work that never landed — so a closed worktree is prunable ONLY through the
+    manual path, with a dirty-tree refusal and a loss summary. GitHub reports a
+    merged PR as ``MERGED`` (never ``CLOSED``), so this check is unambiguous.
+    """
+    return (pr or {}).get("state") == "CLOSED"
 
 
 # --- per-worktree context: issue/ticket links + purpose one-liner ---
@@ -4914,7 +4986,11 @@ _GIT_MUTATION_LOCK = LoopBoundLock()
 # merged_* verdicts about commit divergence, which a discard says nothing about.
 # `active` stays in: dirt is one of its two causes, and when the cause is
 # unmerged commits instead, the removal's own PR gate refuses it a moment later.
-_DISCARD_OVERRIDABLE_CODES = frozenset({"merged_dirty", "active"})
+# `closed_dirty` joins them: like `merged_dirty` the DIRT is what withheld the
+# candidate, so a discard of exactly the untracked files the operator was shown
+# is the consent that unblocks it. Force is still required for a tracked-file
+# modification; a discard alone never destroys tracked work.
+_DISCARD_OVERRIDABLE_CODES = frozenset({"merged_dirty", "closed_dirty", "active"})
 
 
 async def _prunable(path: str, branch: str | None) -> dict:
@@ -4963,6 +5039,51 @@ async def _prunable(path: str, branch: str | None) -> dict:
         if not await _head_contained_in_pr(path, head_oid, pr_oid):
             return {**base, "ok": False, "code": "merged_new_commits"}
         return {**base, "ok": True, "code": "merged"}
+    if _is_pr_closed(pr):
+        # A CLOSED-unmerged PR is prunable through the MANUAL path only (the
+        # reaper filters to code=="merged"; see _auto_prune_once). Unlike a
+        # merged tree, nothing guarantees this worktree's content is on the base
+        # branch — the PR was declined or superseded while the tree kept moving
+        # — so three guards stand between the operator and data loss:
+        #
+        #  * A dirty tree is REFUSED by default (code "closed_dirty"), reusing
+        #    the same dirty/dirty_tracked/force plumbing as merged_dirty. The
+        #    dirt breakdown already sits in `base` via _dirt_fields, so the
+        #    checklist can tell the operator exactly what a discard/force would
+        #    destroy (N modified tracked files, N untracked files) instead of
+        #    asking for a blind confirm.
+        #  * `own` (commits on this branch not reachable from the base branch,
+        #    from _own_commits_count) is surfaced as `unmerged_commits`. A
+        #    clean closed tree that is ALSO ahead of base is a stronger warning
+        #    than a clean merged tree, whose content is shipped by definition;
+        #    the UI raises the alarm on this flag rather than re-deriving
+        #    ancestry with a fresh git call.
+        unmerged = bool(own and own > 0)
+        if dirty:
+            return {**base, "ok": False, "code": "closed_dirty",
+                    "unmerged_commits": unmerged}
+        #  * The verdict is BOUND TO THE BRANCH HEAD, exactly as the merged path
+        #    above binds its own. A closed PR is looked up by branch NAME, so a
+        #    branch that was reused after its PR closed -- new commits, work the
+        #    closed PR never saw, possibly a replacement PR not opened yet --
+        #    still resolves to that stale CLOSED verdict. Without this check the
+        #    tree would be offered as prunable and removing it would destroy
+        #    work that has nothing to do with the PR that was declined. The
+        #    guard is fail-closed: an OID that cannot be established withholds
+        #    the candidate rather than trusting the name-based lookup.
+        pr_oid = (
+            await _fetch_pr_head_oid(branch, repo=(pr or {}).get("_repo"))
+            if branch
+            else None
+        )
+        if not head_oid or not pr_oid:
+            return {**base, "ok": False, "code": "closed_unverified",
+                    "unmerged_commits": unmerged}
+        if not await _head_contained_in_pr(path, head_oid, pr_oid):
+            return {**base, "ok": False, "code": "closed_new_commits",
+                    "unmerged_commits": unmerged}
+        return {**base, "ok": True, "code": "closed",
+                "unmerged_commits": unmerged}
     if own == 0 and not dirty:
         if age_h and age_h > 48:
             return {**base, "ok": True, "code": "empty"}
@@ -4980,6 +5101,13 @@ async def _prune_candidates() -> dict:
         v = await _prunable(w["path"], w.get("branch"))
         row = {"name": name, "code": v["code"], "branch": w.get("branch")}
         if v["ok"]:
+            # A closed-PR candidate carries the ancestry warning so the
+            # checklist can flag a clean-but-ahead tree distinctly from a
+            # merged one (whose content is shipped by definition). The key is
+            # absent on merged rows, which the frontend reads as "not
+            # applicable".
+            if v.get("code") == "closed":
+                row["unmerged_commits"] = bool(v.get("unmerged_commits"))
             candidates.append(row)
         else:
             # Surface dirty flag so the frontend can pre-disable force-selection
@@ -5066,8 +5194,22 @@ async def _prune_run(
                     result = {"name": nm, "ok": False, "error": err}
                 else:
                     is_forced = nm in _force
+                    # A regular candidate re-verified as `closed` (a clean,
+                    # CLOSED-PR worktree) needs the force PATH at removal: with
+                    # force=False, _worktree_remove refuses any tree whose PR is
+                    # not merged and is ahead of base, which a closed candidate
+                    # routinely is. Force here does NOT mean `git worktree
+                    # remove --force` — for a clean unmerged tree that gate
+                    # drops the git flag and lets git's own dirty check fire at
+                    # removal time (the TOCTOU guard), so a late edit still
+                    # blocks it. It only lifts the "PR not merged" refusal, and
+                    # only after the fresh _prunable verdict below CONFIRMED the
+                    # tree is clean and closed.
+                    remove_force = is_forced
                     if not is_forced:
                         verdict = await _prunable(target["path"], target.get("branch"))
+                        if verdict.get("code") == "closed" and verdict.get("ok"):
+                            remove_force = True
                         if not verdict.get("ok"):
                             # A discard approval overrides ONLY a verdict whose
                             # blocker is the dirt the caller just consented to.
@@ -5088,7 +5230,7 @@ async def _prune_run(
 
                         res = await _worktree_remove(
                             nm,
-                            force=is_forced,
+                            force=remove_force,
                             progress=_progress,
                             _caller="prune",
                             discard_untracked_paths=_discard_paths.get(nm),
@@ -5248,6 +5390,18 @@ async def _auto_prune_once() -> dict:
     a running pod first (then re-verifies) and applies the squash-safe OID race
     guard. Nothing is force-removed. Best-effort: never raises; returns
     ``{removed, failed}``.
+
+    The ``closed`` class (PR CLOSED without merging) is DELIBERATELY excluded
+    here, for a stronger reason than the stale-empty exclusion above. A merged
+    worktree is safe to delete because its content is on the base branch by
+    definition; a closed one carries no such guarantee — the PR was declined or
+    superseded while the tree kept moving, so it routinely holds the only copy
+    of work that never landed (measured on a real fleet: one closed worktree
+    held a multi-hundred-line uncommitted rewrite, another held brand-new
+    untracked source files in no commit and no PR). Reaping that on a timer,
+    with no human to read the loss summary, would destroy it irrecoverably.
+    Closed worktrees are therefore prunable ONLY through the manual checklist,
+    which refuses a dirty tree by default and names what a removal would lose.
     """
     removed: list[str] = []
     failed: list[dict] = []
@@ -5261,7 +5415,9 @@ async def _auto_prune_once() -> dict:
     for row in cand.get("candidates", []):
         name = row.get("name")
         # Restrict unattended auto-prune to MERGED worktrees only; the
-        # stale-empty class stays manual (see docstring).
+        # stale-empty AND closed classes stay manual (see docstring). A closed
+        # worktree may hold the only copy of unmerged work, so it is never
+        # reaped on a timer.
         if not name or row.get("code") != "merged":
             continue
         try:

@@ -41,12 +41,11 @@ export const CHUNK_BUDGETS = {
   // `src/i18n/all.ts` — Rolldown names the chunk after that entry. Grows a
   // little with every translated string, which is expected and fine; what this
   // ceiling catches is a NEW library or surface landing in the catalog chunk.
-  // Re-measured 2026-08-29 at 9751 KB: the previous `measured 9278 KB` note
-  // had gone ~470 KB stale from ordinary translation growth, leaving main a
-  // few hundred bytes under its own ceiling — so a PR adding one sentence to
-  // 13 catalogs tripped this gate rather than the new-surface class it exists
-  // to catch. Same staleness incident as the `t` entry below records.
-  all: 10240 * KB, // measured 9751 KB (~5% headroom)
+  // The built-in App Store guidance adds one use-case and one configuration
+  // string for each of 23 apps across all 12 shipped catalogs. The Dev Fleet
+  // closed-PR prune group and the expanded Disconnect guidance are the largest
+  // recent catalog increments included in this measurement.
+  all: 10490 * KB, // measured 9985 KB (~5% headroom)
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because

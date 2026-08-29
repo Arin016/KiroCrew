@@ -198,9 +198,15 @@ async def test_load_fallback_repos_collects_ancestor_remotes(monkeypatch):
         if "--is-ancestor" in cmd:
             return (0 if "fork/main" in cmd else 1), "", ""
         if "get-url" in cmd:
+            remote = cmd[-1]
+            # Upstream is a genuinely different repository from the fork, so the
+            # fork's ancestor main still qualifies as a pre-rename fallback repo.
+            if remote == "origin":
+                return 0, "git@github.com:kirodotdev/KiroCrew.git\n", ""
             return 0, "git@github.com:someone/kirocrew.git\n", ""
         return 1, "", "unexpected"
 
+    monkeypatch.setattr(mod, "_repo", lambda: "/fake/repo")
     monkeypatch.setattr(mod, "_run_cmd", fake_run)
     await mod._load_fallback_repos()
     assert mod._FALLBACK_REPOS == ["someone/kirocrew"]
@@ -211,6 +217,97 @@ async def test_load_fallback_repos_empty_when_remote_listing_fails(monkeypatch):
     monkeypatch.setattr(mod, "_run_cmd", AsyncMock(return_value=(1, "", "boom")))
     await mod._load_fallback_repos()
     assert mod._FALLBACK_REPOS == []
+
+
+@pytest.mark.asyncio
+async def test_load_fallback_repos_skips_duplicate_upstream_alias(monkeypatch):
+    """A remote that merely aliases the upstream repo is NOT a fallback repo.
+
+    This is the fleet-misflag defect: an ``origin`` left in place after the
+    tracking remote was renamed points at the SAME repo as upstream, so
+    ``merge-base --is-ancestor`` is trivially true. Upstream's own name must
+    not enter the fallback list (which would flag every worktree as legacy).
+    """
+    async def fake_run(cmd, **kw):
+        if cmd[-1] == "remote":
+            return 0, "kirocrew\norigin\n", ""
+        if "--is-ancestor" in cmd:
+            return 0, "", ""  # identical refs -> trivially an ancestor
+        if "get-url" in cmd:
+            # Both remotes point at the SAME upstream repository.
+            return 0, "https://github.com/kirodotdev/KiroCrew.git\n", ""
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(mod, "_repo", lambda: "/fake/repo")
+    monkeypatch.setattr(mod, "_UPSTREAM_REMOTE", "kirocrew")
+    monkeypatch.setattr(mod, "_run_cmd", fake_run)
+    await mod._load_fallback_repos()
+    assert mod._FALLBACK_REPOS == []
+
+
+@pytest.mark.asyncio
+async def test_load_fallback_repos_recognizes_scp_and_git_suffix_as_same(monkeypatch):
+    """scp-style and .git-suffixed spellings of the upstream URL are one repo.
+
+    The alias uses ``git@github.com:...`` while upstream uses the https,
+    ``.git``-suffixed spelling; both normalize to the same identity, so the
+    alias is skipped rather than treated as a distinct fork.
+    """
+    async def fake_run(cmd, **kw):
+        if cmd[-1] == "remote":
+            return 0, "kirocrew\norigin\n", ""
+        if "--is-ancestor" in cmd:
+            return 0, "", ""
+        if "get-url" in cmd:
+            remote = cmd[-1]
+            if remote == "kirocrew":
+                return 0, "https://github.com/kirodotdev/KiroCrew.git\n", ""
+            return 0, "git@github.com:KiroDotDev/kirocrew\n", ""
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(mod, "_repo", lambda: "/fake/repo")
+    monkeypatch.setattr(mod, "_UPSTREAM_REMOTE", "kirocrew")
+    monkeypatch.setattr(mod, "_run_cmd", fake_run)
+    await mod._load_fallback_repos()
+    assert mod._FALLBACK_REPOS == []
+
+
+@pytest.mark.asyncio
+async def test_load_fallback_repos_dedupes_multiple_aliases_of_one_repo(monkeypatch):
+    """Two aliases of one genuine fork collapse to a single fallback entry."""
+    async def fake_run(cmd, **kw):
+        if cmd[-1] == "remote":
+            return 0, "kirocrew\nfork-a\nfork-b\n", ""
+        if "--is-ancestor" in cmd:
+            # Both forks' mains are ancestors of upstream's.
+            return 0, "", ""
+        if "get-url" in cmd:
+            remote = cmd[-1]
+            if remote == "kirocrew":
+                return 0, "https://github.com/kirodotdev/KiroCrew.git\n", ""
+            if remote == "fork-a":
+                return 0, "git@github.com:someone/kirocrew.git\n", ""
+            return 0, "https://github.com/someone/KiroCrew\n", ""  # same repo, other spelling
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(mod, "_repo", lambda: "/fake/repo")
+    monkeypatch.setattr(mod, "_UPSTREAM_REMOTE", "kirocrew")
+    monkeypatch.setattr(mod, "_run_cmd", fake_run)
+    await mod._load_fallback_repos()
+    assert mod._FALLBACK_REPOS == ["someone/kirocrew"]
+
+
+def test_normalize_repo_identity_spellings_and_host():
+    """Same repo across https/scp/.git spellings is one identity; host matters."""
+    https = mod._normalize_repo_identity("https://github.com/kirodotdev/KiroCrew.git")
+    scp = mod._normalize_repo_identity("git@github.com:KiroDotDev/kirocrew")
+    assert https == scp == ("github.com", "kirodotdev/kirocrew")
+    # Same owner/repo on a different forge is a DISTINCT identity.
+    other = mod._normalize_repo_identity("https://gitlab.com/kirodotdev/kirocrew.git")
+    assert other == ("gitlab.com", "kirodotdev/kirocrew")
+    assert other != https
+    # Unparseable URL yields None.
+    assert mod._normalize_repo_identity("not-a-url") is None
 
 
 # --------------------------------------------------------------------------
@@ -1061,6 +1158,179 @@ async def test_prunable_active_worktree_is_kept(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=3))
     monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=False))
     assert (await mod._prunable(str(tmp_path), "feat"))["code"] == "active"
+
+
+def _bind_closed_head(monkeypatch, *, contained=True, pr_oid="pr-head"):
+    """Satisfy the closed verdict's head binding.
+
+    The `closed` verdict is bound to the branch head the same way `merged` is:
+    a closed PR is looked up by branch NAME, so a reused branch would otherwise
+    inherit a stale CLOSED verdict. These two seams are what that guard reads.
+    """
+    monkeypatch.setattr(mod, "_git", AsyncMock(return_value="local-head"))
+    monkeypatch.setattr(mod, "_fetch_pr_head_oid", AsyncMock(return_value=pr_oid))
+    monkeypatch.setattr(mod, "_head_contained_in_pr", AsyncMock(return_value=contained))
+
+
+@pytest.mark.asyncio
+async def test_prunable_closed_clean_is_candidate_not_merged(monkeypatch, tmp_path):
+    """A CLOSED-PR worktree with a clean tree is a `closed` candidate — a
+    distinct class from `merged`, so the manual checklist can group and warn on
+    it separately."""
+    monkeypatch.setattr(mod, "_pr_status_cached", AsyncMock(return_value={"state": "CLOSED"}))
+    monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=0))
+    monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=False))
+    _bind_closed_head(monkeypatch)
+    v = await mod._prunable(str(tmp_path), "feat")
+    assert v["ok"] is True
+    assert v["code"] == "closed"
+    # It must NOT be classified as merged — a merged tree's content is on the
+    # base branch by definition, a closed one's is not.
+    assert v["code"] != "merged"
+
+
+@pytest.mark.asyncio
+async def test_prunable_closed_reused_branch_is_refused(monkeypatch, tmp_path):
+    """REGRESSION PIN: a branch REUSED after its PR closed must not inherit the
+    stale CLOSED verdict.
+
+    GitHub resolves a closed PR by branch NAME, so a branch that kept moving —
+    new commits the closed PR never saw, perhaps a replacement PR not opened yet
+    — still returns that CLOSED record. Offering the tree as prunable on that
+    basis would destroy work unrelated to the PR that was declined, which is the
+    exact data loss this whole class exists to prevent. The local head not being
+    contained in the closed PR's head is what detects it."""
+    monkeypatch.setattr(mod, "_pr_status_cached", AsyncMock(return_value={"state": "CLOSED"}))
+    monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=5))
+    monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=False))
+    _bind_closed_head(monkeypatch, contained=False)
+    v = await mod._prunable(str(tmp_path), "feat")
+    assert v["ok"] is False
+    assert v["code"] == "closed_new_commits"
+    # The ancestry warning still travels with the refusal.
+    assert v["unmerged_commits"] is True
+
+
+@pytest.mark.asyncio
+async def test_prunable_closed_unverifiable_head_is_refused(monkeypatch, tmp_path):
+    """Fail-closed: when the closed PR's head OID cannot be established the
+    verdict withholds the candidate rather than trusting the name-based lookup.
+    An unverifiable guard must never read as a pass."""
+    monkeypatch.setattr(mod, "_pr_status_cached", AsyncMock(return_value={"state": "CLOSED"}))
+    monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=False))
+    _bind_closed_head(monkeypatch, pr_oid=None)
+    v = await mod._prunable(str(tmp_path), "feat")
+    assert v["ok"] is False
+    assert v["code"] == "closed_unverified"
+
+
+@pytest.mark.asyncio
+async def test_prunable_closed_ahead_of_base_flags_unmerged_commits(monkeypatch, tmp_path):
+    """A clean closed tree whose branch is ahead of base carries the ancestry
+    warning (`unmerged_commits`) — a stronger signal than a merged candidate."""
+    monkeypatch.setattr(mod, "_pr_status_cached", AsyncMock(return_value={"state": "CLOSED"}))
+    monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=4))
+    monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=False))
+    _bind_closed_head(monkeypatch)
+    v = await mod._prunable(str(tmp_path), "feat")
+    assert v["ok"] is True and v["code"] == "closed"
+    assert v["unmerged_commits"] is True
+
+
+@pytest.mark.asyncio
+async def test_prunable_closed_clean_no_own_commits_no_unmerged_warning(monkeypatch, tmp_path):
+    """A clean closed tree with no commits ahead of base is still a candidate,
+    but the unmerged-commits alarm is off."""
+    monkeypatch.setattr(mod, "_pr_status_cached", AsyncMock(return_value={"state": "CLOSED"}))
+    monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=0))
+    monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=False))
+    _bind_closed_head(monkeypatch)
+    v = await mod._prunable(str(tmp_path), "feat")
+    assert v["code"] == "closed"
+    assert v["unmerged_commits"] is False
+
+
+@pytest.mark.asyncio
+async def test_prunable_closed_dirty_is_refused_with_loss_summary(monkeypatch, tmp_path):
+    """A CLOSED-PR worktree with a dirty tree is REFUSED without force
+    (code `closed_dirty`), and the verdict names what a removal would lose:
+    the tracked-modification flag and the untracked-file count."""
+    monkeypatch.setattr(mod, "_pr_status_cached", AsyncMock(return_value={"state": "CLOSED"}))
+    monkeypatch.setattr(mod, "_own_commits_count", AsyncMock(return_value=2))
+    monkeypatch.setattr(mod, "_real_dirty", AsyncMock(return_value=True))
+    # One modified tracked file plus three untracked files — the loss summary.
+    monkeypatch.setattr(
+        mod, "_dirty_split",
+        AsyncMock(return_value=(True, ["a.py", "b.py", "c.py"])),
+    )
+    v = await mod._prunable(str(tmp_path), "feat")
+    assert v["ok"] is False
+    assert v["code"] == "closed_dirty"
+    # Loss summary: modified tracked files + untracked count are surfaced so the
+    # operator decides informed instead of blind-confirming.
+    assert v["dirty"] is True
+    assert v["dirty_tracked"] is True
+    assert v["dirty_untracked"] == 3
+    # And the ancestry warning still rides along on the refusal.
+    assert v["unmerged_commits"] is True
+
+
+@pytest.mark.asyncio
+async def test_prune_candidates_surfaces_closed_unmerged_flag(monkeypatch):
+    """`_prune_candidates` carries the closed candidate's `unmerged_commits`
+    flag onto its row (and only onto closed rows, not merged ones)."""
+    monkeypatch.setattr(
+        mod, "_discover_worktrees",
+        AsyncMock(return_value=[
+            {"path": "/r", "is_main": True},
+            {"path": "/r/wt-closed", "branch": "c"},
+            {"path": "/r/wt-merged", "branch": "m"},
+        ]),
+    )
+
+    async def fake_prunable(path, branch):
+        if branch == "c":
+            return {"ok": True, "code": "closed", "unmerged_commits": True}
+        return {"ok": True, "code": "merged"}
+
+    monkeypatch.setattr(mod, "_prunable", fake_prunable)
+    out = await mod._prune_candidates()
+    by_name = {c["name"]: c for c in out["candidates"]}
+    assert by_name["wt-closed"]["code"] == "closed"
+    assert by_name["wt-closed"]["unmerged_commits"] is True
+    # A merged row carries no unmerged_commits key (frontend reads its absence
+    # as "not applicable").
+    assert "unmerged_commits" not in by_name["wt-merged"]
+
+
+@pytest.mark.asyncio
+async def test_prune_candidates_closed_dirty_lands_in_kept_with_loss_counts(monkeypatch):
+    """A `closed_dirty` worktree is a KEPT row (refused by default), and its
+    dirt breakdown is surfaced so the checklist can show the loss summary."""
+    monkeypatch.setattr(
+        mod, "_discover_worktrees",
+        AsyncMock(return_value=[
+            {"path": "/r", "is_main": True},
+            {"path": "/r/wt-cd", "branch": "cd"},
+        ]),
+    )
+
+    async def fake_prunable(path, branch):
+        return {
+            "ok": False, "code": "closed_dirty", "dirty": True,
+            "dirty_tracked": True, "dirty_untracked": 2,
+            "dirty_untracked_paths": ["x", "y"], "unmerged_commits": True,
+        }
+
+    monkeypatch.setattr(mod, "_prunable", fake_prunable)
+    out = await mod._prune_candidates()
+    assert [c["name"] for c in out["candidates"]] == []
+    kept = {k["name"]: k for k in out["kept"]}
+    assert kept["wt-cd"]["code"] == "closed_dirty"
+    assert kept["wt-cd"]["dirty"] is True
+    assert kept["wt-cd"]["dirty_tracked"] is True
+    assert kept["wt-cd"]["dirty_untracked"] == 2
 
 
 @pytest.mark.asyncio
