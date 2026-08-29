@@ -6285,7 +6285,7 @@ class SessionManager:
                 )
                 if sandbox_removed:
                     logger.info(
-                        "Periodic sweep: removed %d stale sandbox launchers",
+                        "Periodic sweep: removed %d stale sandbox artifacts",
                         sandbox_removed,
                     )
             except Exception as exc:
