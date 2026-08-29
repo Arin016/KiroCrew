@@ -9474,7 +9474,7 @@
       "disconnect_census_incomplete_source": "A autorização armazenada foi mantida porque não foi possível ler {{source}} para descartar que outro servidor a use. Corrija ou remova esse arquivo e desconecte novamente.",
       "disconnect_entry_left_alone": "A configuração do seu servidor não foi alterada.",
       "disconnect_entry_not_ours": "A autorização armazenada foi removida. A configuração do seu servidor não foi alterada.",
-      "disconnect_entry_not_ours_only": "A autorização armazenada foi mantida intacta porque esta entrada aponta para um servidor diferente. A configuração do seu servidor não foi alterada; gerencie esta entrada na aba MCP Servers.",
+      "disconnect_entry_not_ours_only": "Nenhuma autorização local foi encontrada para esta entrada porque ela aponta para um servidor diferente. A configuração do seu servidor não foi alterada; gerencie esta entrada na aba MCP Servers.",
       "disconnect_grant_shared": "A autorização armazenada foi mantida porque o mesmo endpoint também está configurado por: {{names}}. Revogar no provedor também corta o acesso de {{names}}.",
       "disconnect_grant_survived": "Parte da autorização armazenada não pôde ser removida. Revogue o acesso no provedor.",
       "disconnected_locally": "Desconectado localmente. Revogue o acesso no provedor para cancelar totalmente a autorização.",

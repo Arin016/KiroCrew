@@ -454,7 +454,7 @@ describe('a connected provider', () => {
     // would be the dishonesty two review rounds landed on in this span.
     const note = await screen.findByRole('status')
     expect(note).toHaveTextContent(
-      'The stored grant was kept because the same endpoint is also configured by: notion-work. Your server configuration was left unchanged.',
+      'The stored grant was kept because the same endpoint is also configured by: notion-work. Revoking at the provider also cuts off notion-work. Your server configuration was left unchanged.',
     )
     expect(note).not.toHaveTextContent('Entry removed')
   })
@@ -477,6 +477,33 @@ describe('a connected provider', () => {
     const note = await screen.findByRole('status')
     expect(note).toHaveTextContent(
       'The stored grant was removed. Your server configuration was left unchanged.',
+    )
+  })
+
+  it('warns and hands over the MCP Servers tab when the entry is not ours and no grant existed', async () => {
+    mcpServers.mockResolvedValue(connected)
+    // Not ours by endpoint AND no local grant to act on: the click cannot do
+    // anything here, so this is not a green success. It must name the reason
+    // (a different server) and point at the MCP Servers tab as the way forward,
+    // and it warns (role=alert / text-warn) rather than reassuring under
+    // role=status.
+    connectionsDisconnect.mockResolvedValue({
+      ok: true,
+      grantRemoved: false,
+      grantSurviving: [],
+      entryRemoved: false,
+      grantSharedWith: [],
+    })
+    mount()
+
+    fireEvent.click(await waitFor(() => within(card('notion')).getByRole('button', { name: /Disconnect/ })))
+
+    const note = await screen.findByRole('alert')
+    expect(note).toHaveClass('text-warn')
+    expect(note).not.toHaveClass('text-ok')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(note).toHaveTextContent(
+      'No local grant was found for this entry because it points at a different server. Your server configuration was left unchanged; manage this entry from the MCP Servers tab.',
     )
   })
 
