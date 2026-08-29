@@ -7138,6 +7138,15 @@
       "use_this_folder": "usa questa cartella"
     },
     "terminalKeyBar": {
+      "select": "Seleziona",
+      "select_line_short": "Riga · tocca tutto",
+      "select_all_short": "Tutto · alla riga",
+      "copy": "Copia",
+      "copy_failed": "Copia non riuscita",
+      "copy_needs_https": "La copia richiede una connessione sicura (HTTPS)",
+      "copy_no_selection": "Tocca Seleziona, poi Copia",
+      "copy_done": "Copiato",
+      "copy_permission_needed": "Consenti l'accesso agli appunti",
       "paste": "Incolla",
       "paste_clipboard_empty": "Gli appunti sono vuoti",
       "paste_failed": "Incollaggio non riuscito",

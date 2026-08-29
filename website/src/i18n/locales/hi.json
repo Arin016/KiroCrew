@@ -7029,6 +7029,15 @@
       "use_this_folder": "इस फ़ोल्डर का इस्तेमाल करें"
     },
     "terminalKeyBar": {
+      "select": "चुनें",
+      "select_line_short": "पंक्ति · सभी टैप",
+      "select_all_short": "सभी · पंक्ति चुनें",
+      "copy": "कॉपी करें",
+      "copy_failed": "कॉपी विफल",
+      "copy_needs_https": "कॉपी करने के लिए एक सुरक्षित (HTTPS) कनेक्शन आवश्यक है",
+      "copy_no_selection": "चुनें टैप करें, फिर कॉपी करें",
+      "copy_done": "कॉपी हो गया",
+      "copy_permission_needed": "क्लिपबोर्ड एक्सेस की अनुमति दें",
       "paste": "चिपकाएँ",
       "paste_clipboard_empty": "क्लिपबोर्ड खाली है",
       "paste_failed": "चिपकाना विफल रहा",

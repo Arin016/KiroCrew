@@ -2197,6 +2197,15 @@
       "command_completions": "Command completions"
     },
     "terminalKeyBar": {
+      "select": "Select",
+      "select_line_short": "Line · tap for all",
+      "select_all_short": "All · tap for line",
+      "copy": "Copy",
+      "copy_failed": "Copy failed",
+      "copy_needs_https": "Copy needs a secure (HTTPS) connection",
+      "copy_no_selection": "Tap Select, then Copy",
+      "copy_done": "Copied",
+      "copy_permission_needed": "Allow clipboard access",
       "paste": "Paste",
       "paste_clipboard_empty": "Clipboard is empty",
       "paste_failed": "Paste failed",

@@ -7138,6 +7138,15 @@
       "use_this_folder": "utiliser ce dossier"
     },
     "terminalKeyBar": {
+      "select": "Sélectionner",
+      "select_line_short": "Ligne · toucher pour tout",
+      "select_all_short": "Tout · toucher pour ligne",
+      "copy": "Copier",
+      "copy_failed": "Échec de la copie",
+      "copy_needs_https": "La copie nécessite une connexion sécurisée (HTTPS)",
+      "copy_no_selection": "Touchez Sélectionner, puis Copier",
+      "copy_done": "Copié",
+      "copy_permission_needed": "Autoriser l'accès au presse-papiers",
       "paste": "Coller",
       "paste_clipboard_empty": "Le presse-papiers est vide",
       "paste_failed": "Échec du collage",

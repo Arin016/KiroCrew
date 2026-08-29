@@ -7138,6 +7138,15 @@
       "use_this_folder": "usar esta carpeta"
     },
     "terminalKeyBar": {
+      "select": "Seleccionar",
+      "select_line_short": "Línea · toca todo",
+      "select_all_short": "Todo · a la línea",
+      "copy": "Copiar",
+      "copy_failed": "Error al copiar",
+      "copy_needs_https": "Copiar requiere una conexión segura (HTTPS)",
+      "copy_no_selection": "Toca Seleccionar y luego Copiar",
+      "copy_done": "Copiado",
+      "copy_permission_needed": "Permitir el acceso al portapapeles",
       "paste": "Pegar",
       "paste_clipboard_empty": "El portapapeles está vacío",
       "paste_failed": "Error al pegar",

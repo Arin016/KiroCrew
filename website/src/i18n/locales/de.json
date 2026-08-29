@@ -7029,6 +7029,15 @@
       "use_this_folder": "diesen Ordner verwenden"
     },
     "terminalKeyBar": {
+      "select": "Auswählen",
+      "select_line_short": "Zeile · alles tippen",
+      "select_all_short": "Alles · zur Zeile",
+      "copy": "Kopieren",
+      "copy_failed": "Kopieren fehlgeschlagen",
+      "copy_needs_https": "Kopieren erfordert eine sichere (HTTPS) Verbindung",
+      "copy_no_selection": "Auswählen tippen, dann Kopieren",
+      "copy_done": "Kopiert",
+      "copy_permission_needed": "Zugriff auf die Zwischenablage erlauben",
       "paste": "Einfügen",
       "paste_clipboard_empty": "Zwischenablage ist leer",
       "paste_failed": "Einfügen fehlgeschlagen",
