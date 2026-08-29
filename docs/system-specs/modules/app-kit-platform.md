@@ -810,6 +810,22 @@ independently load-bearing:
   (scheme/host case-folded, path case preserved); a different-repo name
   collision keeps the seed, so a republished document cannot silently re-home
   an app to a new repository under a familiar name.
+- **Its repos reach the blob proxy, from process memory only.** A catalog row's
+  own icon and hero come from the CDN (`iconRef`/`heroRef`), but the store's
+  detail page and the Library card read the INSTALLED manifest's repo-relative
+  `iconPath` / `heroImageDetail` / `screenshots` — which the catalog publishes no
+  equivalent of — and every one of those resolves to an `/api/apps/blob` URL. So
+  `known_registry_repos` unions in `official_catalog.vouched_repos()`, without
+  which an app whose ONLY listing is official had all of that art refused 403.
+  The snapshot is written by `fetch_inventory_entries` alone and lives in process
+  memory, never read from the cache: an allowlist entry makes the gateway CLONE a
+  URL, which is the coordinate-shaped class the bullet above refuses to take from
+  an agent-writable file. A failed fetch keeps the previous snapshot rather than
+  clearing it — a CDN blip must not start 403ing art on an already-listed row.
+  This admits the repo to the membership test and nothing more: the clone-host
+  trust gate still applies unchanged, and `_repo_key_owner_count` enumerates the
+  bundled and external sources itself, so a catalog-only repo counts zero owners
+  and can never take the credential carve-out.
 
 **Execution consent is repository-bound for new grants.** Registry and installed
 app responses carry a server-overwritten `trustRepository`: the normalized clone

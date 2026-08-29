@@ -1351,6 +1351,35 @@ class TestRepoLookups:
         )
         assert registry.known_registry_repos() == {"core/a", "ext/b"}
 
+    def test_known_repos_include_the_catalog_vouched_urls(self, monkeypatch, cache_dir):
+        """An app listed ONLY in the official catalog is the intended happy path, and
+        was the one whose blob-served art 403'd: the catalog publishes no equivalent
+        of the manifest's ``screenshots``/``heroImageDetail``, so the detail page and
+        the Library card read them off the installed manifest and every one of those
+        goes through the blob proxy."""
+        monkeypatch.setattr(registry, "_load_registry_file", lambda: [])
+        _config_with(monkeypatch, [])
+        monkeypatch.setattr(
+            registry.official_catalog,
+            "vouched_repos",
+            lambda: frozenset({"https://github.com/octocat/some-app"}),
+        )
+        assert registry.known_registry_repos() == {"https://github.com/octocat/some-app"}
+
+    def test_a_vouched_url_is_stripped_of_userinfo_like_the_other_sources(
+        self, monkeypatch, cache_dir
+    ):
+        """Same normalization as the bundled and external halves, or the same repo
+        admitted by two spellings compares unequal to the handler's own query value."""
+        monkeypatch.setattr(registry, "_load_registry_file", lambda: [])
+        _config_with(monkeypatch, [])
+        monkeypatch.setattr(
+            registry.official_catalog,
+            "vouched_repos",
+            lambda: frozenset({"https://user:pw@github.com/octocat/some-app"}),
+        )
+        assert registry.known_registry_repos() == {"https://github.com/octocat/some-app"}
+
 
 class TestSourceStrings:
     def test_is_registry_source(self):

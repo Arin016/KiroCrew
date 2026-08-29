@@ -4039,16 +4039,30 @@ def _external_registry_repos() -> set[str]:
 def known_registry_repos() -> set[str]:
     """Repo names trusted by the ``/api/apps/blob`` SSRF gate.
 
-    Union of the bundled registry and the user's external (federated)
-    registries — external-registry apps resolve an ``/api/apps/blob`` iconUrl,
-    so their repos must be allowlisted here or the App Store icon 403s.
+    Union of the bundled registry, the user's external (federated) registries, and
+    the official catalog's vouched clone URLs — each of these serves rows whose art
+    resolves to an ``/api/apps/blob`` URL, so their repos must be allowlisted here
+    or the App Store icon 403s.
+
+    The catalog half exists because an app listed ONLY in the official catalog is
+    the intended happy path and used to be the one that broke: a catalog row
+    supplies its icon and hero from the CDN, but the store's own detail page and
+    the Library card read the INSTALLED manifest's repo-relative ``iconPath`` /
+    ``screenshots`` — which the catalog publishes no equivalent of — and every one
+    of those goes through the blob proxy. With the catalog absent from this union,
+    an app whose only listing is official had all of that art refused.
+
+    ``vouched_repos`` is process memory populated only by a FRESH catalog fetch,
+    never by the agent-writable cache: an allowlist entry makes the gateway reach a
+    host, which is the class this module refuses to take from a local file.
     """
     bundled = {
         _strip_git_target_userinfo(e["repo"])
         for e in _load_registry_file()
         if isinstance(e.get("repo"), str) and e["repo"]
     }
-    return bundled | _external_registry_repos()
+    catalog = {_strip_git_target_userinfo(r) for r in official_catalog.vouched_repos()}
+    return bundled | _external_registry_repos() | catalog
 
 
 # ---------------------------------------------------------------------------

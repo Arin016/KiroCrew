@@ -1134,8 +1134,18 @@ def _no_live_catalog_network(monkeypatch: pytest.MonkeyPatch):
     refusal rather than failing the test with this message. Like
     ``_no_release_feed_network`` above, this is a NETWORK guard first and a
     diagnostic second.
+
+    It also pins the module's ``_VOUCHED_REPOS`` snapshot empty per test. That set
+    is PROCESS memory written by a successful ``fetch_inventory_entries``, and it
+    feeds ``registry.known_registry_repos`` — the ``/api/apps/blob`` SSRF gate — so
+    a test that drives a fetch to success would otherwise hand every later test in
+    the worker a wider allowlist than it set up. Reset here rather than in a second
+    autouse fixture because this one already resolves the module, and an autouse
+    fixture's cost is paid by all ~26k tests.
     """
     from kiro_crew.apps import official_catalog
+
+    monkeypatch.setattr(official_catalog, "_VOUCHED_REPOS", frozenset(), raising=True)
 
     original = official_catalog._open_catalog
 

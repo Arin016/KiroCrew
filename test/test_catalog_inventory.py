@@ -1623,3 +1623,103 @@ class TestPinnedInstallRefusals:
         assert seen["git_url"] == URL
         # The pin must reach BOTH fetch layers: the manifest preflight and the clone.
         assert manifest_seen.get("commit") == SHA
+
+
+class TestVouchedRepos:
+    """The catalog's contribution to the ``/api/apps/blob`` SSRF gate.
+
+    An allowlist entry is the kind of value this module refuses to take from a
+    local file: it makes the gateway CLONE a URL. So the whole point of this
+    snapshot is WHERE it may come from, and every test here is about that rather
+    than about the set's contents.
+    """
+
+    def test_a_fresh_fetch_records_the_urls_it_vouched_for(self, monkeypatch):
+        monkeypatch.setattr(oc, "_read_cache", lambda: None)
+        monkeypatch.setattr(
+            oc,
+            "fetch_document",
+            lambda url, *a, **k: {"schemaVersion": 1, "apps": [catalog_git()]},
+        )
+        oc.fetch_inventory_entries()
+        assert oc.vouched_repos() == frozenset({URL})
+
+    def test_the_agent_writable_cache_can_never_introduce_one(self, monkeypatch):
+        """The reason the snapshot is process memory rather than a cache read.
+
+        ``_read_cache`` is a file the agent's own tools can write, so a planted entry
+        there must not become a host the blob proxy will reach. The fetch SUCCEEDS
+        here on purpose: a test where it fails never reaches the recording line at
+        all, so it cannot tell a cache read from a fetch read.
+        """
+        planted = {
+            "schemaVersion": 1,
+            "apps": [
+                catalog_git(
+                    name="planted",
+                    source={"type": "git", "url": "https://evil.example/x", "ref": SHA},
+                )
+            ],
+        }
+        monkeypatch.setattr(oc, "_read_cache", lambda: planted)
+        monkeypatch.setattr(
+            oc,
+            "fetch_document",
+            lambda url, *a, **k: {"schemaVersion": 1, "apps": [catalog_git()]},
+        )
+        oc.fetch_inventory_entries()
+        assert oc.vouched_repos() == frozenset({URL}), "the FETCHED document decides"
+        assert "https://evil.example/x" not in oc.vouched_repos()
+
+    def test_a_failed_fetch_keeps_the_previous_snapshot(self, monkeypatch):
+        """A CDN blip must not start 403ing the art on an already-listed row, and a
+        stale entry grants nothing a fresh one did not already grant."""
+        monkeypatch.setattr(oc, "_read_cache", lambda: None)
+        monkeypatch.setattr(
+            oc,
+            "fetch_document",
+            lambda url, *a, **k: {"schemaVersion": 1, "apps": [catalog_git()]},
+        )
+        oc.fetch_inventory_entries()
+        monkeypatch.setattr(oc, "fetch_document", lambda url, *a, **k: None)
+        monkeypatch.setattr(oc, "_write_failure", lambda: None)
+        with pytest.raises(oc.CatalogUnavailable):
+            oc.fetch_inventory_entries()
+        assert oc.vouched_repos() == frozenset({URL})
+
+    def test_an_entry_whose_coordinates_do_not_validate_vouches_for_nothing(self, monkeypatch):
+        """Routed through ``inventory`` so one validator decides, not two: a URL that
+        cannot supply install coordinates must not become a reachable host either."""
+        monkeypatch.setattr(oc, "_read_cache", lambda: None)
+        monkeypatch.setattr(
+            oc,
+            "fetch_document",
+            lambda url, *a, **k: {
+                "schemaVersion": 1,
+                # http:// is refused by `_coordinates`, so `inventory` drops the row.
+                "apps": [catalog_git(source={"type": "git", "url": "http://plain.example/x", "ref": SHA})],
+            },
+        )
+        oc.fetch_inventory_entries()
+        assert oc.vouched_repos() == frozenset()
+
+    def test_the_snapshot_is_replaced_not_accumulated(self, monkeypatch):
+        """A URL the catalog has since dropped must stop being a reachable host."""
+        monkeypatch.setattr(oc, "_read_cache", lambda: None)
+        monkeypatch.setattr(
+            oc,
+            "fetch_document",
+            lambda url, *a, **k: {"schemaVersion": 1, "apps": [catalog_git()]},
+        )
+        oc.fetch_inventory_entries()
+        other = "https://github.com/org/other-app"
+        monkeypatch.setattr(
+            oc,
+            "fetch_document",
+            lambda url, *a, **k: {
+                "schemaVersion": 1,
+                "apps": [catalog_git(name="other", source={"type": "git", "url": other, "ref": SHA})],
+            },
+        )
+        oc.fetch_inventory_entries()
+        assert oc.vouched_repos() == frozenset({other})

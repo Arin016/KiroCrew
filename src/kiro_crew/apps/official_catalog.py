@@ -546,7 +546,55 @@ def fetch_inventory_entries() -> list[dict[str, Any]]:
     if problem is not None:
         raise CatalogUnavailable(problem)
     assert isinstance(doc, dict)  # narrowed by _envelope_error
-    return [a for a in doc["apps"] if isinstance(a, dict)]
+    entries = [a for a in doc["apps"] if isinstance(a, dict)]
+    _remember_vouched_repos(entries)
+    return entries
+
+
+#: Clone URLs the catalog vouched for on the most recent SUCCESSFUL fresh fetch.
+#:
+#: Process memory, deliberately, and rebound rather than mutated so a reader gets a
+#: consistent immutable snapshot without a lock. The blob proxy's SSRF gate reads
+#: this from a per-request worker thread, so it must answer without touching the
+#: network; and it must NOT come from the on-disk cache, which is agent-writable.
+#: The distinction this module already draws is the one that applies: a cached row
+#: may supply DISPLAY COPY for a row that exists anyway, and may never supply
+#: anything that makes the gateway reach a host. An allowlist entry is the second
+#: kind — planting one would buy an attacker a clone of a URL of their choosing —
+#: so it is populated only here, from a document TLS attributed to our own domain.
+_VOUCHED_REPOS: frozenset[str] = frozenset()
+
+
+def _remember_vouched_repos(entries: list[dict[str, Any]]) -> None:
+    """Record the clone URLs *entries* vouch for, for :func:`vouched_repos`.
+
+    Derived through :func:`inventory` rather than off ``entry["source"]`` directly,
+    so only a URL that already passed ``_coordinates``' validation (https, no
+    userinfo, no control characters) can enter the set — one validator, not two.
+
+    Only ever called after a fresh document validated. A FAILED fetch leaves the
+    previous snapshot in place instead of clearing it: the art on an already-listed
+    row must not start 403ing because the CDN blipped, and a stale allowlist entry
+    grants nothing a fresh one did not already grant.
+    """
+    global _VOUCHED_REPOS
+    _VOUCHED_REPOS = frozenset(
+        row["repo"]
+        for row in inventory(entries)
+        if isinstance(row.get("repo"), str) and row["repo"]
+    )
+
+
+def vouched_repos() -> frozenset[str]:
+    """Clone URLs the catalog vouched for, for the ``/api/apps/blob`` SSRF gate.
+
+    Empty until a fresh catalog fetch has succeeded in this process, which is the
+    ordering that matters in practice: the store listing that renders a blob URL
+    performs that fetch before the browser requests the bytes. A surface that
+    somehow renders one first degrades to today's 403 for that one request, never
+    to a widened gate.
+    """
+    return _VOUCHED_REPOS
 
 
 def inventory_for_install(name: str) -> dict[str, Any] | None:
