@@ -1180,6 +1180,39 @@ async def _run_cmd(
                 pass
 
 
+async def _run_uninterruptible(coro: Any) -> Any:
+    """Await *coro* to completion even if THIS caller is cancelled.
+
+    ``asyncio.shield`` alone is not enough for a destructive, lock-guarded git
+    mutation: it stops the cancellation from reaching the inner command, but
+    the outer ``await`` still raises ``CancelledError`` immediately, so the
+    caller unwinds -- releasing _GIT_MUTATION_LOCK / _MAKE_LIVE_LOCK -- while
+    the detached git child is still writing, and a new mutation could race it.
+
+    Run the coroutine as a task and, if a cancellation lands on our await,
+    keep re-awaiting (shielded) until the task is actually done before
+    re-raising. Repeat cancellations (e.g. a shutdown hard-timeout after the
+    first cancel) are absorbed only for the drain -- the same pattern the run
+    worker uses to reap a mid-spawn subprocess. The inner git command is
+    ``_run_cmd``, which is timeout-bounded, so the drain terminates.
+    """
+    task = asyncio.ensure_future(coro)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+        except asyncio.CancelledError:
+            cancelled = True
+            if not task.done():
+                continue
+            # Task finished; propagate the cancellation the caller requested,
+            # but only after the mutation is complete.
+            raise
+
+
 def _kill_tree_sync(pid: int) -> None:
     """Kill *pid*'s group, then any descendant that escaped it.
 
@@ -4078,7 +4111,15 @@ async def _worktree_remove_locked(
             cmd = ["git", "-C", repo, "worktree", "remove", path]
             if force_use_git_force:
                 cmd.append("--force")
-            rc, stdout, stderr = await _run_cmd(cmd, timeout=60)
+            # Run the destructive mutation uninterruptibly. On gateway
+            # shutdown dev_fleet_cleanup cancels the prune worker; a naive
+            # cancel would either SIGKILL the child (via _run_cmd's handler) or,
+            # with a bare shield, unwind this frame and release
+            # _GIT_MUTATION_LOCK / _MAKE_LIVE_LOCK while the detached child is
+            # still writing. _run_uninterruptible holds this frame -- and the
+            # locks -- until the timeout-bounded `git worktree remove` has
+            # finished, then lets the cancellation propagate at that safe point.
+            rc, stdout, stderr = await _run_uninterruptible(_run_cmd(cmd, timeout=60))
             if rc != 0:
                 # When the removal runs without --force (TOCTOU guard for
                 # clean-unmerged override), a git refusal means the tree became
@@ -4148,10 +4189,17 @@ async def _worktree_remove_locked(
                                 repo, verdict_oid.strip(), head_oid.strip()
                             )
                 if should_delete:
-                    await _git(
+                    # Uninterruptible like `worktree remove` above: this ref
+                    # delete is the second destructive mutation; hold the frame
+                    # (and the git-mutation lock) until it finishes so a
+                    # shutdown cancel cannot tear it mid-write and corrupt
+                    # packed-refs. A cancel landing BETWEEN the two mutations
+                    # lands on the recoverable side (a dangling refs/heads/<branch>,
+                    # per the fail-closed policy above), never on a torn write.
+                    await _run_uninterruptible(_git(
                         repo, "update-ref", "-d",
                         f"refs/heads/{branch}", verdict_oid.strip(), timeout=10,
-                    )
+                    ))
 
         # Every removal path lands here — the single-worktree handler, each parallel
         # prune worker, and the auto-prune reaper — so this is the one place the
@@ -4959,6 +5007,7 @@ async def _prune_run(
     # and a duplicate would spawn two workers racing to remove the SAME
     # worktree — the second one then reports a spurious failure over the
     # first one's success.
+    global _prune_task
     _force = force_names or set()
     # Per-name consented untracked sets. Like ``force`` this is an explicit
     # override of the preview verdict, so a named worktree joins the work list
@@ -5072,7 +5121,20 @@ async def _prune_run(
             _PRUNE_STATE["running"] = False
             _PRUNE_STATE["current"] = None
 
-    asyncio.create_task(_work())
+    # Retain the worker so dev_fleet_cleanup can cancel+await it on shutdown
+    # (it runs destructive git mutations that must not outlive the gateway).
+    # Clear the module handle when the batch finishes so an idle slot never
+    # holds a completed task between prunes, mirroring the _ACTIVE_RUNS
+    # done-callback convention.
+    task = asyncio.create_task(_work())
+    _prune_task = task
+
+    def _clear(_t: asyncio.Task) -> None:
+        global _prune_task
+        if _prune_task is _t:
+            _prune_task = None
+
+    task.add_done_callback(_clear)
     return {"ok": True, "total": len(names)}
 
 
@@ -5098,6 +5160,14 @@ _NET_REFRESH_S = 60
 _refresher_task: asyncio.Task | None = None
 _warm_task: asyncio.Task | None = None
 _reaper_task: asyncio.Task | None = None
+# The in-flight prune batch worker. Retained (not discarded) so
+# dev_fleet_cleanup can cancel and await it on shutdown: the worker runs the
+# destructive `git worktree remove` / `update-ref -d` mutations under
+# _GIT_MUTATION_LOCK, and a batch left running past cleanup would keep mutating
+# the shared MAIN_REPO .git state after the gateway exits. Single-flight: only
+# one prune batch runs at a time (guarded by _PRUNE_STATE["running"]), so one
+# slot suffices.
+_prune_task: asyncio.Task | None = None
 
 # Test-only escape hatch: a test that boots the real app via ``create_app()``
 # (e.g. to exercise the HMAC middleware) would otherwise start a genuine
@@ -5664,7 +5734,7 @@ async def dev_fleet_startup(app: web.Application) -> None:
 
 async def dev_fleet_cleanup(app: web.Application) -> None:
     """Cancel and await background tasks so a stopped runner leaves nothing behind."""
-    global _refresher_task, _warm_task, _reaper_task, _SHUTDOWN_IN_PROGRESS
+    global _refresher_task, _warm_task, _reaper_task, _prune_task, _SHUTDOWN_IN_PROGRESS
     # Close the admission window first: set the flag and snapshot _ACTIVE_RUNS
     # atomically under the admission lock.  The lock is held only for these two
     # fast dict operations — no I/O, no awaits — so it cannot stall any in-
@@ -5691,7 +5761,13 @@ async def dev_fleet_cleanup(app: web.Application) -> None:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         _ACTIVE_RUNS.pop(rid, None)
-    for bg_task in (_refresher_task, _warm_task, _reaper_task):
+    # Cancel and await the idle background poll loops and the in-flight prune
+    # worker. Cancelling the prune worker is safe because its two destructive
+    # git mutations (`git worktree remove`, `update-ref -d`) run through
+    # _run_uninterruptible: the cancel is delivered only at the safe boundary
+    # once the timeout-bounded mutation has completed and its lock is released,
+    # so the shared checkout is never left half-removed.
+    for bg_task in (_refresher_task, _warm_task, _reaper_task, _prune_task):
         if bg_task is not None and not bg_task.done():
             bg_task.cancel()
             try:
@@ -5701,6 +5777,7 @@ async def dev_fleet_cleanup(app: web.Application) -> None:
     _refresher_task = None
     _warm_task = None
     _reaper_task = None
+    _prune_task = None
 
 
 # =============================================================================
