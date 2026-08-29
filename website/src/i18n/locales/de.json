@@ -11499,7 +11499,12 @@
         "applying_update": "Update wird angewendet…",
         "applying_restart_note": "Das Gateway startet sich selbst neu, sobald die neue Version bereit ist; diese Seite verbindet sich automatisch neu.",
         "approval_window_expired": "Das Freigabefenster ist ohne Freigabe abgelaufen. Das Update kann jederzeit neu angestoßen werden.",
-        "try_again": "Erneut versuchen"
+        "try_again": "Erneut versuchen",
+        "not_on_channel_yet": "Nicht auf {{channel}}",
+        "channel_explainer_gateway_switch_note_version": "Ein Wechsel ändert nur, welcher Kanal auf Updates geprüft wird. Der Kanal {{channel}} veröffentlicht derzeit v{{version}} – ÄLTER als der laufende Build. Führe den Befehl unten aus, um diese Installation wirklich umzustellen.",
+        "channel_publishes_older_version": "Der Kanal {{channel}} veröffentlicht derzeit v{{version}} – älter als der laufende Build, daher gibt es kein Update. <link>Lade v{{version}} herunter</link>, um auf diesen Kanal zu wechseln.",
+        "switch_to_version": "Zu v{{version}} wechseln",
+        "in_app_channel_move_intro": "Das Release des gewählten Kanals wird neben dem aktuellen installiert und atomar umgeschaltet. Das Anwenden erfordert einen Bestätigungsbefehl auf dem Gateway-Host."
       },
       "botChannelPanel": {
         "allowed_user_ids": "Erlaubte Benutzer-IDs",
