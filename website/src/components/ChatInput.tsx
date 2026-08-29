@@ -2246,19 +2246,48 @@ function ChatInput({
     }
   }, [onUploadFiles, onPasteBlocksChange, pasteBlocks, value, onChange])
 
-  /** Two-step click on a collapsed-paste token:
-   *    1st click (detail=1) → select the token as a range (visual highlight)
-   *    2nd click (detail=2, i.e. a quick second click = native "double click"
-   *       semantics) → expand to the original full content in the textarea
-   *  Uses `event.detail` (the click count) which the browser computes with
-   *  its own double-click timing — fully cross-browser (Chrome, Electron,
-   *  Safari, Firefox all agree) and no ref/selection tracking required. */
+  /** Replace a collapsed-paste token with its full content in the textarea and
+   *  drop the backing block. The caret lands just past the inserted content. */
+  const expandTokenRange = useCallback((range: { start: number; end: number; block: PasteBlock }) => {
+    const expanded = value.slice(0, range.start) + range.block.content + value.slice(range.end)
+    onChange(expanded)
+    onPasteBlocksChange?.(pasteBlocks.filter(b => b.id !== range.block.id))
+    requestAnimationFrame(() => {
+      const ta = inputRef.current
+      if (ta) {
+        const pos = range.start + range.block.content.length
+        ta.setSelectionRange(pos, pos)
+        ta.focus()
+      }
+    })
+  }, [value, pasteBlocks, onPasteBlocksChange, onChange])
+
+  /** Click/tap on a collapsed-paste token expands it to the original full
+   *  content in the textarea.
+   *
+   *  Two gestures reach expansion, because a single gesture cannot serve both
+   *  pointer classes:
+   *   - Mouse: a two-step click — 1st click (detail=1) selects the token as a
+   *     range (visual highlight), a quick 2nd click (detail>=2, the browser's
+   *     own double-click) expands. `event.detail` is the click count the
+   *     browser computes with its double-click timing, so no ref/selection
+   *     tracking is needed and Chrome/Electron/Safari/Firefox all agree.
+   *   - Touch: a single tap expands. Two discrete taps never coalesce into a
+   *     `detail>=2` click the way mouse clicks do, so the double-click path is
+   *     unreachable under a finger; gating expansion on it left the token only
+   *     ever selectable on touch, never openable. A tap matches the sent-bubble
+   *     PastedChip, which is a real <button> that toggles on one tap. */
   const handleTextareaClick = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
     if (!onPasteBlocksChange || !pasteBlocks.length) return
     const ta = e.currentTarget
     const caret = ta.selectionStart ?? 0
     const range = tokenRangeAt(value, pasteBlocks, caret)
     if (!range) return
+
+    // Touch has no double-click to reach the expand branch below, so the first
+    // tap inside a token expands directly — the select-first step is a
+    // mouse-only refinement.
+    if (isTouchDevice()) { expandTokenRange(range); return }
 
     if (e.detail < 2) {
       // First click in a (potential) sequence — highlight the token as an
@@ -2273,17 +2302,8 @@ function ChatInput({
 
     // e.detail >= 2 — second (or more) click in a rapid sequence on the
     // same region — expand.
-    const expanded = value.slice(0, range.start) + range.block.content + value.slice(range.end)
-    onChange(expanded)
-    onPasteBlocksChange(pasteBlocks.filter(b => b.id !== range.block.id))
-    requestAnimationFrame(() => {
-      if (ta) {
-        const pos = range.start + range.block.content.length
-        ta.setSelectionRange(pos, pos)
-        ta.focus()
-      }
-    })
-  }, [value, pasteBlocks, onPasteBlocksChange, onChange])
+    expandTokenRange(range)
+  }, [value, pasteBlocks, onPasteBlocksChange, expandTokenRange])
 
   /** Snap selection endpoints that land inside a token range to the nearest edge.
    *  Covers drag-select that ends mid-token, touch/long-press handles on mobile,
