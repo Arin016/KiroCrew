@@ -145,7 +145,6 @@ beforeEach(() => {
   connectionsCancel.mockReset().mockResolvedValue({ ok: true, slug: 'notion', dropped: true })
   connectionsDisconnect.mockReset().mockResolvedValue({
     ok: true,
-    disconnected: 'notion',
     grantRemoved: true,
     grantSurviving: [],
     entryRemoved: true,
@@ -370,7 +369,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: true,
       grantSurviving: ['registration'],
       entryRemoved: true,
@@ -395,7 +393,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       // A pair kept for a sharer is never re-stat'd, so grantSurviving is empty
       // by construction -- survivors now mean a FAILED unlink and nothing else.
@@ -421,7 +418,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: true,
@@ -444,7 +440,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: false,
@@ -468,7 +463,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: true,
       grantSurviving: [],
       entryRemoved: false,
@@ -494,7 +488,6 @@ describe('a connected provider', () => {
     // the keep must still read as a deliberate refusal with a next step.
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: true,
@@ -530,7 +523,6 @@ describe('a connected provider', () => {
     // must not interpolate a blank name into "fix that file".
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: true,
@@ -544,7 +536,7 @@ describe('a connected provider', () => {
 
     const note = await screen.findByRole('alert')
     expect(note).toHaveTextContent(
-      'The stored grant was kept because a configuration source could not be read to rule out another server using it. Fix or remove the unreadable file and disconnect again.',
+      'The stored grant was kept because a configuration source could not be read to rule out another server using it. Check your server configuration and disconnect again.',
     )
   })
 

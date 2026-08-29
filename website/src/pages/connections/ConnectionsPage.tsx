@@ -907,6 +907,12 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       const shared = result.grantSharedWith.length > 0
       const censusGap = !shared && result.grantCensusIncomplete
       const entryKept = !result.entryRemoved
+      // No grant existed and the entry stayed: the endpoint the card watches is
+      // configured elsewhere, so the click cannot do anything here. This is not a
+      // `success` -- Connected still shows and Disconnect is still live, so the
+      // outcome must name the reason and hand the user the MCP Servers tab as the
+      // way forward, and it must warn rather than reassure.
+      const notOursNoGrant = !survived && !shared && !censusGap && !result.grantRemoved && entryKept
       // The census knows which source it could not read, so the repair instruction
       // names it. Empty is the honest case, not a missing field: `censusIncomplete`
       // is also set by an entry whose URL could not be compared, which names no
@@ -927,11 +933,13 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
               : t('pages.connectionsPage.disconnect_census_incomplete')
             : result.grantRemoved && entryKept
             ? t('pages.connectionsPage.disconnect_entry_not_ours')
-            : entryKept
-              ? '' // no grant existed and the entry stayed: the entry clause is the whole story
+            : notOursNoGrant
+              ? t('pages.connectionsPage.disconnect_entry_not_ours_only')
               : t('pages.connectionsPage.disconnected_locally')
       const entryClause =
-        entryKept && (survived || shared || !result.grantRemoved)
+        // The not-ours-no-grant clause already states the config was untouched and
+        // names the recourse, so it does not take the generic "left alone" tail.
+        entryKept && !notOursNoGrant && (survived || shared || !result.grantRemoved)
           ? t('pages.connectionsPage.disconnect_entry_left_alone')
           : ''
       setFeedback(current => ({
@@ -942,8 +950,10 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
           // A census gap is the one outcome that tells the user their access was
           // NOT withdrawn AND hands them a file to repair. Rendering it green under
           // role=status announced a chore as a success; it is still not an `error`,
-          // because nothing failed -- a safety rule declined to act.
-          survived ? 'error' : censusGap ? 'warning' : 'success',
+          // because nothing failed -- a safety rule declined to act. The
+          // not-ours-no-grant outcome is the same shape: nothing failed, but the
+          // click did nothing and the user needs to act elsewhere, so it warns too.
+          survived ? 'error' : censusGap || notOursNoGrant ? 'warning' : 'success',
         ),
       }))
     }

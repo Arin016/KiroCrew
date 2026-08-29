@@ -288,7 +288,6 @@ async def test_disconnect_revokes_the_grant_and_removes_the_entry(
 
     assert body == {
         "ok": True,
-        "disconnected": _SLUG,
         "grantRemoved": True,
         "grantSurviving": [],
         "entryRemoved": True,
