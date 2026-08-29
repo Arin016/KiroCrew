@@ -9629,7 +9629,19 @@
       "closed_pr_not_on_main_hint": "বন্ধ, মার্জ না-করা PR — এর বিষয়বস্তু main-এ নেই, তাই সরালে তা স্থায়ীভাবে মুছে যাবে। নির্বাচনের আগে যাচাই করুন।",
       "closed_has_unmerged_commits": "বন্ধ PR — main-এ নেই এমন কমিট রয়েছে",
       "pr_closed_but_branch_has_newer_commits": "PR বন্ধ — ব্রাঞ্চে নতুন কমিট আছে",
-      "pr_closed_but_verification_unavailable_retry": "PR বন্ধ কিন্তু যাচাই করা যাচ্ছে না — আবার চেষ্টা করো"
+      "pr_closed_but_verification_unavailable_retry": "PR বন্ধ কিন্তু যাচাই করা যাচ্ছে না — আবার চেষ্টা করো",
+      "pod_memory_of_ceiling": "cgroup সীমার তুলনায় ব্যবহৃত পড মেমরি",
+      "pod_cpu_usage": "পড CPU ব্যবহার",
+      "pod_task_count": "পড টাস্ক (প্রসেস/থ্রেড) সংখ্যা",
+      "pod_tasks_label": "টাস্ক",
+      "pod_memory": "মেমরি: {{value}}",
+      "pod_cpu": "CPU: {{value}}",
+      "pod_tasks": "টাস্ক: {{value}}",
+      "pod_home_size": "পড হোম: {{value}}",
+      "pod_home_disk": "পড-হোম ডিস্ক: {{value}}",
+      "orphan_pods_label": "অনাথ পড হোম: {{value}}",
+      "total_disk_used_by_running_pod_homes": "চলমান পড হোম দ্বারা ব্যবহৃত মোট ডিস্ক",
+      "pod_homes_left_on_disk_with_no_live_pod": "কোনও সক্রিয় পড ছাড়াই ডিস্কে থাকা পড হোম"
     },
     "developer": {
       "agentBackendTab": {

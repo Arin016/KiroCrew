@@ -9779,7 +9779,19 @@
       "closed_pr_not_on_main_hint": "PR cerrado y sin fusionar — su contenido no está en main, así que eliminarlo lo borra de forma permanente. Revisa antes de seleccionar.",
       "closed_has_unmerged_commits": "PR cerrado — tiene commits que no están en main",
       "pr_closed_but_branch_has_newer_commits": "PR cerrado — la rama tiene commits más recientes",
-      "pr_closed_but_verification_unavailable_retry": "PR cerrado, pero la verificación no está disponible — vuelve a intentarlo"
+      "pr_closed_but_verification_unavailable_retry": "PR cerrado, pero la verificación no está disponible — vuelve a intentarlo",
+      "pod_memory_of_ceiling": "Memoria del pod usada frente a su límite de cgroup",
+      "pod_cpu_usage": "Uso de CPU del pod",
+      "pod_task_count": "Número de tareas del pod (procesos/hilos)",
+      "pod_tasks_label": "tareas",
+      "pod_memory": "Memoria: {{value}}",
+      "pod_cpu": "CPU: {{value}}",
+      "pod_tasks": "Tareas: {{value}}",
+      "pod_home_size": "Home del pod: {{value}}",
+      "pod_home_disk": "Disco de homes de pods: {{value}}",
+      "orphan_pods_label": "Homes de pods huérfanos: {{value}}",
+      "total_disk_used_by_running_pod_homes": "Disco total usado por los homes de pods en ejecución",
+      "pod_homes_left_on_disk_with_no_live_pod": "Homes de pods que quedan en disco sin un pod activo"
     },
     "developer": {
       "agentBackendTab": {

@@ -44,8 +44,10 @@ export const CHUNK_BUDGETS = {
   // The built-in App Store guidance adds one use-case and one configuration
   // string for each of 23 apps across all 12 shipped catalogs. The Dev Fleet
   // closed-PR prune group and the expanded Disconnect guidance are the largest
-  // recent catalog increments included in this measurement.
-  all: 10490 * KB, // measured 9985 KB (~5% headroom)
+  // recent catalog increments included in this measurement; Dev Fleet's
+  // per-pod system readout then adds its own strings across the same 12
+  // catalogs on top of that baseline.
+  all: 10490 * KB, // measured 9985 KB before the pod-system catalog keys (~5% headroom)
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because

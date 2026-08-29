@@ -9929,7 +9929,19 @@
       "closed_pr_not_on_main_hint": "Закрытый несмерженный PR — его содержимое отсутствует в main, поэтому удаление приведёт к безвозвратной потере. Проверьте перед выбором.",
       "closed_has_unmerged_commits": "Закрытый PR — есть коммиты, отсутствующие в main",
       "pr_closed_but_branch_has_newer_commits": "PR закрыт — в ветке есть более новые коммиты",
-      "pr_closed_but_verification_unavailable_retry": "PR закрыт, но проверка недоступна — повтори"
+      "pr_closed_but_verification_unavailable_retry": "PR закрыт, но проверка недоступна — повтори",
+      "pod_memory_of_ceiling": "Используемая память пода относительно лимита cgroup",
+      "pod_cpu_usage": "Использование ЦП пода",
+      "pod_task_count": "Число задач пода (процессы/потоки)",
+      "pod_tasks_label": "задач",
+      "pod_memory": "Память: {{value}}",
+      "pod_cpu": "ЦП: {{value}}",
+      "pod_tasks": "Задачи: {{value}}",
+      "pod_home_size": "Домашний каталог пода: {{value}}",
+      "pod_home_disk": "Диск домашних каталогов подов: {{value}}",
+      "orphan_pods_label": "Осиротевшие домашние каталоги подов: {{value}}",
+      "total_disk_used_by_running_pod_homes": "Всего диска, занятого домашними каталогами работающих подов",
+      "pod_homes_left_on_disk_with_no_live_pod": "Домашние каталоги подов на диске без активного пода"
     },
     "developer": {
       "agentBackendTab": {
