@@ -1810,6 +1810,59 @@ class TestArtifactCli:
             )
         assert "Saved: slug=new version=1" in capsys.readouterr().out
 
+    def test_save_warns_when_the_slug_was_suffixed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `save` has no --slug, so a colliding name silently lands a NEW
+        # artifact at a suffixed slug while the canonical one keeps its old
+        # content. The warning has to name both the taken slug and the verb
+        # that versions in place.
+        with _ArtifactHarness(
+            [
+                _FakeResponse(
+                    {
+                        "slug": "run-summary-2",
+                        "version": 1,
+                        "slug_collided_with": "run-summary",
+                    }
+                )
+            ]
+        ):
+            cc._artifact(
+                _ns(
+                    artifact_action="save",
+                    name="Run Summary",
+                    content="corrected",
+                    content_file=None,
+                    tags=None,
+                    kind=None,
+                    description=None,
+                )
+            )
+        captured = capsys.readouterr()
+        assert "Saved: slug=run-summary-2 version=1" in captured.out
+        assert "run-summary" in captured.err
+        assert "kirocrew artifact update run-summary" in captured.err
+
+    def test_save_is_silent_when_the_slug_was_free(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with _ArtifactHarness([_FakeResponse({"slug": "fresh", "version": 1})]):
+            cc._artifact(
+                _ns(
+                    artifact_action="save",
+                    name="Fresh",
+                    content="body",
+                    content_file=None,
+                    tags=None,
+                    kind=None,
+                    description=None,
+                )
+            )
+        captured = capsys.readouterr()
+        assert "Saved: slug=fresh version=1" in captured.out
+        assert captured.err == ""
+
     def test_save_reads_content_file(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
