@@ -1167,6 +1167,11 @@ export function useWebSocket() {
             // cached page instead, so neither a grid pane nor a failed-switch
             // restore can resurrect the discarded transcript (#6364 review).
             const clearSlot = data.slot as string
+            // Drop the slot's buffered stream text (content + thinking) too:
+            // an entry buffered before the /clear would otherwise flush on the
+            // next frame and resurrect discarded text into the just-cleared
+            // pane. Keyed delete — other slots' in-flight buffers are theirs.
+            chunkBufRef.current.delete(clearSlot)
             if (clearSlot === store.getState().chat.activeSlot) dispatch(clearMessages())
             else dispatch(clearSlotCache(clearSlot))
             break
