@@ -145,7 +145,6 @@ beforeEach(() => {
   connectionsCancel.mockReset().mockResolvedValue({ ok: true, slug: 'notion', dropped: true })
   connectionsDisconnect.mockReset().mockResolvedValue({
     ok: true,
-    disconnected: 'notion',
     grantRemoved: true,
     grantSurviving: [],
     entryRemoved: true,
@@ -370,7 +369,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: true,
       grantSurviving: ['registration'],
       entryRemoved: true,
@@ -395,7 +393,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       // A pair kept for a sharer is never re-stat'd, so grantSurviving is empty
       // by construction -- survivors now mean a FAILED unlink and nothing else.
@@ -412,7 +409,7 @@ describe('a connected provider', () => {
     // access here was removed when it deliberately was not.
     const note = await screen.findByRole('status')
     expect(note).toHaveTextContent(
-      'The stored grant was kept because the same endpoint is also configured by: notion-work.',
+      'The stored grant was kept because the same endpoint is also configured by: notion-work. Revoking at the provider would cut off their access too.',
     )
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
@@ -421,7 +418,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: true,
@@ -436,7 +432,7 @@ describe('a connected provider', () => {
     // revoke -- and it under-reports when more than one did.
     const note = await screen.findByRole('status')
     expect(note).toHaveTextContent(
-      'The stored grant was kept because the same endpoint is also configured by: notion-work, notion-personal.',
+      'The stored grant was kept because the same endpoint is also configured by: notion-work, notion-personal. Revoking at the provider would cut off their access too.',
     )
   })
 
@@ -444,7 +440,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: false,
@@ -459,7 +454,7 @@ describe('a connected provider', () => {
     // would be the dishonesty two review rounds landed on in this span.
     const note = await screen.findByRole('status')
     expect(note).toHaveTextContent(
-      'The stored grant was kept because the same endpoint is also configured by: notion-work. Your server configuration was left unchanged.',
+      'The stored grant was kept because the same endpoint is also configured by: notion-work. Revoking at the provider would cut off their access too. Your server configuration was left unchanged. You can manage this entry from the MCP Servers tab.',
     )
     expect(note).not.toHaveTextContent('Entry removed')
   })
@@ -468,7 +463,6 @@ describe('a connected provider', () => {
     mcpServers.mockResolvedValue(connected)
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: true,
       grantSurviving: [],
       entryRemoved: false,
@@ -486,6 +480,37 @@ describe('a connected provider', () => {
     )
   })
 
+  it('warns with the MCP Servers recourse when nothing here was ours', async () => {
+    mcpServers.mockResolvedValue(connected)
+    // The not-ours outcome: no grant existed and no purge-eligible entry
+    // matched, so the backend changed nothing at all.
+    connectionsDisconnect.mockResolvedValue({
+      ok: true,
+      grantRemoved: false,
+      grantSurviving: [],
+      entryRemoved: false,
+      grantSharedWith: [],
+    })
+    mount()
+
+    fireEvent.click(await waitFor(() => within(card('notion')).getByRole('button', { name: /Disconnect/ })))
+
+    // role=alert with WARN styling, not a green role=status success: the card
+    // still shows Connected with a live Disconnect button, so a bare "left
+    // unchanged" success reads as an action that worked yet changed nothing,
+    // and the user's only move is to click again. The message must carry the
+    // recourse (the MCP Servers tab) — and it must state no cause, because
+    // entryRemoved=false cannot prove WHY the entry was kept.
+    const note = await screen.findByRole('alert')
+    expect(note).toHaveClass('text-warn')
+    expect(note).not.toHaveClass('text-ok')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(note).toHaveTextContent(
+      'Your server configuration was left unchanged. You can manage this entry from the MCP Servers tab.',
+    )
+    expect(note).not.toHaveTextContent('points at a different server')
+  })
+
   it('reports a census-incomplete keep as a deliberate refusal, never a failed removal', async () => {
     mcpServers.mockResolvedValue(connected)
     // The backend's fail-closed path: an unreadable spec source can HIDE a sharer,
@@ -494,7 +519,6 @@ describe('a connected provider', () => {
     // the keep must still read as a deliberate refusal with a next step.
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: true,
@@ -530,7 +554,6 @@ describe('a connected provider', () => {
     // must not interpolate a blank name into "fix that file".
     connectionsDisconnect.mockResolvedValue({
       ok: true,
-      disconnected: 'notion',
       grantRemoved: false,
       grantSurviving: [],
       entryRemoved: true,
@@ -544,8 +567,11 @@ describe('a connected provider', () => {
 
     const note = await screen.findByRole('alert')
     expect(note).toHaveTextContent(
-      'The stored grant was kept because a configuration source could not be read to rule out another server using it. Fix or remove the unreadable file and disconnect again.',
+      'The stored grant was kept because a configuration source could not be read to rule out another server using it. Check your server configuration and disconnect again.',
     )
+    // The source-less trigger can be an entry whose URL could not be compared,
+    // which involves no file — the guidance must not name one.
+    expect(note).not.toHaveTextContent('unreadable file')
   })
 
   it('reports a failed disconnect as an error instead of claiming success', async () => {

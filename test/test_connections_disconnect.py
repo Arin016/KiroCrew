@@ -288,7 +288,6 @@ async def test_disconnect_revokes_the_grant_and_removes_the_entry(
 
     assert body == {
         "ok": True,
-        "disconnected": _SLUG,
         "grantRemoved": True,
         "grantSurviving": [],
         "entryRemoved": True,
@@ -297,6 +296,30 @@ async def test_disconnect_revokes_the_grant_and_removes_the_entry(
         "grantCensusUnreadable": [],
     }
     assert purged == [_SLUG]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_response_carries_no_slug_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The response reports outcome facts only, never the caller's own slug.
+
+    ``ok`` carries the verdict and the caller already knows which slug it
+    asked about, so an echo field invites a client to read identity from the
+    body instead of its own request. Pinned by name so the field cannot creep
+    back in as a harmless-looking addition.
+    """
+    _wire(
+        monkeypatch,
+        removed=["token", "registration"],
+        surviving=[],
+        inventory=[_entry(_SLUG, _provider_url())],
+        purged=[],
+    )
+
+    body = await _disconnect()
+
+    assert "disconnected" not in body
 
 
 @pytest.mark.asyncio
