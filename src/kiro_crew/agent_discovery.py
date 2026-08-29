@@ -552,19 +552,16 @@ def agent_skill_globs(agent: str, agents_dir: Path | None = None) -> list[str]:
     except OSError:
         return []
     for f in candidates:
-        if f.name.startswith("._"):
-            continue
-        try:
-            real = f.resolve(strict=True)
-        except OSError:
-            continue
-        if is_sensitive_path(str(real)):
-            continue
-        try:
-            data = json.loads(real.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
+        # The one hardened reader for the user-writable agents dir: AppleDouble
+        # sidecars, symlink loops (``RuntimeError`` on resolve), sensitive
+        # resolved targets (with the SEL ``denied`` event), the size cap, and
+        # non-UTF-8 / non-object JSON all collapse to ``None`` — skipped like an
+        # absent file, preserving this function's never-raises / ``[]`` contract.
+        # Pass ``f``, not the resolved target: ``f.stem`` and
+        # ``expand_skill_uri`` below must see the ORIGINAL path so a symlinked
+        # spec's relative globs stay anchored where the symlink lives.
+        data = _read_agent_spec(f)
+        if data is None:
             continue
         if data.get("name") != agent and f.stem != agent:
             continue
