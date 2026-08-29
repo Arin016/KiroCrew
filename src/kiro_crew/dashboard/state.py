@@ -2763,6 +2763,7 @@ class _ChatSlot:
         "_stop_event_id",
         "_stop_escalated_card_id",
         "_pending_reset_history_key",
+        "_pending_discard_conversation_key",
         "_eager_spawn_task",
         "_prefetch_ttl_task",
         "_dirty_flag",
@@ -3033,6 +3034,11 @@ class _ChatSlot:
         # inline because the endpoint can be reached from inside the kiro-cli
         # process group via the set_project MCP tool.
         self._pending_reset_history_key: str | None = None
+        # Set by the reset_conversation directive; consumed alongside the
+        # project-change reset above. Deferred for the same reason: the tool is
+        # called from inside the turn it wants to end, and the immediate route
+        # refuses a busy slot rather than tearing down a turn mid-write.
+        self._pending_discard_conversation_key: str | None = None
         # Debounced speculative session-creation task (session.eager_spawn).
         # At most one per slot: scheduling a new one cancels the previous, so
         # rapid signals (create + project set) collapse into a single spawn.

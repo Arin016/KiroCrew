@@ -47,6 +47,19 @@ def _mock_provider_factory():
     return factory
 
 
+def _raw_sid(mgr, key: str):
+    """The stored sid, read straight off the map entry.
+
+    ``SessionMap.get`` additionally requires the transcript ``<sid>.json`` to
+    exist on disk, so it answers None for any synthetic sid — which would make a
+    "was it cleared?" assertion pass whether or not the clear ran. These tests
+    care about the stored pointer, so they read it.
+    """
+    from kiro_crew.session_map import canonical_key
+
+    return (mgr._session_map._data.get(canonical_key(key)) or {}).get("sid")
+
+
 def _alive_provider_factory():
     """Like _mock_provider_factory but with an explicit live process check, so
     the fast-path session-reuse branch (which gates on is_process_alive) treats
@@ -2309,6 +2322,123 @@ class TestDiscardConversation:
         mock_clear.assert_called_once_with("k1")
         mock_delete.assert_not_called()
         assert not mgr.has_session("k1")
+
+    @pytest.mark.asyncio
+    async def test_skip_if_busy_refuses_while_a_turn_holds_the_semaphore(self, cfg):
+        """The guard reads the SEMAPHORE, which is why it has to live here.
+
+        ``get_or_create`` leaves the semaphore held until ``release``, and the
+        provider reports ``has_active_turn() is False`` throughout — a turn that
+        holds the semaphore without a prompt in flight yet. So a CALLER probing
+        the provider and then calling this would see "idle", tear the session
+        down, and take the provider away from a turn that had already been
+        admitted. Refusing here, under the lock that pops the session, is what
+        closes that window.
+        """
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        provider, _, _ = await mgr.get_or_create("k1")
+        # The blind spot, made explicit: the provider says idle while busy.
+        assert provider.has_active_turn() is False
+
+        discarded = await mgr.discard_conversation("k1", replay=False, skip_if_busy=True)
+
+        assert discarded is False
+        provider.shutdown.assert_not_awaited()
+        assert mgr.has_session("k1"), "the refusal must leave the session intact"
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_changes_nothing_at_all(self, cfg):
+        """Not a partial teardown: the replay flag must not move either, or the
+        caller's retry would find suppression already consumed."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        await mgr.get_or_create("k1")
+
+        assert await mgr.discard_conversation("k1", replay=False, skip_if_busy=True) is False
+
+        assert mgr.consume_replay_suppression("k1") is False
+
+    @pytest.mark.asyncio
+    async def test_skip_if_busy_proceeds_once_the_turn_releases(self, cfg):
+        """The refusal is a wait, not a cancellation."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        provider, _, _ = await mgr.get_or_create("k1")
+        assert await mgr.discard_conversation("k1", replay=False, skip_if_busy=True) is False
+
+        mgr.release("k1")
+        discarded = await mgr.discard_conversation("k1", replay=False, skip_if_busy=True)
+
+        assert discarded is True
+        provider.shutdown.assert_awaited_once()
+        assert mgr.consume_replay_suppression("k1") is True
+
+    @pytest.mark.asyncio
+    async def test_the_default_still_tears_down_a_busy_session(self, cfg):
+        """``skip_if_busy`` defaults False, so every pre-existing caller — the
+        poisoned-conversation escalation among them — keeps its behaviour."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        provider, _, _ = await mgr.get_or_create("k1")
+
+        discarded = await mgr.discard_conversation("k1")
+
+        assert discarded is True
+        provider.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_successor_mapped_during_shutdown_keeps_its_sid(self, cfg):
+        """The sid clear must not outlive the pop.
+
+        Ordered deterministically rather than by timing: the successor is mapped
+        from inside ``provider.shutdown``, which is precisely the await the
+        teardown suspends on. That is the whole window the bug needs — pop, then
+        a concurrent channel turn creates and maps a new session under the same
+        key, then a clear deferred past the shutdown wipes the NEW session's
+        pointer. Clearing in the same tick as the pop closes it.
+
+        Observed on the RAW entry, not through ``SessionMap.get``: that getter
+        additionally requires ``<sid>.json`` to exist on disk, so for a synthetic
+        sid it answers None whether or not the clear ran — which would make this
+        assertion pass with the bug present.
+        """
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        provider, _, _ = await mgr.get_or_create("k1")
+        mgr.release("k1")
+        mgr._session_map.set("k1", "original-sid")
+
+        async def _map_a_successor_while_shutting_down():
+            mgr._session_map.set("k1", "successor-sid")
+
+        provider.shutdown = AsyncMock(side_effect=_map_a_successor_while_shutting_down)
+
+        await mgr.discard_conversation("k1", replay=False)
+
+        provider.shutdown.assert_awaited_once()
+        assert _raw_sid(mgr, "k1") == "successor-sid", (
+            "the successor session's sid was erased by a clear deferred past the " "shutdown await"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_sid_is_still_cleared_with_no_successor(self, cfg):
+        """Scope pin: the clear still happens — it just happens earlier."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        await mgr.get_or_create("k1")
+        mgr.release("k1")
+        mgr._session_map.set("k1", "original-sid")
+
+        await mgr.discard_conversation("k1", replay=False)
+
+        assert _raw_sid(mgr, "k1") == ""
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_does_not_clear_the_sid(self, cfg):
+        """``skip_if_busy`` refusing must leave the mapping alone too — the clear
+        sits after the early return, not before it."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        await mgr.get_or_create("k1")
+        mgr._session_map.set("k1", "original-sid")
+
+        assert await mgr.discard_conversation("k1", replay=False, skip_if_busy=True) is False
+
+        assert _raw_sid(mgr, "k1") == "original-sid"
 
     @pytest.mark.asyncio
     async def test_discard_conversation_unlinks_temp_files_from_the_session_queue(

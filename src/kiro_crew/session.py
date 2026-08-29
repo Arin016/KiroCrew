@@ -2056,9 +2056,19 @@ class SessionManager:
         """Permanently destroy a session and its persistence entry."""
         await self._lifecycle_boundary().destroy(key)
 
-    async def discard_conversation(self, key: str, *, replay: bool = True) -> None:
-        """Drop native conversation state while retaining channel linkage."""
-        await self._lifecycle_boundary().discard_conversation(key, replay=replay)
+    async def discard_conversation(
+        self, key: str, *, replay: bool = True, skip_if_busy: bool = False
+    ) -> bool:
+        """Drop native conversation state while retaining channel linkage.
+
+        Returns whether a session was actually torn down; False means
+        ``skip_if_busy`` refused because a turn was in flight. See
+        :meth:`SessionLifecycleService.discard_conversation` for the guard's
+        atomicity contract.
+        """
+        return await self._lifecycle_boundary().discard_conversation(
+            key, replay=replay, skip_if_busy=skip_if_busy
+        )
 
     async def drain_active_turns(self, timeout: float | None = None) -> int:
         """Bring unfinished native turns to a bounded safe boundary."""

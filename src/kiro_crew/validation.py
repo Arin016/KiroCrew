@@ -1262,6 +1262,17 @@ SET_PROJECT_SCHEMA = ToolSchema(
     custom_validator=_validate_set_project,
 )
 
+# reset_conversation drops the calling session's model context at the next turn
+# boundary. It takes NO arguments: a caller asking for a clean context always
+# wants a clean one, and replaying the transcript into the fresh conversation
+# returns most of what the reset reclaimed. The HTTP route
+# (POST /api/chat/slots/{slot}/reset-conversation) still carries a replay flag
+# for the rare caller that genuinely wants the provider reset without it.
+RESET_CONVERSATION_SCHEMA = ToolSchema(
+    tool_name="reset_conversation",
+    fields=[],
+)
+
 # suggest_followup renders an agent-authored follow-up card in the calling
 # dashboard slot. Every string below is LLM-authored and lands in the DOM and
 # (for the worktree action) in a `git worktree add` argv, so the shapes are
@@ -2702,6 +2713,7 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "get_chat_session": GET_CHAT_SESSION_SCHEMA,
     "list_sessions": LIST_SESSIONS_SCHEMA,
     "set_project": SET_PROJECT_SCHEMA,
+    "reset_conversation": RESET_CONVERSATION_SCHEMA,
     "suggest_followup": SUGGEST_FOLLOWUP_SCHEMA,
     "artifact_save": ARTIFACT_SAVE_SCHEMA,
     "artifact_get": ARTIFACT_GET_SCHEMA,

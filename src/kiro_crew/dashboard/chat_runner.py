@@ -273,6 +273,7 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: E402
     payload_for_replay,
     should_notice_leaked_tool_call,
     should_recover_promise_only,
+    subagents_attached,
 )
 
 
@@ -3019,27 +3020,116 @@ def _should_suppress_requeue(slot) -> bool:
     return False
 
 
-async def _consume_pending_reset(state: DashboardState, slot: _ChatSlot) -> None:
-    """Reset the session for a deferred project change, if one is queued.
+async def _consume_pending_reset(
+    state: DashboardState, slot: _ChatSlot, *, allow_discard: bool = False
+) -> bool:
+    """Apply a deferred session reset queued on *slot*, if any.
 
-    Called both before get_or_create (idle picker change) and at turn end
-    (mid-turn set_project). Clears the flag only after a successful reset, and
-    compare-and-clears so a key queued by a concurrent api_chat_slot_project
-    during the await isn't clobbered.
+    Returns whether a teardown actually ran, so a caller can decide whether a
+    respawn is owed. A deferral left armed returns False.
+
+    Two independent deferrals share this consumer, and both are queued rather
+    than applied inline because their producer runs INSIDE the turn they would
+    tear down: a project change (set_project) and a conversation discard
+    (reset_conversation).
+
+    They are not alternatives and neither subsumes the other, so when both are
+    eligible both run, project change first. ``reset`` recreates the session but
+    leaves replay suppression alone, so a discard that asked for
+    ``replay=False`` still has to run to suppress the ``[CONVERSATION HISTORY]``
+    rebuild — dropping it because a reset had already torn the session down
+    would hand the next turn a reconstruction of the conversation the caller
+    discarded.
+
+    ``allow_discard`` IS THE BOUNDARY, and only the end-of-turn caller sets it.
+    The project reset is consumed at three points including the one just before
+    ``get_or_create``, and that pre-acquire point is safe for it only in the
+    narrow sense its own comment claims: no lock is held by THIS turn, so
+    ``reset`` cannot self-kill. It says nothing about another actor on the same
+    session — a channel (Slack, Discord) turn runs on the linked session with no
+    dashboard task at all, so a discard consumed there tears the provider down
+    under a channel response that is still streaming and the reply is lost. The
+    discard therefore waits for the end of a turn, where the session is between
+    turns rather than about to start one.
+
+    Even there the boundary is checked atomically, not assumed: the discard goes
+    through ``discard_conversation(..., skip_if_busy=True)``, which refuses under
+    the same session lock that pops the session. Probing from here and tearing
+    down afterwards would leave a window between the two — long enough for a
+    channel message to acquire the session's semaphore and begin streaming a
+    reply the teardown would then destroy. The semaphore is also a stricter
+    signal than ``has_active_turn``, which cannot see a turn that holds the
+    semaphore but has not yet put a prompt in flight.
+
+    The discard additionally waits on sub-agent children.
+    ``discard_conversation`` releases the shared runtime those children run on,
+    and turn end is exactly when they are most likely to outlive their parent:
+    ``slot.running`` is already False while they keep going, and the last child
+    can still have a ``[Subagent completion event]`` injection in flight. So a
+    slot with attached children leaves the flag ARMED and the discard lands at a
+    later consume instead — the caller waits, the child's work survives. That is
+    the same policy the immediate route enforces as a 409, applied through the
+    same shared predicate rather than a second copy of the probes.
+
+    Each flag is cleared only after its own effect succeeds, and compare-and-
+    cleared so a key queued by a concurrent producer during the await is not
+    clobbered.
     """
-    if not slot._pending_reset_history_key:
-        return
-    pending_key = slot._pending_reset_history_key
-    try:
-        await state.sessions.reset(pending_key)
-        if slot._pending_reset_history_key == pending_key:
-            slot._pending_reset_history_key = None
-    except Exception:
-        logger.warning(
-            "Failed to consume pending project-change reset for slot %s",
-            slot.key,
-            exc_info=True,
-        )
+    torn_down = False
+    if slot._pending_reset_history_key:
+        pending_key = slot._pending_reset_history_key
+        try:
+            await state.sessions.reset(pending_key)
+            torn_down = True
+            if slot._pending_reset_history_key == pending_key:
+                slot._pending_reset_history_key = None
+        except Exception:
+            logger.warning(
+                "Failed to consume pending project-change reset for slot %s",
+                slot.key,
+                exc_info=True,
+            )
+    if allow_discard and slot._pending_discard_conversation_key:
+        discard_key = slot._pending_discard_conversation_key
+        if subagents_attached(state, slot, discard_key, "consume_pending_discard"):
+            # Left armed on purpose: releasing the shared runtime now would kill
+            # children that are still running, queued, or delivering a result.
+            logger.debug(
+                "Deferring queued conversation discard for slot %s: sub-agents attached",
+                slot.key,
+            )
+            return torn_down
+        try:
+            # ``skip_if_busy`` rather than a busy-probe here: the check and the
+            # teardown have to be ONE atomic step under the session lock. A
+            # caller-side probe leaves a window in which a channel turn acquires
+            # the session's semaphore and starts streaming, and the teardown then
+            # takes its provider away. False means it refused — leave the flag
+            # armed and let a later boundary apply it.
+            #
+            # ``replay=False`` is the only value this path ever wants: replaying
+            # the transcript into the fresh conversation returns most of what the
+            # reset reclaimed. The flag exists on the manager for the HTTP route,
+            # which does let a caller choose.
+            discarded = await state.sessions.discard_conversation(
+                discard_key, replay=False, skip_if_busy=True
+            )
+            if not discarded:
+                logger.debug(
+                    "Deferring queued conversation discard for slot %s: turn in flight",
+                    slot.key,
+                )
+                return torn_down
+            torn_down = True
+            if slot._pending_discard_conversation_key == discard_key:
+                slot._pending_discard_conversation_key = None
+        except Exception:
+            logger.warning(
+                "Failed to consume pending conversation discard for slot %s",
+                slot.key,
+                exc_info=True,
+            )
+    return torn_down
 
 
 # Debounce before a speculative spawn. Absorbs rapid consecutive signals
@@ -9845,18 +9935,22 @@ async def _run_chat(
             # has something to retire.
             if slot._active_turn_session_key == session_key:
                 slot._active_turn_session_key = ""
-        # End-of-turn fallback: catches set_project calls that fired mid-turn,
-        # after the start-of-turn consume already ran. Guarded because a raise
-        # here would skip the steer requeue and queue drain below, silently
-        # stranding queued work at the end of an otherwise successful turn.
+        # End-of-turn fallback: catches set_project and reset_conversation calls
+        # that fired mid-turn, after the start-of-turn consume already ran. This
+        # is the ONLY caller that may consume a queued conversation discard —
+        # the earlier consume points run just before a turn acquires the session,
+        # where a teardown can land under a channel turn already streaming on it.
+        # Guarded because a raise here would skip the steer requeue and queue
+        # drain below, silently stranding queued work at the end of an otherwise
+        # successful turn.
         try:
-            _had_pending_reset = bool(slot._pending_reset_history_key)
-            await _consume_pending_reset(state, slot)
-            # The consume tore down the session for a mid-turn project change;
-            # without a respawn the NEXT message pays the full cold start the
-            # eager path exists to hide. Only when a reset was actually
-            # consumed — an ordinary turn end must not spawn anything.
-            if _had_pending_reset:
+            torn_down = await _consume_pending_reset(state, slot, allow_discard=True)
+            # The consume tore down the session for a mid-turn project change or
+            # conversation discard; without a respawn the NEXT message pays the
+            # full cold start the eager path exists to hide. Keyed on what
+            # actually tore down, not on what was queued — a discard left armed
+            # behind attached sub-agents changed nothing to respawn for.
+            if torn_down:
                 schedule_eager_spawn(state, slot)
         except Exception:
             logger.debug("_consume_pending_reset failed", exc_info=True)

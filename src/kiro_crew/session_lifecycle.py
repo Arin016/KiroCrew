@@ -650,11 +650,40 @@ class SessionLifecycleService:
             )
             self._deps.logger.info("Destroyed session (map deleted): %s", key)
 
-    async def discard_conversation(self, key: str, *, replay: bool = True) -> None:
-        """Drop only the native conversation while preserving channel linkage."""
+    async def discard_conversation(
+        self, key: str, *, replay: bool = True, skip_if_busy: bool = False
+    ) -> bool:
+        """Drop only the native conversation while preserving channel linkage.
+
+        Returns whether a session was actually torn down. False means
+        ``skip_if_busy`` made it a no-op; nothing was changed, including the
+        replay flag and the session map.
+
+        ``skip_if_busy`` refuses the teardown when the session has a turn in
+        flight, and is enforced HERE, atomically with the pop, for the same
+        reason :meth:`reset` enforces its own: a caller that probes busy-ness
+        first and calls this second leaves a window between the two in which a
+        turn can be admitted — a channel message acquiring the session's
+        semaphore, say — and the teardown then removes the provider from under a
+        reply that has started. The probe is the SEMAPHORE rather than
+        ``provider.has_active_turn()``, which is deliberately stricter: a turn
+        that holds the semaphore but has not yet put a prompt in flight is
+        invisible to ``has_active_turn`` and is exactly the case a caller-side
+        pre-check cannot close.
+
+        The sid clear runs in the SAME event-loop tick as the pop, with no await
+        between them, so a cold start racing this teardown cannot have mapped a
+        replacement sid for the key by the time it runs — the clear can never
+        erase a successor's pointer. Clearing it after the shutdown awaits would
+        do exactly that, since the shutdown is the window a concurrent channel
+        turn needs to create and map a new session under the same key.
+        """
         owner = self._owner
         key = owner._fold_key(key)
         async with owner._lock:
+            current = owner._sessions.get(key)
+            if skip_if_busy and current is not None and current.semaphore.locked():
+                return False
             session = owner._sessions.pop(key, None)
             owner._compact_cooldown_until.pop(key, None)
             owner._compact_pending_verdict.pop(key, None)
@@ -664,17 +693,28 @@ class SessionLifecycleService:
                 self._suppress_replay.discard(key)
             else:
                 self._suppress_replay.add(key)
+        # Same tick as the pop — no await between the two, so a cold start racing
+        # this teardown cannot have registered a replacement sid for the key in
+        # between, and this clear therefore cannot erase a SUCCESSOR's pointer.
+        # Deferring it past the shutdown awaits below is exactly that bug: the
+        # provider shutdown is slow, a concurrent channel turn creates and maps a
+        # new session under the same key while it runs, and a clear in the
+        # ``finally`` then wipes the new session's sid. Mirrors ``reset``'s
+        # ``clear_conversation``, which clears in this same position for this
+        # same reason. Outside the lock rather than inside it because
+        # ``clear_sid`` persists to disk, and the lock must not span blocking IO.
+        owner._session_map.clear_sid(key)
         try:
             if session:
                 await asyncio.to_thread(self._deps.get_unlink_session_queue(), session)
                 await session.provider.shutdown()
             await owner.release_subagent_runtime(key)
         finally:
-            owner._session_map.clear_sid(key)
             self._deps.logger.info(
                 "Discarded native conversation (sid cleared, map entry kept): %s",
                 key,
             )
+        return True
 
     async def drain_active_turns(self, timeout: float | None = None) -> int:
         """Bring unfinished native turns to a safe boundary before teardown."""

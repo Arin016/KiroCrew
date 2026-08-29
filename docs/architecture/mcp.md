@@ -633,7 +633,7 @@ answers `tools/list` from):
     call rather than guessing.
 - **Session-bound directives** (`session_directive.DIRECTIVE_TOOLS`):
   `ask_question`, `suggest_followup`, `monitor_start`, `monitor_update`,
-  `autonudge_stop`, `set_project`
+  `autonudge_stop`, `set_project`, `reset_conversation`
 - **Crew routing:** `select_crew`
 - **Sessions and history:** `list_sessions`, `get_chat_session`,
   `search_chat_history`
@@ -940,8 +940,9 @@ and let a sub-agent's card land in its parent's slot.
 
 **Return a session directive and let the session-aware consumer apply it.** This
 is what the `ask_question` MCP tool itself now does, along with `monitor_start`,
-`monitor_update`, `autonudge_stop`, `set_project` and `suggest_followup`
-(`session_directive.DIRECTIVE_TOOLS`). The tool validates its arguments and
+`monitor_update`, `autonudge_stop`, `set_project`, `suggest_followup` and
+`reset_conversation` (`session_directive.DIRECTIVE_TOOLS`). The tool validates
+its arguments and
 returns a human-readable confirmation plus a marker line carrying the validated
 payload and **no session key**. `dashboard/chat_runner`'s tool-result handler
 decodes the marker, applies the effect against **its own** `slot.key`, then

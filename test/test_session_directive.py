@@ -1,6 +1,6 @@
 """Tests for the session-directive protocol and forgery gate (issue #755).
 
-``session_directive`` is the stateless wire format the five session-bound MCP
+``session_directive`` is the stateless wire format the session-bound MCP
 tools use in the gateway-off topology: the tool validates its arguments and
 returns a human confirmation plus a machine marker carrying the validated
 payload (never a session key). The session-aware consumer decodes the marker
@@ -23,6 +23,7 @@ _CASES = {
     "set_project": {"project": "/workspace/foo", "clear": False},
     "suggest_followup": {"items": [{"title": "t", "prompt": "p"}]},
     "ask_question": {"questions": [{"question": "Which approach?", "options": [{"label": "A"}]}]},
+    "reset_conversation": {},
 }
 
 

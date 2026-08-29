@@ -81,6 +81,7 @@ from kiro_crew.dashboard.chat_utils import (
     _sync_dashboard_slots,
     effective_session_key,
     slot_history_key,
+    subagents_attached,
 )
 from kiro_crew.dashboard.state import (
     DashboardState,
@@ -2288,38 +2289,16 @@ def _subagents_attached_response(
 
     One guard for every endpoint whose action cannot coexist with children —
     dispatching a new turn (continue) interleaves with their writes, and a
-    session teardown (reload) kills the shared runtime they run on. Two copies
-    of this block is how the probes diverge, and this one fails toward
-    discarding a child's work.
+    session teardown (reload) kills the shared runtime they run on.
 
-    Three probes, none optional:
-
-    * `running_agents_for` on the true session key. QUEUED children count too:
-      a spawn that hit the concurrency/stagger gate is deliberately absent
-      from `_agents` (see `SubagentInfo.queued`), yet it WILL start on its own.
-    * IN-FLIGHT RESULT DELIVERY: the last child can finish — emptying both
-      probes — while its `[Subagent completion event]` injection is still
-      landing, and that injection needs both the transcript order and the
-      session it reports to. The runner's own synthesis gate pairs the same
-      conditions at both its call sites (chat_runner).
-    * Fail closed on a None running-probe: that is the probe FAILING, not a
-      slot with no children, and mistaking the two is exactly the hazard this
-      guard exists to prevent. Mirrors the stage gate in chat_orchestrator.
+    The probes themselves live in :func:`chat_utils.subagents_attached`, shared
+    with the deferred consume in ``chat_runner`` that applies a queued
+    conversation discard. That teardown reaches the same runtime without passing
+    through any endpoint, so it must apply the same policy — and two copies of
+    the probe block is how the two would diverge. This wrapper only shapes the
+    refusal.
     """
-    subs = getattr(state, "subagents", None)
-    if subs is None:
-        return None
-    running = subs.running_agents_for(session_key)
-    queued = 0
-    if running is not None:
-        try:
-            queued = subs._queued_depth(session_key)
-        except Exception:
-            # An unreadable queue is unknown children, not zero children.
-            logger.debug("%s: queued-depth probe failed", operation, exc_info=True)
-            queued = 1
-    inflight = getattr(slot, "_subagent_deliveries_inflight", 0)
-    if running is None or running or queued or inflight:
+    if subagents_attached(state, slot, session_key, operation):
         return web.json_response(
             {"error": "sub-agents are running", "code": "slot_subagents_running"},
             status=409,
