@@ -1485,12 +1485,32 @@ def register_routes(app: web.Application) -> None:
         except Exception:  # pragma: no cover - defensive
             logger.warning("%s: watcher shutdown failed", store.APP_NAME, exc_info=True)
 
+    async def _stop_run(_app: web.Application) -> None:
+        """Wind down an in-flight run on gateway shutdown.
+
+        The supervisor's worker thread is a daemon and does not block exit, but the
+        agent/measurer SUBPROCESS it spawns is not — left running it outlives the
+        gateway, holding the clone lock and spending budget after the process that
+        owned it is gone. ``stop`` is idempotent (a no-op when idle) and bounded: it
+        signals the run and joins for at most ``STOP_JOIN_TIMEOUT_S``, since the spine
+        stops between candidates. A measurement already in flight can exceed that
+        window — the join then returns with the run still ``stopping`` — but asking it
+        to stop at all is the improvement over leaving it entirely unsignalled. Run
+        off the event loop because that join blocks.
+        """
+        try:
+
+            await asyncio.to_thread(runner.get_supervisor().stop)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("%s: run shutdown failed", store.APP_NAME, exc_info=True)
+
     # Guarded: register_routes runs before the runner freezes its signal lists,
     # so appending is safe — but a failure here must never break gateway startup.
     try:
         app.on_startup.append(_bind_watcher_loop)
         app.on_cleanup.append(_stop_watchers)
+        app.on_cleanup.append(_stop_run)
     except Exception:  # pragma: no cover - defensive
-        logger.warning("%s: could not register watcher lifecycle hooks", store.APP_NAME)
+        logger.warning("%s: could not register lifecycle hooks", store.APP_NAME)
 
     logger.info("%s backend routes registered", store.APP_NAME)
