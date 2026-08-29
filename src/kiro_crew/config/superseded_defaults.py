@@ -59,6 +59,7 @@ class SupersededDefault:
     old_default: object
     new_default: object
     changed_in: str
+    new_default_display: str | None = None
 
 
 # The explicit, versioned registry of superseded defaults. APPEND-ONLY: a future
@@ -119,6 +120,17 @@ SUPERSEDED_DEFAULTS: tuple[SupersededDefault, ...] = (
         new_default="base",
         changed_in="0.5.0",
     ),
+    # #6651 changed the watchdog budget from a materialized 25 seconds to a
+    # nullable, launch-class default: 25 seconds for desktop/foreground and 90
+    # seconds for managed services. A stored 25 may be either the old default or
+    # a deliberate operator pin, so report it instead of rewriting it.
+    SupersededDefault(
+        dotted_key="dashboard.loop_stall_exit_after_secs",
+        old_default=25,
+        new_default=None,
+        changed_in="#6651",
+        new_default_display="unset (automatic: 25s desktop / 90s managed service)",
+    ),
 )
 
 
@@ -173,12 +185,18 @@ def drift_summary(entry: SupersededDefault) -> str:
     options -- this mechanism does not know whether the stored value was chosen
     deliberately, and must not imply the value is wrong.
     """
+    new_default = entry.new_default_display or repr(entry.new_default)
+    adoption = (
+        "removing the key or setting it to JSON null"
+        if entry.new_default is None
+        else f"removing the key or setting it to {entry.new_default!r}"
+    )
     return (
         f"{entry.dotted_key} is stored as {entry.old_default!r}, which was the default "
-        f"before {entry.changed_in} changed it to {entry.new_default!r}. An install that "
+        f"before {entry.changed_in} changed it to {new_default}. An install that "
         f"predates that change keeps the old value because a stored value beats the "
-        f"default. If {entry.old_default!r} was not a deliberate choice, removing the key "
-        f"or setting it to {entry.new_default!r} adopts the current default."
+        f"default. If {entry.old_default!r} was not a deliberate choice, {adoption} "
+        f"adopts the current default."
     )
 
 

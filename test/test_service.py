@@ -83,6 +83,49 @@ class TestPlatformDetection:
             assert current_platform() == Platform.UNSUPPORTED
 
 
+class TestManagedServiceMarkerDetection:
+    def test_no_installed_definition_is_not_applicable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.SYSTEMD)
+        monkeypatch.setattr(controller.linux, "UNIT_PATH", tmp_path / "missing.service")
+        assert controller.installed_service_has_managed_marker() is None
+
+    def test_systemd_definition_requires_explicit_marker(self, monkeypatch, tmp_path):
+        path = tmp_path / "kirocrew.service"
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.SYSTEMD)
+        monkeypatch.setattr(controller.linux, "UNIT_PATH", path)
+        path.write_text("[Service]\nExecStart=kirocrew gateway\n", encoding="utf-8")
+        assert controller.installed_service_has_managed_marker() is False
+        path.write_text(
+            '[Service]\nEnvironment="KIROCREW_SERVICE_MANAGED=1"\n',
+            encoding="utf-8",
+        )
+        assert controller.installed_service_has_managed_marker() is True
+
+    def test_launchd_definition_reads_environment_dictionary(self, monkeypatch, tmp_path):
+        path = tmp_path / "dev.kirocrew.gateway.plist"
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.LAUNCHD)
+        monkeypatch.setattr(controller.macos, "PLIST_PATH", path)
+        path.write_bytes(plistlib.dumps({"Label": "dev.kirocrew.gateway"}))
+        assert controller.installed_service_has_managed_marker() is False
+        path.write_bytes(
+            plistlib.dumps(
+                {"EnvironmentVariables": {"KIROCREW_SERVICE_MANAGED": "1"}}
+            )
+        )
+        assert controller.installed_service_has_managed_marker() is True
+
+    def test_malformed_launchd_definition_is_reported_stale(self, monkeypatch, tmp_path):
+        path = tmp_path / "dev.kirocrew.gateway.plist"
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.LAUNCHD)
+        monkeypatch.setattr(controller.macos, "PLIST_PATH", path)
+        path.write_text(
+            "<plist><dict><key>Label</key><string>Kiro & Crew</string></dict></plist>",
+            encoding="utf-8",
+        )
+
+        assert controller.installed_service_has_managed_marker() is False
+
+
 class TestShutdownBudget:
     def test_service_deadline_covers_gateway_grace(self):
         from kiro_crew.gateway_shutdown_budget import (

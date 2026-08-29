@@ -18,6 +18,8 @@ Three contracts are covered here:
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 from kiro_crew.config.loader import (
@@ -25,9 +27,12 @@ from kiro_crew.config.loader import (
     LOOP_STALL_EXIT_AFTER_MIN,
     KiroCrewConfig,
     _clamp_security_bounds,
+    consume_managed_service_launch_environment,
+    load_loop_stall_exit_after,
+    resolve_loop_stall_exit_after,
 )
 from kiro_crew.dashboard.crash_dump_store import claim_dump_notification
-from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog, resolve_exit_after
+from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog
 
 
 def _dump(tmp_path: Path, name: str = "loopstall-20260803T000000Z.txt") -> Path:
@@ -72,23 +77,38 @@ class TestClaimDumpNotification:
 
 
 class TestLoopStallBudgetConfig:
-    def test_default_preserves_existing_behaviour(self) -> None:
-        assert KiroCrewConfig().dashboard.loop_stall_exit_after_secs == 25
+    def test_default_remains_automatic_until_launch(self) -> None:
+        assert KiroCrewConfig().dashboard.loop_stall_exit_after_secs is None
 
     def test_managed_service_uses_the_wider_budget(self) -> None:
-        assert resolve_exit_after(25, {"KIROCREW_SERVICE_MANAGED": "1"}) == 90
-        assert resolve_exit_after(25, {"INVOCATION_ID": "legacy-unit"}) == 90
-        assert resolve_exit_after(25, {}) == 25
+        assert resolve_loop_stall_exit_after({}, {"KIROCREW_SERVICE_MANAGED": "1"}) == 90
+        assert resolve_loop_stall_exit_after({}, {"INVOCATION_ID": "legacy-unit"}) == 25
+        assert resolve_loop_stall_exit_after({}, {"SYSTEMD_EXEC_PID": str(os.getpid())}) == 25
+        assert resolve_loop_stall_exit_after({}, {"KIROCREW_SERVICE_MANAGED": "0"}) == 25
+        assert resolve_loop_stall_exit_after({}, {"INVOCATION_ID": ""}) == 25
+        assert resolve_loop_stall_exit_after({}, {}) == 25
+
+    def test_managed_marker_is_consumed_before_children_are_started(self) -> None:
+        environment = {
+            "KIROCREW_SERVICE_MANAGED": "1",
+            "PATH": "/usr/bin",
+        }
+
+        launch_environment = consume_managed_service_launch_environment(environment)
+
+        assert launch_environment == {"KIROCREW_SERVICE_MANAGED": "1"}
+        assert environment == {"PATH": "/usr/bin"}
+        assert resolve_loop_stall_exit_after({}, launch_environment) == 90
+        assert resolve_loop_stall_exit_after({}, environment) == 25
 
     def test_operator_budget_is_preserved_for_managed_services(self) -> None:
-        assert resolve_exit_after(60, {"KIROCREW_SERVICE_MANAGED": "1"}) == 60
-        assert resolve_exit_after(60, {"INVOCATION_ID": "legacy-unit"}) == 60
+        explicit = {"loop_stall_exit_after_secs": 25}
+        assert resolve_loop_stall_exit_after(explicit, {"KIROCREW_SERVICE_MANAGED": "1"}) == 25
 
     def test_watchdog_arms_with_the_managed_service_budget(self) -> None:
         arms: list[float] = []
         watchdog = LoopStallWatchdog(
-            exit_after=25,
-            environ={"KIROCREW_SERVICE_MANAGED": "1"},
+            exit_after=resolve_loop_stall_exit_after({}, {"KIROCREW_SERVICE_MANAGED": "1"}),
             arm_later=arms.append,
             cancel_later=lambda: None,
         )
@@ -98,9 +118,88 @@ class TestLoopStallBudgetConfig:
         finally:
             watchdog.stop()
 
-    def test_configured_value_is_read(self, tmp_path, monkeypatch) -> None:
-        import json
+    def test_automatic_default_survives_unrelated_full_config_save(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.config.loader import _invalidate_config_cache
 
+        monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+        _invalidate_config_cache()
+        try:
+            assert load_loop_stall_exit_after({"KIROCREW_SERVICE_MANAGED": "1"}) == 90
+            cfg = KiroCrewConfig.load()
+            assert cfg.dashboard.loop_stall_exit_after_secs is None
+            cfg.save()
+            saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+            assert saved["dashboard"]["loop_stall_exit_after_secs"] is None
+            assert load_loop_stall_exit_after({"KIROCREW_SERVICE_MANAGED": "1"}) == 90
+            assert load_loop_stall_exit_after({}) == 25
+        finally:
+            _invalidate_config_cache()
+
+    def test_schema_explains_the_automatic_launch_class_defaults(self) -> None:
+        from kiro_crew.config.schema import SCHEMA_REGISTRY
+
+        entry = next(
+            item for item in SCHEMA_REGISTRY if item.path == "dashboard.loop_stall_exit_after_secs"
+        )
+        assert entry.nullable is True
+        assert entry.default_value is None
+        assert "25 seconds" in entry.help
+        assert "90 seconds" in entry.help
+
+    def test_legacy_materialized_desktop_default_is_reported_not_rewritten(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.config.loader import _invalidate_config_cache
+
+        (tmp_path / "config.json").write_text(
+            json.dumps({"dashboard": {"loop_stall_exit_after_secs": 25}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+        _invalidate_config_cache()
+        try:
+            assert KiroCrewConfig.load().dashboard.loop_stall_exit_after_secs == 25
+            assert load_loop_stall_exit_after({"KIROCREW_SERVICE_MANAGED": "1"}) == 25
+            saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+            assert saved["dashboard"]["loop_stall_exit_after_secs"] == 25
+        finally:
+            _invalidate_config_cache()
+
+    def test_explicit_desktop_default_is_preserved_for_managed_service(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.config.loader import _invalidate_config_cache
+
+        (tmp_path / "config.json").write_text(
+            json.dumps({"dashboard": {"loop_stall_exit_after_secs": 25}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+        _invalidate_config_cache()
+        try:
+            assert KiroCrewConfig.load().dashboard.loop_stall_exit_after_secs == 25
+            assert load_loop_stall_exit_after({"KIROCREW_SERVICE_MANAGED": "1"}) == 25
+        finally:
+            _invalidate_config_cache()
+
+    def test_local_operator_budget_overrides_base_and_managed_default(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        (tmp_path / "config.json").write_text(
+            json.dumps({"dashboard": {"loop_stall_exit_after_secs": 25}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "config.local.json").write_text(
+            json.dumps({"dashboard": {"loop_stall_exit_after_secs": 60}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+
+        assert load_loop_stall_exit_after({"KIROCREW_SERVICE_MANAGED": "1"}) == 60
+
+    def test_configured_value_is_read(self, tmp_path, monkeypatch) -> None:
         from kiro_crew.config.loader import _invalidate_config_cache
 
         cfg_dir = tmp_path / "cfgdir"

@@ -39,8 +39,10 @@ fed by the async heartbeat calling :meth:`LoopStallWatchdog.beat` every tick:
 2. **Soft observability dump (the daemon-thread fallback).**  A separate daemon
    thread compares the last beat against the clock and, once the loop has not
    beaten for ``stall_after`` seconds, logs a marker and dumps all thread stacks
-   *without* exiting, re-arming on recovery.  This is the fallback used when the
-   armed timer is disabled (``exit_after=None``) or could not be armed.
+   *without* exiting, re-arming on recovery. When the hard timer is active this
+   stays on stderr so a recovered stall is not classified as a fatal crash. If
+   the hard timer is disabled or could not be armed, the soft dump also goes to
+   the dedicated file because no later fatal capture can make it discoverable.
 
 The daemon thread keeps running even when the loop thread is blocked in the
 kernel — CPython releases the GIL around blocking syscalls such as ``close()`` /
@@ -56,53 +58,27 @@ from __future__ import annotations
 
 import faulthandler
 import logging
-import os
 import sys
 import threading
 import time
 import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from kiro_crew.dashboard.stall_enrichment import collect_stall_enrichment
 
 logger = logging.getLogger("kiro_crew.dashboard.loop_watchdog")
 
-_MANAGED_SERVICE_ENV = "KIROCREW_SERVICE_MANAGED"
-_DIRECT_EXIT_AFTER_DEFAULT = 25.0
-_MANAGED_EXIT_AFTER_DEFAULT = 90.0
-
-
-def resolve_exit_after(
-    configured_budget: float,
-    environ: Mapping[str, str] | None = None,
-) -> float:
-    """Widen the unchanged default for managed services.
-
-    Newly rendered systemd and launchd definitions carry an explicit marker.
-    ``INVOCATION_ID`` also recognizes systemd units installed by an older
-    Kiro Crew version, so upgrading the package fixes their policy without
-    requiring a service re-install. Any non-default configured budget is an
-    operator choice and is preserved on every launch path.
-    """
-    source = os.environ if environ is None else environ
-    managed = source.get(_MANAGED_SERVICE_ENV) == "1" or bool(source.get("INVOCATION_ID"))
-    if managed and configured_budget == _DIRECT_EXIT_AFTER_DEFAULT:
-        return _MANAGED_EXIT_AFTER_DEFAULT
-    return configured_budget
-
 
 def _default_dump(file: "typing.IO[str] | typing.Any | None" = None) -> None:
-    """Dump every thread's stack to a dedicated file AND stderr.
+    """Dump every thread's stack to a dedicated file and stderr.
 
-    Writes to both the dedicated crash-dump file (for discoverability) and stderr
-    (for journal/terminal visibility) so dumps are never lost.
-
-    *file* can be any object with a ``fileno()`` method (including
-    :class:`~kiro_crew.dashboard.crash_dump_store.DumpFile`).
+    The caller passes ``dump_file`` only when no authoritative hard-exit timer
+    is armed. That keeps soft-only failures discoverable by ``doctor`` while a
+    recoverable pre-exit dump in a managed service remains journal-only and
+    cannot masquerade as a fatal crash at the next clean startup.
     """
     target = file or sys.stderr
     faulthandler.dump_traceback(file=target, all_threads=True)
-    # Also write to stderr if the target is a different file
     if target is not sys.stderr:
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
 
@@ -166,15 +142,14 @@ class LoopStallWatchdog:
             ``None`` disables the armed timer (only the soft dump remains).
         poll_interval: How often the daemon thread evaluates liveness.
         now: Monotonic clock, injectable for tests.
-        dump: Soft stack-dump callback, injectable for tests.  Defaults to
-            ``faulthandler.dump_traceback(all_threads=True)``.
+        dump: Soft stack-dump callback, injectable for tests. By default a
+            soft dump is stderr-only while the hard timer is armed, otherwise
+            it is written to both ``dump_file`` and stderr.
         arm_later: Arms the C-level dump-then-exit timer for N seconds,
             injectable for tests so they never arm a real process-killing timer.
             Defaults to :func:`_default_arm_later`.
         cancel_later: Cancels the armed timer, injectable for tests.  Defaults
             to :func:`_default_cancel_later`.
-        environ: Process environment used to identify a managed service,
-            injectable for deterministic tests. Defaults to :data:`os.environ`.
         enrich_after: Seconds of heartbeat silence before the daemon thread
             emits stall enrichment (stall UTC timestamp + this process's
             established TCP sockets with rx/tx queue depths) to the logger at
@@ -206,16 +181,13 @@ class LoopStallWatchdog:
         enrich_after: float = 15.0,
         enrich: "Callable[[float], list[str]] | None" = None,
         log: logging.Logger | None = None,
-        environ: Mapping[str, str] | None = None,
     ) -> None:
         self._stall_after = stall_after
-        self._exit_after = (
-            None if exit_after is None else resolve_exit_after(exit_after, environ)
-        )
+        self._exit_after = exit_after
         self._poll_interval = poll_interval
         self._now = now
         self._dump_file = dump_file
-        self._dump = dump or (lambda: _default_dump(dump_file))
+        self._dump = dump
         self._arm_later = arm_later or (lambda t: _default_arm_later(t, dump_file))
         self._cancel_later = cancel_later or _default_cancel_later
         self._enrich_after = enrich_after
@@ -244,8 +216,22 @@ class LoopStallWatchdog:
         if self._later_active and self._exit_after is not None:
             try:
                 self._cancel_later()
+            except Exception:  # pragma: no cover - never let petting crash the loop
+                # Cancellation failed, so the previous timer may still own the
+                # crash file.  Keep the active flag rather than creating a
+                # competing soft sentinel on that uncertain path.
+                self._log.exception(
+                    "loop watchdog failed to cancel dump_traceback_later before re-arm"
+                )
+                return
+            try:
                 self._arm_later(self._exit_after)
             except Exception:  # pragma: no cover - never let petting crash the loop
+                # Cancellation succeeded but no replacement timer exists.  The
+                # soft watchdog must now write the discoverable file as well as
+                # stderr; leaving this true would silently lose both the hard
+                # exit and its crash artifact on the next stall.
+                self._later_active = False
                 self._log.exception(
                     "loop watchdog failed to re-arm dump_traceback_later"
                 )
@@ -293,7 +279,17 @@ class LoopStallWatchdog:
                     silence,
                 )
                 try:
-                    self._dump()
+                    if self._dump is not None:
+                        self._dump()
+                    elif self._later_active:
+                        # A managed service may recover before its wider hard
+                        # deadline. Keep that diagnostic in the journal; the
+                        # armed timer owns the fatal crash-sentinel file.
+                        _default_dump()
+                    else:
+                        # No hard timer can create a discoverable artifact, so
+                        # retain the soft-only dump in the dedicated file too.
+                        _default_dump(self._dump_file)
                 except Exception:  # pragma: no cover - dump must never crash the watchdog
                     self._log.exception("loop watchdog stack dump failed")
                 return True

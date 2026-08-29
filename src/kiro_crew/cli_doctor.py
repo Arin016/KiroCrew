@@ -983,6 +983,20 @@ def _doctor_data_home() -> None:
     )
 
 
+def _doctor_managed_service_policy(issues: list[str]) -> None:
+    """Surface installed service definitions that predate launch-class policy."""
+    state = service_controller.installed_service_has_managed_marker()
+    if state is None:
+        return
+    print("\nManaged Service")
+    if state:
+        print("  watchdog:    ✅ managed-service policy marker installed")
+        return
+    print("  watchdog:    ⚠️  installed definition predates managed-service defaults")
+    print("               Fix: run `kirocrew service install` once, then restart the service")
+    issues.append("managed service definition is outdated")
+
+
 def _doctor_path_launcher() -> None:
     """Report which install the ``kirocrew`` command on PATH actually belongs to.
 
@@ -2602,6 +2616,9 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
 
     # ── Stored defaults a release has since changed (#5244) ──
     render_doctor_section(issues)
+
+    # ── Installed services must carry the launch-class marker (#6651) ──
+    _doctor_managed_service_policy(issues)
 
     # ── Data Home (+ leftover legacy home) ──
     _doctor_data_home()
