@@ -564,7 +564,10 @@ log.flush()
         signing fine.
         """
         legacy = tmp_path / kiro_crew_sel._HMAC_KEY_FILE
-        legacy.write_bytes(os.urandom(64))
+        # Windows' CRT text mode treats a trailing 0x1A as DOS EOF. Keep this
+        # input deterministic so opening the binary key as a lock can never
+        # regress to text mode and silently truncate its final byte.
+        legacy.write_bytes(b"k" * 63 + b"\x1a")
         trust = tmp_path / kiro_crew_sel._TRUST_SUBDIR
 
         real_mkdir = Path.mkdir
