@@ -522,7 +522,19 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         # path (steer is unavailable between stages, so it falls through to the
         # queue below and is held until the plan ends).
         if body.get("steer") and not request_app:
-            outcome = await steer_into_running_turn(state, slot, message)
+            # Client-minted send correlation id (the same `meta.sendId`
+            # convention the plain send path persists): thread it through the
+            # steer so the persisted row and the steer_push echo can be matched
+            # back to the optimistic bubble by id rather than by text (#6075).
+            # Raw client input — the sink (`normalize_send_id` at the top of
+            # `steer_into_running_turn`) type-checks and length-bounds it,
+            # treating anything unusable as absent (the old-client shape).
+            outcome = await steer_into_running_turn(
+                state,
+                slot,
+                message,
+                send_id=user_meta.get("sendId") if user_meta else None,
+            )
             if outcome == STEER_STEERED:
                 return web.json_response({"ok": True, "steered": True})
             if outcome == STEER_REQUEUED:
