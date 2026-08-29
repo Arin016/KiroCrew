@@ -2735,6 +2735,110 @@ async def test_dispatch_usage_update():
         await _stop_reader(task)
 
 
+@pytest.mark.asyncio
+async def test_dispatch_cost_and_prompt_tokens_reach_event_complete():
+    """claude seam billing: a session-cumulative usage_update cost and the
+    PromptResponse token counts are delta'd/folded into last_prompt_stats and
+    surfaced on EVENT_COMPLETE.usage — the wiring issue #6750 adds. Two turns
+    prove the delta: turn 2 is billed only its own movement of the cumulative
+    counter, and its own token counts."""
+    from kiro_crew.acp.types import EVENT_COMPLETE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+
+        async def run_turn(cost_amount, input_tokens, output_tokens):
+            events: list = []
+
+            async def drive():
+                async for ev in handle.prompt("hi", timeout=3.0):
+                    events.append(ev)
+
+            driver = asyncio.ensure_future(drive())
+            req_id = (await _await_routed(rt, "sA"))["sA"]
+            _feed(
+                reader,
+                {
+                    "method": METHOD_SESSION_UPDATE,
+                    "params": {
+                        "sessionId": "sA",
+                        "update": {
+                            "sessionUpdate": "usage_update",
+                            "used": 5000,
+                            "size": 10000,
+                            "cost": {"amount": cost_amount, "currency": "USD"},
+                        },
+                    },
+                },
+            )
+            _feed(
+                reader,
+                {
+                    "id": req_id,
+                    "result": {
+                        "stopReason": "end_turn",
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
+                        "cachedReadTokens": 7,
+                        "cachedWriteTokens": 3,
+                    },
+                },
+            )
+            await asyncio.wait_for(driver, timeout=3.0)
+            (complete,) = [ev for ev in events if ev.kind == EVENT_COMPLETE]
+            return complete
+
+        first = await run_turn(0.30, 100, 50)
+        assert first.usage.cost_usd == pytest.approx(0.30)
+        assert first.usage.input_tokens == 100
+        assert first.usage.output_tokens == 50
+        assert first.usage.cache_read_tokens == 7
+        assert first.usage.cache_creation_tokens == 3
+
+        # Turn 2: the cumulative counter moved 0.30 -> 0.50, so this turn's
+        # cost is the 0.20 delta, and the token counts are its own, not a sum.
+        second = await run_turn(0.50, 40, 20)
+        assert second.usage.cost_usd == pytest.approx(0.20)
+        assert second.usage.input_tokens == 40
+        assert second.usage.output_tokens == 20
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [
+        "0.5",  # cost not dict-shaped
+        {"amount": "0.5"},
+        {"amount": True},
+        {"amount": float("nan")},
+        {"amount": -0.01},
+        {"amount": 10**400},
+    ],
+)
+def test_handle_update_malformed_cost_is_noop(cost):
+    """A malformed agent-supplied cost must degrade to absent at the
+    parse_usage_cost chokepoint — no exception inside the prompt-turn dispatch
+    path, and no stats movement."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    msg = JsonRpcMessage(
+        method=METHOD_SESSION_UPDATE,
+        params={
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "usage_update", "used": 1, "size": 2, "cost": cost},
+        },
+    )
+    events = handle._handle_update(msg)  # must not raise
+    assert events == []
+    assert handle.last_prompt_stats.cost_usd == 0.0
+    assert handle.last_prompt_stats.cost_session_usd == 0.0
+
+
 @pytest.mark.parametrize(
     "used,size",
     [
