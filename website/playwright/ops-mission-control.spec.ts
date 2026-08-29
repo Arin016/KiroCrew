@@ -117,18 +117,47 @@ async function clickSegment(page: Page, name: string): Promise<void> {
   // `workers: 1`.
   // `SegmentedControl` has THREE responsive modes: `full` and `compact` both render one
   // title'd button per segment (compact just hides the label text), while `dropdown` shows a
-  // single trigger + chevron and mounts the segment buttons only when opened. So: if the
-  // segment's title button is already attached, click it (covers full AND compact — the
-  // compact case is what a seeded incident widens the header into, and the earlier `isVisible`
-  // gate wrongly rejected it because the label span is hidden). Otherwise open the dropdown
-  // and wait for the segment to mount. Scoped to `getByTitle` so the app sidebar's own
-  // like-named buttons never match.
+  // single trigger + chevron and mounts the segment buttons only when opened. Scoped to
+  // `getByTitle` so the app sidebar's own like-named buttons never match.
+  //
+  // The subtlety that made this flake is that the mode is decided ASYNCHRONOUSLY. The control
+  // mounts in `full` (title'd buttons present, no chevron), then a `useEffect` + `ResizeObserver`
+  // measures the parent and may flip to `dropdown` (title'd buttons unmounted, chevron mounted).
+  // A seeded incident widens the board and drives that flip, and the observer can fire several
+  // times as layout settles, so the two forms briefly co-exist or briefly BOTH vanish for a
+  // frame. The previous helper sampled `getByTitle(...).count()` ONCE and branched irrevocably:
+  // if it happened to sample during that settling window it read 0, took the chevron path, and
+  // then waited 10s for a chevron that the settled `full`-mode control does not have — the
+  // deterministic timeout seen on `:532`/`:797` under the shared, board-widened gateway.
+  //
+  // Fix: never decide from a single sample. Wait for the control to reach a STABLE actionable
+  // state (either the title'd segment is attached, or the dropdown trigger is), then act on
+  // whichever it settled into — re-checking after opening the dropdown so a late flip back to
+  // `full` is handled by clicking the now-present title'd button instead of failing.
   const segment = page.getByTitle(name, { exact: true })
-  if ((await segment.count()) === 0) {
-    await page.locator('button:has(svg.lucide-chevron-down)').first().click()
-    await expect(segment.first()).toBeVisible({ timeout: 10000 })
-  }
-  await segment.first().click()
+  const chevron = page.locator('button:has(svg.lucide-chevron-down)')
+
+  // Gate on a settled control: retries until the segment OR the chevron trigger is present,
+  // absorbing the ResizeObserver settling window instead of racing it.
+  await expect(segment.or(chevron).first()).toBeAttached({ timeout: 15000 })
+
+  // Detect-and-act ATOMICALLY, retried as one unit. A single-sample branch here would still
+  // race the full→dropdown flip: the `.or()` gate can resolve on the initial `full`-mode
+  // segment BEFORE the ResizeObserver collapse, and a once-sampled `count() === 0` check then
+  // skips the dropdown branch while the final click waits on title'd buttons the settled
+  // `dropdown`-mode control never remounts — the mirror image of the flake this helper fixes.
+  // `toPass()` re-runs the whole decide-open-click sequence until one path lands, so BOTH flip
+  // directions are absorbed (Design review).
+  await expect(async () => {
+    if ((await segment.count()) === 0) {
+      // Dropdown mode: open it, then require the segment to mount. If the control flipped
+      // back to `full` in the meantime the chevron is gone; the click is best-effort and the
+      // segment assertion is the real gate.
+      await chevron.first().click().catch(() => {})
+      await expect(segment.first()).toBeVisible({ timeout: 2000 })
+    }
+    await segment.first().click({ timeout: 2000 })
+  }).toPass({ timeout: 15000 })
 }
 
 /**
