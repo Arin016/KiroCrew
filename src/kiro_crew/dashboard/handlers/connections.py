@@ -578,7 +578,6 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "ok": True,
-            "disconnected": slug,
             "grantRemoved": bool(removed),
             "grantSurviving": surviving,
             "entryRemoved": scope.entry_removed,

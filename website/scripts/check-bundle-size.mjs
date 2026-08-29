@@ -43,9 +43,9 @@ export const CHUNK_BUDGETS = {
   // ceiling catches is a NEW library or surface landing in the catalog chunk.
   // The built-in App Store guidance adds one use-case and one configuration
   // string for each of 23 apps across all 12 shipped catalogs. The Dev Fleet
-  // closed-PR prune group adds five user-visible strings across the same 12
-  // catalogs, which is the last increment that pushed this past 9750 KB.
-  all: 9800 * KB, // measured 9758 KB after Dev Fleet closed-PR prune catalog keys
+  // closed-PR prune group and the expanded Disconnect guidance are the largest
+  // recent catalog increments included in this measurement.
+  all: 10490 * KB, // measured 9985 KB (~5% headroom)
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because
