@@ -1049,16 +1049,37 @@ _PROXY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~:@!$&'()*+,;=-]+$")
 # The peer surface the proxy will forward, as canonical segment prefixes — a
 # positive ALLOWLIST, one named prefix per row. The proxy carries the
 # remote-crew chat view and nothing else, so only the peer's `api/chat`
-# subtree is reachable (a prefix grant: every route under it, including
-# mutating ones — that breadth is the chat feature's own wire surface).
+# subtree and its `api/stream` event feed are reachable (each a prefix grant:
+# every route under it, including mutating ones — that breadth is the chat
+# feature's own wire surface).
 # Everything outside the named prefixes is refused — including the peer's own
 # `api/instances` control plane (no chaining a hub through a peer into a
 # third machine) and the peer's token-minting routes, whose JSON replies
 # would otherwise carry a minted peer credential back through the hub
-# in-band. When the event-stream view lands, its `("api", "ws")` row is added
-# HERE explicitly, never by widening the policy back to deny-only. The
-# constant's exact value and row shape are pinned by tests.
-_PROXY_ALLOWED_PREFIXES: tuple[tuple[str, ...], ...] = (("api", "chat"),)
+# in-band.
+#
+# `api/stream` is the peer's own SSE broadcast endpoint (its `api_stream`
+# handler), the out-of-turn half of the chat view: the per-turn reply streams
+# back from `api/chat`, while session-list and slot-state changes arrive here.
+# It is deliberately SSE and not the sibling `api/ws`: a WebSocket row would
+# need a `101 Switching Protocols` to cross this proxy, and the reply
+# content-type gate below exists precisely to stop a peer serving anything but
+# JSON/SSE onto the authenticated hub origin — an upgrade would tunnel straight
+# through it. A GET returning `text/event-stream` needs no such exception.
+#
+# Note what this row admits: that feed is per-CLIENT but not per-slot, so a hub
+# holding it receives the peer's whole notification/slot broadcast, not only the
+# session on screen. That is peer content crossing to a hub user who is already
+# the peer's owner (this route is owner-only), so it widens VOLUME, not
+# privilege — but it is the reason this is a named row rather than a blanket
+# `api/` grant.
+#
+# A new prefix is added HERE explicitly, never by widening the policy back to
+# deny-only. The constant's exact value and row shape are pinned by tests.
+_PROXY_ALLOWED_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("api", "chat"),
+    ("api", "stream"),
+)
 
 # Derived from the allowlist so the refusal (and its SEL audit line) stays
 # honest as rows are added.
