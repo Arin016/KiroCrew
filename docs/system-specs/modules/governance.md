@@ -2508,7 +2508,7 @@ carve-out stay as code. It expects `CONTRACT_VERSION == 1` (pinned pre-launch).
 - `dashboard/handlers/security.py` — `GET /api/governance/policy` (posture-only
   serialization).
 - chokepoints: `sandbox.py`, `mcp_cron.py`, `subagent.py`, `mcp_core.py`,
-  `computer_use/gate.py` (`require_computer_use` fail-closed +
+  `computer_use/gate.py` (`require_computer_use` audit-only +
   `apply_observation_ceiling`).
 - `cli.py` / `cli_commands.py` — the `policy` command.
 
