@@ -95,6 +95,27 @@ const COMPLETION_KEEP_CHARS_MIN = 0
 const COMPLETION_KEEP_CHARS_MAX = 512000
 const COMPLETION_KEEP_CHARS_DEFAULT = 3000
 
+/**
+ * Shape of the ['kirocrewConfig'] query cache, reused for the optimistic
+ * getQueryData/setQueryData generics so the nested writes below are
+ * type-checked against the same structure the query returns.
+ */
+type KiroConfig = {
+  session?: { autocompact_pct?: number }
+  session_summary?: { enabled?: boolean }
+  agent?: {
+    model?: string
+    role_models?: { background?: string; subagent?: string }
+    role_efforts?: { background?: string; subagent?: string }
+    reasoning_effort?: string
+    soft_stop_budget_secs?: number
+    completion_keep?: CompletionKeepMode
+    completion_keep_chars?: number
+    fallback_model?: string
+  }
+  dashboard?: { user_role?: string; user_role_other?: string; user_technical_level?: string; prevent_sleep?: boolean }
+}
+
 export function ChatPanel() {
   const qc = useQueryClient()
   const [chatCfg, setChatCfg] = useState<ChatConfig>(loadChatConfig)
@@ -149,25 +170,28 @@ export function ChatPanel() {
   })
 
   // ── KiroCrew config (server-side) ──
-  const mcQ = useQuery<{
-    session?: { autocompact_pct?: number }
-    session_summary?: { enabled?: boolean }
-    agent?: {
-      model?: string
-      role_models?: { background?: string; subagent?: string }
-      role_efforts?: { background?: string; subagent?: string }
-      reasoning_effort?: string
-      soft_stop_budget_secs?: number
-      completion_keep?: CompletionKeepMode
-      completion_keep_chars?: number
-      fallback_model?: string
-    }
-    dashboard?: { user_role?: string; user_role_other?: string; user_technical_level?: string; prevent_sleep?: boolean }
-  }>({
+  const mcQ = useQuery<KiroConfig>({
     queryKey: ['kirocrewConfig'],
     queryFn: () => api.kirocrewConfig(),
   })
   const mcCfg = mcQ.data
+
+  // Shared optimistic-write helper for the Model-section selectors. Mirrors
+  // DisplayPanel's tintMut/shellMut onMutate: cancel the in-flight config
+  // query, snapshot prev, apply a caller-provided mutator to a structuredClone,
+  // write it back, and return { prev } so onError can roll back. Keeping this
+  // in one place avoids seven hand-written clone blocks drifting apart.
+  const optimisticConfig = useCallback(
+    async (mutate: (next: KiroConfig) => void): Promise<{ prev: KiroConfig | undefined }> => {
+      await qc.cancelQueries({ queryKey: ['kirocrewConfig'] })
+      const prev = qc.getQueryData<KiroConfig>(['kirocrewConfig'])
+      const next = structuredClone(prev ?? {})
+      mutate(next)
+      qc.setQueryData(['kirocrewConfig'], next)
+      return { prev }
+    },
+    [qc],
+  )
 
   // ── User profile (About You) ──
   // Same slugs as onboarding step 2 (OnboardingFlow.tsx), validated by the
@@ -248,13 +272,18 @@ export function ChatPanel() {
   const fallbackModel = mcCfg?.agent?.fallback_model ?? 'auto'
   const fallbackMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.fallback_model', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: (err: unknown) => {
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = { ...(next.agent ?? {}), fallback_model: v }
+      }),
+    onError: (err: unknown, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
       // Surface the backend's actual deny reason (e.g. an unentitled id)
       // next to the generic failure line.
       const reason = err instanceof Error && err.message ? `: ${err.message}` : ''
       setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_fallback_model') + reason)
     },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
   const fallbackModelOptions = (current: string): string[] => {
     const opts = ['', 'auto', ...availableModels.map(m => m.name).filter(m => m !== 'auto')]
@@ -312,8 +341,15 @@ export function ChatPanel() {
 
   const defaultModelMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.model', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_default_model')),
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = { ...(next.agent ?? {}), model: v }
+      }),
+    onError: (_err, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
+      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_default_model'))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
 
   const defaultEffort = mcCfg?.agent?.reasoning_effort ?? ''
@@ -323,8 +359,15 @@ export function ChatPanel() {
   const effortSupported = modelSupportsEffort(defaultModel)
   const defaultEffortMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.reasoning_effort', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_default_reasoning_effort')),
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = { ...(next.agent ?? {}), reasoning_effort: v }
+      }),
+    onError: (_err, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
+      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_default_reasoning_effort'))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
 
   // ── Per-role model defaults (agent.role_models) ──
@@ -347,13 +390,33 @@ export function ChatPanel() {
     opts.map(m => (m === 'auto' ? i18nT('pages.settings.chatPanel.role_model_auto') : m))
   const backgroundModelMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_models.background', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_model')),
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = {
+          ...(next.agent ?? {}),
+          role_models: { ...(next.agent?.role_models ?? {}), background: v },
+        }
+      }),
+    onError: (_err, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
+      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_model'))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
   const subagentModelMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_models.subagent', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_model')),
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = {
+          ...(next.agent ?? {}),
+          role_models: { ...(next.agent?.role_models ?? {}), subagent: v },
+        }
+      }),
+    onError: (_err, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
+      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_model'))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
 
   // Per-role reasoning effort, paired with each role's model. Empty inherits the
@@ -373,13 +436,33 @@ export function ChatPanel() {
   const effortLabels = EFFORT_LEVELS.map(l => (l === '' ? i18nT('pages.settings.chatPanel.model_default') : effortLabel(l)))
   const backgroundEffortMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_efforts.background', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_effort')),
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = {
+          ...(next.agent ?? {}),
+          role_efforts: { ...(next.agent?.role_efforts ?? {}), background: v },
+        }
+      }),
+    onError: (_err, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
+      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_effort'))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
   const subagentEffortMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_efforts.subagent', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_effort')),
+    onMutate: (v: string) =>
+      optimisticConfig(next => {
+        next.agent = {
+          ...(next.agent ?? {}),
+          role_efforts: { ...(next.agent?.role_efforts ?? {}), subagent: v },
+        }
+      }),
+    onError: (_err, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['kirocrewConfig'], ctx.prev)
+      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_effort'))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
   })
 
   // ── Local chat config (localStorage) ──
