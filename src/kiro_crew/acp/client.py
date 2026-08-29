@@ -41,7 +41,9 @@ from kiro_crew.acp._dispatch import (
     derive_edit_diff,
     extract_tool_purpose,
     make_unified_diff,
+    parse_prompt_token_usage,
     parse_session_modes,
+    parse_usage_cost,
     parse_usage_update,
     redact_text,
 )
@@ -108,7 +110,6 @@ from kiro_crew.acp.types import (
     AcpPromptStats,
     JsonRpcMessage,
     JsonRpcRequest,
-    TurnUsage,
 )
 from kiro_crew.agent import ensure_agent_materialized
 from kiro_crew.browser_cli.launch import browser_session_env, browser_socket_env
@@ -3210,6 +3211,13 @@ class AcpClient:
         # replacement process, so release it with the oracle it sampled into.
         self._retire_liveness_state()
         self._session_id = None
+        # The adapter's cumulative cost counter is in-process: a replacement
+        # process restarts it at zero, so the delta baseline must restart with
+        # it or spend up to the old total is silently dropped — the monotonic
+        # guard only catches a counter that has NOT yet caught back up to the
+        # stale baseline. The current turn's already-billed delta is kept;
+        # carry_over() zeroes it at the next turn boundary.
+        self.last_prompt_stats.cost_session_usd = 0.0
         self._buffer.clear()
         self._stderr_lines.clear()
         if self._stderr_task and not self._stderr_task.done():
@@ -4425,6 +4433,7 @@ class AcpClient:
                     result = msg.result or {}
                     if isinstance(result, dict):
                         reason = result.get("stopReason", "") or ""
+                    self._track_prompt_usage(result)
                     self._last_stop_reason = reason
                     self._turn_done.set()
                     return
@@ -4519,6 +4528,7 @@ class AcpClient:
                 reason = ""
                 if isinstance(result, dict):
                     reason = result.get("stopReason", "") or ""
+                self._track_prompt_usage(result)
                 if extract_agent_from_result and isinstance(result, dict):
                     # commands/execute returns output in result fields,
                     # not via session/update chunks — yield as text.
@@ -4544,7 +4554,7 @@ class AcpClient:
                 yield AcpEvent(
                     kind=EVENT_COMPLETE,
                     stop_reason=reason,
-                    usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                    usage=self.last_prompt_stats.to_turn_usage(),
                 )
                 return
             if action == "error":
@@ -4576,7 +4586,7 @@ class AcpClient:
                             yield tr_event
                         yield AcpEvent(
                             kind=EVENT_COMPLETE,
-                            usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                            usage=self.last_prompt_stats.to_turn_usage(),
                         )
                         return
                 tool_event = self._extract_tool_event(msg)
@@ -4790,7 +4800,7 @@ class AcpClient:
                 yield AcpEvent(
                     kind=EVENT_COMPLETE,
                     stop_reason=STOP_REASON_COMPACTION_FAILED,
-                    usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                    usage=self.last_prompt_stats.to_turn_usage(),
                 )
                 return
             # If text was streamed, this is a stale turn (kiro-cli finished
@@ -4804,7 +4814,7 @@ class AcpClient:
                 yield AcpEvent(
                     kind=EVENT_COMPLETE,
                     stop_reason=STOP_REASON_END_TURN,
-                    usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                    usage=self.last_prompt_stats.to_turn_usage(),
                 )
                 return
             raise AcpTimeoutError()
@@ -5052,6 +5062,7 @@ class AcpClient:
                 result = msg.result or {}
                 if isinstance(result, dict):
                     reason = result.get("stopReason", "") or ""
+                self._track_prompt_usage(result)
                 self._last_stop_reason = reason
                 self._turn_done.set()
                 return "".join(output)
@@ -5182,10 +5193,29 @@ class AcpClient:
                 self.last_prompt_stats.note_pct_reported()
             else:
                 logger.debug("usage_update missing used/size: %s", update)
+            # Session-cumulative billing cost (claude seam); kiro never sends
+            # the key so this is None on the kiro path. Delta'd per turn on
+            # the stats object (monotonic guard lives there).
+            cost = parse_usage_cost(update)
+            if cost is not None:
+                self.last_prompt_stats.apply_cost_cumulative(cost)
         elif kind == UPDATE_CONFIG_OPTION:
             self._handle_config_option_update(msg)
         elif self._is_claude and kind and kind not in KNOWN_SESSION_UPDATES:
             logger.debug("Unhandled session update type: %s", kind)
+
+    def _track_prompt_usage(self, result: Any) -> None:
+        """Fold a PromptResponse's turn-scoped token counts into the stats.
+
+        The claude-agent-acp adapter reports per-turn token counts on the
+        prompt response; kiro-cli's response carries only ``stopReason``, so
+        ``parse_prompt_token_usage`` returns None there and the stats are
+        untouched (harness parity). Validation lives at that shared
+        chokepoint, mirroring ``_track_usage_update``.
+        """
+        tokens = parse_prompt_token_usage(result)
+        if tokens is not None:
+            self.last_prompt_stats.apply_prompt_token_usage(*tokens)
 
     async def _maybe_audit_tool_call(self, tool_event: "AcpEvent") -> None:
         """Emit a per-tool-call SEL audit for clients with no external audit loop.

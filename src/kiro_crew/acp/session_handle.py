@@ -32,8 +32,10 @@ from kiro_crew.acp._dispatch import (
     build_permission_event,
     classify_notification,
     parse_metadata,
+    parse_prompt_token_usage,
     parse_session_update,
     parse_text_chunk,
+    parse_usage_cost,
     parse_usage_update,
     redact_text,
     reject_option_id,
@@ -108,7 +110,6 @@ from kiro_crew.acp.types import (
     AcpEvent,
     AcpPromptStats,
     JsonRpcMessage,
-    TurnUsage,
 )
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
@@ -1989,7 +1990,7 @@ class AcpSessionHandle:
                         yield AcpEvent(
                             kind=EVENT_COMPLETE,
                             stop_reason=STOP_REASON_COMPACTION_FAILED,
-                            usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                            usage=self.last_prompt_stats.to_turn_usage(),
                         )
                         return
 
@@ -2023,7 +2024,7 @@ class AcpSessionHandle:
                             self._session_id, self._cancel_grace_secs,
                         )
                         yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_STALE_RECOVER,
-                                       usage=TurnUsage(credits=self.last_prompt_stats.credits))
+                                       usage=self.last_prompt_stats.to_turn_usage())
                         return
                     logger.warning(
                         "Cancel unacked after %.1fs on session %s — unblocking caller "
@@ -2031,7 +2032,7 @@ class AcpSessionHandle:
                         self._cancel_grace_secs, self._session_id,
                     )
                     yield AcpEvent(kind=EVENT_COMPLETE, stop_reason="error: cancel unacked",
-                                   usage=TurnUsage(credits=self.last_prompt_stats.credits))
+                                   usage=self.last_prompt_stats.to_turn_usage())
                     return
 
                 try:
@@ -2279,6 +2280,7 @@ class AcpSessionHandle:
                     reason = ""
                     if isinstance(result, dict):
                         reason = result.get("stopReason", "") or ""
+                    self._track_prompt_usage(result)
                     if self._stale_probe and reason == STOP_REASON_CANCELLED:
                         # Probe-ack reclassification (the non-lethal harness for
                         # every watchdog probe): kiro-cli acks session/cancel on a
@@ -2326,7 +2328,7 @@ class AcpSessionHandle:
                     self._tool_dispatched = False
                     self._turn_done.set()
                     yield AcpEvent(kind=EVENT_COMPLETE, stop_reason=reason,
-                                   usage=TurnUsage(credits=self.last_prompt_stats.credits))
+                                   usage=self.last_prompt_stats.to_turn_usage())
                     return
                 if msg.method is None and msg.id is not None:
                     # Response frame for a DIFFERENT req_id: a concurrent
@@ -2412,7 +2414,7 @@ class AcpSessionHandle:
                             self._tool_dispatched = False
                             self._turn_done.set()
                             yield AcpEvent(kind=EVENT_COMPLETE,
-                                           usage=TurnUsage(credits=self.last_prompt_stats.credits))
+                                           usage=self.last_prompt_stats.to_turn_usage())
                             return
                 elif action == "steer":
                     # Mid-turn steer lifecycle echo from kiro-cli (_session/steer).
@@ -2566,7 +2568,7 @@ class AcpSessionHandle:
             # tell this apart from a normal turn end.
             self._turn_done.set()
             yield AcpEvent(kind=EVENT_COMPLETE, stop_reason="timeout",
-                           usage=TurnUsage(credits=self.last_prompt_stats.credits))
+                           usage=self.last_prompt_stats.to_turn_usage())
         finally:
             for _m in _buffered:
                 self._queue.put_nowait(_m)
@@ -2771,8 +2773,20 @@ class AcpSessionHandle:
             title=(tool.title if tool else ""),
             tool_input=(tool.command if tool else ""),
             text=f"verdict={verdict}; idle_secs={int(idle)}; {evidence}",
-            usage=TurnUsage(credits=self.last_prompt_stats.credits),
+            usage=self.last_prompt_stats.to_turn_usage(),
         )
+
+    def _track_prompt_usage(self, result: Any) -> None:
+        """Fold a PromptResponse's turn-scoped token counts into the stats.
+
+        Mirrors ``AcpClient._track_prompt_usage``: the claude-agent-acp adapter
+        reports per-turn token counts on the prompt response; kiro-cli's
+        response carries only ``stopReason``, so ``parse_prompt_token_usage``
+        returns None there and the stats are untouched (harness parity).
+        """
+        tokens = parse_prompt_token_usage(result)
+        if tokens is not None:
+            self.last_prompt_stats.apply_prompt_token_usage(*tokens)
 
     def _track_metadata(self, msg: JsonRpcMessage) -> None:
         """Capture per-turn context usage + kiro billing credits from _kiro.dev/metadata.
@@ -3338,6 +3352,12 @@ class AcpSessionHandle:
                         self.last_prompt_stats.note_pct_reported()
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
+            # Session-cumulative billing cost (claude seam); kiro never sends
+            # the key so this is None on the kiro path. Delta'd per turn on
+            # the stats object (monotonic guard lives there).
+            cost = parse_usage_cost(update)
+            if cost is not None:
+                self.last_prompt_stats.apply_cost_cumulative(cost)
             return []
 
         # config_option_update: ACP pushes updated configOptions (e.g. after
