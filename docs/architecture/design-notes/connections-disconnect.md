@@ -80,7 +80,7 @@ decided over an incomplete census, or acted on outside the lock that judged it:
 - **The census was incomplete.** Discovery merges exactly one agent spec
   (`kirocrew.json`), so a spec the user wrote by hand, or one an app materialized,
   was invisible — while kiro-cli authorizes from it and shares the pair the
-  endpoint names. `_spec_census` globs the whole agents directory alongside the
+  endpoint names. `spec_census` globs the whole agents directory alongside the
   `mcp.json` scopes, precisely because the specs that matter are the ones Kiro
   Crew does *not* own. An agent spec contributes sharers but is never a purge
   target: Kiro Crew does not own a user's agent file.
@@ -111,7 +111,7 @@ document that declares no entries read as empty. The purge acts only on
 *positive* evidence — a scope it read and matched — so an unreadable scope is
 simply not purged; refusing the whole request would leave the user unable to
 disconnect because of a file with nothing to do with this provider. This is also
-why `_spec_census` does not call `_load_mcp_json_by_source`: that function warns
+why `spec_census` does not call `_load_mcp_json_by_source`: that function warns
 and skips an unreadable source, which is right for a view and wrong for a
 destructive decision.
 
