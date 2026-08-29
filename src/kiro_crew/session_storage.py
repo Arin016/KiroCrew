@@ -79,6 +79,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, Any
 
 from kiro_crew import hooks, platform_compat
+from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.paths import (
     CONFIG_DIR_LEAF,
     KIRO_BASE_DIR_NAME,
@@ -1540,13 +1541,10 @@ def _summarize_manifest(batch: Path) -> tuple[dict[str, Any], int, int] | None:
 
 
 def _rewrite_manifest(batch: Path, header: dict[str, Any], entries: list[dict[str, Any]]) -> None:
-    """Replace a manifest atomically after a partial restore."""
-    tmp = batch / f"{MANIFEST_NAME}.tmp"
-    with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(header) + "\n")
-        for entry in entries:
-            handle.write(json.dumps(entry) + "\n")
-    os.replace(tmp, batch / MANIFEST_NAME)
+    """Replace and sync a manifest after a partial restore."""
+    header_line = json.dumps(header) + "\n"
+    entry_lines = "".join(json.dumps(entry) + "\n" for entry in entries)
+    atomic_write(batch / MANIFEST_NAME, header_line + entry_lines, fsync=True)
 
 
 def _entry_bytes(entry: dict[str, Any]) -> int:

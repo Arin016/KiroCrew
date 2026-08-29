@@ -765,6 +765,40 @@ class TestManifestPersistenceFailure:
         assert (crew_home / "sessions" / "dashboard_chat-1.jsonl").is_file()
         assert session_storage.list_trash() == []
 
+    def test_rewrite_fsyncs_before_publishing_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crash after publish must not expose manifest bytes still only in cache."""
+        from kiro_crew import atomic_write as atomic_write_module
+
+        batch = tmp_path / "batch"
+        batch.mkdir()
+        events: list[str] = []
+        real_fsync = atomic_write_module.os.fsync
+        real_replace = atomic_write_module.replace_with_retry
+
+        def tracking_fsync(fd: int) -> None:
+            events.append("fsync")
+            real_fsync(fd)
+
+        def tracking_replace(src: str | Path, dst: str | Path) -> None:
+            events.append("replace")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(atomic_write_module.os, "fsync", tracking_fsync)
+        monkeypatch.setattr(atomic_write_module, "replace_with_retry", tracking_replace)
+        header = {"schema": session_storage.MANIFEST_SCHEMA, "batch_id": "batch"}
+        entries = [{"uid": "aaaa1111", "files": []}]
+
+        session_storage._rewrite_manifest(batch, header, entries)
+
+        assert events.index("fsync") < events.index("replace")
+        manifest = batch / session_storage.MANIFEST_NAME
+        assert [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()] == [
+            header,
+            *entries,
+        ]
+
 
 class TestBatchIdentityIsTheDirectory:
     def test_a_header_naming_another_batch_is_not_offered(self, stores: tuple[Path, Path]) -> None:
