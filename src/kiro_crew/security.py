@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
 from kiro_crew.executors import maintenance_executor
+from kiro_crew.identity_stores import fenced_home_dirs
 from kiro_crew.sel import SecurityEvent, SecurityEventLog
 from kiro_crew.trust_patterns import ENV_ASSIGNMENT_RE
 from kiro_crew.vector_memory_constants import _contains_injection
@@ -4798,21 +4799,21 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     # The internal reader opens the DB read-only + SEL-audited (NOT via
     # is_sensitive_path), so it still works; the sandbox bind-mount list
     # (sandbox.py) is SEPARATE, so kiro-cli's own auth is unaffected.
-    ".local/share/kiro-cli",
-    ".local/share/amazon-q",
-    "Library/Application Support/kiro-cli",
-    "Library/Application Support/amazon-q",
-    # Windows layouts of the same stores. Current kiro-cli writes the local,
-    # non-roaming app-data directory (%LOCALAPPDATA% defaults to
-    # ~/AppData/Local); the Roaming entries cover layouts that used
-    # %APPDATA% (defaults to ~/AppData/Roaming). These matchers are
-    # home-anchored, so a profile redirected outside the home directory is not
-    # covered -- the default location is what agent file tools can reach by a
-    # fixed relative path.
-    "AppData/Local/kiro-cli",
-    "AppData/Local/amazon-q",
-    "AppData/Roaming/kiro-cli",
-    "AppData/Roaming/amazon-q",
+    # The identity-store directories come from the single canonical table
+    # (``identity_stores.IDENTITY_STORE_ROOTS``) so this fence and the five other
+    # readers cannot drift apart (#6352). The splice emits all eight in table
+    # order (``.local/share`` -> ``Library/Application Support`` ->
+    # ``AppData/Local`` -> ``AppData/Roaming``, kiro-cli before amazon-q), which
+    # is the exact order this list carried before the refactor -- a golden test
+    # freezes that the final list is unchanged.
+    #
+    # Windows layouts: current kiro-cli writes the local, non-roaming app-data
+    # directory (%LOCALAPPDATA% defaults to ~/AppData/Local); the Roaming entries
+    # cover layouts that used %APPDATA% (defaults to ~/AppData/Roaming). These
+    # matchers are home-anchored, so a profile redirected outside the home
+    # directory is not covered -- the default location is what agent file tools
+    # can reach by a fixed relative path.
+    *fenced_home_dirs(),
 ]
 
 # ── KiroCrew's own data-home secrets & governance trust-root ──
