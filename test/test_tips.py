@@ -1506,8 +1506,15 @@ class TestCuratedTips:
         ids = [t["id"] for t in tips]
         assert len(ids) == len(set(ids)), "curated tip ids must be unique"
         # A few known KiroCrew-native features must be present.
-        for expected in ("split-view", "command-palette", "warm-pool"):
+        for expected in ("split-view", "command-palette", "warm-pool", "secrets-vault"):
             assert expected in ids
+        # The secrets-vault tip routes to the Secrets settings tab.
+        by_id = {t["id"]: t for t in tips}
+        assert by_id["secrets-vault"]["action"] == {
+            "kind": "route",
+            "label": "Open Secrets settings",
+            "route": "/settings/secrets",
+        }
         for t in tips:
             for k in _TIP_ALLOWED_FIELDS:
                 assert isinstance(t.get(k), str), f"{t.get('id')}.{k} must be a string"
