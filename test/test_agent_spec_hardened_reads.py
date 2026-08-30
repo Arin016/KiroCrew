@@ -45,6 +45,7 @@ from kiro_crew.dashboard.handlers.agents import (
 )
 from kiro_crew.dashboard.handlers.mcp import (
     _collect_server_rows,
+    _find_server_spec_anywhere,
     _launch_specs_for,
     api_mcp_active,
 )
@@ -282,6 +283,245 @@ class TestLaunchSpecsFor:
         assert specs["srv"][0].command == "x"
 
 
+@pytest.fixture
+def agents_dir_resolver(agents_dir, monkeypatch):
+    """``agents_dir`` plus the ``config.paths`` resolver these two sites use.
+
+    They call ``config.paths.kiro_agents_dir()``, which honours its OWN override
+    and NOT ``agent.KIRO_AGENTS_DIR``, so the base fixture alone does not
+    redirect them. ``cron_script._resolve_mcp_server`` is ``lru_cache``d, so the
+    cache is cleared around the test instead of leaking a resolved answer into
+    the next one.
+    """
+    from kiro_crew.config import paths as config_paths
+    from kiro_crew.cron_script import _resolve_mcp_server
+
+    monkeypatch.setattr(config_paths, "_agents_dir_override", lambda: agents_dir)
+    _resolve_mcp_server.cache_clear()
+    yield agents_dir
+    _resolve_mcp_server.cache_clear()
+
+
+class TestFindServerSpecAnywhere:
+    """handlers.mcp._find_server_spec_anywhere -- the spec-recovery search.
+
+    Server names carry a suffix because the search falls through to the provider
+    ``mcp.json`` scopes, which are real files on a developer machine; a generic
+    name could be answered by one of those and read as a pass.
+    """
+
+    @pytest.mark.parametrize("kind", REFUSALS)
+    def test_refused_agent_spec_contributes_no_spec(self, agents_dir_resolver, kind):
+        _plant_refused(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "mcpServers": {"phantom-hr": {"command": "x"}}},
+            kind,
+        )
+
+        assert _find_server_spec_anywhere("phantom-hr") is None
+
+    def test_valid_agent_spec_still_found_under_the_same_cap(self, agents_dir_resolver):
+        _plant(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "mcpServers": {"real-hr": {"command": "x", "disabled": True}}},
+        )
+
+        assert _find_server_spec_anywhere("real-hr") == {"command": "x"}
+
+
+class TestResolveMcpServer:
+    """cron_script._resolve_mcp_server -- the zero-token script-cron path."""
+
+    @pytest.mark.parametrize("kind", REFUSALS)
+    def test_refused_agent_spec_resolves_to_no_server(self, agents_dir_resolver, kind):
+        from kiro_crew.cron_script import _resolve_mcp_server
+
+        _plant_refused(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "mcpServers": {"srv-hr": {"command": "c", "args": ["a"]}}},
+            kind,
+        )
+
+        assert _resolve_mcp_server("srv-hr") is None
+
+    def test_valid_agent_spec_still_resolves_under_the_same_cap(self, agents_dir_resolver):
+        from kiro_crew.cron_script import _resolve_mcp_server
+
+        _plant(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "mcpServers": {"srv-hr": {"command": "c", "args": ["a"]}}},
+        )
+
+        assert _resolve_mcp_server("srv-hr") == ("c", "a")
+
+    def test_malformed_spec_no_longer_escapes_as_a_decode_error(self, agents_dir_resolver):
+        """The differential case for THIS site.
+
+        The old bare ``read_text`` + ``json.loads`` had no ``except`` anywhere on
+        the path, so a half-written spec raised ``JSONDecodeError`` out of the
+        resolver and into the cron runner. Refusal now degrades to "no such
+        server", the same answer an absent entry gives.
+        """
+        from kiro_crew.cron_script import _resolve_mcp_server
+
+        (agents_dir_resolver / AGENT_FILENAME).write_text("{not json", encoding="utf-8")
+
+        assert _resolve_mcp_server("srv-hr") is None
+
+
+class TestLoadAgentConfig:
+    """mcp_discovery._load_agent_config -- the merged mcpServers view.
+
+    Feeds MCP discovery from several surfaces, which is why its label is
+    ``unknown`` rather than one interface channel.
+    """
+
+    @pytest.mark.parametrize("kind", REFUSALS)
+    def test_refused_agent_spec_contributes_no_servers(self, agents_dir_resolver, kind):
+        from kiro_crew.mcp_discovery import _load_agent_config
+
+        _plant_refused(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "mcpServers": {"phantom-md": {"command": "x"}}},
+            kind,
+        )
+
+        assert "phantom-md" not in _load_agent_config().get("mcpServers", {})
+
+    def test_valid_agent_spec_still_merges_under_the_same_cap(self, agents_dir_resolver):
+        from kiro_crew.mcp_discovery import _load_agent_config
+
+        _plant(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "mcpServers": {"real-md": {"command": "x"}}},
+        )
+
+        assert "real-md" in _load_agent_config().get("mcpServers", {})
+
+    def test_non_utf8_spec_no_longer_escapes_the_handler(self, agents_dir_resolver):
+        """The differential case for THIS site.
+
+        The old form passed ``encoding="utf-8"`` and caught only
+        ``(JSONDecodeError, OSError)``, so a non-UTF-8 spec raised
+        ``UnicodeDecodeError`` -- a ``ValueError`` -- straight through.
+        """
+        from kiro_crew.mcp_discovery import _load_agent_config
+
+        (agents_dir_resolver / AGENT_FILENAME).write_bytes(b'{"mcpServers": {"\xff": {}}}')
+
+        assert "phantom-md" not in _load_agent_config().get("mcpServers", {})
+
+
+class TestLoadSteeringResources:
+    """context._load_steering_resources -- dashboard steering injection.
+
+    ``unknown`` labels it because dashboard chat, Slack and cron sessions all
+    reach it through the same context builder.
+
+    The loader only accepts a ``file://`` resource that globs under
+    ``Path.home()`` and resolves inside it, so ``Path.home`` itself is redirected
+    at the isolated agents dir and the pattern is written relative to it.
+    Redirecting the resolver rather than ``HOME`` is what makes this work on
+    every platform: Windows ``expanduser`` reads ``USERPROFILE``, so setting
+    ``HOME`` alone left the real profile dir in play, the marker could never
+    load, and the refusal assertion passed vacuously while the valid-spec one
+    failed (same ``setattr(Path, "home", ...)`` shape as test_acp_client.py).
+    """
+
+    @staticmethod
+    def _plant_steering(agents_dir: Path, monkeypatch) -> None:
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: agents_dir))
+        (agents_dir / "steer.md").write_text("STEERING-MARKER", encoding="utf-8")
+
+    @pytest.mark.parametrize("kind", REFUSALS)
+    def test_refused_agent_spec_loads_no_steering(self, agents_dir_resolver, monkeypatch, kind):
+        from kiro_crew.context import _load_steering_resources
+
+        self._plant_steering(agents_dir_resolver, monkeypatch)
+        _plant_refused(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "resources": ["file://steer.md"]},
+            kind,
+        )
+
+        assert "STEERING-MARKER" not in _load_steering_resources()
+
+    def test_valid_agent_spec_still_loads_steering_under_the_same_cap(
+        self, agents_dir_resolver, monkeypatch
+    ):
+        from kiro_crew.context import _load_steering_resources
+
+        self._plant_steering(agents_dir_resolver, monkeypatch)
+        _plant(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {"name": "kirocrew", "resources": ["file://steer.md"]},
+        )
+
+        assert "STEERING-MARKER" in _load_steering_resources()
+
+    def test_absent_spec_still_returns_empty(self, agents_dir_resolver):
+        from kiro_crew.context import _load_steering_resources
+
+        assert _load_steering_resources() == ""
+
+
+class TestDenialAuditNeverRaises:
+    """A failing denial audit must not break either never-raise promise.
+
+    The refusal paths are the only places this module calls out to another
+    subsystem, and for some surfaces it is the process's FIRST SEL use --
+    constructing that singleton mkdirs its home. On an unwritable or hostile SEL
+    directory the audit therefore raises, and BOTH callers promise not to:
+    ``_read_agent_spec`` by the contract its ~15 bare call sites read it on, and
+    ``project_agent_names`` in its own docstring. Either raise would abort
+    whichever surface asked on exactly the hostile path the refusal handles --
+    and ``project_agent_names`` runs on EVERY turn of a project-agent-bound
+    session, with a caller-supplied path.
+    """
+
+    @staticmethod
+    def _break_sel(monkeypatch):
+        from kiro_crew import agent_discovery
+
+        monkeypatch.setattr(agent_discovery, "is_sensitive_path", lambda _p: True)
+
+        def _explode():
+            raise OSError("SEL home is not writable")
+
+        monkeypatch.setattr(agent_discovery, "_sel", _explode)
+        return agent_discovery
+
+    def test_reader_audit_failure_still_degrades_to_absent(self, tmp_path, monkeypatch, caplog):
+        spec = tmp_path / "evil.json"
+        spec.write_text(json.dumps({"name": "evil"}), encoding="utf-8")
+        agent_discovery = self._break_sel(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="kiro_crew.agent_discovery"):
+            result = agent_discovery._read_agent_spec(spec, operation="doctor", source="cli")
+
+        # The spec is still REFUSED, so nothing unaudited is read; only the audit
+        # ROW is lost, and that hole in the trail is operator-visible.
+        assert result is None
+        assert any("audit row lost" in r.message for r in caplog.records)
+
+    def test_project_scan_audit_failure_still_yields_empty(self, tmp_path, monkeypatch, caplog):
+        agent_discovery = self._break_sel(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="kiro_crew.agent_discovery"):
+            result = agent_discovery.project_agent_names(tmp_path)
+
+        assert result == frozenset()
+        assert any("audit row lost" in r.message for r in caplog.records)
+
+
 class TestSensitiveSymlinkGuard:
     """One representative surface proves the symlink guard flows through.
 
@@ -508,22 +748,27 @@ _EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
         ("list_agents", "unknown"),
         ("resolve_project_agent_name", "unknown"),
     ],
-    "kiro_crew/cli_doctor.py": [("doctor", "cli"), ("doctor", "cli")],
+    "kiro_crew/cli_doctor.py": [("doctor", "cli"), ("doctor", "cli"), ("doctor", "cli")],
     "kiro_crew/config/loader.py": [("load_config", "unknown")],
     "kiro_crew/connections/mint.py": [
         ("connections_mint", "dashboard"),
         ("connections_mint", "dashboard"),
     ],
+    "kiro_crew/context.py": [("steering_resources", "unknown")],
+    "kiro_crew/cron_script.py": [("cron_resolve_mcp_server", "cron")],
     "kiro_crew/dashboard/handlers/agents.py": [
         ("api_agent_detail", "dashboard"),
         ("api_agent_detail", "dashboard"),
         ("api_agents_sync", "dashboard"),
     ],
+    "kiro_crew/dashboard/handlers/hooks.py": [("api_kiro_hooks", "dashboard")],
     "kiro_crew/dashboard/handlers/mcp.py": [
         ("api_mcp_active", "dashboard"),
+        ("mcp_find_server_spec", "dashboard"),
         ("mcp_server_rows", "dashboard"),
         ("mcp_stub_eligibility", "dashboard"),
     ],
+    "kiro_crew/mcp_discovery.py": [("mcp_discovery_agent_config", "unknown")],
     "kiro_crew/session.py": [
         ("forward:operation", "forward:source"),
         ("resolve_agent_model", "unknown"),
@@ -532,7 +777,17 @@ _EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
 
 
 def _read_agent_spec_call_sites() -> dict[str, list[tuple[str | None, str | None]]]:
-    """Return every direct ``_read_agent_spec`` call and its label pair."""
+    """Return every ``_read_agent_spec`` call site and its label pair.
+
+    A site that hands the reader off by REFERENCE counts too. ``asyncio.to_thread(
+    _read_agent_spec, path, operation=..., source=...)`` never produces a Call
+    node named ``_read_agent_spec``, so matching only direct calls left every
+    off-loop caller invisible to this ratchet -- and one such site really did
+    sit behind the reader's defaults, recording its denials as an agent-listing
+    cache warm. Any call that merely PASSES the reader is therefore a site as
+    well, and its labels are read from the handing-off call, which is where the
+    forwarded kwargs are written.
+    """
     src = Path(__file__).resolve().parent.parent / "src"
     sites: dict[str, list[tuple[str | None, str | None]]] = {}
     for path in sorted(src.rglob("*.py")):
@@ -547,7 +802,14 @@ def _read_agent_spec_call_sites() -> dict[str, list[tuple[str | None, str | None
                 else func.attr if isinstance(func, ast.Attribute) else ""
             )
             if name != "_read_agent_spec":
-                continue
+                # Not the reader itself -- but it is a site if it hands the
+                # reader off to be invoked elsewhere (to_thread, partial, an
+                # executor). Positional only: a callee is never passed by
+                # keyword in these shapes.
+                if not any(
+                    isinstance(arg, ast.Name) and arg.id == "_read_agent_spec" for arg in node.args
+                ):
+                    continue
             labels: dict[str, str | None] = {"operation": None, "source": None}
             for kw in node.keywords:
                 if kw.arg not in labels:

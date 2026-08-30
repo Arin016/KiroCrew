@@ -1053,7 +1053,24 @@ def _load_steering_resources() -> str:
         cfg_path = kiro_agents_dir() / "kirocrew.json"
         if not cfg_path.exists():
             return ""
-        cfg = json.loads(safe_read_file(str(cfg_path)))
+        # The agents dir is user-writable and shared with other tools, so the
+        # spec goes through the hardened agent-spec reader. ``safe_read_file``
+        # screened the resolved target but read it with an unbounded
+        # ``fh.read()`` -- the size cap guards ``safe_read_file_bytes``, the
+        # other helper -- and emitted no SEL event, so an oversized spec was
+        # still read whole here and a refusal was never audited. Every outcome
+        # the blanket ``except`` below used to absorb (PermissionError on a
+        # sensitive target, AttributeError on non-object JSON) now arrives as
+        # ``None`` and returns the same empty string, without the read.
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        cfg = _read_agent_spec(
+            cfg_path,
+            operation="steering_resources",
+            source="unknown",
+        )
+        if cfg is None:
+            return ""
         resources = cfg.get("resources", [])
         parts: list[str] = []
         home_resolved = str(Path.home().resolve()) + os.sep

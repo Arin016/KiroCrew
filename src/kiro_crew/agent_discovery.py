@@ -144,6 +144,51 @@ SKILL_URI_PREFIX = "skill://"
 AGENT_SPEC_SUFFIX = ".agent-spec.json"
 
 
+def _audit_denied(*, operation: str, source: str, resources: str, error: str) -> None:
+    """Emit a denial audit row for a refused path, never raising.
+
+    BOTH denial paths in this module promise not to raise -- ``_read_agent_spec``
+    by the contract :func:`_warn_on_systematic_scan_failure` documents and its
+    callers read bare, and :func:`project_agent_names` in its own docstring
+    ("Never raises; an unreadable checkout yields an empty set"). Auditing the
+    denial must not become the one way to break either promise: for some
+    surfaces this is the process's FIRST SEL use, and constructing the singleton
+    mkdirs its home (``sel.py``), so an unwritable or hostile SEL directory
+    would abort whichever surface asked -- on exactly the hostile path the
+    refusal exists to handle.
+
+    The REFUSAL always stands, so nothing unaudited is ever read or scanned;
+    what is lost is the audit ROW. That is best-effort by the SEL API's own
+    design: ``log_api_access`` reserves fail-closed behaviour for its explicit
+    ``critical=True`` callers (``apps/admission.py``, the auto-improvement
+    server) and neither of these sites has ever been one. WARNING, not debug, so
+    an operator sees that the trail has a hole rather than finding out later.
+
+    The fallback names only the ``operation`` -- a fixed internal label. The
+    REFUSED PATH is deliberately not logged here: on this branch its resolved
+    target is a sensitive location (that is why it was refused), so writing it at
+    a default-visible level would leak the very thing the deny list protects.
+    The path already appears in the neighbouring ``debug`` line for anyone
+    debugging a specific file, and the SEL row -- the record designed to carry
+    it, redacted and clipped -- is what is being lost.
+    """
+    try:
+        _sel().log_api_access(
+            caller="agent_discovery",
+            operation=operation,
+            outcome="denied",
+            source=source,
+            resources=resources,
+            error=error,
+        )
+    except Exception:
+        logger.warning(
+            "SEL denial audit failed for a %s denial -- refusal stands, audit row lost",
+            operation,
+            exc_info=True,
+        )
+
+
 def _read_agent_spec(
     path: Path,
     *,
@@ -189,10 +234,8 @@ def _read_agent_spec(
         return None
     if is_sensitive_path(str(real)):
         logger.debug("Skipping sensitive agent config: %s", path)
-        _sel().log_api_access(
-            caller="agent_discovery",
+        _audit_denied(
             operation=operation,
-            outcome="denied",
             source=source,
             resources=str(real),
             error="sensitive path rejected",
@@ -355,10 +398,8 @@ def project_agent_names(project_dir: str | Path | None) -> frozenset[str]:
     # at a protected path, matching every other deny in this module.
     if is_sensitive_path(key):
         logger.debug("Skipping sensitive project dir for agent discovery: %s", project_dir)
-        _sel().log_api_access(
-            caller="agent_discovery",
+        _audit_denied(
             operation="project_agent_names",
-            outcome="denied",
             source="project_agent_names",
             resources=key,
             error="sensitive project dir rejected",

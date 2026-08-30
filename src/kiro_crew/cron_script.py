@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiro_crew import platform_compat
+from kiro_crew.agent_discovery import _read_agent_spec
 from kiro_crew.config.loader import config_dir, read_local_secret
 from kiro_crew.config.paths import kiro_agents_dir
 from kiro_crew.github_runner import prevalidated_gh_env
@@ -542,7 +543,21 @@ def _resolve_mcp_server(name: str) -> tuple[str, ...] | None:
             break
     if not cfg_path.exists():
         return None
-    cfg = json.loads(cfg_path.read_text())
+    # The agents dir is user-writable and shared with other tools, so this goes
+    # through the hardened agent-spec reader (size cap, sensitive-symlink
+    # screen, explicit UTF-8, non-object rejection, SEL denial event) instead of
+    # a bare ``read_text`` + ``json.loads``. ``None`` covers every unusable file
+    # -- including the malformed-JSON and non-UTF-8 cases the old form let
+    # escape as an unhandled JSONDecodeError / UnicodeDecodeError into the cron
+    # runner -- and degrades to "no such server", the same answer an absent
+    # entry already produced.
+    cfg = _read_agent_spec(
+        cfg_path,
+        operation="cron_resolve_mcp_server",
+        source="cron",
+    )
+    if cfg is None:
+        return None
     spec = cfg.get("mcpServers", {}).get(name)
     if not spec:
         return None

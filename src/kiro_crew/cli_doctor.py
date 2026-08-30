@@ -825,11 +825,14 @@ def _doctor_mcp_governance(
         logger.debug("config load failed in governance check", exc_info=True)
         declared = False
 
-    try:
-        spec = json.loads(agent_path.read_text(encoding="utf-8"))
-        servers = spec.get("mcpServers") or {}
-    except Exception:
-        servers = {}
+    # Same hardened reader as this file's other spec reads: the agents dir is
+    # user-writable, so an oversized or sensitively-symlinked spec is refused
+    # (and audited) rather than parsed. No try/except: the reader's contract is
+    # return-``None``-never-raise, which the five sibling sites migrated
+    # alongside this one also rely on bare. ``None`` degrades to no declared
+    # servers, exactly as the blanket ``except`` here used to.
+    spec = _read_agent_spec(agent_path, operation="doctor", source="cli")
+    servers = (spec or {}).get("mcpServers") or {}
     if not isinstance(servers, dict):
         # `or {}` only replaces a FALSY value, so a string or list here survives
         # and the membership walk below would raise, aborting the whole doctor
