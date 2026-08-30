@@ -283,6 +283,80 @@ class TestWheelInstallCheck:
         assert info["check_status"] == "succeeded"  # optional field, not a hard failure
 
 
+class TestChannelMovePending:
+    """The running build is ahead of everything the FOLLOWED lane publishes.
+
+    That is the state a channel switcher leaves behind on an install whose bytes
+    it cannot replace: the feed answers honestly ("nothing newer for you"), and
+    the panel must still say the install is not on the chosen lane yet. It is
+    derived from the feed comparison rather than from the version's prerelease
+    stamp because promotion never re-stamps -- see ``_channel_move_pending``.
+    """
+
+    def _run(self, monkeypatch, tmp_path, *, channel: str, local: str, remote: str) -> dict:
+        (tmp_path / "channel").write_text(f"{channel}\n")
+        _stub_feed(monkeypatch, body=_manifest(channel=channel, version=remote))
+        monkeypatch.setattr(updates, "_local_version", local)
+        asyncio.run(updates._do_update_check())
+        return updates.get_update_info()
+
+    def test_insider_bytes_following_stable_report_a_pending_move(self, monkeypatch, tmp_path):
+        info = self._run(
+            monkeypatch, tmp_path, channel="stable", local="0.5.0rc3", remote="0.4.1rc1"
+        )
+        assert info["channel_move_pending"] is True
+        # No update is available, and that is not a contradiction: the lane has
+        # nothing NEWER. Both facts ride the status frame so the panel can show
+        # "not on stable yet" instead of a green "up to date".
+        assert info["update_available"] is False
+        fields = updates.status_update_fields()
+        assert fields["update_channel_move_pending"] is True
+        assert fields["update_channel"] == "stable"
+        # The move's target, folded for display, so the note can name it.
+        assert fields["update_latest_version_display"] == "0.4.1"
+        # ...and the running build keeps its own stamp rather than being renamed
+        # to a stable release that was never published.
+        assert fields["version_display"] == "0.5.0rc3"
+
+    def test_a_promoted_stable_install_is_not_mid_switch(self, monkeypatch, tmp_path):
+        # The regression this predicate exists for: comparing the followed channel
+        # against the version-derived lane reported `insider != stable` here, so
+        # the whole promoted-stable population saw the switch note permanently.
+        info = self._run(
+            monkeypatch, tmp_path, channel="stable", local="0.4.1rc1", remote="0.4.1rc1"
+        )
+        assert info["channel_move_pending"] is False
+        assert updates.status_update_fields()["version_display"] == "0.4.1"
+
+    def test_running_behind_is_an_update_not_a_move(self, monkeypatch, tmp_path):
+        info = self._run(
+            monkeypatch, tmp_path, channel="stable", local="0.4.0rc14", remote="0.4.1rc1"
+        )
+        assert info["update_available"] is True
+        assert info["channel_move_pending"] is False
+
+    def test_nightly_bytes_following_stable_report_a_pending_move(self, monkeypatch, tmp_path):
+        info = self._run(
+            monkeypatch,
+            tmp_path,
+            channel="stable",
+            local="0.6.0.dev20260829060906",
+            remote="0.4.1rc1",
+        )
+        assert info["channel_move_pending"] is True
+
+    def test_a_failed_check_reports_no_move(self, monkeypatch, tmp_path):
+        (tmp_path / "channel").write_text("stable\n")
+        _stub_feed(monkeypatch, status=503)
+        monkeypatch.setattr(updates, "_local_version", "0.5.0rc3")
+        asyncio.run(updates._do_update_check())
+        info = updates.get_update_info()
+        assert info["check_status"] == "failed"
+        # A verdict the check never reached must not be inferred from the stamp.
+        assert info["channel_move_pending"] is False
+        assert updates.status_update_fields()["version_display"] == "0.5.0"
+
+
 class TestFeedMinVersion:
     """The feed's optional ``min_version`` floor drives the mandatory-update verdict.
 

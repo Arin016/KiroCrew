@@ -892,12 +892,14 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       // second fact it never tested ("Entry removed." while the entry stayed;
       // "Disconnected, but…" while the backend declined). The GRANT clause states
       // only what happened to the grant; the ENTRY clause is appended whenever the
-      // backend left the entry alone. TWO of the three outcomes announce: a
-      // survivor is an `error` (a grant outliving the click is the state this
-      // endpoint exists to prevent) and a census gap is a `warning` (nothing
-      // failed, but the grant is still there and a file needs repairing). A grant
-      // deliberately kept for a NAMED sharer needs nothing from the user, so it
-      // stays a success status.
+      // backend left the entry alone. Outcomes that announce: a survivor is an
+      // `error` (a grant outliving the click is the state this endpoint exists to
+      // prevent), a census gap is a `warning` (nothing failed, but the grant is
+      // still there and the configuration needs checking), and a not-ours entry is
+      // a `warning` too (the card still shows Connected with a live Disconnect
+      // button, so a green success would misreport a click that changed nothing).
+      // A grant deliberately kept for a NAMED sharer needs nothing from the user,
+      // so it stays a success status.
       // `grantSurviving` now reports FAILED unlinks only: the backend re-stats
       // just the pairs it actually tried to remove, so a deliberate keep (a
       // sharer, or a census gap) never appears here. That is what collapses the
@@ -907,6 +909,14 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       const shared = result.grantSharedWith.length > 0
       const censusGap = !shared && result.grantCensusIncomplete
       const entryKept = !result.entryRemoved
+      // The not-ours outcome: nothing here was this provider's to remove — no
+      // grant artifacts existed and no purge-eligible entry matched, so the
+      // click changed nothing. The entry clause is the whole message there, and
+      // it must hand the user a next move: without the recourse their only
+      // move is to click Disconnect again. The message states only what the
+      // response proves (nothing changed) — `entryRemoved=false` cannot say WHY
+      // the entry was kept, so the copy never asserts a cause.
+      const entryNotOurs = entryKept && !survived && !shared && !censusGap && !result.grantRemoved
       // The census knows which source it could not read, so the repair instruction
       // names it. Empty is the honest case, not a missing field: `censusIncomplete`
       // is also set by an entry whose URL could not be compared, which names no
@@ -939,11 +949,13 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
         [provider.slug]: disconnectFeedback(
           provider,
           [grantClause, entryClause].filter(Boolean).join(' '),
-          // A census gap is the one outcome that tells the user their access was
-          // NOT withdrawn AND hands them a file to repair. Rendering it green under
-          // role=status announced a chore as a success; it is still not an `error`,
-          // because nothing failed -- a safety rule declined to act.
-          survived ? 'error' : censusGap ? 'warning' : 'success',
+          // A census gap tells the user their access was NOT withdrawn and hands
+          // them a repair to make; a not-ours entry leaves the card showing
+          // Connected with a live Disconnect button, so a green success would
+          // misreport a click that changed nothing. Neither is an `error`,
+          // because nothing failed — a safety rule declined to act, or there was
+          // nothing here to act on.
+          survived ? 'error' : censusGap || entryNotOurs ? 'warning' : 'success',
         ),
       }))
     }

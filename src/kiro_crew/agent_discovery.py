@@ -144,7 +144,12 @@ SKILL_URI_PREFIX = "skill://"
 AGENT_SPEC_SUFFIX = ".agent-spec.json"
 
 
-def _read_agent_spec(path: Path) -> dict[str, Any] | None:
+def _read_agent_spec(
+    path: Path,
+    *,
+    operation: str = "list_agents",
+    source: str = "list_agents",
+) -> dict[str, Any] | None:
     """Parse an agent config file, or ``None`` when it is not usable.
 
     The one reader for both scopes, so every guard applies uniformly: AppleDouble
@@ -172,9 +177,9 @@ def _read_agent_spec(path: Path) -> dict[str, Any] | None:
         logger.debug("Skipping sensitive agent config: %s", path)
         _sel().log_api_access(
             caller="agent_discovery",
-            operation="list_agents",
+            operation=operation,
             outcome="denied",
-            source="list_agents",
+            source=source,
             resources=str(real),
             error="sensitive path rejected",
         )
@@ -466,6 +471,57 @@ def spec_model(data: dict[str, Any]) -> str:
     return spec_str(data, "model", _DEFER_MODEL)
 
 
+def agent_model_map(
+    agents_dir: Path | None = None,
+    *,
+    operation: str,
+    source: str,
+) -> dict[str, str]:
+    """Build the full agent name/stem-to-model map for legacy history restore.
+
+    Restore needs every entry, so this intentionally scans the complete scope.
+    It keeps that surface on the hardened reader while preserving
+    security-event attribution through the required *operation* and *source*
+    arguments. A missing or non-string model stays ``""`` here so a restored
+    legacy session continues to inherit its crew/global model; this deliberately
+    differs from session's targeted runtime resolver, where no pin means
+    ``"auto"``.
+
+    A refused spec is skipped like an absent one.  If every candidate in a
+    non-empty directory is refused, the scan-level warning used by discovery is
+    emitted so a systematic gate failure is not mistaken for an empty install.
+    """
+    directory = agents_dir or _kiro_agents_dir()
+    if not directory.is_dir():
+        return {}
+    try:
+        files = sorted(directory.glob("*.json"))
+    except OSError:
+        return {}
+
+    candidates = 0
+    parsed = 0
+    result: dict[str, str] = {}
+    for spec_file in files:
+        if not spec_file.name.startswith("._"):
+            candidates += 1
+        data = _read_agent_spec(
+            spec_file,
+            operation=operation,
+            source=source,
+        )
+        if data is None:
+            continue
+        model = spec_str(data, "model", "")
+        declared_name = spec_str(data, "name")
+        if declared_name:
+            result[declared_name] = model
+        result[spec_file.stem] = model
+        parsed += 1
+    _warn_on_systematic_scan_failure(directory, candidates, parsed)
+    return result
+
+
 def _builder_mcp_skills(data: dict[str, Any]) -> list[str]:
     """Extract skill names from builder-mcp args (--skill-name-filter)."""
     mcp = data.get("mcpServers") or {}
@@ -580,19 +636,16 @@ def agent_skill_globs(agent: str, agents_dir: Path | None = None) -> list[str]:
     except OSError:
         return []
     for f in candidates:
-        if f.name.startswith("._"):
-            continue
-        try:
-            real = f.resolve(strict=True)
-        except OSError:
-            continue
-        if is_sensitive_path(str(real)):
-            continue
-        try:
-            data = json.loads(real.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
+        # The one hardened reader for the user-writable agents dir: AppleDouble
+        # sidecars, symlink loops (``RuntimeError`` on resolve), sensitive
+        # resolved targets (with the SEL ``denied`` event), the size cap, and
+        # non-UTF-8 / non-object JSON all collapse to ``None`` — skipped like an
+        # absent file, preserving this function's never-raises / ``[]`` contract.
+        # Pass ``f``, not the resolved target: ``f.stem`` and
+        # ``expand_skill_uri`` below must see the ORIGINAL path so a symlinked
+        # spec's relative globs stay anchored where the symlink lives.
+        data = _read_agent_spec(f)
+        if data is None:
             continue
         if data.get("name") != agent and f.stem != agent:
             continue

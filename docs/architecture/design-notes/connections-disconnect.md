@@ -80,7 +80,7 @@ decided over an incomplete census, or acted on outside the lock that judged it:
 - **The census was incomplete.** Discovery merges exactly one agent spec
   (`kirocrew.json`), so a spec the user wrote by hand, or one an app materialized,
   was invisible — while kiro-cli authorizes from it and shares the pair the
-  endpoint names. `_spec_census` globs the whole agents directory alongside the
+  endpoint names. `spec_census` globs the whole agents directory alongside the
   `mcp.json` scopes, precisely because the specs that matter are the ones Kiro
   Crew does *not* own. An agent spec contributes sharers but is never a purge
   target: Kiro Crew does not own a user's agent file.
@@ -111,7 +111,7 @@ document that declares no entries read as empty. The purge acts only on
 *positive* evidence — a scope it read and matched — so an unreadable scope is
 simply not purged; refusing the whole request would leave the user unable to
 disconnect because of a file with nothing to do with this provider. This is also
-why `_spec_census` does not call `_load_mcp_json_by_source`: that function warns
+why `spec_census` does not call `_load_mcp_json_by_source`: that function warns
 and skips an unreadable source, which is right for a view and wrong for a
 destructive decision.
 
@@ -154,14 +154,17 @@ theirs landing between the census read and the unlink is judged by a snapshot
 that never saw it. No gateway-side lock can close that; it is inherent to
 config files the gateway does not own.
 
-One sibling path is knowingly left alone: removing the same server through the
-plain MCP surface (`api_mcp_apply` → `_purge_server_config`) still takes the entry
-out and leaves the grant pair on disk, so an OAuth'd server uninstalled that way
-keeps a usable refresh token. The deferral is deliberate rather than an oversight
-— nothing on that surface claims the authorization was revoked, so it does not
-produce the dishonesty this note exists to remove, and revoking there would need
-the same ownership census this endpoint runs, on a path whose callers include
-bulk edits that were never a withdrawal of consent.
+Two sibling paths are knowingly left alone: removing the same server through the
+plain MCP surface (`api_mcp_apply` → `_purge_server_config`), and removing it
+from the Kiro global config through the REST handler
+(`DELETE /api/mcp/servers/{name}`, which rewrites only that one file), both take
+the entry out with no grant census and leave the grant pair on disk, so an
+OAuth'd server uninstalled either way keeps a usable refresh token. The deferral
+is deliberate rather than an oversight — nothing on either surface claims the
+authorization was revoked, so neither produces the dishonesty this note exists
+to remove, and revoking there would need the same ownership census this endpoint
+runs, on paths whose callers include bulk edits that were never a withdrawal of
+consent.
 
 The rebuild runs **inside** this transaction, through the shielded offload. A
 post-lock rebuild snapshots the config before a concurrent Disconnect's purge and

@@ -743,6 +743,22 @@ class AcpPromptStats:
     # Per-turn billing credits summed from kiro's _kiro.dev/metadata
     # meteringUsage (unit="credit"). 0 for providers that bill in tokens.
     credits: float = 0.0
+    # Per-turn token counts from the PromptResponse (the claude-agent-acp
+    # adapter reports them there; kiro-cli's response carries none, so these
+    # stay 0 on the kiro path). Accumulated like ``credits``; reset per turn
+    # by ``carry_over()``.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    # Per-turn cost delta in USD, derived from the adapter's session-cumulative
+    # ``usage_update.cost.amount`` via ``apply_cost_cumulative``. Reset per turn
+    # by ``carry_over()``.
+    cost_usd: float = 0.0
+    # Last seen session-cumulative cost — the baseline the next reading is
+    # delta'd against. SESSION state: survives ``carry_over()`` like the
+    # context fields, or every turn would re-bill the whole session's spend.
+    cost_session_usd: float = 0.0
     # True while ``context_pct`` reads 0.0 only because a compaction dropped the
     # counts and no fresh telemetry has re-derived them. Distinguishes "the
     # transcript is empty" from "the transcript's size is unknown" — the two are
@@ -764,6 +780,7 @@ class AcpPromptStats:
             context_window_tokens=self.context_window_tokens,
             context_tokens_from_usage=self.context_tokens_from_usage,
             context_pct_unknown=self.context_pct_unknown,
+            cost_session_usd=self.cost_session_usd,
         )
 
     def reset_context_state(self) -> None:
@@ -793,6 +810,11 @@ class AcpPromptStats:
         self.context_window_tokens = 0
         self.context_tokens_from_usage = False
         self.context_pct_unknown = False
+        # The adapter's cumulative cost counter belongs to the OLD session; the
+        # fresh session/new starts it at zero, so a kept baseline would
+        # under-count the first turns (any new reading below the stale baseline
+        # only survives via the monotonic reset guard).
+        self.cost_session_usd = 0.0
 
     def note_pct_reported(self) -> None:
         """Mark ``context_pct`` as backed by real telemetry.
@@ -802,6 +824,64 @@ class AcpPromptStats:
         what the compacted transcript actually costs.
         """
         self.context_pct_unknown = False
+
+    def apply_cost_cumulative(self, cumulative: float) -> None:
+        """Fold a session-cumulative cost reading into the per-turn delta.
+
+        The adapter reports cost as a running session total, so the per-turn
+        figure is the movement since the last reading. Monotonic guard: a
+        reading BELOW the stored baseline means the adapter's counter reset
+        (process restart) — the new total is then entirely spend since the
+        reset, so it is taken whole rather than producing a negative delta.
+        The caller validates the value (finite, non-negative) at the
+        ``parse_usage_cost`` chokepoint.
+        """
+        delta = cumulative - self.cost_session_usd
+        if delta < 0:
+            delta = cumulative
+        self.cost_usd += delta
+        self.cost_session_usd = cumulative
+
+    def apply_prompt_token_usage(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+        cache_write_tokens: int,
+    ) -> None:
+        """Accumulate the PromptResponse's turn-scoped token counts.
+
+        Accumulated (not assigned) to mirror ``credits``: the counters are
+        per-turn and ``carry_over()`` zeroes them at the turn boundary, so a
+        turn that sees one response reads identically either way, and one that
+        sees several sums them. Callers validate at the
+        ``parse_prompt_token_usage`` chokepoint.
+        """
+        self.input_tokens += int(input_tokens)
+        self.output_tokens += int(output_tokens)
+        self.cache_read_tokens += int(cache_read_tokens)
+        self.cache_write_tokens += int(cache_write_tokens)
+
+    def to_turn_usage(self) -> "TurnUsage":
+        """One ``TurnUsage`` carrying every billing dimension this turn filled.
+
+        The single source of truth for stats → event conversion: every
+        ``EVENT_COMPLETE`` construction site uses this instead of hand-filling
+        fields, so a backend that bills in cost/tokens (the claude seam) and
+        one that bills in credits (kiro) both surface whatever they reported.
+        A backend that sends neither cost nor token counts leaves the new
+        dimensions at their zero defaults, so the result is byte-identical to
+        ``TurnUsage(credits=...)`` (harness parity).
+        """
+        return TurnUsage(
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            cache_read_tokens=self.cache_read_tokens,
+            # Anthropic's "cache write" is a cache-creation charge.
+            cache_creation_tokens=self.cache_write_tokens,
+            cost_usd=self.cost_usd,
+            credits=self.credits,
+        )
 
     @staticmethod
     def sanitize_pct(value: object) -> float | None:

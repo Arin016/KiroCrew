@@ -140,6 +140,7 @@ from kiro_crew import mcp_discovery  # noqa: E402
 from kiro_crew.config import paths as connections_paths  # noqa: E402
 from kiro_crew.connections import get_provider  # noqa: E402
 from kiro_crew.connections import mint  # noqa: E402
+from kiro_crew.connections import ownership  # noqa: E402
 from kiro_crew.dashboard.handlers import connections  # noqa: E402
 from kiro_crew.dashboard.handlers import mcp as mcp_handlers  # noqa: E402
 
@@ -211,7 +212,7 @@ def _wire(
         return (raw_specs if raw_specs is not None else default_raw, unreadable)
 
     if not real_census:
-        monkeypatch.setattr(connections, "_spec_census", _census)
+        monkeypatch.setattr(ownership, "spec_census", _census)
     monkeypatch.setattr(mcp_handlers, "_get_mcp_lock", _no_lock)
 
     def _purge(name: str, *, scopes: tuple[str, ...] | None = None) -> dict:
@@ -288,7 +289,6 @@ async def test_disconnect_revokes_the_grant_and_removes_the_entry(
 
     assert body == {
         "ok": True,
-        "disconnected": _SLUG,
         "grantRemoved": True,
         "grantSurviving": [],
         "entryRemoved": True,
@@ -297,6 +297,30 @@ async def test_disconnect_revokes_the_grant_and_removes_the_entry(
         "grantCensusUnreadable": [],
     }
     assert purged == [_SLUG]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_response_carries_no_slug_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The response reports outcome facts only, never the caller's own slug.
+
+    ``ok`` carries the verdict and the caller already knows which slug it
+    asked about, so an echo field invites a client to read identity from the
+    body instead of its own request. Pinned by name so the field cannot creep
+    back in as a harmless-looking addition.
+    """
+    _wire(
+        monkeypatch,
+        removed=["token", "registration"],
+        surviving=[],
+        inventory=[_entry(_SLUG, _provider_url())],
+        purged=[],
+    )
+
+    body = await _disconnect()
+
+    assert "disconnected" not in body
 
 
 @pytest.mark.asyncio
@@ -718,7 +742,7 @@ def test_the_census_reads_agent_specs_kirocrew_does_not_own(
         json.dumps({"mcpServers": {"notion-research": {"url": _URL}}}), encoding="utf-8"
     )
 
-    specs, unreadable = connections._spec_census()
+    specs, unreadable = ownership.spec_census()
 
     assert unreadable == ()
     assert specs["agent:my-research.json"] == {"notion-research": {"url": _URL}}
@@ -731,7 +755,7 @@ def test_the_census_names_a_source_it_could_not_read(
     agents = _agents_dir(monkeypatch, tmp_path)
     (agents / "broken.json").write_text("{not json", encoding="utf-8")
 
-    specs, unreadable = connections._spec_census()
+    specs, unreadable = ownership.spec_census()
 
     assert unreadable == ("agent:broken.json",)
     assert specs["agent:broken.json"] == {}
@@ -856,7 +880,7 @@ def test_the_census_reports_the_unreadable_agents_dir_sentinel(
 ) -> None:
     """The unreadable-directory sentinel must land in ``unreadable``, not be skipped.
 
-    ``_agent_spec_sources`` reports an unenumerable agents dir as a source whose
+    ``agent_spec_sources`` reports an unenumerable agents dir as a source whose
     path IS the directory. ``is_file()`` is False for it, so a bare
     ``continue`` silently discards the exact signal the sentinel exists to
     carry, and the fail-closed design defeats itself.
@@ -865,12 +889,12 @@ def test_the_census_reports_the_unreadable_agents_dir_sentinel(
     sentinel_dir = tmp_path / "unreadable-agents"
     sentinel_dir.mkdir()
     monkeypatch.setattr(
-        connections,
-        "_agent_spec_sources",
+        ownership,
+        "agent_spec_sources",
         lambda _projects=(): [("agent:unreadable-agents/", sentinel_dir)],
     )
 
-    _specs, unreadable = connections._spec_census()
+    _specs, unreadable = ownership.spec_census()
 
     assert "agent:unreadable-agents/" in unreadable
 
@@ -891,7 +915,7 @@ def test_the_census_reports_structurally_invalid_json_as_unreadable(
     (agents / "bad-servers.json").write_text('{"mcpServers": []}', encoding="utf-8")
     (agents / "no-key.json").write_text('{"name": "x"}', encoding="utf-8")
 
-    _specs, unreadable = connections._spec_census()
+    _specs, unreadable = ownership.spec_census()
 
     assert "agent:non-object.json" in unreadable
     assert "agent:bad-servers.json" in unreadable
@@ -1017,7 +1041,7 @@ def test_the_census_reports_null_mcp_servers_as_unreadable(
     agents = _agents_dir(monkeypatch, tmp_path)
     (agents / "null-servers.json").write_text('{"mcpServers": null}', encoding="utf-8")
 
-    _specs, unreadable = connections._spec_census()
+    _specs, unreadable = ownership.spec_census()
 
     assert "agent:null-servers.json" in unreadable
 
@@ -1041,12 +1065,12 @@ def test_the_census_reports_an_unlistable_agents_dir(
 
     monkeypatch.setattr(os, "listdir", _deny)
 
-    sources = connections._agent_spec_sources()
+    sources = ownership.agent_spec_sources()
     assert len(sources) >= 1
     label = sources[0][0]
     assert label.startswith("agent:") and label.endswith("/")
 
-    _specs, unreadable = connections._spec_census()
+    _specs, unreadable = ownership.spec_census()
     assert any(u.startswith("agent:") and u.endswith("/") for u in unreadable)
 
 
@@ -1057,7 +1081,7 @@ def test_the_census_treats_a_missing_agents_dir_as_absent(
     _agents_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(connections_paths, "kiro_agents_dir", lambda: tmp_path / "never-created")
 
-    _specs, unreadable = connections._spec_census()
+    _specs, unreadable = ownership.spec_census()
 
     assert unreadable == ()
 
@@ -1175,10 +1199,10 @@ async def test_a_project_local_agent_spec_is_never_a_purge_target(
     assert scopes == [("kirocrew",)], "purge reached outside the mcp.json scopes"
     assert revoked == []
     assert body["grantSharedWith"] == [_SLUG]
-    labels = [label for label, _path in connections._agent_spec_sources((project,))]
+    labels = [label for label, _path in ownership.agent_spec_sources((project,))]
     project_labels = [label for label in labels if "checkout" in label]
     assert project_labels, "the project spec never entered the source list"
-    assert not any(connections._is_scope_label(label) for label in project_labels)
+    assert not any(ownership.is_scope_label(label) for label in project_labels)
     assert not any(label.startswith("mirror:") for label in project_labels)
 
 
@@ -1465,7 +1489,7 @@ def test_agent_sources_separate_purge_owned_mirrors_from_user_specs(
     (agents / "kirocrew.json").write_text('{"mcpServers": {}}', encoding="utf-8")
     (agents / "custom.json").write_text('{"mcpServers": {}}', encoding="utf-8")
 
-    labels = dict((label, path.name) for label, path in connections._agent_spec_sources())
+    labels = dict((label, path.name) for label, path in ownership.agent_spec_sources())
 
     assert "mirror:kirocrew.json" in labels, f"rendered mirror not labelled: {labels}"
     assert "agent:custom.json" in labels, f"user spec mislabelled: {labels}"

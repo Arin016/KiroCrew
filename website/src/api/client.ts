@@ -2642,7 +2642,7 @@ export const api = {
   // whose URL could not be compared) names no file, and a gateway predating the
   // field sends none.
   connectionsDisconnect: (slug: string) =>
-    post('/api/connections/disconnect', { slug }).then(j) as Promise<{ ok: boolean; disconnected: string; grantRemoved: boolean; grantSurviving: string[]; entryRemoved: boolean; grantSharedWith: string[]; grantCensusIncomplete: boolean; grantCensusUnreadable?: string[] }>,
+    post('/api/connections/disconnect', { slug }).then(j) as Promise<{ ok: boolean; grantRemoved: boolean; grantSurviving: string[]; entryRemoved: boolean; grantSharedWith: string[]; grantCensusIncomplete: boolean; grantCensusUnreadable?: string[] }>,
   // MCP Gateway (shared pool)
   mcpGatewayStatus: () => fetch('/api/mcp-gateway/status').then(j) as Promise<{ enabled: boolean; stub: string[]; stub_count: number; running: boolean; ping_ok: boolean; supported: boolean }>,
   mcpGatewayEnable: (enabled: boolean) => post('/api/mcp-gateway/enable', { enabled }).then(j) as Promise<{ ok: boolean; enabled: boolean; running: boolean; ping_ok: boolean }>,
@@ -2914,8 +2914,11 @@ export const api = {
    *  ask carries `ask_id`; a stateless card carries `card_id` instead. */
   pendingQuestions: (): Promise<{ ask_id?: string; card_id?: string; slot: string; questions: { question: string; header?: string; multiSelect?: boolean; options: { label: string; description?: string }[] }[]; ts?: number }[]> =>
     fetch('/api/ask-question/pending').then(j),
-  /** Resolve a pending agent question (ask_question MCP tool). Pass no answers
-   *  to dismiss, which unblocks the agent with a timeout-equivalent result. */
+  /** Resolve a pending agent question that carries an `ask_id` — a server-side
+   *  wait opened by `POST /api/ask-question`, not the MCP ask_question tool,
+   *  which posts a stateless `card_id` card instead. Pass no answers to
+   *  dismiss, which unblocks the waiting caller with a timeout-equivalent
+   *  result. */
   answerQuestion: (askId: string, answers?: Record<string, string>) =>
     post('/api/ask-question/' + encodeURIComponent(askId) + '/answer',
       answers ? { answers } : { dismissed: true }).then(j),

@@ -5564,6 +5564,7 @@ class DashboardState:
         update_latest_version: str = "",
         update_latest_version_display: str = "",
         update_channel: str = "",
+        update_channel_move_pending: bool = False,
         update_managed_by: str = "",
         update_commits_ahead: int = 0,
         update_commits_behind: int = 0,
@@ -5623,6 +5624,16 @@ class DashboardState:
             # between switching channels and the new lane's build landing, so the
             # switcher must key on this one or it would snap back on every poll.
             "update_channel": update_channel,
+            # Is the running build ahead of everything ``update_channel``
+            # publishes? True means that lane never shipped these bytes, so the
+            # install is not on it yet and only re-running the installer moves
+            # it. Deliberately NOT derived by comparing ``update_channel``
+            # against ``release_channel`` below: promotion re-points the soaked
+            # candidate's bytes without re-stamping them, so a promoted stable
+            # build reports ``release_channel: insider`` while being a stable
+            # install with nothing pending. False on every layout with no feed
+            # answer.
+            "update_channel_move_pending": update_channel_move_pending,
             # Who manages updates on this host: "" (self-managed), or the
             # mechanism that owns them (e.g. "command" for a policy-pinned
             # provider). The panel keys its update copy on this — a

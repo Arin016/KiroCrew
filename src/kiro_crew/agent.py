@@ -2649,15 +2649,25 @@ def migrate_agent_specs() -> int:
     agent loads. Idempotent and cheap (a handful of small JSON files); safe to
     run on every gateway start. Returns the number of spec files cleaned.
     """
-    if not kiro_agents_dir_path().is_dir():
+    agents_dir = kiro_agents_dir_path()
+    if not agents_dir.is_dir():
         return 0
     cleaned = 0
-    for spec_path in sorted(kiro_agents_dir_path().glob("*.json")):
+    for spec_path in sorted(agents_dir.glob("*.json")):
+        # This read is followed by a rewrite, so the hardened reader's
+        # sensitive-target refusal is not sufficient on its own: refuse every
+        # symlink, escape and sensitive path before reading to prevent copy-out.
+        if not _spec_path_is_safe(spec_path, agents_dir):
+            continue
         # The hardened reader (size cap, AppleDouble/sensitive-symlink and
         # non-object refusal). This site also WRITES below: a spec the reader
         # refuses is now never rewritten at all, whereas the old read_text
         # path read -- and then rewrote -- whatever the file or link named.
-        data = _read_agent_spec(spec_path)
+        data = _read_agent_spec(
+            spec_path,
+            operation="migrate_agent_specs",
+            source="unknown",
+        )
         if data is None:
             continue
         if "model_managed" not in data and "cc_model" not in data:
@@ -4325,16 +4335,6 @@ def _install_aim_capabilities() -> None:
     _install_lite_agent_fallback()
 
 
-def _remove_bare_lite_if_aim_installed() -> None:
-    """No-op on public installs (AIM package manager absent).
-
-    Symbol preserved for backward compatibility.  Previously removed the
-    bare ``kirocrew-lite.json`` when an AIM-installed duplicate existed; with
-    AIM install neutralized there is no AIM-managed copy to deduplicate.
-    """
-    return None
-
-
 def _install_lite_agent_fallback() -> None:
     """Write a bare kirocrew-lite config (cheap background agent)."""
     lite_path = kiro_agents_dir_path() / _LITE_AGENT_FILENAME
@@ -4530,8 +4530,9 @@ Your tools:
 - State that outlives a round — `session_ledger_read`, `session_ledger_record`.
 - Patrol — `monitor_start`, `monitor_update`, `autonudge_stop`, `wait`.
 - Capacity, before standing up several sessions at once — `resource_status`.
-- Talking to the person — `ask_question` for a blocking decision that is not
-  yours to make, `send_message` / `send_notification` to report.
+- Talking to the person — `ask_question` puts a decision that is not yours to
+  make to them as a card, after which you END your turn and their answer
+  arrives as the next message; `send_message` / `send_notification` to report.
 - Naming the right skill in a seed message — `skill_search`, `skill_fetch`.
 - Reading — `fs_read`, `web_fetch`.
 - `tool_search` loads a tool that is not in your list yet.

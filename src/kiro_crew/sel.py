@@ -728,9 +728,15 @@ class SecurityEventLog:
             raise OSError(
                 f"SEL chain-lock sidecar {lock_path} is a link; refusing to lock it"
             )
+        # Windows' CRT text mode strips a trailing 0x1A while opening a file
+        # for update. The fallback lock path can be the raw HMAC key, so this
+        # descriptor must be binary even though the lock code never writes it.
         fd = os.open(
             lock_path,
-            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            os.O_CREAT
+            | os.O_RDWR
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
             0o600,
         )
         joined: _ChainHold | None = None

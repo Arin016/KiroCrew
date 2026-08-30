@@ -5,6 +5,7 @@ import { resolveDefaultColor } from '../utils/sessionColors'
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { isSystemNoticeKind } from '../lib/systemNotice'
 import { isStopEvent } from '../lib/stopEvent'
+import { normalizeRunSessionKey } from '../apps/workflows/runModel'
 import { gcSessionStorage } from '../utils/storageGc'
 import type { RootState } from './index'
 import type { ChatMessage, ChatSlot, SessionInfo, SubagentActivity, ToolActivity, WorkflowRunSummary } from '../types'
@@ -1534,8 +1535,11 @@ export const switchSlot = createAsyncThunk<
     // can omit `slotRun` entirely, and throwing here would skip the fetch.
     const state = (getState() as { chat: ChatState }).chat
     const streaming = (state.slotRun?.[key]?.state ?? 'idle') !== 'idle'
+    // A bounded page is a WINDOW, and unseen server growth can push that window clear
+    // of a small cache entirely, so only a slot with nothing painted may be bounded.
+    const cached = state.slotMessages?.[safeKey(key)]?.length ?? 0
     try {
-      return await fetchSlotDetail(key, streaming ? undefined : OLDER_PAGE_LIMIT)
+      return await fetchSlotDetail(key, streaming || cached > 0 ? undefined : OLDER_PAGE_LIMIT)
     } catch (e) {
       // A thrown error crosses the thunk boundary as `miniSerializeError(e)`,
       // which keeps string fields only -- `ApiError.status` (a number) never
@@ -2133,7 +2137,10 @@ export const warmSlotCache = createAsyncThunk(
     // Captured BEFORE the fetch: two warms for one slot resolve in any order,
     // and the later-dispatched response is the newer view of the transcript.
     const warmSeq = nextWarmSeq()
-    return { ...(await fetchSlotDetail(key, streaming ? undefined : PANE_HYDRATE_LIMIT)), warmSeq }
+    // `switchSlot.pending` paints the active view from this cache, and a window can miss
+    // a small cache entirely once the server has grown, so refetch any of it whole.
+    const cached = state.slotMessages?.[safeKey(key)]?.length ?? 0
+    return { ...(await fetchSlotDetail(key, streaming || cached > 0 ? undefined : PANE_HYDRATE_LIMIT)), warmSeq }
   },
 )
 
@@ -2595,6 +2602,59 @@ export const selectSidebarApprovalCounts = createSelector(
     }
     return approvalCounts
   },
+)
+
+/** Live dynamic-workflow activity per originating session, keyed by the
+ *  NORMALIZED session key (`normalizeRunSessionKey`), so a slot looks itself
+ *  up with the same normalization `runBelongsToSlot` applies — this replaces
+ *  a per-slot scan over every run. Values carry the count of running runs
+ *  plus the RAW name/phase of the first matching run in insertion order;
+ *  they are agent-authored wire strings, so rendering sanitizes at the edge.
+ *  Memoized on `workflowRuns` identity, which lets a session row read its one
+ *  key with `shallowEqual` and ignore every other run's events. */
+export const selectSidebarWorkflowActive = createSelector(
+  [(state: RootState) => state.chat.workflowRuns],
+  (workflowRuns) => {
+    // Null prototype: the accumulator is indexed by a normalized session key
+    // from the wire, and on a `{}` literal a key like "__proto__" would READ
+    // Object.prototype as a truthy existing entry and then mutate it —
+    // corrupting every object in the page. Object.create(null) makes such a
+    // key an ordinary own property. (Same threat model as the goalLoops
+    // safeKey normalization.)
+    const active: Record<string, { count: number; name: string; phase: string }> = Object.create(null)
+    for (const r of Object.values(workflowRuns ?? {})) {
+      // A run with NO sessionKey is UI-launched (no chat link) and belongs to
+      // no slot — the same exclusion runBelongsToSlot encodes.
+      if (r.status !== 'running' || !r.sessionKey) continue
+      const key = normalizeRunSessionKey(r.sessionKey)
+      const cur = active[key]
+      if (cur) cur.count += 1
+      else active[key] = { count: 1, name: r.name || r.run_id, phase: r.phase || '' }
+    }
+    return active
+  },
+)
+
+/** Just the keys of `selectSidebarWorkflowActive` — the sidebar shell's
+ *  presence signal (the In-progress filter and the board's state lanes need
+ *  "which sessions have a live run", never the label). Subscribed with
+ *  `shallowEqual`, it re-renders the shell only when the SET of
+ *  workflow-active sessions changes, not on every phase/progress event. */
+export const selectSidebarWorkflowActiveKeys = createSelector(
+  [selectSidebarWorkflowActive],
+  (active) => Object.keys(active),
+)
+
+/** Keys of sessions with an active goal loop — the same presence-only
+ *  contract as `selectSidebarWorkflowActiveKeys`: a mid-loop cycle-count bump
+ *  rewrites the map value but leaves this key set (and so, under
+ *  `shallowEqual`, the subscriber) untouched. `Object.keys` returns own keys
+ *  only, so membership tests over the result are inherently own-property —
+ *  the `safeKey` prototype-pollution caveat on direct map reads does not
+ *  apply here. */
+export const selectGoalLoopKeys = createSelector(
+  [(state: RootState) => state.chat.goalLoops],
+  (goalLoops) => Object.keys(goalLoops ?? {}),
 )
 
 /**

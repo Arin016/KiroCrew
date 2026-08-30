@@ -2650,7 +2650,6 @@
     "agent_capabilities": "Agent Capabilities",
     "artifacts": "Artifacts",
     "discover": "Discover",
-    "knowledge": "Knowledge",
     "library": "Library",
     "notifications": "Notifications",
     "schedule": "Schedule",
@@ -2894,7 +2893,12 @@
       "prompts_label": "Prompts",
       "prompts_description": "Reusable prompt templates from {{registry}}",
       "workflows_label": "Workflows",
-      "workflows_description": "Create, edit, and run reusable agent workflows"
+      "workflows_description": "Create, edit, and run reusable agent workflows",
+      "knowledge_label": "Knowledge",
+      "knowledge_description": "Documents and sources your agent can search when answering",
+      "group_agent": "Agent",
+      "group_knowledge_instructions": "Knowledge & instructions",
+      "group_automation": "Automation"
     },
     "channelPage": {
       "agent_joining_one": "{{count}} agent joining",
@@ -3380,11 +3384,11 @@
       "connections": "Connections",
       "could_not_load_status": "Connection status could not be loaded. Cards may be out of date.",
       "disconnect": "Disconnect",
-      "disconnect_census_incomplete": "The stored grant was kept because a configuration source could not be read to rule out another server using it. Fix or remove the unreadable file and disconnect again.",
+      "disconnect_census_incomplete": "The stored grant was kept because a configuration source could not be read to rule out another server using it. Check your server configuration and disconnect again.",
       "disconnect_census_incomplete_source": "The stored grant was kept because {{source}} could not be read to rule out another server using it. Fix or remove that file and disconnect again.",
-      "disconnect_entry_left_alone": "Your server configuration was left unchanged.",
+      "disconnect_entry_left_alone": "Your server configuration was left unchanged. You can manage this entry from the MCP Servers tab.",
       "disconnect_entry_not_ours": "The stored grant was removed. Your server configuration was left unchanged.",
-      "disconnect_grant_shared": "The stored grant was kept because the same endpoint is also configured by: {{names}}.",
+      "disconnect_grant_shared": "The stored grant was kept because the same endpoint is also configured by: {{names}}. Revoking at the provider would cut off their access too.",
       "disconnect_grant_survived": "Part of the stored grant could not be removed. Revoke access at the provider.",
       "disconnected_locally": "Disconnected locally. Revoke access at the provider to cancel the grant completely.",
       "documentation": "Documentation",
@@ -4391,7 +4395,12 @@
         "applying_update": "Applying the update…",
         "applying_restart_note": "The gateway restarts itself when the new version is ready; this page reconnects automatically.",
         "approval_window_expired": "The approval window expired without an approval. Arm the update again when ready.",
-        "try_again": "Try again"
+        "try_again": "Try again",
+        "not_on_channel_yet": "Not on {{channel}}",
+        "channel_explainer_gateway_switch_note_version": "Switching only changes which channel is checked for updates. The {{channel}} channel currently publishes v{{version}}, which is OLDER than the build you are running — run the command below to actually move this install onto it.",
+        "channel_publishes_older_version": "The {{channel}} channel currently publishes v{{version}}, which is older than the build you are running, so it has no update to offer. <link>Download v{{version}}</link> to move onto that channel.",
+        "switch_to_version": "Switch to v{{version}}",
+        "in_app_channel_move_intro": "The chosen channel's release installs beside the current one and switches over atomically. Applying takes one approval command on the gateway host."
       },
       "computerUsePanel": {
         "computer_use_lets_the_agent_read_any_app_window": "Computer use lets the agent read any app window and send clicks and keystrokes into it. Most clicks are delivered straight to the app and leave your pointer alone, but the agent can ask to move the real pointer when a target needs it. Password fields are never read; nothing else limits which apps it may drive.",
