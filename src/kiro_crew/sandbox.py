@@ -451,9 +451,21 @@ def bind_voice_safe_agent_workspace(
 
     A pathname-only overlap check has an unavoidable check/use window: another
     sandboxed process can retarget a workspace symlink after ``stat`` and before
-    Kiro initializes its own sandbox. On macOS, open the workspace first, compare
-    directory ancestry entirely through descriptors, and make the child chdir via
-    that descriptor. The returned descriptor must stay open until the child exits.
+    Kiro initializes its own sandbox. On macOS, open the workspace first and
+    compare directory ancestry entirely through descriptors; the returned
+    descriptor stays open until the child exits and is what the child chdirs
+    into -- the post-exec spawn shim calls ``os.fchdir`` on the inherited
+    descriptor before ``execv``, so the working-directory change uses the
+    already-verified directory identity rather than a mutable pathname.
+
+    The returned STRING is the real verified workspace pathname (not
+    ``/dev/fd/N``). It is the value handed to the agent over the wire as the
+    session/new ``cwd``; the child's own directory change happens by descriptor
+    via the shim, not by chdir-ing into this pathname. (An earlier version
+    returned ``/dev/fd/{fd}`` as the cwd, but macOS devfs re-opens ``/dev/fd/N``
+    under a fresh permission check and a directory fd opened
+    ``O_RDONLY|O_DIRECTORY`` is not a usable chdir target there, which raised
+    ``PermissionError``.)
 
     Other platforms keep their original pathname and do not inherit a descriptor.
     """
@@ -481,7 +493,7 @@ def bind_voice_safe_agent_workspace(
                     "runtime; keep the workspace and Kiro Crew data home disjoint"
                 )
 
-        return f"/dev/fd/{workspace_fd}", workspace_fd
+        return workspace_path, workspace_fd
     except OSError as exc:
         if workspace_fd >= 0:
             os.close(workspace_fd)
@@ -6475,9 +6487,32 @@ def _needs_path_search(argv: "Sequence[str]") -> bool:
     return not (os.sep in name or (os.altsep and os.altsep in name))
 
 
+def _inject_chdir_fd(prefix: "Sequence[str]", chdir_fd: int, kwargs: "dict[str, Any]") -> list[str]:
+    """Splice ``--chdir-fd=N`` into a shim *prefix* and keep the fd inheritable.
+
+    The chdir descriptor differs per spawn, so it cannot ride on the
+    profile-keyed :func:`spawn_shim_argv` cache -- it is injected per call here.
+    The flag goes in front of the ``--`` separator that ends the shim's own
+    options, and *chdir_fd* is added to ``pass_fds`` so the child still inherits
+    the descriptor the shim will ``os.fchdir`` (see ``_spawn_exec_shim.py``).
+
+    A fresh list is built so the cached prefix tuple is never mutated.
+    """
+    prefix_list = list(prefix)
+    # The cached prefix always ends with the "--" separator; put the per-call
+    # flag just before it so it is parsed as a shim option, not a command arg.
+    sep = prefix_list.index("--")
+    prefix_list.insert(sep, f"--chdir-fd={chdir_fd}")
+    existing = kwargs.get("pass_fds") or ()
+    if chdir_fd not in existing:
+        kwargs["pass_fds"] = (*existing, chdir_fd)
+    return prefix_list
+
+
 async def create_subprocess_limited(
     *argv: str,
     profile: str = RLIMIT_PROFILE_TOOL,
+    chdir_fd: int | None = None,
     **kwargs: Any,
 ) -> asyncio.subprocess.Process:
     """``asyncio.create_subprocess_exec`` with resource limits applied post-exec.
@@ -6486,6 +6521,17 @@ async def create_subprocess_limited(
     resource_limit_preexec())``. Every keyword argument is forwarded untouched
     except ``preexec_fn``, which this owns: passing one would reintroduce the fork
     hazard the shim exists to remove, so it is refused.
+
+    ``chdir_fd`` is an optional directory descriptor the child should change
+    into BY DESCRIPTOR: when set and the shim is active, ``--chdir-fd=N`` is
+    injected into the shim options and ``N`` is kept in ``pass_fds`` so the shim
+    inherits it and calls ``os.fchdir`` before ``exec``. This is how the macOS
+    workspace binding hands the child its already-verified working directory
+    without chdir-ing into ``/dev/fd/N`` (which macOS rejects). When there is no
+    shim (Windows, a no-op profile, a truncated install), the descriptor cannot
+    be applied post-exec, so the caller's own ``cwd=`` pathname is relied on
+    instead -- the ACP session-host profile always carries a shim, so the
+    descriptor path covers the primary case.
 
     The returned ``Process`` describes the command itself, not a wrapper -- the
     shim ``exec``s in place -- so ``pid``, ``returncode``, signal delivery, and
@@ -6502,10 +6548,14 @@ async def create_subprocess_limited(
     if not prefix:
         # No shim (Windows, a no-op profile, or a truncated install): keep
         # whatever policy the profile carries on the legacy fork path. Dropping
-        # the caps silently would be worse than the fork hazard.
+        # the caps silently would be worse than the fork hazard. The chdir
+        # descriptor cannot be applied without the shim, so the caller's ``cwd=``
+        # pathname is what takes effect on this fallback path.
         return await asyncio.create_subprocess_exec(
             *argv, preexec_fn=_preexec_for_profile(profile), **kwargs
         )
+    if chdir_fd is not None:
+        prefix = _inject_chdir_fd(prefix, chdir_fd, kwargs)
     if not _needs_path_search(argv):
         # Explicit path: nothing to resolve, so no filesystem access and no
         # thread hop -- exec does the work.

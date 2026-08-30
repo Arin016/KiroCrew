@@ -904,7 +904,7 @@ class TestSpawnStderrDrainCleanup:
 async def test_failed_live_spawn_cleanup_releases_workspace_when_kill_is_cancelled(tmp_path):
     client = AcpClient(work_dir=tmp_path)
     client._bound_workspace_fd = 74
-    client._spawn_work_dir = "/dev/fd/74"
+    client._spawn_work_dir = str(tmp_path)
     client._kill_process = AsyncMock(side_effect=asyncio.CancelledError())
     released: list[int] = []
 
@@ -3499,7 +3499,7 @@ class TestEnsureReadyRetryOnAcpError:
         async def fake_spawn():
             client._process = MagicMock(returncode=None, pid=123)
             client._bound_workspace_fd = 77
-            client._spawn_work_dir = "/dev/fd/77"
+            client._spawn_work_dir = str(tmp_path)
 
         async def fake_init():
             raise AcpError("init failed")

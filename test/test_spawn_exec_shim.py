@@ -149,6 +149,44 @@ class TestShimArgvContract:
             shim.main(["--oom-bias", "--", "/bin/true"])
             assert biased == [True]
 
+    def test_chdir_fd_fchdirs_and_closes_before_exec(self):
+        """The macOS workspace fix: chdir BY DESCRIPTOR, before exec, then close.
+
+        fchdir must run before the limits go on (a tight RLIMIT must not be able
+        to interfere with it) and the descriptor is closed once the cwd is set,
+        so it does not survive into the exec'd image.
+        """
+        order: list[str] = []
+        with (
+            patch.object(shim.os, "fchdir", lambda fd: order.append(f"fchdir:{fd}")),
+            patch.object(shim.os, "close", lambda fd: order.append(f"close:{fd}")),
+            patch.object(shim, "_apply_rlimits", lambda _p: order.append("limits")),
+            patch.object(
+                shim.os,
+                "execv",
+                lambda *_a: order.append("exec") or (_ for _ in ()).throw(OSError(2, "x")),
+            ),
+        ):
+            shim.main(["--rlimits=RLIMIT_NOFILE:1024", "--chdir-fd=9", "--", "/bin/true"])
+        assert order == ["fchdir:9", "close:9", "limits", "exec"]
+
+    def test_chdir_fd_fails_closed_when_fchdir_raises(self, capsys):
+        """A failed chdir must NOT exec in the wrong directory -- fail with 127."""
+
+        def boom(_fd):
+            raise OSError(9, "Bad file descriptor")
+
+        with (
+            patch.object(shim.os, "fchdir", boom),
+            patch.object(shim.os, "execv", side_effect=AssertionError("exec despite fchdir fail")),
+        ):
+            assert shim.main(["--chdir-fd=9", "--", "/bin/true"]) == 127
+        assert "cannot fchdir" in capsys.readouterr().err
+
+    def test_unparseable_chdir_fd_fails_closed(self, capsys):
+        assert shim.main(["--chdir-fd=notanint", "--", "/bin/true"]) == 127
+        assert "invalid --chdir-fd" in capsys.readouterr().err
+
 
 # --------------------------------------------------------------------------
 # Parent side: the argv prefix and the profiles
@@ -310,6 +348,53 @@ class TestCreateSubprocessLimited:
         assert kwargs["cwd"] == "/tmp"
         assert kwargs["env"] == {"A": "1"}
         assert kwargs["start_new_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_chdir_fd_injects_the_flag_before_the_separator_and_keeps_the_fd(self):
+        """The macOS workspace fix: the shim chdirs BY DESCRIPTOR before exec.
+
+        ``--chdir-fd=N`` must land among the shim's own options (before ``--``),
+        and ``N`` must stay in ``pass_fds`` so the child inherits the descriptor
+        the shim will ``os.fchdir``.
+        """
+        spawn = AsyncMock()
+        with patch("asyncio.create_subprocess_exec", spawn):
+            await create_subprocess_limited(
+                "/nonexistent/tool",
+                profile=RLIMIT_PROFILE_SESSION_HOST,
+                chdir_fd=41,
+                cwd="/real/workspace",
+            )
+        argv = spawn.await_args.args
+        assert "--chdir-fd=41" in argv
+        assert argv.index("--chdir-fd=41") < argv.index("--")
+        assert 41 in spawn.await_args.kwargs["pass_fds"]
+        # cwd stays the real pathname (used for PATH resolution / reporting),
+        # never /dev/fd/N.
+        assert spawn.await_args.kwargs["cwd"] == "/real/workspace"
+        assert strip_spawn_shim(argv) == ("/nonexistent/tool",)
+
+    @pytest.mark.asyncio
+    async def test_chdir_fd_is_merged_into_existing_pass_fds(self):
+        spawn = AsyncMock()
+        with patch("asyncio.create_subprocess_exec", spawn):
+            await create_subprocess_limited(
+                "/nonexistent/tool",
+                profile=RLIMIT_PROFILE_SESSION_HOST,
+                chdir_fd=7,
+                pass_fds=(3, 4),
+            )
+        assert set(spawn.await_args.kwargs["pass_fds"]) == {3, 4, 7}
+
+    @pytest.mark.asyncio
+    async def test_no_chdir_fd_leaves_the_argv_and_pass_fds_alone(self):
+        spawn = AsyncMock()
+        with patch("asyncio.create_subprocess_exec", spawn):
+            await create_subprocess_limited(
+                "/nonexistent/tool", profile=RLIMIT_PROFILE_SESSION_HOST
+            )
+        assert not any(str(a).startswith("--chdir-fd") for a in spawn.await_args.args)
+        assert "pass_fds" not in spawn.await_args.kwargs
 
 
 # --------------------------------------------------------------------------
@@ -627,3 +712,46 @@ class TestRealChild:
         else:
             expected = gateway_hard
         assert int(out.decode().strip()) == expected
+
+    @pytest.mark.asyncio
+    async def test_chdir_fd_puts_the_child_in_the_descriptor_directory(self, tmp_path):
+        """Regression for the macOS ``/dev/fd/N`` crash (issue: insider.5 ACP spawn).
+
+        The old binding handed the child ``cwd=/dev/fd/N``; macOS devfs re-opens
+        that path under a fresh permission check and rejects a directory fd, so
+        every kiro-cli ACP session raised ``PermissionError``. The fix hands the
+        child the descriptor and lets the shim ``os.fchdir`` it before exec.
+
+        This starts a REAL child through the same shim + ``chdir_fd`` path the
+        ACP spawn sites use and asserts its working directory is the descriptor's
+        directory. It runs (not skips) on Linux, so it exercises the mechanism
+        end to end and would have caught the crash -- the old tests stubbed the
+        binding and never started a child with that working directory. fchdir on
+        a directory fd behaves identically on macOS, so this covers the fix on
+        both platforms even though the original crash is Darwin-only.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        real_workspace = os.path.realpath(workspace)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(str(workspace), flags)
+        try:
+            proc = await create_subprocess_limited(
+                sys.executable,
+                "-c",
+                "import os,sys;sys.stdout.write(os.path.realpath(os.getcwd()))",
+                profile=RLIMIT_PROFILE_SESSION_HOST,
+                chdir_fd=fd,
+                # cwd is a DIFFERENT real directory: proves the descriptor, not
+                # cwd=, is what places the child. (With cwd honored the child
+                # would report tmp_path, not the workspace subdirectory.)
+                cwd=str(tmp_path),
+                pass_fds=(fd,),
+                stdout=asyncio.subprocess.PIPE,
+            )
+            out, _ = await proc.communicate()
+        finally:
+            # The shim closes its inherited copy; the parent still owns this one.
+            os.close(fd)
+        assert proc.returncode == 0
+        assert out.decode() == real_workspace

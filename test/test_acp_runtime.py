@@ -1091,11 +1091,15 @@ async def test_bound_macos_runtime_reuses_descriptor_cwd_for_sessions(monkeypatc
 
     runtime = AcpRuntime(work_dir=tmp_path)
     runtime._bound_workspace_fd = 71
-    runtime._spawn_work_dir = "/dev/fd/71"
+    # The binding now stores the real verified workspace pathname (the child's
+    # own cwd is set BY DESCRIPTOR via the shim's os.fchdir), and that pathname
+    # is what session/new sends over the wire -- no longer /dev/fd/71.
+    runtime._spawn_work_dir = str(tmp_path)
     matches = MagicMock(return_value=True)
     monkeypatch.setattr(runtime_mod, "bound_agent_workspace_matches", matches)
 
-    assert await runtime._session_work_dir(tmp_path) == "/dev/fd/71"
+    # Still re-verified against the bound descriptor identity before returning.
+    assert await runtime._session_work_dir(tmp_path) == str(tmp_path)
     matches.assert_called_once_with(71, tmp_path)
 
 
@@ -1105,7 +1109,7 @@ async def test_bound_macos_runtime_rejects_descendant_session_workspace(monkeypa
 
     runtime = AcpRuntime(work_dir=tmp_path)
     runtime._bound_workspace_fd = 71
-    runtime._spawn_work_dir = "/dev/fd/71"
+    runtime._spawn_work_dir = str(tmp_path)
     descendant = tmp_path / "packages" / "app"
     matches = MagicMock(return_value=False)
     monkeypatch.setattr(runtime_mod, "bound_agent_workspace_matches", matches)
@@ -1121,7 +1125,7 @@ async def test_bound_macos_runtime_rejects_different_session_workspace(monkeypat
 
     runtime = AcpRuntime(work_dir=tmp_path)
     runtime._bound_workspace_fd = 72
-    runtime._spawn_work_dir = "/dev/fd/72"
+    runtime._spawn_work_dir = str(tmp_path)
     monkeypatch.setattr(runtime_mod, "bound_agent_workspace_matches", MagicMock(return_value=False))
 
     with pytest.raises(AcpRuntimeError, match="exact workspace"):
@@ -1134,7 +1138,7 @@ async def test_kill_cancellation_still_releases_bound_workspace(monkeypatch, tmp
 
     runtime = AcpRuntime(work_dir=tmp_path)
     runtime._bound_workspace_fd = 73
-    runtime._spawn_work_dir = "/dev/fd/73"
+    runtime._spawn_work_dir = str(tmp_path)
     entered = asyncio.Event()
     closed: list[int] = []
 

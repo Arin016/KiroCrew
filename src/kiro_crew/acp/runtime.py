@@ -1010,10 +1010,14 @@ class AcpRuntime:
                 "A delegated macOS Kiro runtime is bound to one exact workspace; "
                 "create a runtime bound to the requested workspace"
             )
-        # Return only the inherited descriptor.  Appending a descendant suffix
-        # would perform mutable pathname lookup in the child after this check,
-        # reopening the same-UID symlink-retarget window the binding closes.
-        return f"/dev/fd/{self._bound_workspace_fd}"
+        # Re-verified against the bound descriptor identity above, so this is the
+        # one exact workspace the runtime is bound to. Return its real pathname:
+        # it is sent to the agent over the wire as the session/new ``cwd`` and
+        # must be a path the agent process can interpret. The child's own working
+        # directory was already set by descriptor (os.fchdir in the spawn shim)
+        # at spawn time, so this pathname is not used as a chdir target here and
+        # does not reopen the symlink-retarget window the binding closes.
+        return self._spawn_work_dir
 
     async def _to_thread_guarding_sandbox(
         self, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
@@ -1264,6 +1268,11 @@ class AcpRuntime:
             )
         try:
             if self._bound_workspace_fd is not None:
+                # The child changes into the verified workspace BY DESCRIPTOR:
+                # the shim os.fchdir()s the inherited descriptor before exec, so
+                # pass_fds keeps it inheritable and chdir_fd tells the shim which
+                # one. cwd= is the real workspace pathname (used only for PATH
+                # resolution and process reporting), not /dev/fd/N.
                 self._process = await create_subprocess_limited(
                     *argv,
                     stdin=asyncio.subprocess.PIPE,
@@ -1274,6 +1283,7 @@ class AcpRuntime:
                     start_new_session=platform_compat.IS_POSIX,
                     creationflags=0,
                     pass_fds=(self._bound_workspace_fd,),
+                    chdir_fd=self._bound_workspace_fd,
                     env=env,
                     profile=RLIMIT_PROFILE_SESSION_HOST,
                 )

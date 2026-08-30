@@ -2,7 +2,7 @@
 
 Spawned as::
 
-    <sys.executable> -I -S -c <this file's source> [--rlimits=SPEC] [--oom-bias] -- argv...
+    <sys.executable> -I -S -c <this file's source> [--rlimits=SPEC] [--oom-bias] [--chdir-fd=N] -- argv...
 
 and replaces itself with ``argv`` via ``execv``, so the PID, process group,
 session, inherited fds, and exit status the caller observes are all the child's
@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - Windows has no POSIX rlimits
 
 _RLIMIT_FLAG = "--rlimits="
 _OOM_BIAS_FLAG = "--oom-bias"
+_CHDIR_FD_FLAG = "--chdir-fd="
 _ARGV_SEPARATOR = "--"
 # Shell convention for "command found but could not be executed", so a caller
 # that only sees the exit status can still tell an exec failure from the
@@ -150,12 +151,22 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     spec = ""
     want_oom_bias = False
+    chdir_fd: int | None = None
     while args and args[0] != _ARGV_SEPARATOR:
         item = args.pop(0)
         if item.startswith(_RLIMIT_FLAG):
             spec = item[len(_RLIMIT_FLAG) :]
         elif item == _OOM_BIAS_FLAG:
             want_oom_bias = True
+        elif item.startswith(_CHDIR_FD_FLAG):
+            # Change directory BY DESCRIPTOR (see below). An unparseable fd is a
+            # contract mismatch between caller and shim, so fail closed rather
+            # than exec in an unknown directory.
+            try:
+                chdir_fd = int(item[len(_CHDIR_FD_FLAG) :])
+            except ValueError:
+                sys.stderr.write(f"spawn shim: invalid {_CHDIR_FD_FLAG} value {item!r}\n")
+                return _EXEC_FAILED
         else:
             # Fail closed. A stray token here means the caller and this shim
             # disagree about the argv contract, and guessing which side the
@@ -179,6 +190,28 @@ def main(argv: list[str] | None = None) -> int:
     except (UnicodeEncodeError, ValueError):
         sys.stderr.write("spawn shim: command argv is not encodable\n")
         return _EXEC_FAILED
+
+    # Change into the child's working directory BY DESCRIPTOR, before the limits
+    # go on so a tight RLIMIT cannot interfere with the fchdir. The parent opened
+    # and verified this directory's identity and passed the descriptor down via
+    # pass_fds; os.fchdir uses that already-verified identity rather than a
+    # mutable pathname, which is both immune to symlink retargeting (the reason
+    # the descriptor binding exists) and portable -- fchdir on a directory fd
+    # works identically on Linux and macOS, unlike chdir-ing into /dev/fd/N,
+    # which macOS devfs re-opens under a fresh permission check and rejects.
+    if chdir_fd is not None:
+        try:
+            os.fchdir(chdir_fd)
+        except OSError as exc:
+            sys.stderr.write(f"spawn shim: cannot fchdir to fd {chdir_fd}: {exc.strerror}\n")
+            return _EXEC_FAILED
+        # The child no longer needs the descriptor once its cwd is set; closing
+        # it here keeps it out of the exec'd image. (It still had to be inherited
+        # for the fchdir above, so the parent must keep it in pass_fds.)
+        try:
+            os.close(chdir_fd)
+        except OSError:
+            pass
 
     _apply_rlimits(pairs)
     if want_oom_bias:

@@ -415,7 +415,11 @@ class TestBuildSeatbeltProfile:
 
         path, descriptor = sandbox_mod.bind_voice_safe_agent_workspace("/mutable/workspace")
 
-        assert (path, descriptor) == ("/dev/fd/41", 41)
+        # The binding returns the real verified workspace pathname (for the
+        # session/new wire cwd) plus the descriptor the child chdirs into via the
+        # shim's os.fchdir -- no longer a /dev/fd/N chdir target (macOS rejects
+        # that; see bind_voice_safe_agent_workspace docstring).
+        assert (path, descriptor) == ("/mutable/workspace", 41)
         assert closed == [42]
 
     def test_macos_workspace_binding_rejects_opened_runtime_ancestor(self, monkeypatch):
@@ -469,7 +473,7 @@ class TestBuildSeatbeltProfile:
         def delayed_binding(_workspace):
             entered.set()
             assert release.wait(timeout=2)
-            return "/dev/fd/61", 61
+            return "/mutable/workspace", 61
 
         def record_close(descriptor):
             assert descriptor == 61

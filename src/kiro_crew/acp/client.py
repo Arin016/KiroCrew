@@ -2993,6 +2993,11 @@ class AcpClient:
             )
         try:
             if self._bound_workspace_fd is not None:
+                # The child changes into the verified workspace BY DESCRIPTOR:
+                # the shim os.fchdir()s the inherited descriptor before exec, so
+                # pass_fds keeps it inheritable and chdir_fd tells the shim which
+                # one. cwd= is the real workspace pathname (used only for PATH
+                # resolution and process reporting), not /dev/fd/N.
                 self._process = await create_subprocess_limited(
                     *argv,
                     stdin=asyncio.subprocess.PIPE,
@@ -3004,6 +3009,7 @@ class AcpClient:
                     start_new_session=platform_compat.IS_POSIX,
                     creationflags=0,
                     pass_fds=(self._bound_workspace_fd,),
+                    chdir_fd=self._bound_workspace_fd,
                     profile=RLIMIT_PROFILE_SESSION_HOST,
                 )
             else:
