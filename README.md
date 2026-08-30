@@ -742,6 +742,7 @@ make this tool possible:
 <a href="https://github.com/darko-mesaros" title="Darko Mesaros"><img src="https://github.com/darko-mesaros.png?size=64" width="64" height="64" alt="Darko Mesaros" /></a>
 <a href="https://github.com/davidtlee-amzn" title="davidtlee-amzn"><img src="https://github.com/davidtlee-amzn.png?size=64" width="64" height="64" alt="davidtlee-amzn" /></a>
 <a href="https://github.com/dcorelibran" title="dcorelibran"><img src="https://github.com/dcorelibran.png?size=64" width="64" height="64" alt="dcorelibran" /></a>
+<a href="https://github.com/DebasishTripathy13" title="Debasish Tripathy"><img src="https://github.com/DebasishTripathy13.png?size=64" width="64" height="64" alt="Debasish Tripathy" /></a>
 <a href="https://github.com/derrick0714" title="Xu Deng"><img src="https://github.com/derrick0714.png?size=64" width="64" height="64" alt="Xu Deng" /></a>
 <a href="https://github.com/DeryFerd" title="Dery Ferdika"><img src="https://github.com/DeryFerd.png?size=64" width="64" height="64" alt="Dery Ferdika" /></a>
 <a href="https://github.com/desaip05" title="Parikshit Desai"><img src="https://github.com/desaip05.png?size=64" width="64" height="64" alt="Parikshit Desai" /></a>
