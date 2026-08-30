@@ -13,7 +13,7 @@ import { isBrowseCommand } from '../utils/browseCommand'
 // importable from here; the implementation lives in `utils/browseCommand` so a
 // pure test need not pull ChatPage's module graph.
 export { isBrowseCommand }
-import { useDrawerSwipe, animateDrawer, registerDrawerTargets, takeOverDrawer } from '../hooks/useDrawerSwipe'
+import { useDrawerSwipe, animateDrawer, registerDrawerTargets, takeOverDrawer, safeAreaLeft } from '../hooks/useDrawerSwipe'
 import { shouldReplaceSessionUrl } from '../utils/sessionUrlHistory'
 import type { ResizeInfo } from '../utils/resizeImage'
 import { useAppSelector, useAppDispatch, store } from '../store'
@@ -121,6 +121,17 @@ const TRANSCRIPT_MASK_ABOVE_PX = 16
  * pins that ordering, and pins the child list so a new bar cannot forget it.
  */
 const COMPOSER_MASK_OVERSHOOT_PX = 10
+/**
+ * Strip of screen the mobile sessions drawer deliberately leaves uncovered, so a
+ * sliver of the conversation behind it stays visible.
+ *
+ * ONE number, because it has to be two things at once: the panel's rendered
+ * width (`viewport - this`) and the offset its slide travels. Spelling the width
+ * as a `max-w-[calc(100vw-2.5rem)]` class while the travel read `innerWidth` is
+ * exactly how they drifted apart — the panel finished sliding 40px before its
+ * animation did, so the ease-out's tail moved an already-offscreen panel.
+ */
+const DRAWER_UNCOVERED_PX = 40
 // No arbitrary cap on pinned-jump page loads: the loop terminates when the
 // target message is found OR history is exhausted (!slotHasMore / null result).
 // The `cancelled` flag in the useEffect cleanup and the loadOlderMessages null
@@ -6647,6 +6658,27 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const drawerPanelRef = useRef<HTMLDivElement | null>(null)
   const drawerScrimRef = useRef<HTMLDivElement | null>(null)
   /**
+   * The drawer's travel: its OWN width, not the screen's.
+   *
+   * The panel is deliberately narrower than the viewport (`DRAWER_UNCOVERED_PX`
+   * of chat stays visible beside it), so a travel of `innerWidth` puts it fully
+   * offscreen at ~90% of the slide — and the settle's whole deceleration tail
+   * then plays with nothing on screen. Measured on a 390px phone: the panel
+   * vanished at 160ms of a 300ms dismissal, leaving 140ms of invisible motion
+   * plus a scrim still 10% dark, fading alone. Matching the travel to the width
+   * lands the panel's edge and the scrim's zero on the same frame, which is what
+   * makes the ease-out readable.
+   *
+   * Live, not captured: rotation and resize change it, and a settle registered
+   * earlier must not animate against a stale span. The safe-area inset is part
+   * of it — the panel is pinned at `left-safe`, so it starts that far in and has
+   * to cross it too.
+   */
+  const drawerTravel = useCallback(
+    () => Math.max(0, (window.innerWidth || 0) - DRAWER_UNCOVERED_PX + safeAreaLeft()),
+    [],
+  )
+  /**
    * RIGHT-side panel slide (mobile only). The inline side panel used to enter
    * by animating `width: 0 → auto` — a LAYOUT animation the compositor cannot
    * take, which re-laid-out the squeezed chat pane on every frame of the
@@ -6667,22 +6699,25 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     travel: () => window.innerWidth || 0,
   }), [sideOverlayX])
   /** The scrim tracks the panel instead of running its own fade, so a half-drag
-   *  is half-dimmed and a cancelled drag un-dims with the finger. */
-  const drawerScrim = useTransform(drawerX, x => {
-    const w = typeof window === 'undefined' ? 1 : window.innerWidth || 1
-    return Math.max(0, Math.min(1, 1 + x / w))
-  })
+   *  is half-dimmed and a cancelled drag un-dims with the finger. Divided by the
+   *  drawer's OWN travel, so it reaches 0 exactly as the panel clears the edge. */
+  const drawerScrim = useTransform(drawerX, x =>
+    Math.max(0, Math.min(1, 1 + x / Math.max(1, drawerTravel()))))
   // Point every settle on `drawerX` at real DOM. Registered once for the page's
   // lifetime, reading the elements through the refs at animation time — the
   // panel is mounted and unmounted per open, so binding the nodes themselves
   // here would go stale on the first close. Safe ONLY because the drawer's
   // ChatSidebar renders staticRows (no projection nodes under a compositor-
   // driven transform — see registerDrawerTargets' precondition).
+  //
+  // `travel` is recomputed per call rather than captured, so a rotation or a
+  // resize between registration and the next settle cannot animate against a
+  // stale span.
   useEffect(() => registerDrawerTargets(drawerX, {
     panel: () => drawerPanelRef.current,
     scrim: () => drawerScrimRef.current,
-    travel: () => window.innerWidth || 0,
-  }), [drawerX])
+    travel: drawerTravel,
+  }), [drawerX, drawerTravel])
   // Read for the transition guards below. The animation each transition starts
   // is a side effect, so it must not live inside a setState updater — React may
   // invoke an updater more than once, which would start the settle twice.
@@ -6692,11 +6727,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     if (drawerPhaseRef.current === 'open') return
     // Seat it offscreen before the mount so the first painted frame is the
     // closed offset, then let the shared settle carry it in.
-    if (drawerPhaseRef.current === 'closed') drawerX.set(-(window.innerWidth || 0))
+    if (drawerPhaseRef.current === 'closed') drawerX.set(-drawerTravel())
     drawerPhaseRef.current = 'open'
     setDrawerPhase('open')
     animateDrawer(drawerX, 0)
-  }, [drawerX])
+  }, [drawerX, drawerTravel])
   /** Mount the panel for a drag in progress. Deliberately NOT `openSidebar`:
    *  that one runs the settle to the rest position, which would race the finger
    *  for the same value and pull the panel out from under it. The gesture has
@@ -6709,11 +6744,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     if (drawerPhaseRef.current !== 'open') return
     drawerPhaseRef.current = 'closing'
     setDrawerPhase('closing')
-    animateDrawer(drawerX, -(window.innerWidth || 0), () => {
+    animateDrawer(drawerX, -drawerTravel(), () => {
       drawerPhaseRef.current = 'closed'
       setDrawerPhase('closed')
     })
-  }, [drawerX])
+  }, [drawerX, drawerTravel])
   // Close the drawer when a session is selected. Routed through closeSidebar so
   // it slides out — flipping straight to 'closed' would unmount it on the spot.
   useEffect(() => { if (isMobile) closeSidebar() }, [activeSlot]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -6795,6 +6830,26 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       })
     }
   }, [isMobile, sidePanelWantsMount, sideOverlayX])
+  /** Read by the right overlay's release handler, which must know whether the
+   *  store currently has the panel open without depending on it. */
+  const activityOpenRef = useRef(activityOpen)
+  activityOpenRef.current = activityOpen
+  /**
+   * Mount the right overlay for a drag in progress — the mirror of
+   * `beginDrawerDrag`, and deliberately NOT the effect above: that one runs a
+   * settle to the rest position, which would race the finger for the same
+   * value. The gesture has already seated the offset and owns it until release.
+   *
+   * The STORE is left alone until the release commits. Writing `activityOpen`
+   * here would re-run the effect above mid-gesture, and a drag the user then
+   * reconsiders would still have flipped (and persisted) the panel's open flag.
+   * The phase alone is enough to mount, because the effect keys on the store's
+   * predicate rather than on the phase.
+   */
+  const beginSideOverlayDrag = useCallback(() => {
+    sideOverlayPhaseRef.current = 'open'
+    setSideOverlayPhase('open')
+  }, [])
 
   /** True while the INLINE side panel (mobile / embed, no actbar column) is
    *  mounted AND visible.
@@ -6810,16 +6865,50 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const inlineSidePanelShowing = !activitySlot
     && shouldMountSidePanel({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen })
     && !isSidePanelHidden({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen })
-  // ONE binding for both directions: an inward drag from the left band opens the
-  // drawer, a leftward drag anywhere on the open drawer closes it. Which rule
-  // applies is read live from `open` inside the hook, so the opening drag does
-  // not tear its own listeners down when the panel mounts mid-gesture.
+  // ONE binding per panel, each covering both of ITS directions: a rightward
+  // drag opens the sessions drawer, a leftward drag on the open drawer closes
+  // it. Which rule applies is read live from `open` inside the hook, so the
+  // opening drag does not tear its own listeners down when the panel mounts
+  // mid-gesture.
+  //
+  // The two instances share this element and are told apart by DIRECTION, not by
+  // where the touch began — so an opening drag works from anywhere in the pane
+  // rather than out of a narrow edge band. The one thing direction cannot
+  // separate is a panel that is already OPEN: its closing drag is the other
+  // panel's opening drag, so each instance is disabled while the other's panel
+  // is on screen.
   const drawerDragging = useDrawerSwipe(chatContainerRef, {
-    enabled: isMobile && !embedded,
+    enabled: isMobile && !embedded && sideOverlayPhase === 'closed',
+    travel: drawerTravel,
     open: mobileSessions,
     x: drawerX,
     onGestureOpen: beginDrawerDrag,
     onSettle: open => { if (!open) { drawerPhaseRef.current = 'closed'; setDrawerPhase('closed') } },
+  })
+  // Right-hand side panel, same gesture mirrored. Not bound when the actbar
+  // column owns the panel (desktop) or while the find pane holds the dock —
+  // there the store's mount predicate refuses to keep the panel open, so a
+  // committed drag would be undone by the effect above on the next render.
+  useDrawerSwipe(chatContainerRef, {
+    enabled: isMobile && !embedded && !activitySlot && !search.isOpen && drawerPhase === 'closed',
+    side: 'right',
+    open: sideOverlayPhase === 'open',
+    x: sideOverlayX,
+    onGestureOpen: beginSideOverlayDrag,
+    onSettle: open => {
+      // Committed: publish to the store, which is what keeps the panel open
+      // across a re-render and remembers it for this chat. The effect above sees
+      // a phase already at 'open' and does not re-animate.
+      if (open) { dispatch(openActivityPanel()); return }
+      // Parked: write 'closed' BEFORE touching the store, so the effect sees a
+      // panel that has already arrived and does not run a second slide-out over
+      // this one. The store is only flipped when it actually had the panel open
+      // — an opening drag that was reconsidered never wrote it in the first
+      // place, and toggling here would OPEN the panel it just dismissed.
+      sideOverlayPhaseRef.current = 'closed'
+      setSideOverlayPhase('closed')
+      if (activityOpenRef.current) toggleAct()
+    },
   })
   /** Reveal a session's pull request / issue in that session's side panel.
    *
@@ -7110,7 +7199,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           />
         </div>
       ) : (
-      <OverlayDrawer open={isMobile ? drawerMounted : sidebarOpen} width={isMobile ? winW : effectiveSidebarWidth} dragging={sidebarDragging} slideX={isMobile ? drawerX : undefined} slideRef={drawerPanelRef} morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? 'mobile-sessions-overlay fixed top-safe-offset-[42px] bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
+      <OverlayDrawer open={isMobile ? drawerMounted : sidebarOpen} width={isMobile ? Math.max(0, winW - DRAWER_UNCOVERED_PX) : effectiveSidebarWidth} dragging={sidebarDragging} slideX={isMobile ? drawerX : undefined} slideRef={drawerPanelRef} morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? 'mobile-sessions-overlay fixed top-safe-offset-[42px] bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
         <ChatSidebar
           slots={filteredSlots}
           activeSlot={activeSlot}
@@ -7176,7 +7265,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             OVER it — leaving no way to close a panel that covers the whole
             screen. It would also be pointing at a chat pane the panel has
             squeezed to zero width. Sessions stay reachable meanwhile via the
-            left-edge drag (useDrawerSwipe above).
+            rightward drag (useDrawerSwipe above).
 
             Suppressed when EMBEDDED for the same reason it is suppressed
             behind the side panel: `fixed` anchors it to the VIEWPORT, not to
@@ -8246,12 +8335,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               : 'h-full overflow-hidden flex justify-end shrink-0'}
             // Kept mounted for a live app tab: hide instead of unmounting so the
             // iframe (and the drawing inside it) survives a panel close. On
-            // mobile the overlay phase already owns mount/hide timing; seating
-            // the closed offset inline keeps the first painted frame offscreen.
+            // mobile the overlay phase already owns mount/hide timing, and the
+            // offset is BOUND (not a one-shot read): a drag writes the value
+            // directly, so only a live binding paints those frames — the
+            // compositor settle still runs through the registered element above.
             style={isMobile
               ? (sideOverlayPhase === 'closed'
                   ? { display: 'none' } // keep-alive: mounted for the iframe, invisible
-                  : { transform: `translate3d(${sideOverlayX.get()}px, 0, 0)` })
+                  : { x: sideOverlayX })
               : (isSidePanelHidden({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen }) ? { display: 'none' } : undefined)}
           >
             <SidePanel

@@ -25,6 +25,8 @@ describe('useDrawerSwipe', () => {
 
   /** Viewport width doubles as the gesture's full travel, so closed is -400. */
   const CLOSED = -400
+  /** A right-anchored panel runs the same travel with the opposite sign. */
+  const CLOSED_RIGHT = 400
 
   beforeEach(() => {
     el = document.createElement('div')
@@ -36,9 +38,9 @@ describe('useDrawerSwipe', () => {
     Object.defineProperty(window, 'innerWidth', { writable: true, value: 400 })
   })
 
-  function mount(open = false) {
+  function mount(open = false, side: 'left' | 'right' = 'left') {
     return renderHook(() => useDrawerSwipe(ref, {
-      enabled: true, open, x, onGestureOpen, onSettle,
+      enabled: true, side, open, x, onGestureOpen, onSettle,
     }))
   }
 
@@ -152,13 +154,46 @@ describe('useDrawerSwipe', () => {
     expect(x.get()).toBe(0)
   })
 
-  it('is a band, not the left third of the screen', () => {
+  it('opens from anywhere in the pane, not just an edge band', () => {
     mount()
-    // 137px was inside the predecessor's 35%-of-viewport zone, so a rightward
-    // drag begun mid-message opened the drawer.
-    fire(el, touch('touchstart', 137))
-    fire(el, touch('touchmove', 300))
+    // 300px on a 400px viewport — nowhere near the left edge. The predecessor
+    // armed only inside 24-120px, which is why the gesture was hard to find:
+    // a drag begun mid-screen, where the thumb naturally lands, did nothing.
+    fire(el, touch('touchstart', 300))
+    fire(el, touch('touchmove', 330))
+    expect(onGestureOpen).toHaveBeenCalledTimes(1)
+    expect(x.get()).toBe(CLOSED + 30)
+  })
+
+  it('leaves the platform forward-swipe band at the FAR bezel alone too', () => {
+    mount()
+    // Within 24px of the right edge, dragging the direction that WOULD open the
+    // left drawer: the far bezel only became reachable once the opening band
+    // spanned the pane, and the OS owns that strip for its own forward gesture.
+    fire(el, touch('touchstart', 390))
+    fire(el, touch('touchmove', 430))
     expect(onGestureOpen).not.toHaveBeenCalled()
+    expect(x.get()).toBe(0)
+  })
+
+  it('leaves the far bezel alone for the panel anchored THERE as well', () => {
+    // The right panel's own opening drag starts near the right edge, which is
+    // exactly where the platform's gesture lives — so the dead zone has to hold
+    // for the side that most wants to reach past it.
+    x.set(CLOSED_RIGHT)
+    mount(false, 'right')
+    fire(el, touch('touchstart', 390))
+    fire(el, touch('touchmove', 200))
+    expect(onGestureOpen).not.toHaveBeenCalled()
+    expect(x.get()).toBe(CLOSED_RIGHT)
+  })
+
+  it('a LEFT panel ignores a leftward drag — direction is what selects a panel', () => {
+    mount()
+    fire(el, touch('touchstart', 300))
+    fire(el, touch('touchmove', 100))
+    expect(onGestureOpen).not.toHaveBeenCalled()
+    expect(x.get()).toBe(0)
   })
 
   it('yields to a vertical scroll', () => {
@@ -301,6 +336,127 @@ describe('useDrawerSwipe', () => {
     fire(el, touch('touchcancel', 40))
     fire(el, touch('touchmove', 300))
     expect(onGestureOpen).not.toHaveBeenCalled()
+  })
+
+  // ── The right-anchored panel: same gesture, mirrored ────────────────────
+  // Only the SIGNS differ, so these pin the mirror rather than re-testing the
+  // machinery: closed sits at +travel, a leftward drag opens, a rightward one
+  // closes, and a flick is judged against this side's own opening direction.
+
+  it('opens a RIGHT panel on a leftward drag, tracking the finger', () => {
+    x.set(CLOSED_RIGHT)
+    mount(false, 'right')
+    fire(el, touch('touchstart', 300))
+    fire(el, touch('touchmove', 280))          // dx -20, past AXIS_LOCK
+    expect(onGestureOpen).toHaveBeenCalledTimes(1)
+    expect(x.get()).toBe(CLOSED_RIGHT - 20)
+    fire(el, touch('touchmove', 100))
+    expect(x.get()).toBe(CLOSED_RIGHT - 200)
+  })
+
+  it('a RIGHT panel ignores a rightward drag', () => {
+    x.set(CLOSED_RIGHT)
+    mount(false, 'right')
+    fire(el, touch('touchstart', 100))
+    fire(el, touch('touchmove', 300))
+    expect(onGestureOpen).not.toHaveBeenCalled()
+    expect(x.get()).toBe(CLOSED_RIGHT)
+  })
+
+  it('commits a RIGHT panel past halfway, and never past its own edge', async () => {
+    x.set(CLOSED_RIGHT)
+    mount(false, 'right')
+    fire(el, touch('touchstart', 300, 0, 0))
+    fire(el, touch('touchmove', 40, 0, 200))   // dx -260 -> 65% of the travel
+    expect(x.get()).toBe(CLOSED_RIGHT - 260)
+    fire(el, touch('touchmove', -200, 0, 400)) // dragged well past open
+    expect(x.get()).toBe(0)                    // clamped at its rest position
+    fire(el, touch('touchend', -200, 0, 600))
+    await waitFor(() => expect(onSettle).toHaveBeenCalledWith(true))
+  })
+
+  it('closes an open RIGHT panel on a rightward drag past halfway', async () => {
+    x.set(0)
+    mount(true, 'right')
+    fire(el, touch('touchstart', 20, 0, 0))
+    fire(el, touch('touchmove', 300, 0, 200))
+    expect(x.get()).toBe(280)
+    fire(el, touch('touchend', 300, 0, 400))
+    await waitFor(() => expect(onSettle).toHaveBeenCalledWith(false))
+  })
+
+  it('reads a flick against the RIGHT panel\'s own opening direction', async () => {
+    // Same leftward flick that would be a CLOSE on the left drawer: barely 8%
+    // of the travel, so only the velocity branch can commit it.
+    x.set(CLOSED_RIGHT)
+    mount(false, 'right')
+    fire(el, touch('touchstart', 300, 0, 0))
+    fire(el, touch('touchmove', 270, 0, 10))
+    fire(el, touch('touchmove', 268, 0, 12))   // -1 px/ms, past COMMIT_VELOCITY
+    fire(el, touch('touchend', 268, 0, 15))
+    await waitFor(() => expect(onSettle).toHaveBeenCalledWith(true))
+  })
+
+  // ── A panel narrower than the screen ────────────────────────────────────
+  // The sessions drawer leaves a strip of chat uncovered, so its travel is its
+  // own width. Everything the gesture decides divides by that: leave it at the
+  // viewport width and the drag runs past the panel's edge while the commit
+  // point sits inboard of the real halfway mark.
+
+  /** Bind with an explicit travel narrower than the 400px viewport. */
+  function mountNarrow(open = false) {
+    return renderHook(() => useDrawerSwipe(ref, {
+      enabled: true, travel: () => 360, open, x, onGestureOpen, onSettle,
+    }))
+  }
+
+  it('rests closed at its OWN width, not the viewport width', () => {
+    mountNarrow()
+    fire(el, touch('touchstart', 200))
+    fire(el, touch('touchmove', 260))          // dx 60 past the axis lock
+    expect(x.get()).toBe(-360 + 60)
+  })
+
+  it('clamps a drag at the panel edge that travel names', () => {
+    mountNarrow()
+    fire(el, touch('touchstart', 200))
+    fire(el, touch('touchmove', 900))          // far past open
+    expect(x.get()).toBe(0)
+  })
+
+  it('measures the commit share against the PANEL, not the screen', () => {
+    // A fifth of a 360px panel is 72px; a fifth of the 400px screen would be
+    // 80px. 76px therefore commits only if the share divides by the travel it
+    // was given.
+    mountNarrow()
+    fire(el, touch('touchstart', 200, 0, 0))
+    fire(el, touch('touchmove', 215, 0, 200))
+    fire(el, touch('touchmove', 276, 0, 1000))   // dx 76 of 360
+    fire(el, touch('touchend', 276, 0, 1400))    // slow: only distance decides
+    return waitFor(() => expect(onSettle).toHaveBeenCalledWith(true))
+  })
+
+  it('still refuses a release short of that fifth', async () => {
+    mountNarrow()
+    fire(el, touch('touchstart', 200, 0, 0))
+    fire(el, touch('touchmove', 215, 0, 200))
+    fire(el, touch('touchmove', 268, 0, 1000))   // dx 68 of 360
+    fire(el, touch('touchend', 268, 0, 1400))
+    await waitFor(() => expect(onSettle).toHaveBeenCalledWith(false))
+  })
+
+  it('asks the same fifth of a CLOSING drag, measured from its own start', async () => {
+    // The reformulation this pins. Read as an absolute position instead —
+    // "commit while the panel is more than a fifth open" — the same 76px pull
+    // leaves this panel 79% open and therefore refuses to close, so a light
+    // threshold for opening would have become an 80% threshold for closing.
+    x.set(0)
+    mountNarrow(true)
+    fire(el, touch('touchstart', 300, 0, 0))
+    fire(el, touch('touchmove', 285, 0, 200))
+    fire(el, touch('touchmove', 224, 0, 1000))   // dx -76 of 360
+    fire(el, touch('touchend', 224, 0, 1400))
+    await waitFor(() => expect(onSettle).toHaveBeenCalledWith(false))
   })
 
   // ── Horizontal scroller ownership (carried over from useSwipeEdge) ───────

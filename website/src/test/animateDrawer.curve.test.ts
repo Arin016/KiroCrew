@@ -16,9 +16,13 @@
  * which visually freezes the near edges while the far edges are still sweeping."
  * So the budget is not a preference, it is the same conclusion reached twice.
  *
- * EXIT — its budget is at the front too, but inverted: a dismissal must start
- * from where the panel IS. A shared easeOut exit jumps off the edge and then
- * crawls to a stop, which is what the first symmetric pairing got wrong.
+ * EXIT — the SAME curve, simply shorter. Its own easeIN (slow off the mark, then
+ * quick) was tried on the theory that a dismissal should start from where the
+ * panel is; on a device it reads as the panel hesitating before it goes, and it
+ * disagreed with the gesture-released dismissal beside it, which has to
+ * decelerate because the finger is already moving. So the shape is a property of
+ * the surface and the duration is a property of the event: 420ms to disclose,
+ * 240ms to dismiss.
  *
  * The two curves are also the Notification Center sheet's, asserted here as one
  * motion language across both files.
@@ -75,24 +79,51 @@ describe('animateDrawer — settle curves', () => {
   it('uses a DIFFERENT curve and duration per direction', () => {
     const inOpts = settle(0)
     const outOpts = settle(-TRAVEL)
-    // The asymmetry IS the fix; collapsing back to one shared curve is the
-    // regression this pins.
+    // Two shapes, one family — and the split is about where the settle STARTS,
+    // not about the direction as such. Entering, and continuing a released
+    // finger, both open at 2.25x the average: for the finger that is continuity,
+    // and for an entry the jump lands at the screen edge. A TAP dismissal starts
+    // from rest with the panel in full view, so it launches at 1.0x instead.
     expect(outOpts.ease).not.toEqual(inOpts.ease)
+    // Both still decelerate into their end — neither accelerates away, which the
+    // very first exit shape did and which read as a hesitation.
+    expect(outOpts.ease[1] / outOpts.ease[0]).toBeGreaterThanOrEqual(1)
+    expect(inOpts.ease[1] / inOpts.ease[0]).toBeGreaterThan(1)
+    // The entry front-loads harder: that is the difference being pinned.
+    expect(inOpts.ease[1] / inOpts.ease[0]).toBeGreaterThan(outOpts.ease[1] / outOpts.ease[0])
     expect(outOpts.duration).not.toBe(inOpts.duration)
-    // A dismissal is shorter than a reveal — nothing is being disclosed.
-    expect(outOpts.duration).toBeLessThan(inOpts.duration)
+    // The dismissal is the LONGER of the two, and deliberately so: a tap carries
+    // no velocity, so it is played as the gentlest release rather than as a
+    // hurried exit. ("A dismissal is shorter, nothing is being disclosed" was the
+    // earlier rule; judged on a device at 300ms and 400ms it read as rushed
+    // against a slow swipe, which lands on the release ceiling.)
+    expect(outOpts.duration).toBeGreaterThan(inOpts.duration)
   })
 
-  it('leaves SLOWLY at first, so a dismissal starts where the panel is', () => {
+  it('LEAVES fast and glides a long way into the edge', () => {
     const { ease, duration } = settle(-TRAVEL)
     const ms = duration * 1000
     const at = (t: number) => easedAt(ease, Math.min(1, t / ms))
-    // This is the budget the recording actually set. A shared easeOut exit
-    // measures ~40% by 50ms here and fails outright.
-    expect(at(50)).toBeLessThan(0.05)
-    expect(at(100)).toBeLessThan(0.15)
-    // Accelerating away: the second half must cover more ground than the first.
-    expect(at(ms) - at(ms / 2)).toBeGreaterThan(at(ms / 2))
+    // Anti-jump, and the reason this curve differs from the entry's: a tap starts
+    // from a standstill with the panel in full view, so the FIRST PAINTED FRAME
+    // is where a launch and a jump are told apart. The entry's shape put 9% of the
+    // travel (31.6px of 350) in that frame and read as skipping ahead; this one
+    // spends under 5%.
+    expect(at(17)).toBeLessThan(0.05)
+    // Front-loaded, not a hesitation: a fifth of the time buys well over a fifth
+    // of the travel.
+    expect(at(ms / 5)).toBeGreaterThan(0.3)
+    // …and the glide is the point: the LAST tenth of the travel gets a third of
+    // the duration or more. A near-linear exit fails this, which is what made it
+    // read as merely stopping rather than settling.
+    const t90 = (() => {
+      let lo = 0, hi = 1
+      for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (at(m * ms) < 0.9) lo = m; else hi = m }
+      return ((lo + hi) / 2) * ms
+    })()
+    expect(ms - t90).toBeGreaterThan(ms / 3)
+    // Decelerating: the first half covers more ground than the second.
+    expect(at(ms / 2)).toBeGreaterThan(at(ms) - at(ms / 2))
     expect(at(ms)).toBeCloseTo(1, 2)
   })
 
