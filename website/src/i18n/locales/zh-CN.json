@@ -9489,7 +9489,19 @@
       "closed_pr_not_on_main_hint": "PR 已关闭且未合并 — 其内容不在 main 上，删除后将永久丢失。请在选择前逐一确认。",
       "closed_has_unmerged_commits": "已关闭的 PR — 有不在 main 上的提交",
       "pr_closed_but_branch_has_newer_commits": "PR 已关闭 — 分支上有更新的提交",
-      "pr_closed_but_verification_unavailable_retry": "PR 已关闭，但无法验证 — 重试"
+      "pr_closed_but_verification_unavailable_retry": "PR 已关闭，但无法验证 — 重试",
+      "pod_memory_of_ceiling": "Pod 已用内存与其 cgroup 上限对比",
+      "pod_cpu_usage": "Pod CPU 使用率",
+      "pod_task_count": "Pod cgroup 中的任务数",
+      "pod_tasks_label": "个任务",
+      "pod_memory": "内存：{{value}}",
+      "pod_cpu": "CPU：{{value}}",
+      "pod_tasks": "任务：{{value}}",
+      "pod_home_size": "Pod 主目录：{{value}}",
+      "pod_home_disk": "Pod 主目录磁盘：{{value}}",
+      "orphan_pods_label": "孤立 Pod 主目录：{{value}}",
+      "total_disk_used_by_running_pod_homes": "运行中 Pod 主目录占用的磁盘总量",
+      "pod_homes_left_on_disk_with_no_live_pod": "磁盘上没有对应运行 Pod 的遗留主目录"
     },
     "developer": {
       "agentBackendTab": {

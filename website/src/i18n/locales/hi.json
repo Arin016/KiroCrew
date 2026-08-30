@@ -9639,7 +9639,19 @@
       "closed_pr_not_on_main_hint": "बंद, बिना मर्ज की गई PR — इसकी सामग्री main पर नहीं है, इसलिए हटाने पर वह स्थायी रूप से मिट जाएगी। चुनने से पहले जाँच करें।",
       "closed_has_unmerged_commits": "बंद PR — main पर न होने वाले कमिट हैं",
       "pr_closed_but_branch_has_newer_commits": "PR बंद — ब्रांच में नए कमिट हैं",
-      "pr_closed_but_verification_unavailable_retry": "PR बंद पर पुष्टि उपलब्ध नहीं — फिर कोशिश करें"
+      "pr_closed_but_verification_unavailable_retry": "PR बंद पर पुष्टि उपलब्ध नहीं — फिर कोशिश करें",
+      "pod_memory_of_ceiling": "इसकी cgroup सीमा के सापेक्ष उपयोग की गई पॉड मेमोरी",
+      "pod_cpu_usage": "पॉड CPU उपयोग",
+      "pod_task_count": "पॉड कार्य (प्रोसेस/थ्रेड) संख्या",
+      "pod_tasks_label": "कार्य",
+      "pod_memory": "मेमोरी: {{value}}",
+      "pod_cpu": "CPU: {{value}}",
+      "pod_tasks": "कार्य: {{value}}",
+      "pod_home_size": "पॉड होम: {{value}}",
+      "pod_home_disk": "पॉड-होम डिस्क: {{value}}",
+      "orphan_pods_label": "अनाथ पॉड होम: {{value}}",
+      "total_disk_used_by_running_pod_homes": "चल रहे पॉड होम द्वारा उपयोग की गई कुल डिस्क",
+      "pod_homes_left_on_disk_with_no_live_pod": "बिना किसी सक्रिय पॉड के डिस्क पर बचे पॉड होम"
     },
     "developer": {
       "agentBackendTab": {

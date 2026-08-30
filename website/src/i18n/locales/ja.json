@@ -9489,7 +9489,19 @@
       "closed_pr_not_on_main_hint": "クローズ済みで未マージの PR — 内容は main に存在しないため、削除すると完全に失われます。選択する前に確認してください。",
       "closed_has_unmerged_commits": "クローズ済み PR — main に存在しないコミットがあります",
       "pr_closed_but_branch_has_newer_commits": "PR はクローズ済み — ブランチに新しいコミットがあります",
-      "pr_closed_but_verification_unavailable_retry": "PR はクローズ済みですが検証利用不可 — 再試行"
+      "pr_closed_but_verification_unavailable_retry": "PR はクローズ済みですが検証利用不可 — 再試行",
+      "pod_memory_of_ceiling": "cgroup 上限に対する Pod のメモリ使用量",
+      "pod_cpu_usage": "Pod の CPU 使用率",
+      "pod_task_count": "Pod のタスク（プロセス/スレッド）数",
+      "pod_tasks_label": "タスク",
+      "pod_memory": "メモリ: {{value}}",
+      "pod_cpu": "CPU: {{value}}",
+      "pod_tasks": "タスク: {{value}}",
+      "pod_home_size": "Pod ホーム: {{value}}",
+      "pod_home_disk": "Pod ホームのディスク: {{value}}",
+      "orphan_pods_label": "孤立した Pod ホーム: {{value}}",
+      "total_disk_used_by_running_pod_homes": "実行中の Pod ホームが使用するディスク合計",
+      "pod_homes_left_on_disk_with_no_live_pod": "稼働中の Pod がないままディスクに残る Pod ホーム"
     },
     "developer": {
       "agentBackendTab": {
