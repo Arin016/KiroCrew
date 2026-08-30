@@ -3166,6 +3166,53 @@ class TestSecurityBoundClamping:
             cfg = _load_from_dict({"session": {"pool_size": 1000}})
         assert cfg.session.pool_size == POOL_SIZE_MAX == 10
 
+    def test_chat_entry_cache_bounds_default_when_absent(self) -> None:
+        """Omitted from config.json, the entry-cache bounds are byte-identical
+        to the previous hardcoded constants (4096 entries / 32 MiB)."""
+        cfg = _load_from_dict({})
+        assert cfg.dashboard.chat_entry_cache_max_entries == 4096
+        assert cfg.dashboard.chat_entry_cache_max_bytes == 32 * 1024 * 1024
+
+    def test_chat_entry_cache_max_entries_clamped_at_both_ends(self) -> None:
+        from kiro_crew.config.loader import (
+            CHAT_ENTRY_CACHE_ENTRIES_MAX,
+            CHAT_ENTRY_CACHE_ENTRIES_MIN,
+        )
+
+        with unittest.mock.patch("kiro_crew.config.loader._log_config_clamp_event"):
+            low = _load_from_dict({"dashboard": {"chat_entry_cache_max_entries": 1}})
+            high = _load_from_dict({"dashboard": {"chat_entry_cache_max_entries": 10**9}})
+        assert low.dashboard.chat_entry_cache_max_entries == CHAT_ENTRY_CACHE_ENTRIES_MIN == 256
+        assert high.dashboard.chat_entry_cache_max_entries == CHAT_ENTRY_CACHE_ENTRIES_MAX == 262144
+
+    def test_chat_entry_cache_max_bytes_clamped_at_both_ends(self) -> None:
+        from kiro_crew.config.loader import (
+            CHAT_ENTRY_CACHE_BYTES_MAX,
+            CHAT_ENTRY_CACHE_BYTES_MIN,
+        )
+
+        with unittest.mock.patch("kiro_crew.config.loader._log_config_clamp_event"):
+            low = _load_from_dict({"dashboard": {"chat_entry_cache_max_bytes": 1024}})
+            high = _load_from_dict({"dashboard": {"chat_entry_cache_max_bytes": 10**12}})
+        assert low.dashboard.chat_entry_cache_max_bytes == CHAT_ENTRY_CACHE_BYTES_MIN
+        assert CHAT_ENTRY_CACHE_BYTES_MIN == 4 * 1024 * 1024
+        assert high.dashboard.chat_entry_cache_max_bytes == CHAT_ENTRY_CACHE_BYTES_MAX
+        assert CHAT_ENTRY_CACHE_BYTES_MAX == 512 * 1024 * 1024
+
+    def test_chat_entry_cache_bounds_in_range_preserved(self) -> None:
+        """A deliberate in-range setting is preserved verbatim -- the clamp must
+        not be a blanket overwrite."""
+        cfg = _load_from_dict(
+            {
+                "dashboard": {
+                    "chat_entry_cache_max_entries": 16384,
+                    "chat_entry_cache_max_bytes": 64 * 1024 * 1024,
+                }
+            }
+        )
+        assert cfg.dashboard.chat_entry_cache_max_entries == 16384
+        assert cfg.dashboard.chat_entry_cache_max_bytes == 64 * 1024 * 1024
+
     def test_session_start_timeout_default(self) -> None:
         """Omitted from config.json, the budget is the built-in 90s default."""
         cfg = _load_from_dict({})

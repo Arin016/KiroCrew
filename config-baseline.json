@@ -5652,6 +5652,8 @@
         "merge_queued_messages": false,
         "mcp_probe_timeout_secs": 15,
         "loop_stall_exit_after_secs": null,
+        "chat_entry_cache_max_entries": 4096,
+        "chat_entry_cache_max_bytes": 33554432,
         "cautious_boot": true,
         "widget_density": "more",
         "use_builtin_browser": true,
@@ -5952,6 +5954,34 @@
       "enumValues": null,
       "defaultValue": null,
       "nullable": true
+    },
+    {
+      "path": "dashboard.chat_entry_cache_max_entries",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Chat Entry Cache Max Entries",
+      "help": "Maximum number of persisted-message entries the chat save path memoises. The cache's working set is roughly the number of active chat slots times their window size, so the right bound is host-dependent: a gateway with many concurrent slots overflows this bound while the byte ceiling still has headroom, and the cache hit rate collapses to zero (every save re-pays redaction). Raise it on a many-slot host. Clamped to 256..262144. Read once at first use; a change takes effect on the next gateway restart.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 4096
+    },
+    {
+      "path": "dashboard.chat_entry_cache_max_bytes",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Chat Entry Cache Max Bytes",
+      "help": "Memory ceiling in bytes for the chat save path's persisted-message entry memo. Evicted alongside the entry-count bound; raise it together with the entry bound when a many-slot host needs a larger cache. Clamped to 4 MiB..512 MiB. Read once at first use; a change takes effect on the next gateway restart.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 33554432
     },
     {
       "path": "dashboard.cautious_boot",

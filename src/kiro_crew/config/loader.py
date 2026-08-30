@@ -3093,6 +3093,22 @@ LOOP_STALL_EXIT_AFTER_DEFAULT = 25
 LOOP_STALL_EXIT_AFTER_MANAGED_DEFAULT = 90
 _MANAGED_SERVICE_ENV = "KIROCREW_SERVICE_MANAGED"
 
+# dashboard.chat_entry_cache_max_entries / chat_entry_cache_max_bytes -- bounds
+# on the persisted-message entry memo in ``dashboard/chat_persistence.py``. The
+# right entry count is host-dependent: the cache's working set is roughly
+# ``active_slots x window_size``, so a gateway with many concurrent chat slots
+# overflows the entry bound while the byte bound still has headroom, and the LRU
+# then evicts each slot's window just before its next save (a zero-hit cliff,
+# every save re-paying redaction plus key derivation). The defaults match the
+# previous hardcoded values; raising the entry bound on a many-slot host is the
+# operator's call, with the byte ceiling still bounding memory.
+CHAT_ENTRY_CACHE_ENTRIES_MIN = 256
+CHAT_ENTRY_CACHE_ENTRIES_MAX = 262144
+CHAT_ENTRY_CACHE_ENTRIES_DEFAULT = 4096
+CHAT_ENTRY_CACHE_BYTES_MIN = 4 * 1024 * 1024
+CHAT_ENTRY_CACHE_BYTES_MAX = 512 * 1024 * 1024
+CHAT_ENTRY_CACHE_BYTES_DEFAULT = 32 * 1024 * 1024
+
 
 @dataclass
 class DashboardConfig:
@@ -3216,6 +3232,31 @@ class DashboardConfig:
             "liveness probe kills at roughly 20s independently, so a value "
             "above that only takes effect for a headless gateway — the desktop "
             "probe wins first and the stack dump is lost.",
+        ),
+    )
+    chat_entry_cache_max_entries: int = field(
+        default=CHAT_ENTRY_CACHE_ENTRIES_DEFAULT,
+        metadata=_meta(
+            "Chat Entry Cache Max Entries",
+            "Maximum number of persisted-message entries the chat save path "
+            "memoises. The cache's working set is roughly the number of active "
+            "chat slots times their window size, so the right bound is "
+            "host-dependent: a gateway with many concurrent slots overflows "
+            "this bound while the byte ceiling still has headroom, and the "
+            "cache hit rate collapses to zero (every save re-pays redaction). "
+            "Raise it on a many-slot host. Clamped to 256..262144. Read once "
+            "at first use; a change takes effect on the next gateway restart.",
+        ),
+    )
+    chat_entry_cache_max_bytes: int = field(
+        default=CHAT_ENTRY_CACHE_BYTES_DEFAULT,
+        metadata=_meta(
+            "Chat Entry Cache Max Bytes",
+            "Memory ceiling in bytes for the chat save path's persisted-message "
+            "entry memo. Evicted alongside the entry-count bound; raise it "
+            "together with the entry bound when a many-slot host needs a "
+            "larger cache. Clamped to 4 MiB..512 MiB. Read once at first use; "
+            "a change takes effect on the next gateway restart.",
         ),
     )
     cautious_boot: bool = field(
@@ -4385,6 +4426,18 @@ _SECURITY_BOUNDED_FIELDS: tuple[tuple[str, str, int, int], ...] = (
         "loop_stall_exit_after_secs",
         LOOP_STALL_EXIT_AFTER_MIN,
         LOOP_STALL_EXIT_AFTER_MAX,
+    ),
+    (
+        "dashboard",
+        "chat_entry_cache_max_entries",
+        CHAT_ENTRY_CACHE_ENTRIES_MIN,
+        CHAT_ENTRY_CACHE_ENTRIES_MAX,
+    ),
+    (
+        "dashboard",
+        "chat_entry_cache_max_bytes",
+        CHAT_ENTRY_CACHE_BYTES_MIN,
+        CHAT_ENTRY_CACHE_BYTES_MAX,
     ),
     ("session", "pool_size", 0, POOL_SIZE_MAX),
 )
@@ -8082,6 +8135,22 @@ class KiroCrewConfig:
                         LOOP_STALL_EXIT_AFTER_MIN,
                         LOOP_STALL_EXIT_AFTER_MAX,
                     )
+                ),
+                chat_entry_cache_max_entries=_safe_int(
+                    dashboard_data.get(
+                        "chat_entry_cache_max_entries", CHAT_ENTRY_CACHE_ENTRIES_DEFAULT
+                    ),
+                    CHAT_ENTRY_CACHE_ENTRIES_DEFAULT,
+                    CHAT_ENTRY_CACHE_ENTRIES_MIN,
+                    CHAT_ENTRY_CACHE_ENTRIES_MAX,
+                ),
+                chat_entry_cache_max_bytes=_safe_int(
+                    dashboard_data.get(
+                        "chat_entry_cache_max_bytes", CHAT_ENTRY_CACHE_BYTES_DEFAULT
+                    ),
+                    CHAT_ENTRY_CACHE_BYTES_DEFAULT,
+                    CHAT_ENTRY_CACHE_BYTES_MIN,
+                    CHAT_ENTRY_CACHE_BYTES_MAX,
                 ),
                 cautious_boot=_safe_bool(dashboard_data.get("cautious_boot"), True),
                 auto_open_browser=dashboard_data.get("auto_open_browser", True),

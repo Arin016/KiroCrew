@@ -583,16 +583,25 @@ def _isolate_message_entry_cache():
 
     The byte counter is part of the same state, so resetting only the dict would
     leave the memory ceiling mis-accounted and evict a healthy cache.
+
+    The memoised config bounds are reset for the same reason: they are resolved
+    once per process from whatever KIROCREW_HOME the first caller saw, so a test
+    that resolved them under its own home would otherwise leak its bounds into
+    every later test's cache behaviour.
     """
     from kiro_crew.dashboard import chat_persistence as _cp
 
     _cp._entry_cache.clear()
     _cp._entry_cache_bytes = 0
+    _cp._entry_cache_bounds_cached = None
+    _cp._entry_cache_bounds_read_warned = False
     try:
         yield
     finally:
         _cp._entry_cache.clear()
         _cp._entry_cache_bytes = 0
+        _cp._entry_cache_bounds_cached = None
+        _cp._entry_cache_bounds_read_warned = False
 
 
 @pytest.fixture(autouse=True)
