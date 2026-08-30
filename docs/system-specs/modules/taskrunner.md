@@ -527,7 +527,7 @@ Independent review using separate session (`taskrunner:{task_id}:review`):
 
 Two-layer approval during step execution:
 
-1. `task_executor.execute_task()` evaluates hook rules first; an explicit hook auto-approval remains eligible, while a deny remains a denial.
+1. `task_executor.execute_task()` evaluates hook rules first; an explicit hook auto-approval remains eligible, while a deny remains a denial. A hook auto-approval for a **shell** command is honoured only after `name_grant.refusal_for_event(event)` confirms each program name in the command still resolves to the program it appears to name; a refusal downgrades to the interactive prompt (or the headless deny-by-default) and is audited as `outcome=auto_approve_declined` with `reason=name_grant`.
 2. When no hook grants the request, `on_tool_approval` decides it if the runner has a callback; otherwise the headless path rejects the tool with `headless_no_authorization`.
 
 ### Per-run auto-approve (trust) toggle
