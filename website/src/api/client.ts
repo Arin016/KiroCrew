@@ -2867,8 +2867,13 @@ export const api = {
   // Mid-turn steer: inject into the RUNNING turn instead of queueing. Fire-and-forget
   // JSON response ({ok, steered}); the backend falls back to queue if steer is
   // unavailable so the text is never dropped.
-  steerChat: (message: string, slot?: string) =>
-    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true }) }).then(j),
+  // `sendId` is the client-minted correlation id stamped on the optimistic steer
+  // bubble (same convention as the plain send path). It rides in `meta`, which
+  // BOTH backend paths persist — the accepted-steer row and the new-turn row a
+  // steer that races chat_done falls onto — so the bubble is reconcilable, and
+  // its accepted-vs-new-turn ambiguity resolvable, by id identity (#6075).
+  steerChat: (message: string, slot?: string, sendId?: string) =>
+    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true, ...(sendId ? { meta: { sendId } } : {}) }) }).then(j),
   sessionsHealth: () => fetch('/api/sessions/health').then(j),
   // Knowledge
   knowledgeSearch: (q: string) => get(`/api/knowledge/search-for-context?q=${encodeURIComponent(q)}`).then(j),

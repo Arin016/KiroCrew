@@ -1708,11 +1708,12 @@ function mergePreservedThinking<M extends { role: string; content: string; cls?:
   }
   // Conservative row identity for the coverage cut: the STRONGEST available
   // class only — tool id, else server-minted `mid`, else role+ts, else
-  // role+trimmed text. Never stacked: a strong-identity row must not also
-  // match on a weaker key, or a duplicate-content sibling (two `🔧 bash`
-  // calls with distinct tool ids) lets an OLDER incoming row text-match a
-  // NEWER existing row and falsely extend coverage past a post-snapshot
-  // anchor — which would drop live reasoning.
+  // role+trimmed text. Never stacked among those classes: a strong-identity
+  // row must not also match on a weaker key, or a duplicate-content sibling
+  // (two `🔧 bash` calls with distinct tool ids) lets an OLDER incoming row
+  // text-match a NEWER existing row and falsely extend coverage past a
+  // post-snapshot anchor — which would drop live reasoning. (`send:${sendId}`
+  // is the one deliberate exception; see below.)
   //
   // Coverage evidence comes ONLY from `coverageSource` — the PURE fetched
   // server page, before the reducer re-attaches any client-preserved rows
@@ -1729,16 +1730,70 @@ function mergePreservedThinking<M extends { role: string; content: string; cls?:
   // contains — never to dedupe rows — so a residual text collision among
   // identity-less rows can only make coverage read longer, and only among
   // rows that carry no stronger key.
+  //
+  // `send:${sendId}` is the ONE key that rides ALONGSIDE the strongest class
+  // rather than being ranked in it. A UNIQUE send id is not a weak key — a
+  // client-minted one-shot id two rows can share only by being the same send
+  // (the same convention `rowIdentities` returns both halves of). It MUST
+  // stack, because the two copies of a pre-echo send have different strongest
+  // keys by construction: the local optimistic bubble carries only `sendId`
+  // while its persisted counterpart carries a server `mid` — ranked
+  // strongest-only they could never match, and the covered bubble would read
+  // as uncovered (#6075). A DUPLICATED id is excluded outright
+  // (`dupSendIds`): an id repeated within one list names two different sends,
+  // and letting it match would extend the coverage cut past a live
+  // post-snapshot anchor on the strength of the WRONG row — deleting live
+  // reasoning, the exact failure the never-stacked rule exists to prevent.
+  // The pre-echo pair is one occurrence in EACH list, so duplication is
+  // counted per list, never across the two. Only user rows emit the key:
+  // that is the only role a send id legitimately lives on, and honoring it
+  // elsewhere would let a mislabeled row vouch for a bubble.
+  const dupSendIds = new Set<string>()
+  const countDupSendIds = (list: M[]): void => {
+    const seen = new Set<string>()
+    for (const m of list) {
+      if (m.role !== 'user') continue
+      const sid = m.meta?.sendId
+      if (typeof sid !== 'string' || !sid) continue
+      if (seen.has(sid)) dupSendIds.add(sid)
+      else seen.add(sid)
+    }
+  }
+  countDupSendIds(coverageSource)
+  countDupSendIds(existing)
   const coverageIds = (m: M): string[] => {
+    const ids: string[] = []
     const tid = toolAnchorId(m)
-    if (tid) return [`tool:${tid}`]
     const mid = m.meta?.mid
-    if (typeof mid === 'string' && mid) return [`mid:${mid}`]
-    if (m.ts) return [`ts:${m.role}:${m.ts}`]
-    if (m.content) return [`txt:${m.role}:${m.content.trimEnd()}`]
-    return []
+    if (tid) ids.push(`tool:${tid}`)
+    else if (typeof mid === 'string' && mid) ids.push(`mid:${mid}`)
+    else if (m.ts) ids.push(`ts:${m.role}:${m.ts}`)
+    else if (m.content) ids.push(`txt:${m.role}:${m.content.trimEnd()}`)
+    if (m.role === 'user') {
+      const sid = m.meta?.sendId
+      if (typeof sid === 'string' && sid && !dupSendIds.has(sid)) ids.push(`send:${sid}`)
+    }
+    return ids
   }
   const preserved: Array<{ msg: M; anchor: ThinkingAnchor | null; anchorIdx: number; confirmed: boolean; boundaryIdx: number; skip: number }> = []
+  // Which backend path each covered send took, keyed by its client-minted
+  // `sendId` (#6075). Read where the anchor scan below breaks at an optimistic
+  // STEER bubble: a persisted NON-steer row carrying the bubble's id proves the
+  // steer POST raced `chat_done` onto the new-turn path (the bubble IS a turn
+  // boundary), a persisted STEER row proves acceptance into the running turn
+  // (not a boundary at all). Built from `coverageSource` only — the same
+  // provenance rule the coverage cut follows — so a re-attached client row can
+  // never vouch for itself. A `null` entry is a tombstone: the page holds MORE
+  // THAN ONE row with that id, so the id names no single path and resolves
+  // nothing (decline, not guess — ids are minted unique, so a duplicate is
+  // either a client defect or an adversarial echo, and both must fail safe).
+  const steerBySendId = new Map<string, boolean | null>()
+  for (const m of coverageSource) {
+    if (m.role !== 'user') continue
+    const sid = m.meta?.sendId
+    if (typeof sid !== 'string' || !sid) continue
+    steerBySendId.set(sid, steerBySendId.has(sid) ? null : !!m.meta?.steer)
+  }
   // How many rows already repeated this text, so a duplicated anchor resolves to the
   // block's OWN turn rather than to the first match.
   const priorText = new Map<string, number>()
@@ -1789,27 +1844,49 @@ function mergePreservedThinking<M extends { role: string; content: string; cls?:
       //
       // An OPTIMISTIC bubble of ANY kind breaks the scan (it may be a new turn,
       // and reading past it could splice that turn's reasoning onto this block)
-      // but NEVER records a boundary and never authorizes a drop. The predicate
-      // is `optimistic` alone, NOT `steer && optimistic`: a plain send is
-      // stamped optimistic too (keyed on its `sendId`, see `appendMessage`), and
-      // it is just as ambiguous. If the client's idle state was stale the server
-      // takes its QUEUE path — persisting no `user` row for that text at all —
-      // while the turn keeps emitting rows; a refresh covering one of those
-      // later rows would then put this unpersisted bubble INSIDE the covered
-      // region and drop the live turn's reasoning above it. A steer bubble is
-      // ambiguous for its own reason: accepted into the running turn (its
-      // `steer_push` echo pending, real anchor one reconciliation away) or raced
-      // `chat_done` onto the new-turn path. Every attempt to resolve either
-      // ambiguity from text identity proved unsound in review (duplicate-text
-      // turns, missed echoes, pages reaching past the bounded cache window), so
-      // this code declines to guess: only a bubble the server has CONFIRMED
-      // (echo reconciled, the flag deleted) is trustworthy as a boundary. The
-      // cost is a narrow residual — a new-turn-path steer's pre-steer chip can
-      // strand at the tail until reload — tracked as #6075, whose sound fix is a
-      // client-minted id persisted through both backend paths, rather than
-      // resolved with weak evidence here.
+      // and by default records no boundary and authorizes no drop. The
+      // predicate is `optimistic` alone, NOT `steer && optimistic`: a plain
+      // send is stamped optimistic too (keyed on its `sendId`, see
+      // `appendMessage`), and it is just as ambiguous. If the client's idle
+      // state was stale the server takes its QUEUE path — persisting no `user`
+      // row for that text at all — while the turn keeps emitting rows; a
+      // refresh covering one of those later rows would then put this
+      // unpersisted bubble INSIDE the covered region and drop the live turn's
+      // reasoning above it. A steer bubble is ambiguous for its own reason:
+      // accepted into the running turn (its `steer_push` echo pending, real
+      // anchor one reconciliation away) or raced `chat_done` onto the new-turn
+      // path. Every attempt to resolve either ambiguity from TEXT identity
+      // proved unsound in review (duplicate-text turns, missed echoes, pages
+      // reaching past the bounded cache window), so text never resolves it.
+      //
+      // ID identity does (#6075) — for STEER bubbles only. A steer bubble
+      // minted with a `sendId` names its persisted counterpart outright: the
+      // covered page holding a NON-steer row with that id proves the new-turn
+      // path — the bubble is a real turn boundary, recorded so the finished
+      // turn's chip drops instead of stranding at the tail — while a STEER row
+      // with that id proves acceptance, so the scan continues past it exactly
+      // as it would past a confirmed steer (the block's real anchor lies
+      // further down). A bubble whose id the page does not contain — or
+      // contains MORE THAN ONCE (the `null` tombstone) — keeps the
+      // decline-to-guess default: break, no boundary, no drop.
+      //
+      // A PLAIN optimistic send is deliberately NOT resolved this way, even
+      // though it carries a `sendId` too: for a non-steer send, "a persisted
+      // row with this id exists" does not prove "the turn above this bubble is
+      // over" — crew mode persists the user row as a durable queue entry and
+      // starts no turn at all — so recording a boundary there re-opens the
+      // over-drop class the text heuristics were retired for. For a steer
+      // bubble the inference is sound precisely because the row's own `steer`
+      // flag names which backend path consumed the send.
       if (isTurnBoundaryUser(cand)) {
-        if (!cand.meta?.optimistic) boundaryIdx = j
+        if (!cand.meta?.optimistic) { boundaryIdx = j; break }
+        if (cand.meta?.steer) {
+          const sid = cand.meta?.sendId
+          const steered =
+            typeof sid === 'string' && sid && !dupSendIds.has(sid) ? steerBySendId.get(sid) : undefined
+          if (steered === true) continue
+          if (steered === false) boundaryIdx = j
+        }
         break
       }
     }
@@ -3066,19 +3143,45 @@ const chatSlice = createSlice({
       // by definition sent mid-turn, so streaming/thinking/tool messages keep
       // landing between the optimistic append and the WS echo. A tail-only
       // check loses that race and renders a duplicate "Steered into the
-      // running turn" card. Scan backwards (bounded) over optimistic STEER
-      // bubbles only (a plain optimistic user message with coincidentally
-      // identical text must never be consumed): prefer exactly matching
-      // content (handles rapid back-to-back steers in order), else fall back
-      // to the most recent one (server-side redaction can alter the echoed
-      // content, so an exact match isn't guaranteed).
+      // running turn" card. Resolution (#6075) pairs strictly by id CLASS:
+      // an echo carrying a `sendId` matches by id ONLY, and an ID-LESS echo
+      // pairs only with ID-LESS bubbles. The gateway serves this SPA bundle,
+      // so client and gateway do not skew: an id-less echo does not mean "an
+      // old gateway stripped the id" — it means the POST carried none (a
+      // scene-interaction steer, a non-minting caller), i.e. a DIFFERENT send
+      // whose echo can never name this tab's id-bearing bubble. Consuming
+      // across classes shows the wrong message twice over: the id-bearing
+      // bubble adopts the foreign echo's text, and its own later exact-id
+      // echo is then suppressed by the redelivery guard. An unmatched echo
+      // inserts instead — over-insert is the recoverable direction. A
+      // NON-optimistic user row already carrying an id-bearing echo's id
+      // means the row was ALREADY installed (the chat_done refresh can
+      // replace the bubble with the persisted row before a delayed echo is
+      // processed) — that echo is a redelivery and inserts nothing. Within
+      // the id-less pairing, prefer exactly matching content, else the most
+      // recent id-less optimistic STEER bubble (a plain optimistic user
+      // message with coincidentally identical text must never be consumed;
+      // server-side redaction can alter the echoed content, so an exact match
+      // isn't guaranteed).
       if (message.role === 'user' && message.meta?.steer && !message.meta?.optimistic) {
+        const echoSid = typeof message.meta?.sendId === 'string' && message.meta.sendId ? message.meta.sendId : ''
         const floor = Math.max(0, msgs.length - 50)
         let target: ChatMessage | undefined
         let fallback: ChatMessage | undefined
         for (let i = msgs.length - 1; i >= floor; i--) {
           const m = msgs[i]
-          if (m.role !== 'user' || !m.meta?.optimistic || !m.meta?.steer) continue
+          if (m.role !== 'user') continue
+          const rowSid = typeof m.meta?.sendId === 'string' && m.meta.sendId ? m.meta.sendId : ''
+          if (echoSid && rowSid === echoSid && !m.meta?.optimistic) return
+          if (!m.meta?.optimistic || !m.meta?.steer) continue
+          if (echoSid) {
+            // Id-bearing echo: the match is exact or there is no match.
+            if (rowSid === echoSid) { target = m; break }
+            continue
+          }
+          // Id-less echo: an id-bearing bubble belongs to a send whose own
+          // exact-id echo is still coming — never consume it here.
+          if (rowSid) continue
           if (message.content && m.content === message.content) { target = m; break }
           if (!fallback) fallback = m
         }

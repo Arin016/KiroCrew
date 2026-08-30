@@ -696,7 +696,9 @@ rebuilds from server history).
 **Backend — segment cut at the steer boundary.** `_run_chat` publishes a sync
 closure on the slot (`slot._steer_segment_cut`, same lifecycle as
 `slot._acp_client`: set at turn start, cleared in the turn's `finally`). The
-steer handler calls it right BEFORE `slot.append("user", …, meta={"steer": True})`,
+steer handler calls it right BEFORE `slot.append("user", …, meta={"steer": True, …})`
+(the meta also carries the client's `sendId` when the POST supplied one — see
+the send-identity paragraph below),
 so the accumulated segment text is flushed as its own assistant message and the
 persisted order is `[assistant(pre-steer), user(steer), assistant(post-steer)]`
 — identical to the live view. The cut persists SILENTLY: `broadcast=False`
@@ -726,6 +728,34 @@ scene-interaction steered). The reconcile path deliberately does NOT freeze — 
 echo time a new post-steer streaming message may be live below the bubble and
 must keep streaming. Pinned by `test_chat_steer.py` (cut ordering, cut-failure
 resilience) and the `finalize-on-steer` describe in `chatSlice.test.ts`.
+
+**Send identity — `sendId` through the steer path (#6075).** The optimistic
+steer bubble is minted with a client `sendId` (the same one-shot convention the
+plain send path uses) and the steer POST carries it as `meta.sendId`. Both
+backend paths persist it: the accepted-steer row via
+`steer_into_running_turn` — which normalizes the raw client value at entry
+(`normalize_send_id`: the URL-safe id alphabet within `SEND_ID_MAX_LEN`, AND
+nothing the canonical credential scanner would redact, since the value reaches
+slot history and the `steer_push` broadcast without the outbound redaction the
+message text goes through; anything failing either gate is treated as absent,
+never truncated) and also echoes it on the `steer_push`
+broadcast — and the raced new-turn row via the generic client-meta persistence
+in `api_chat`. Resolution is id-first everywhere text used to be the key: the
+`steer_push` reconcile matches the bubble by id (an id-mismatched bubble is
+never consumed; a non-optimistic row already carrying the echo's id means the
+`chat_done` refresh installed it first and the echo is a redelivery that
+inserts nothing), and `mergePreservedThinking` resolves an optimistic STEER
+bubble's accepted-vs-new-turn ambiguity from the covered page's row with that
+id (steer flag = acceptance, scan continues; non-steer = new-turn boundary,
+recorded so the finished turn's chip drops with coverage). Text identity never
+resolves the bubble; an unmatched, duplicate, or absent id keeps the
+decline-to-guess default. `sendId` is additive optional meta everywhere it
+travels — no schema bump, and a send without one keeps the exact prior row,
+payload, and scan behavior. Pinned by the sendId tests in
+`test_chat_steer.py`, `chatThinkingSteerBoundary.test.ts`, and
+`ChatSliceCoverageSecondPass.test.tsx`. Known residual: the `STEER_REQUEUED`
+paths do not thread the id into the requeued queue entry, so a steer that
+requeues keeps today's behavior (over-keep — the bubble reconciles on reload).
 
 ### Wait countdown and early end (`/api/session-keepalive` as a control channel)
 

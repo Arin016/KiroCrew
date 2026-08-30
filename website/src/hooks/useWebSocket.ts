@@ -1262,14 +1262,18 @@ export function useWebSocket() {
               bufferSlotActivity(data.slot, (data as { ts?: string }).ts || new Date().toISOString(), true)
             }
             break
-          case 'steer_push':
+          case 'steer_push': {
             // Mid-turn steer echo: show the user's steered text inline in the
             // target slot's transcript. Uses appendSlotMessage so the bubble
             // appears whether or not the slot is currently active (background
             // tabs). Persisted server-side — survives page reload.
+            // `sendId` (present when the initiating client minted one) rides
+            // into the meta so the reconcile in appendSlotMessage can match the
+            // optimistic bubble by id instead of by content (#6075).
+            const steerSid = (data as { sendId?: unknown }).sendId
             dispatch(appendSlotMessage({
               slot: (data as { slot?: string }).slot || store.getState().chat.activeSlot || '',
-              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true }, ts: (data as { ts?: string }).ts },
+              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true, ...(typeof steerSid === 'string' && steerSid ? { sendId: steerSid } : {}) }, ts: (data as { ts?: string }).ts },
             }))
             // Steering is the other way to type into a busy session, so it
             // settles the rank exactly like a queued send. The server appends a
@@ -1283,6 +1287,7 @@ export function useWebSocket() {
               )
             }
             break
+          }
           case 'queue_cancel':
             dispatch(cancelQueuedMessage(data))
             // A cancelled queued message is an answer that never lands. The
