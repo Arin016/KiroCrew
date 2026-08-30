@@ -107,11 +107,35 @@ making the authority check the freshest view available. The two active sets are
 **unioned**, so a re-read can only ever add protection, and a re-read that fails
 refuses the operation rather than proceeding on the stale view.
 
-The residual window is now the move loop itself. A session mapped during it is still
-staged — but staged means *in the trash*, fully restorable, and destroying it needs a
-second explicit `empty`. Closing the window completely needs the session/slot writer
-and this module to share one lock; that is recorded in Known Limitations rather than
-implied away.
+The move loop then closes most of what the re-read cannot. Every source file is
+stat'd there anyway, to record its size in the manifest, and that same stat carries
+an mtime. A candidate qualified by being untouched for `MIN_RECLAIM_AGE_DAYS`, so a
+source whose mtime is newer than the instant the reclaim began has been written to
+since every read that certified it — which an idle session's file cannot be. The
+whole session is left in place, whatever already moved for it is rolled back, and it
+is named in `TrashBatch.revived` so the caller can report it. This costs no extra
+syscall: the detection rides on a stat the loop already performs.
+
+Naming a session in `revived` is a claim -- "this one was left where it was" -- so it
+is only made when the rollback actually completed. Putting a file back is
+deliberately non-overwriting, so the very resume that triggered the detection can
+have recreated an origin and made the rollback decline. Two things then have to hold
+before the call returns: whatever is still staged is **appended to the manifest**, so
+restore and empty can both reach it (safe because restore also moves exclusively, and
+therefore declines the origin the resume recreated rather than overwriting the live
+session with the stale copy); and the call **raises**, naming the batch, instead of
+reporting a revival that is not true. Everything that did move is still described by
+the manifest, so the partial batch stays restorable.
+
+The anchor is taken **before** the scan, not after the authority checks. Taken later
+it would miss a session resumed during the scan or between the index re-read and the
+loop, which is most of the elapsed time. Taking it early adds no false positives,
+because a candidate has to be untouched for `MIN_RECLAIM_AGE_DAYS` to qualify at all.
+
+Detection, not prevention: a session revived *after* its last file was stat'd and
+moved is still staged. The window is therefore the gap between one file's stat and
+its rename rather than the whole loop, and what lands in that gap lands in the
+trash — fully restorable, with destruction still needing a second explicit `empty`.
 
 ## What is reclaimable
 
@@ -549,6 +573,13 @@ That is the conservative direction (never a wrong move), but a client cannot
 distinguish it from a malformed request without reading the code, and retrying is
 the only recovery.
 
+A session that goes live *later still* — after the `refresh`, while the move loop is
+running — is not all-or-nothing. The loop's mtime check leaves that one session in
+place and the rest of the batch proceeds, and the handler folds each such uid into
+the same `refused` list under `in_use`. The mechanism differs from the pre-pass
+(caught by a stat during the move rather than by the index before it) but the reason
+a reader needs is identical, so it carries no new code.
+
 **The guarantee is not weakened.** `move_to_trash()` still re-reads the session map
 inside the mutation lock and still unions the active sets, so the pre-pass can only
 ever be more conservative than the authority, never less. Doing less than the user
@@ -610,13 +641,16 @@ instead of the trash over-deleting. `TestEmptyTrash` and
 
 ## Known Limitations
 
-- **A residual race with session-map writes remains.** The authority check is
-  re-read after the scan and inside the reclaim lock, so the window is the move loop
-  rather than the whole scan, but the session map's writer does not take that lock. A
-  session mapped during the loop would still be staged. It stays restorable — nothing
-  is destroyed without a second explicit action — but closing this fully requires the
-  session/slot code and this module to share one lock, which is a wider change than
-  this surface.
+- **A much smaller residual race with session-map writes remains.** The authority
+  check is re-read after the scan and inside the reclaim lock, and the move loop then
+  rejects any source whose mtime is newer than the batch's validation instant, so a
+  session resumed *during* the loop is left in place and reported rather than staged.
+  What is left is detection, not prevention: the session map's writer still does not
+  take the reclaim lock, so a session revived between one file's stat and its rename
+  is staged anyway. That gap is microseconds rather than the whole loop, and it stays
+  restorable — nothing is destroyed without a second explicit action. Removing it
+  entirely still requires the session/slot code and this module to share one lock,
+  which is a wider change than this surface.
 - Reclaiming is offered both by age (`cleanup`) and by explicit selection
   (`trash`). Neither can take a session the map still lists, so targeting one large
   conversation only works if that conversation is unmapped.
