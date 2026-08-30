@@ -177,6 +177,51 @@ backwards, so they would be skipped permanently while the response read as
 "nothing new". A cursor exactly AT the end is not stale and still returns an empty
 window.
 
+## Stopping is safe to re-send
+
+The Stop button escalates: a second press while the first cancel is still pending
+hard-kills the turn, and the hard-kill path clears the slot's queue and its pending
+steers. That is right for a button, where the second press means a person watched
+the cooperative stop fail to take. It is wrong for an RPC, where a client that got
+no response inside its 30s request timeout re-sends the same request — so on the
+button's semantics a timeout retry would silently get the destructive variant of a
+verb the caller asked for once, and the queued work would be gone with nothing
+saying a retry rather than a decision caused it (issue #5074).
+
+`session_stop` therefore withholds the escalation for a call it cannot tell apart
+from a retry. `stop_retry.allow_escalation` records the first stop a caller makes
+against a target and answers `False` for any repeat inside `WINDOW_SECS` (120s);
+`stop_slot_turn` takes that as `escalate=False` and lets the repeat fall through to
+its existing "stop already in progress" no-op.
+
+Three properties are worth stating because each one is a way this could have gone
+wrong:
+
+- **Only the escalation is withheld, never the stop.** A repeat that finds the
+  target running again soft-stops it exactly as a first call would. The window
+  suppresses a kill, not a cancel.
+- **The window is anchored at the first stop and is not extended by the repeats it
+  absorbs.** So escalation is suppressed for at most one window: a client that
+  retries forever is absorbed, and after 120s a stop that STILL finds the target
+  winding down escalates — which is the case where escalating is the right answer.
+  A sliding window would put a hard kill out of reach of any caller polling faster
+  than the window.
+- **The key is (caller, target), not the target alone.** A retry comes from the
+  caller that made the original request; two different callers stopping one target
+  are two independent decisions, and keying on the target would suppress the second
+  caller's FIRST call — removing escalation from the RPC rather than making a retry
+  safe.
+
+The window is sized against what it has to outlast rather than picked: below the
+30s request timeout it would expire before the retry it exists to absorb. Nothing
+durable backs it, for `create_rate_limit`'s reason — a restart buys a caller one
+window, not a capability.
+
+The caller is told which of the two no-op facts it hit. `already_stopping`
+separates "was never running" from "its cancel is still in flight", because a
+de-duplicated retry reaches that reply routinely and rendering both as "nothing to
+stop" would tell the second caller the opposite of what happened.
+
 ## Configuration
 
 `agent.session_control` (bool, default **false**). Off makes all three tools

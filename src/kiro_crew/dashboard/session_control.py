@@ -44,6 +44,7 @@ from kiro_crew.dashboard.chat_persistence import _TRANSIENT_ROLES as _PERSISTENC
 from kiro_crew.dashboard.chat_utils import effective_session_key, slot_history_key
 from kiro_crew.dashboard.create_rate_limit import SESSION_CREATE, allow_create
 from kiro_crew.dashboard.state import MAX_LIVE_SLOTS, MAX_SLOTS_PER_CREATOR, SlotOrigin
+from kiro_crew.dashboard.stop_retry import allow_escalation
 from kiro_crew.history import metadata_now_iso, transcript_stem
 from kiro_crew.security import redact, redact_and_truncate
 from kiro_crew.sel import sel
@@ -1128,11 +1129,22 @@ async def stop_target(
 ) -> dict[str, Any]:
     """Stop *target*'s in-flight turn, via the same path as the Stop button.
 
-    A first call cancels cooperatively; calling again while that is pending
-    escalates to a hard kill. The escalation is decided by the target's own stop
-    state, not by anything the caller can ask for -- which is why there is no
-    force flag: `stop_slot_turn` escalates on a second press regardless of one,
-    so advertising it would promise a hard kill a first call cannot deliver.
+    A stop cancels cooperatively. The button escalates to a hard kill when a
+    second press lands while the first is still pending; this verb deliberately
+    does not do that for a repeat it cannot tell apart from a RETRY, because a
+    client that got no response inside its request timeout re-sends the same
+    request, and the kill path discards the target's queue and pending steers. So
+    within ``stop_retry.WINDOW_SECS`` of this caller's first stop of this target, a
+    repeat returns the existing "stop already in progress" no-op instead. A stop
+    arriving after that window still escalates, so a genuine second decision keeps
+    the capability — only a blind retry cannot reach it (issue #5074).
+
+    Withholding the escalation never costs the caller the stop it asked for: a
+    repeat that finds the target running again soft-stops it as a first call would.
+
+    Still no force flag: escalation is decided by the target's own stop state and
+    the window above, never by anything the caller can ask for, so advertising one
+    would promise a hard kill a first call cannot deliver.
     """
     # Prewarmed BEFORE `authorize_target`, and that ordering is load-bearing.
     # `stop_slot_turn`'s IDLE branch logs to the SEL with no await before it, so on
@@ -1172,18 +1184,35 @@ async def stop_target(
         target=target,
         operation="stop",
     )
+    # Both calls below are SYNCHRONOUS, which is what lets them sit here at all:
+    # the rule the comment above states is that nothing may SUSPEND between the
+    # gate and the act, and neither of these does.
+    #
+    # `caller_slot_key` repeats the slot walk `authorize_target` just did rather
+    # than changing what that function returns for all three verbs. The walk is
+    # bounded by `MAX_LIVE_SLOTS` and touches no filesystem, and with no
+    # suspension between them the two resolutions cannot disagree — a rebind
+    # landing in that window is impossible, not merely unlikely.
+    caller_key = caller_slot_key(state, caller_session_key)
+    may_escalate = allow_escalation(caller_key, slot.key)
     # Deferred: ``chat_handlers`` imports ``dashboard.chat`` transitively, which
     # reaches back into the gateway at import time — a module-scope import here
     # closes that cycle through ``handlers.session_control`` -> ``server``.
     from kiro_crew.dashboard.chat_handlers import stop_slot_turn
 
-    result = await stop_slot_turn(state, slot, source="session_control")
+    result = await stop_slot_turn(state, slot, source="session_control", escalate=may_escalate)
     _audit(
         caller_session_key=caller_session_key,
         operation="stop",
         slot_key=slot.key,
         outcome="allowed",
-        detail={"result": result.get("info", "stopping")},
+        detail={
+            "result": result.get("info", "stopping"),
+            # Recorded on the ALLOWED line, not only inside `stop_slot_turn`'s
+            # own audit: this is the layer that made the retry judgement, so the
+            # session-control trail has to show it was made.
+            "escalation_withheld": not may_escalate,
+        },
     )
     return {"ok": True, "target": slot.key, **result}
 

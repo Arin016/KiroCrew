@@ -23,6 +23,7 @@ from chat_test_helpers import _make_state
 from kiro_crew.config import loader
 from kiro_crew.dashboard import chat_delivery as cd
 from kiro_crew.dashboard import session_control as sc
+from kiro_crew.dashboard import stop_retry
 from kiro_crew.dashboard.chat_utils import slot_history_key
 from kiro_crew.dashboard.handlers import session_control as handlers_sc
 
@@ -38,6 +39,18 @@ _REAL_ENABLED = sc.session_control_enabled
 def _enabled(monkeypatch):
     """Default every test to the shipped state (enabled) without reading config."""
     monkeypatch.setattr(sc, "session_control_enabled", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stop_windows():
+    """The stop-retry window is process-wide module state.
+
+    Left behind, one test's stop makes a later test's FIRST stop read as a repeat
+    — so escalation would be withheld from a test that never retried anything.
+    """
+    stop_retry.reset_for_tests()
+    yield
+    stop_retry.reset_for_tests()
 
 
 def _slot(state, name: str, **kwargs):
@@ -1350,7 +1363,7 @@ def test_nothing_suspends_between_the_stop_gate_and_the_stop(tmp_path, monkeypat
         order.append("authorize")
         return real_authorize(*a, **kw)
 
-    async def _fake_stop(_state, slot, *, source):
+    async def _fake_stop(_state, slot, *, source, escalate=True):
         order.append("stop")
         return {"ok": True}
 
@@ -1404,7 +1417,7 @@ def test_the_config_warm_is_the_last_suspension_before_the_stop_gate(tmp_path, m
         order.append("warm")
         return True
 
-    async def _fake_stop(_state, slot, *, source):
+    async def _fake_stop(_state, slot, *, source, escalate=True):
         order.append("stop")
         return {"ok": True}
 
@@ -1466,7 +1479,7 @@ def test_stop_constructs_the_sel_off_loop_before_stopping(tmp_path, monkeypatch)
 
     monkeypatch.setattr(sc, "sel", _sel)
 
-    async def _fake_stop(_state, slot, *, source):
+    async def _fake_stop(_state, slot, *, source, escalate=True):
         return {"ok": True}
 
     monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.stop_slot_turn", _fake_stop)
@@ -1491,9 +1504,10 @@ def test_stop_goes_through_the_same_path_as_the_stop_button(tmp_path, monkeypatc
 
     seen: dict[str, object] = {}
 
-    async def _fake_stop(_state, slot, *, source):
+    async def _fake_stop(_state, slot, *, source, escalate=True):
         seen["slot"] = slot.key
         seen["source"] = source
+        seen["escalate"] = escalate
         return {"ok": True}
 
     monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.stop_slot_turn", _fake_stop)
@@ -1502,8 +1516,10 @@ def test_stop_goes_through_the_same_path_as_the_stop_button(tmp_path, monkeypatc
 
     assert out["target"] == "chat-2"
     # No `force`: `stop_slot_turn` escalates on a second press regardless of one,
-    # so the tool does not advertise a flag a first call cannot honour.
-    assert seen == {"slot": "chat-2", "source": "session_control"}
+    # so the tool does not advertise a flag a first call cannot honour. A FIRST
+    # stop still carries `escalate=True` — the retry guard withholds it only for a
+    # repeat, so the button's semantics are unchanged for a call that is not one.
+    assert seen == {"slot": "chat-2", "source": "session_control", "escalate": True}
 
 
 def test_stop_is_refused_for_a_session_out_of_bounds(tmp_path):
@@ -1512,6 +1528,255 @@ def test_stop_is_refused_for_a_session_out_of_bounds(tmp_path):
     _slot(state, "chat-hidden", memory_mode="incognito")
     with pytest.raises(sc.SessionControlError):
         asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-hidden"))
+
+
+# ── session_stop is safe to re-send (#5074) ──────────────────────────────────
+
+
+def _stoppable(state, slot):
+    """A target with a live turn and unconsumed work behind it.
+
+    Both lists are what the hard-kill path clears, so they are the evidence a
+    retry read as an escalation would destroy. ``stop_turn`` answers "cancelled"
+    rather than "idle" so the soft stop stays PENDING — the state a retry arrives
+    into, and the only state from which escalation is reachable at all.
+    """
+    _busy(slot)
+    slot._queue.append({"id": "q1", "content": "the next thing"})
+    slot._pending_steers.append("steer-1")
+    slot._steer_delivery_ids["steer-1"] = "delivery-1"
+    state.sessions.stop_turn = AsyncMock(return_value="cancelled")
+    return slot
+
+
+def test_a_retried_stop_keeps_the_queue_instead_of_escalating(tmp_path, monkeypatch):
+    """The defect: a timeout retry is read as a second press and discards work.
+
+    `stop_slot_turn` hard-kills on any second stop while the first is still
+    pending, and the kill clears `_queue` and `_pending_steers`. An MCP client
+    that got no response inside `_post`'s 30s timeout re-sends the same request,
+    so a caller that asked once silently got the destructive variant — the
+    exposure is worst for the unattended agent this verb exists for, which
+    retries without anyone deciding anything.
+
+    Mutation guard: dropping `escalate=` from `stop_target`'s call, or the
+    `escalate and` guard in `stop_slot_turn`, empties both lists here and leaves
+    `_stop_state` at "killing".
+    """
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    target = _stoppable(state, _peer_target(state, "chat-2", caller))
+    monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.sel", lambda: MagicMock())
+
+    first = asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+    assert target._stop_state == "soft_pending", "fixture must leave a stop pending"
+
+    second = asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+
+    assert first.get("info") is None, "the first stop is the real cooperative one"
+    assert second["info"] == "stop already in progress"
+    assert target._stop_state == "soft_pending", "the retry escalated to a hard kill"
+    assert [q["id"] for q in target._queue] == ["q1"], "the retry discarded queued work"
+    assert target._pending_steers == ["steer-1"], "the retry discarded a pending steer"
+    assert target._steer_delivery_ids == {"steer-1": "delivery-1"}
+
+
+def test_a_repeat_still_stops_a_target_that_started_running_again(tmp_path, monkeypatch):
+    """Withholding the escalation must not withhold the STOP.
+
+    The retry guard suppresses a kill, not a cancel. A repeat that arrives after
+    the first stop has settled and the target has picked up its next turn is a
+    plain first stop as far as that turn is concerned, and has to cancel it.
+
+    Mutation guard: short-circuiting `stop_target` on a repeat — returning the
+    first call's answer without calling `stop_slot_turn` — leaves this second turn
+    running.
+    """
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    target = _stoppable(state, _peer_target(state, "chat-2", caller))
+    monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.sel", lambda: MagicMock())
+
+    asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+    # The first stop lands and the target drains its queue into a new turn.
+    target._stop_state = "idle"
+    target._stop_event_id = None
+
+    out = asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+
+    assert out.get("info") is None, "a repeat against a fresh turn is a real stop"
+    assert target._stop_state == "soft_pending"
+    assert state.sessions.stop_turn.await_count == 2
+
+
+def test_a_stop_after_the_window_still_escalates(tmp_path, monkeypatch):
+    """Escalation is delayed, not removed.
+
+    A stop that STILL finds the target winding down once the window has closed is
+    the case escalating was written for, and the capability has to survive: the
+    alternative contract (never escalate from the RPC) was rejected because it
+    takes the hard kill away from the agent surface entirely.
+
+    Mutation guard: withholding escalation unconditionally leaves `_stop_state` at
+    "soft_pending" and the queue intact.
+    """
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    target = _stoppable(state, _peer_target(state, "chat-2", caller))
+    monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.sel", lambda: MagicMock())
+
+    asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+    # The window closes, so the next stop is a decision rather than a retry.
+    monkeypatch.setattr(stop_retry, "WINDOW_SECS", 0.0)
+
+    asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+
+    assert target._stop_state == "killing"
+    assert list(target._queue) == [], "an escalation discards the queue, by design"
+
+
+def test_a_withheld_escalation_is_recorded(tmp_path, monkeypatch):
+    """#5074 read from the other side: the absorbed retry must be visible too.
+
+    The issue's complaint is that queued messages went "with no record that a
+    retry rather than a decision caused it". Suppressing the kill silently would
+    leave the same gap inverted — an audit in which a de-duplicated retry is
+    indistinguishable from a stop nobody made.
+
+    Mutation guard: dropping the metadata key.
+    """
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    _stoppable(state, _peer_target(state, "chat-2", caller))
+    logged: list[dict] = []
+    fake_sel = MagicMock()
+    fake_sel.log_tool_invocation = lambda **kw: logged.append(kw)
+    monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.sel", lambda: fake_sel)
+
+    asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+    asyncio.run(sc.stop_target(state, caller_session_key=_key(caller), target="chat-2"))
+
+    noop = [row for row in logged if row.get("outcome") == "noop"]
+    assert noop, f"the retry did not reach the no-op branch: {[r.get('outcome') for r in logged]}"
+    assert noop[-1]["metadata"].get("escalation_withheld") is True
+
+
+def test_the_stop_button_still_escalates_on_a_second_press(tmp_path, monkeypatch):
+    """The button's contract is unchanged, and that is the point of the default.
+
+    A person pressing Stop again has watched the cooperative stop fail to take, so
+    the second press IS a decision. Only the RPC, which cannot tell a decision
+    from a re-sent request, gives that up.
+
+    Mutation guard: defaulting `escalate` to False in `stop_slot_turn` breaks this
+    without touching the session-control tests above.
+    """
+    from kiro_crew.dashboard.chat_handlers import stop_slot_turn
+
+    state = _make_state(tmp_path)
+    slot = _stoppable(state, _slot(state, "chat-1"))
+    monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.sel", lambda: MagicMock())
+
+    asyncio.run(stop_slot_turn(state, slot))
+    assert slot._stop_state == "soft_pending"
+
+    asyncio.run(stop_slot_turn(state, slot))
+
+    assert slot._stop_state == "killing"
+    assert list(slot._queue) == []
+
+
+def test_the_no_op_reply_says_which_of_its_two_facts_it_hit(tmp_path, monkeypatch):
+    """`info` alone merges "was never running" with "its cancel is in flight".
+
+    The de-duplicated retry lands on the second one routinely now, and a caller
+    that renders both alike tells that caller the opposite of what happened.
+
+    Mutation guard: hardcoding `already_stopping` either way collapses the two.
+    """
+    from kiro_crew.dashboard.chat_handlers import stop_slot_turn
+
+    state = _make_state(tmp_path)
+    monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.sel", lambda: MagicMock())
+
+    stopping = _stoppable(state, _slot(state, "chat-1"))
+    asyncio.run(stop_slot_turn(state, stopping))
+    still_stopping = asyncio.run(stop_slot_turn(state, stopping, escalate=False))
+    assert still_stopping == {
+        "ok": True,
+        "info": "stop already in progress",
+        "already_stopping": True,
+    }
+
+    idle = _slot(state, "chat-2")
+    assert asyncio.run(stop_slot_turn(state, idle)) == {
+        "ok": True,
+        "info": "not running",
+        "already_stopping": False,
+    }
+
+
+def test_the_window_is_anchored_at_the_first_stop_not_slid_by_repeats():
+    """Escalation is suppressed for ONE window, not for as long as retries arrive.
+
+    A sliding window would put a hard kill out of reach of any caller polling
+    faster than the window — trading a silent queue loss for a capability that can
+    never be reached again.
+
+    Mutation guard: refreshing the stored timestamp on a repeat makes the third
+    call read as a repeat as well.
+    """
+    first_at = 100.0
+    assert stop_retry.allow_escalation("chat-1", "chat-2", now=first_at) is True
+    assert stop_retry.allow_escalation("chat-1", "chat-2", now=first_at + 80.0) is False
+    assert (
+        stop_retry.allow_escalation("chat-1", "chat-2", now=first_at + stop_retry.WINDOW_SECS)
+        is True
+    )
+
+
+def test_the_window_outlasts_the_request_timeout_it_absorbs():
+    """A window at or under `_post`'s 30s timeout expires before its own retry.
+
+    The retry this exists to absorb cannot be sent until the first request has
+    timed out, so the window is sized against that number rather than picked.
+    """
+    assert stop_retry.WINDOW_SECS > 30.0
+
+
+def test_the_window_is_keyed_per_caller_and_target():
+    """A different caller's FIRST stop is its own decision, not somebody's retry.
+
+    Keying on the target alone would suppress that call — removing escalation from
+    the RPC rather than making a retry safe.
+    """
+    assert stop_retry.allow_escalation("chat-1", "chat-2", now=100.0) is True
+    assert stop_retry.allow_escalation("chat-9", "chat-2", now=100.0) is True
+    assert stop_retry.allow_escalation("chat-1", "chat-3", now=100.0) is True
+    assert stop_retry.allow_escalation("chat-1", "chat-2", now=100.0) is False
+
+
+def test_an_unattributable_stop_cannot_escalate():
+    """Fails closed: an empty key cannot be matched against a first call.
+
+    Granting the kill there would hand the destructive variant to exactly the
+    caller whose retries cannot be recognized. Withholding costs only the
+    escalation — the cooperative stop still lands.
+    """
+    assert stop_retry.allow_escalation("", "chat-2", now=100.0) is False
+    assert stop_retry.allow_escalation("chat-1", "", now=100.0) is False
+
+
+def test_expired_windows_are_swept_rather_than_accumulated():
+    """The map must not grow for the gateway's lifetime.
+
+    Mutation guard: dropping the sweep keeps both keys, so a long-lived gateway
+    holds one entry per pair of slots that ever stopped each other.
+    """
+    stop_retry.allow_escalation("chat-1", "chat-2", now=100.0)
+    stop_retry.allow_escalation("chat-3", "chat-4", now=100.0)
+    stop_retry.allow_escalation("chat-5", "chat-6", now=100.0 + stop_retry.WINDOW_SECS + 1.0)
+    assert list(stop_retry._windows) == [("chat-5", "chat-6")]
 
 
 # ── session_send ──

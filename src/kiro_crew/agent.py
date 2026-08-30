@@ -4627,8 +4627,10 @@ item, which you handle immediately.
 #:   under that target's own grants. The server-side gates bound WHICH target is
 #:   reachable; nothing bounds WHAT is sent.
 #: * ``session_stop`` — WITHHELD. Ends another session's in-flight turn and
-#:   DISCARDS its work (``stop_target``: "A first call cancels cooperatively;
-#:   calling again while that is pending escalates to a hard kill").
+#:   DISCARDS its work (``stop_target``: "A stop cancels cooperatively", and the
+#:   cancelled turn's work is gone either way — the retry de-duplication that
+#:   keeps a re-sent stop from ALSO discarding the queue does not make the verb
+#:   non-destructive).
 #:
 #: Every withheld verb stays MOUNTED (``@kirocrew-dashboard`` is still in
 #: ``tools``) — it just passes through ``hooks.on_tool_call`` like any ungranted
