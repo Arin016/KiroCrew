@@ -338,6 +338,11 @@ same way). Key details:
   weights are deliberately excluded from the installer: the user selects a
   model and clicks **Download now**, with no package manager or separate
   dependency step. Intel macOS is the unsupported recognizer exception.
+  Every bundled executable ships **uncompressed** — the Apple notary service
+  decompresses archive members and rejects an unsigned executable found inside
+  one, which fails the whole macOS release (see
+  [stt-streaming](../system-specs/features/stt-streaming.md) for how the runtime
+  then authenticates a decoder whose bytes signing rewrote).
 - **Dashboard bundled** — the SPA is staged into
   `lib/python3.12/site-packages/kiro_crew/static/dist/` inside the bundle.
 - **Pruned** — `__pycache__`, test dirs, and unused stdlib (tkinter, idlelib,

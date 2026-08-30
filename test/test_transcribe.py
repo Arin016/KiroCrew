@@ -10,7 +10,6 @@ whisper.cpp decodes one.
 from __future__ import annotations
 
 import asyncio
-import gzip
 import importlib.machinery
 import importlib.util
 import os
@@ -1221,27 +1220,28 @@ class TestBundledFfmpeg:
 
     @staticmethod
     def _fake_package(
-        monkeypatch, tmp_path, *, create_binary: bool = True, compressed: bool = False
+        monkeypatch, tmp_path, *, create_binary: bool = True, signer_rewritten: bool = False
     ):
         package_dir = tmp_path / "imageio_ffmpeg"
         binaries = package_dir / "binaries"
         binaries.mkdir(parents=True)
-        filename = (
-            "ffmpeg-test.gz"
-            if compressed
-            else ("ffmpeg-test.exe" if _pc.IS_WINDOWS else "ffmpeg-test")
-        )
+        filename = "ffmpeg-test.exe" if _pc.IS_WINDOWS else "ffmpeg-test"
         binary = binaries / filename
         payload = b"bundled decoder"
         if create_binary:
-            binary.write_bytes(gzip.compress(payload, mtime=0) if compressed else payload)
-            binary.chmod(0o444 if compressed else 0o755)
+            binary.write_bytes(payload)
+            binary.chmod(0o755)
 
         monkeypatch.setattr(transcribe, "_trusted_site_package_roots", lambda: (str(tmp_path),))
         monkeypatch.setattr(
             transcribe,
             "_PACKAGED_FFMPEG_ARTIFACTS",
             {filename: (len(payload), transcribe.hashlib.sha256(payload).hexdigest())},
+        )
+        monkeypatch.setattr(
+            transcribe,
+            "_SIGNER_REWRITTEN_FFMPEG_ARTIFACTS",
+            frozenset({filename} if signer_rewritten else ()),
         )
         monkeypatch.setattr(transcribe.platform_compat, "is_bundled_interpreter", lambda: True)
         return binary
@@ -1299,60 +1299,120 @@ class TestBundledFfmpeg:
 
         assert transcribe._bundled_ffmpeg() is None
 
-    def test_gzip_payload_chunks_expand_original_bytes(self, tmp_path):
-        encoded = tmp_path / "ffmpeg.gz"
-        encoded.write_bytes(gzip.compress(b"bundled decoder", mtime=0))
-        descriptor = os.open(encoded, os.O_RDONLY)
+    def test_payload_chunks_yield_the_file_bytes(self, tmp_path):
+        raw = tmp_path / "ffmpeg"
+        raw.write_bytes(b"bundled decoder")
+        descriptor = os.open(raw, os.O_RDONLY)
         try:
-            assert (
-                b"".join(transcribe._ffmpeg_payload_chunks(descriptor, compressed=True))
-                == b"bundled decoder"
-            )
+            assert b"".join(transcribe._ffmpeg_payload_chunks(descriptor)) == b"bundled decoder"
         finally:
             os.close(descriptor)
 
-    def test_gzip_payload_chunks_reject_corruption(self, tmp_path):
-        encoded = tmp_path / "ffmpeg.gz"
-        encoded.write_bytes(b"not a gzip stream")
-        descriptor = os.open(encoded, os.O_RDONLY)
-        try:
-            with pytest.raises(OSError):
-                b"".join(transcribe._ffmpeg_payload_chunks(descriptor, compressed=True))
-        finally:
-            os.close(descriptor)
+    @pytest.mark.skipif(_pc.IS_WINDOWS, reason="signer-rewritten payloads are macOS-only")
+    def test_signer_rewritten_payload_is_accepted_on_a_developer_id_signature(
+        self, monkeypatch, tmp_path
+    ):
+        """A released macOS decoder no longer matches the upstream digest, because
+        signing replaced its Mach-O signature. macOS vouching for the exact bytes
+        staged for execution is the second anchor."""
+        binary = self._fake_package(monkeypatch, tmp_path, signer_rewritten=True)
+        binary.write_bytes(b"bundled decoder + developer id signature")
+        binary.chmod(0o755)
+        verified: list[str] = []
 
-    @pytest.mark.skipif(_pc.IS_WINDOWS, reason="gzip payload is Apple-Silicon-only")
-    def test_gzip_payload_is_expanded_then_authenticated(self, monkeypatch, tmp_path):
-        binary = self._fake_package(monkeypatch, tmp_path, compressed=True)
+        def authentic(path):
+            verified.append(path)
+            return True
+
+        monkeypatch.setattr(transcribe, "_macos_developer_id_authentic", authentic)
 
         opened = transcribe._open_packaged_ffmpeg_resource()
 
         assert opened is not None
         try:
             assert opened.source_path == str(binary)
-            assert not os.access(binary, os.X_OK)
-            assert os.read(opened.descriptor, 1024) == b"bundled decoder"
+            # The signature was checked on the snapshot, not on the bundle path.
+            assert verified == [opened.execution_path]
+            assert opened.execution_path != str(binary)
         finally:
             opened.close()
 
-    @pytest.mark.skipif(_pc.IS_WINDOWS, reason="gzip payload is Apple-Silicon-only")
-    def test_corrupt_gzip_payload_is_rejected(self, monkeypatch, tmp_path):
-        binary = self._fake_package(monkeypatch, tmp_path, compressed=True)
-        binary.chmod(0o644)
-        binary.write_bytes(b"not a gzip stream")
+    @pytest.mark.skipif(_pc.IS_WINDOWS, reason="signer-rewritten payloads are macOS-only")
+    def test_signer_rewritten_payload_without_a_valid_signature_is_refused(
+        self, monkeypatch, tmp_path
+    ):
+        binary = self._fake_package(monkeypatch, tmp_path, signer_rewritten=True)
+        binary.write_bytes(b"attacker decoder, ad-hoc signed")
+        binary.chmod(0o755)
+        monkeypatch.setattr(transcribe, "_macos_developer_id_authentic", lambda _path: False)
 
         assert transcribe._bundled_ffmpeg() is None
 
-    def test_deflate_error_is_reported_as_an_invalid_payload(self, monkeypatch, tmp_path):
-        self._fake_package(monkeypatch, tmp_path, compressed=True)
+    @pytest.mark.skipif(_pc.IS_WINDOWS, reason="signer-rewritten payloads are macOS-only")
+    def test_upstream_digest_still_authenticates_without_any_signature(self, monkeypatch, tmp_path):
+        """The desktop build gate runs BEFORE signing, so the pinned wheel bytes
+        must keep authenticating on their own."""
+        binary = self._fake_package(monkeypatch, tmp_path, signer_rewritten=True)
 
-        def broken_payload(*_args, **_kwargs):
-            raise transcribe.zlib.error("corrupt deflate block")
-            yield b""  # pragma: no cover - make this a generator
+        def _unexpected_codesign(_path):
+            raise AssertionError("codesign consulted for pinned upstream bytes")
 
-        monkeypatch.setattr(transcribe, "_ffmpeg_payload_chunks", broken_payload)
+        monkeypatch.setattr(transcribe, "_macos_developer_id_authentic", _unexpected_codesign)
+
+        assert transcribe._bundled_ffmpeg() == str(binary)
+
+    def test_non_signer_rewritten_artifact_never_consults_codesign(self, monkeypatch, tmp_path):
+        """Linux and Windows payloads stay digest-only: a mismatch is refused
+        outright, never escalated to a signature check."""
+        binary = self._fake_package(monkeypatch, tmp_path)
+        binary.write_bytes(b"changed decoder!!")
+
+        def _unexpected_codesign(_path):
+            raise AssertionError("codesign consulted for a digest-pinned artifact")
+
+        monkeypatch.setattr(transcribe, "_macos_developer_id_authentic", _unexpected_codesign)
 
         assert transcribe._bundled_ffmpeg() is None
+
+    def test_codesign_requirement_pins_the_release_team(self):
+        """Chained to Apple's root AND to our team, so an ad-hoc or self-signed
+        replacement cannot satisfy it."""
+        assert transcribe._MACOS_SIGNING_TEAM_ID == "94KV3E626L"
+        assert transcribe._MACOS_FFMPEG_REQUIREMENT == (
+            "anchor apple generic and certificate leaf[subject.OU] = 94KV3E626L"
+        )
+
+    def test_codesign_is_invoked_by_absolute_path_with_requirement_source_text(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(transcribe.platform_compat, "IS_MACOS", True)
+        recorded: list[list[str]] = []
+
+        class _Result:
+            returncode = 0
+
+        def fake_run(argv, **_kwargs):
+            recorded.append(argv)
+            return _Result()
+
+        monkeypatch.setattr(transcribe.subprocess, "run", fake_run)
+
+        assert transcribe._macos_developer_id_authentic(str(tmp_path / "ffmpeg")) is True
+        argv = recorded[0]
+        assert argv[0] == "/usr/bin/codesign"
+        assert "--strict" in argv
+        # A bare requirement string would be read as a FILE PATH by codesign.
+        assert argv[argv.index("-R") + 1].startswith("=anchor apple generic")
+
+    def test_codesign_absence_is_not_authenticity(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(transcribe.platform_compat, "IS_MACOS", True)
+
+        def missing_codesign(*_args, **_kwargs):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(transcribe.subprocess, "run", missing_codesign)
+
+        assert transcribe._macos_developer_id_authentic(str(tmp_path / "ffmpeg")) is False
 
     def test_linux_memfd_explicitly_requests_executable_mode(self, monkeypatch):
         calls = []
@@ -1525,7 +1585,10 @@ class TestBundledFfmpeg:
 
     def test_release_artifact_pins_cover_every_supported_desktop(self):
         assert transcribe._PACKAGED_FFMPEG_ARTIFACTS == {
-            "ffmpeg-macos-aarch64-v7.1.gz": (
+            # NOT "...v7.1.gz": a compressed payload is decompressed and scanned
+            # by the Apple notary service, which rejects the unsigned executable
+            # inside it and fails the whole macOS release (#6746 regression).
+            "ffmpeg-macos-aarch64-v7.1": (
                 49_368_728,
                 "6d175a4743ca50256e89a8cdd731100f9cee33bd79aeea46894d209410dc6617",
             ),
