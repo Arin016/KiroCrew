@@ -161,6 +161,20 @@ def _read_agent_spec(
     the size cap instead of being slurped into memory during a cache warm. The
     agents directories are user-writable and shared with other tools, so none of
     these are hypothetical.
+
+    *operation*/*source* label the SEL denial event emitted on a sensitive
+    resolved target. Precisely BECAUSE this is the one reader for every surface,
+    a fixed label would record a denial served for an unrelated request as an
+    agent-listing cache warm (#6722): the calling surface names itself here so
+    the security trail attributes the refusal to the request that triggered it.
+    ``source`` is the interface channel (``SecurityEvent.source`` vocabulary:
+    dashboard, cli, slack, cron, ...; ``"unknown"`` when the caller serves
+    multiple channels) — every call site passes it explicitly, enforced by the
+    call-site ratchet test. Both defaults exist ONLY so a bare call reproduces
+    the historical event byte-for-byte (a forgotten future call site degrades
+    to exactly today's trail); they are not for new call sites.
+    ``caller`` stays fixed at ``"agent_discovery"``: the reader genuinely is the
+    caller into SEL, and a fixed value keeps the trail greppable by module.
     """
     if path.name.startswith("._"):
         return None
@@ -286,7 +300,7 @@ def _declared_project_agent_name(spec: Path) -> str | None:
     allowlist: offering the filename of a broken spec has the session accept the
     agent and then fail at ``session/set_mode``.
     """
-    data = _read_agent_spec(spec)
+    data = _read_agent_spec(spec, operation="resolve_project_agent_name", source="unknown")
     if data is None:
         return None
     return spec_str(data, "name", _project_agent_fallback_name(spec))
@@ -644,7 +658,7 @@ def agent_skill_globs(agent: str, agents_dir: Path | None = None) -> list[str]:
         # Pass ``f``, not the resolved target: ``f.stem`` and
         # ``expand_skill_uri`` below must see the ORIGINAL path so a symlinked
         # spec's relative globs stay anchored where the symlink lives.
-        data = _read_agent_spec(f)
+        data = _read_agent_spec(f, operation="agent_skill_globs", source="unknown")
         if data is None:
             continue
         if data.get("name") != agent and f.stem != agent:
@@ -857,7 +871,7 @@ def list_agents(
             if not f.name.startswith("._"):
                 user_candidates += 1
             try:
-                data = _read_agent_spec(f)
+                data = _read_agent_spec(f, operation="list_agents", source="unknown")
                 if data is None:
                     continue
                 agents.append(_global_agent_info(f, data))
@@ -917,7 +931,7 @@ def list_agents(
         if not pf.name.startswith("._"):
             project_candidates += 1
         try:
-            data = _read_agent_spec(pf)
+            data = _read_agent_spec(pf, operation="list_agents", source="unknown")
             if data is None:
                 continue
             info = _project_agent_info(pf, data)
