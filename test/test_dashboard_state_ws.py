@@ -183,6 +183,77 @@ class TestSlotsBroadcastCarriesFolders:
         frame = json.loads(ws.send_str.call_args[0][0])
         assert frame["folders"] == []
 
+    def test_frame_carries_the_folder_generation(self, state: DashboardState) -> None:
+        # The tree alone is not a change signal — this frame fires on routine
+        # session activity — so the client needs the generation to tell "the
+        # store changed" from "a session blinked".
+        state.serialize_slots = MagicMock(return_value=[])  # type: ignore[method-assign]
+        state._folders_generation = 3
+        ws = self._DashboardWS()
+        state.register_ws(ws)  # type: ignore[arg-type]
+
+        state._do_slots_broadcast()
+
+        frame = json.loads(ws.send_str.call_args[0][0])
+        assert frame["foldersGeneration"] == 3
+
+    def test_slot_activity_alone_does_not_advance_the_generation(
+        self, state: DashboardState
+    ) -> None:
+        # THE guardrail. The client refetches whenever this number moves, so a
+        # generation that crept up on ordinary slot churn would refetch the
+        # session-scanning GET /api/chat/folders on every session event and land
+        # that refetch over any in-flight optimistic folder edit.
+        state.serialize_slots = MagicMock(return_value=[{"key": "chat-1"}])  # type: ignore[method-assign]
+        state._folders = [{"id": "f1", "name": "Work", "order": 0}]
+        ws = self._DashboardWS()
+        state.register_ws(ws)  # type: ignore[arg-type]
+
+        state._do_slots_broadcast()
+        state.serialize_slots = MagicMock(  # type: ignore[method-assign]
+            return_value=[{"key": "chat-1", "title": "renamed"}, {"key": "chat-2"}]
+        )
+        state._do_slots_broadcast()
+
+        generations = [
+            json.loads(call[0][0])["foldersGeneration"] for call in ws.send_str.call_args_list
+        ]
+        assert len(generations) == 2
+        assert generations[0] == generations[1]
+
+    @pytest.mark.asyncio
+    async def test_folder_mutation_advances_the_generation(
+        self, state: DashboardState
+    ) -> None:
+        # Bumped in the mutate_folders funnel rather than at each call site, so a
+        # new folder-writing endpoint cannot forget to do it.
+        before = state.folders_generation()
+
+        await state.mutate_folders(
+            lambda folders: (True, folders.append({"id": "f9", "name": "New", "order": 0}))
+        )
+
+        state.serialize_slots = MagicMock(return_value=[])  # type: ignore[method-assign]
+        ws = self._DashboardWS()
+        state.register_ws(ws)  # type: ignore[arg-type]
+        state._do_slots_broadcast()
+
+        frame = json.loads(ws.send_str.call_args[0][0])
+        assert frame["foldersGeneration"] == before + 1
+        assert frame["folders"] == [{"id": "f9", "name": "New", "order": 0}]
+
+    @pytest.mark.asyncio
+    async def test_a_no_op_folder_transaction_does_not_advance_the_generation(
+        self, state: DashboardState
+    ) -> None:
+        # `changed=False` returns before the write; nothing changed, so no client
+        # should be told to refetch.
+        before = state.folders_generation()
+
+        await state.mutate_folders(lambda folders: (False, None))
+
+        assert state.folders_generation() == before
+
 
 class TestOwnerScopedBroadcast:
     """Owner-only typed broadcast + its delivery count (PR #461)."""

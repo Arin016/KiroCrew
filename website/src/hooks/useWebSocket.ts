@@ -226,6 +226,7 @@ export function useWebSocket() {
   const reconnectingRef = useRef(false)  // suppress markSlotUnread during reconnect catch-up
   const lastVersionRef = useRef<string | null>(null)
   const lastGitlabHostsGenRef = useRef<number | null>(null)
+  const lastFoldersGenRef = useRef<number | null>(null)
   const lastSlotsRawRef = useRef<string | null>(null)
   const lastSlotsArrayRef = useRef<ChatSlot[] | null>(null)
   const voiceQueueRef = useRef<string[]>([])
@@ -718,6 +719,8 @@ export function useWebSocket() {
       // gateway, so after a restart an equal number can mean a different
       // allowlist. Clearing it makes the next generation frame refetch.
       lastGitlabHostsGenRef.current = null
+      // Same process-local reasoning for the folder-tree generation.
+      lastFoldersGenRef.current = null
       // Forget the last raw slots frame too, so a reconnect whose first frame
       // repeats the last one before it cannot swallow that first frame.
       lastSlotsRawRef.current = null
@@ -939,6 +942,32 @@ export function useWebSocket() {
                 queryClient.setQueryData<ChatFolder[]>(['chat-folders'], msg.folders as ChatFolder[])
                 // Backfill history_count (omitted from the WS payload) — the seed
                 // marked the query fresh, so nudge the real GET to run.
+                queryClient.invalidateQueries({ queryKey: ['chat-folders'] })
+              }
+            }
+            // Refetch the folder tree when the STORE changed, for every source of
+            // change — an agent, another tab, another device — not just this tab's
+            // own mutation. The seed above deliberately fires once, so without
+            // this a folder created anywhere else stays invisible until a reload:
+            // ['chat-folders'] carries the app-wide staleTime: Infinity, and the
+            // sessions do arrive (their folder_id points at a folder this tab has
+            // never heard of, so they render as Unfiled and the folder looks like
+            // it was never created).
+            //
+            // invalidate, never setQueryData: a refetch is what brings back the
+            // `history_count` the WS payload omits, and the generation only moves
+            // on a real store write, so the value a refetch resolves to already
+            // includes the mutation whose optimistic window it might land in.
+            //
+            // Same process-local trap as gitlabHostsGeneration below: the counter
+            // resets with the gateway, so a restart can hand back a number equal
+            // to the one this client last saw over a different tree. The first
+            // generation frame of each connection is therefore "unknown, refetch",
+            // and comparison only happens within one connection.
+            if (typeof msg.foldersGeneration === 'number') {
+              const prevFoldersGen = lastFoldersGenRef.current
+              lastFoldersGenRef.current = msg.foldersGeneration
+              if (prevFoldersGen === null || prevFoldersGen !== msg.foldersGeneration) {
                 queryClient.invalidateQueries({ queryKey: ['chat-folders'] })
               }
             }
