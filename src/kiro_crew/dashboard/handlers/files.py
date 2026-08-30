@@ -36,6 +36,7 @@ from kiro_crew.dashboard.chat_utils import dashboard_slot_key
 from kiro_crew.dashboard.file_index import _SKIP_DIRS as _WALK_SKIP_DIRS
 from kiro_crew.dashboard.handlers._shared import _probe_persisted_session
 from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.doc_parser import extract_text
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes, safe_read_prefix
 from kiro_crew.messaging import upload_gate
 from kiro_crew.messaging.display_safety import redact_for_display
@@ -2337,6 +2338,241 @@ async def api_file_download(request: web.Request) -> web.Response:
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# Extensions previewable via kiro_crew.doc_parser (OOXML docx/pptx). Legacy
+# binary formats (.doc, .ppt), the OpenDocument family (.odt/.ods/.odp), and
+# spreadsheet formats (.xls/.xlsx) fall through to the download card because
+# doc_parser only understands ZIP+XML OOXML, and adding openpyxl or a legacy
+# OLE reader would grow the dependency tree noticeably for a preview feature.
+_OFFICE_PREVIEWABLE_EXT = {".docx", ".pptx"}
+# Cap the returned text so a huge .docx doesn't blow the JSON payload / DOM.
+# Mirrors api_file_read's 512 KB read cap. Anything larger is truncated and
+# the frontend shows a "Download for full contents" affordance.
+_OFFICE_PREVIEW_CAP = 512_000
+
+
+class _PreviewUnsupported(Exception):
+    """The validated path's extension is outside :data:`_OFFICE_PREVIEWABLE_EXT`.
+
+    Endpoint-local, mirroring :class:`_SheetRefusal`: ``_OpenDenied``'s codes
+    are the SHARED file-serving boundary's vocabulary, and this is this
+    endpoint's own FORMAT policy rather than a security refusal, so it does
+    not belong in that enum. Raised from inside the worker callback so the
+    checked file object is closed by its ``with`` block on the same thread.
+    """
+
+
+async def api_file_office_preview(request: web.Request) -> web.Response:
+    """GET /api/file-office-preview?path=... — extract inline text preview from a .docx/.pptx.
+
+    Sibling of /api/file-download. file-download streams original bytes for
+    saving to disk; this endpoint returns plaintext extracted from the
+    OOXML XML inside so the dashboard can render a scrollable preview of
+    the document contents in place of the "can't view a binary" download
+    card — a common ask for anyone browsing shared reports in the file
+    tree without wanting to save each one.
+
+    Uses ``kiro_crew.doc_parser.extract_text`` which parses the .docx /
+    .pptx ZIP+XML with hardened defusedxml (XXE-safe) and returns "" on
+    any failure. python-docx / python-pptx are not required.
+
+    Not supported (fall through to download): .doc, .ppt, .xls, .xlsx,
+    .odt, .ods, .odp. The frontend keeps the download card for these.
+
+    Security: the open-and-check prefix is the SHARED
+    :func:`_open_checked_file` (dashboard path validation, sensitive-path
+    block, is-file, symlink-refusing ``_open_rb_nofollow`` — atomic
+    O_NOFOLLOW on POSIX, lstat guard on Windows — then fstat), never a
+    hand-rolled second spelling of it, so a future hardening change to that
+    boundary lands here too. This endpoint's own POLICY on top is the 50 MB
+    ``fstat_cap``, the ``.docx``/``.pptx`` format gate, the aggregate
+    extraction budget, and credential redaction before the preview cap is
+    applied. All of it — validation, open, fstat, ZIP+XML parsing,
+    redaction — runs in ONE worker-thread hop, like ``api_file_sheet``.
+    """
+    raw_path = request.query.get("path", "")
+
+    def _log(outcome: str, res: str, error: str = "") -> None:
+        kw = {"error": error} if error else {}
+        _sel().log_tool_invocation(
+            session_key="dashboard", tool_name="file_office_preview",
+            outcome=outcome, resources=res, **kw,
+        )
+
+    # Resolve relative paths against project dir when resolve=1. Uses the
+    # shared helper (same as api_file_read / api_file_download / file-raw):
+    # it passes Windows-absolute/UNC shapes through to the validator, whose
+    # network-path gate runs BEFORE realpath — never re-implement this inline.
+    if request.query.get("resolve") == "1":
+        raw_path, _resolve_err = _resolve_project_relative(raw_path)
+        if _resolve_err == "cannot_resolve":
+            _log("denied", request.query.get("path", ""), "cannot_resolve")
+            return web.json_response(
+                {"error": "cannot resolve: no project dir configured", "code": "no_project_dir"},
+                status=400,
+            )
+        if _resolve_err == "outside_project":
+            _log("denied", request.query.get("path", ""), "outside_project")
+            return web.json_response(
+                {"error": "path outside project directory", "code": "path_outside_project"},
+                status=400,
+            )
+
+    try:
+        validate_tool_args({"path": raw_path}, FILE_READ_SCHEMA)
+    except ValidationError:
+        _log("denied", raw_path)
+        return web.json_response({"error": "invalid input", "code": "invalid_input"}, status=400)
+
+    # The validated path once the shared prefix produces one -- exported by
+    # the worker callback so the exception handlers log the same SEL resource
+    # the success path does.
+    res_path = raw_path
+
+    def _open_and_extract() -> dict[str, object] | _OpenDenied:
+        """Open-and-check plus extract, in ONE worker-thread hop.
+
+        Everything here is blocking I/O or CPU-bound — realpath validation,
+        the sensitive-path screen, the open, the fstat, ZIP decompression,
+        XML parsing, redaction — so none of it may run on the event loop: an
+        NFS/FUSE-backed document makes even the validate/open envelope block
+        for seconds, stalling every session's streaming and the liveness
+        heartbeat.
+
+        The checked open file object never crosses back to the event loop:
+        every path that opens it also closes it on THIS thread (refusals
+        close inside the prefix; the ``with`` block below covers the rest,
+        the format refusal included). A cancellation of the awaiting task
+        therefore cannot strand an open file in a discarded future or
+        finalize one on the loop — the future's result is only ever a
+        payload dict or a typed refusal.
+        """
+        nonlocal res_path
+        # fstat_cap is this endpoint's size gate, enforced on the fd BEFORE
+        # any ZIP parsing: zipfile.ZipFile materializes the archive's central
+        # directory in memory, bounded only by the file itself, so a crafted
+        # archive could otherwise exhaust memory before doc_parser's
+        # per-entry and aggregate budgets ever apply. Same 50 MB ceiling as
+        # file uploads. log_open_failure=False: this endpoint answers a coded
+        # refusal, so a request loop against a known-unreadable path cannot
+        # amplify into the log.
+        checked = _open_checked_file(
+            raw_path,
+            tool_name="file_office_preview",
+            fstat_cap=_MAX_UPLOAD_BYTES,
+            log_open_failure=False,
+        )
+        if isinstance(checked, _OpenDenied):
+            return checked
+        res_path = checked.path
+        with checked.file as fobj:
+            if os.path.splitext(checked.path)[1].lower() not in _OFFICE_PREVIEWABLE_EXT:
+                raise _PreviewUnsupported(checked.path)
+            # extract_text parses through the SAME handle the prefix opened
+            # and fstat-ed (its opt-in fileobj parameter), so the bytes
+            # parsed are exactly the bytes measured — no stat→open TOCTOU
+            # window. max_chars bounds AGGREGATE extraction (cap + 1 keeps
+            # the truncation flag detectable): a deck with thousands of
+            # slides stops parsing at the budget instead of accumulating
+            # unbounded text. It never raises — returns "" on any failure.
+            text = extract_text(
+                checked.path,
+                filename=os.path.basename(checked.path),
+                max_chars=_OFFICE_PREVIEW_CAP + 1,
+                fileobj=fobj,
+            )
+        truncated = len(text) > _OFFICE_PREVIEW_CAP
+        # Redact BEFORE truncating: slicing first could cut a credential
+        # across the cap boundary, leaving an unmatched prefix the redactor
+        # no longer recognizes. Redaction may change the length, so the
+        # truncation flag is computed from the raw extraction above.
+        text = redact(text)
+        if truncated:
+            text = text[:_OFFICE_PREVIEW_CAP]
+        return {
+            "text": text,
+            "truncated": truncated,
+            # No `empty` field: doc_parser returns "" for both a genuinely
+            # blank document and a parse failure, so the two are
+            # indistinguishable here. The frontend treats empty `text` as
+            # "no preview available" and falls back to the download card.
+        }
+
+    try:
+        result = await asyncio.to_thread(_open_and_extract)
+    except asyncio.CancelledError:
+        # Gateway shutdown / client disconnect while the worker thread is
+        # parsing: the access attempt already happened, so record it before
+        # propagating — CancelledError is a BaseException and would bypass
+        # the Exception handler below, leaving the access unaudited. No
+        # resource handling here: the worker callback owns the file's whole
+        # lifetime.
+        _log("cancelled", res_path)
+        raise
+    except _PreviewUnsupported:
+        # 415 (not 400) so the frontend can distinguish "unsupported format,
+        # keep showing the download card" from "invalid input, something's
+        # actually wrong". The frontend short-circuits known-unsupported
+        # extensions client-side, so this branch is the safety net (direct
+        # API calls, frontend/backend list drift).
+        _log("denied", res_path, "unsupported_preview_format")
+        return web.json_response(
+            {
+                "error": "unsupported format for inline preview",
+                "code": "unsupported_preview_format",
+            },
+            status=415,
+        )
+    except Exception:  # noqa: BLE001  # last-resort guard; doc_parser already logs
+        logger.exception("file_office_preview extract_text failed for %s", res_path)
+        _log("failure", res_path)
+        return web.json_response(
+            {"error": "failed to extract preview", "code": "preview_extraction_failed"},
+            status=500,
+        )
+    if isinstance(result, _OpenDenied):
+        # The shared prefix's typed refusals, mapped onto this endpoint's SEL
+        # outcomes and response vocabulary — the part that legitimately
+        # differs per endpoint.
+        code, res = result.code, result.path
+        if code == "invalid_path":
+            _log("denied", res)
+            return web.json_response(
+                {"error": "invalid or forbidden path", "code": "forbidden_path"}, status=400,
+            )
+        if code == "sensitive_path":
+            _log("denied", res, "sensitive_path")
+            return web.json_response(
+                {"error": "sensitive path blocked", "code": "sensitive_path"}, status=403,
+            )
+        if code == "not_found":
+            _log("not_found", res)
+            return web.json_response({"error": "not found", "code": "not_found"}, status=404)
+        if code == "symlink_refused":
+            _log("denied", res, "symlink_rejected")
+            return web.json_response(
+                {"error": "symlinks not allowed", "code": "symlink_rejected"}, status=403,
+            )
+        if code == "file_too_large":
+            _log("denied", res, "file_too_large")
+            return web.json_response(
+                {
+                    "error": (
+                        "file too large for preview "
+                        f"(max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"
+                    ),
+                    "code": "file_too_large",
+                },
+                status=413,
+            )
+        # read_failed: the residual code.
+        _log("failure", res)
+        return web.json_response(
+            {"error": "cannot read file", "code": "file_read_failed"}, status=500,
+        )
+    _log("success", res_path)
+    return web.json_response(result)
 
 
 async def api_file_raw(request: web.Request) -> web.Response:
