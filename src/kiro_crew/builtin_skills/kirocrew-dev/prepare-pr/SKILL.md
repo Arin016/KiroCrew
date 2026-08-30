@@ -148,7 +148,7 @@ blocker. Use a token with Checks read access.
 
 ## Project profile — everything repo-specific
 
-Gates, reviewers, and conventions come from a resolved profile, not from this prose.
+Setup, gates, reviewers, and conventions come from a resolved profile, not from this prose.
 Resolve once per run and keep the JSON for Phases 1–3:
 
 ```bash
@@ -157,9 +157,10 @@ python3 $SKILL_DIR/scripts/resolve_profile.py > /tmp/pp-profile.json
 
 Most-specific-wins: repo-root `.prepare-pr.toml` → Kiro Crew markers (auto-loads
 `profiles/kirocrew.json`) → stack auto-detect → generic fallback. The JSON always
-has `gates[]`, `reviewers[]` (each `{name, model, model_tier, contract, rubric}`),
-`rule_files[]`, `single_commit`, `base_branch`, and
-`readiness{status_context, defer_label}`.
+has `setup[]`, `gates[]`, `reviewers[]` (each
+`{name, model, model_tier, contract, rubric}`), `rule_files[]`, `single_commit`,
+`base_branch`, and `readiness{status_context, defer_label}`. A legacy profile with
+no `setup` resolves it to `[]`.
 
 **Every profile input is read from the base ref, not the checkout** — otherwise a
 branch could drop the lane that reviews it. A ref resolving to nothing is a hard
@@ -167,7 +168,7 @@ error (exit 2), never a silent fall back. Consequence: an **uncommitted
 `.prepare-pr.toml` edit is ignored**; commit it on the base branch or pass an
 explicit `base_ref`.
 
-- **In Kiro Crew:** the bundled profile — Rule-2 gates, `gpt` pinned to `gpt-5.6-sol` mirroring `codex-review.yml`, `opus` pinned to `claude-opus-4.8` mirroring `claude-review.yml`, `single_commit = true`, readiness context `PR Readiness`.
+- **In Kiro Crew:** the bundled profile — Playwright browser setup, Rule-2 gates, `gpt` pinned to `gpt-5.6-sol` mirroring `codex-review.yml`, `opus` pinned to `claude-opus-4.8` mirroring `claude-review.yml`, `single_commit = true`, readiness context `PR Readiness`.
 - **Elsewhere:** auto-detected gates + reviewers, or whatever `.prepare-pr.toml` declares. Pass a non-default readiness name via `--readiness-context` or `PREPARE_PR_READINESS_CONTEXT`; with none, `pr_status.py` uses the full rollup.
 
 **`single_commit` governs history handling in one place.** When `true`, run the
@@ -226,14 +227,24 @@ Never push until this is locally green — no open Critical/High. Local-green is
 cost and latency optimization, not a guarantee; the Phase 3 server poll stays the
 backstop.
 
-1. **Run the profile's `gates[]`.** All must exit 0 before review. For Kiro Crew that is the diff-scoped test runner / isort / flake8 / mypy, plus `tsc -b` for frontend changes.
+1. **Run `setup[]` once, then `gates[]` on every pass.** On the first Phase 2 pass
+   in a worktree, run the profile's `setup[]` in order. Setup may add prerequisites
+   to a per-user cache; it is not a verdict on the diff. A setup failure means the
+   environment is not ready: fix or report that environment problem before
+   evaluating the branch. Do not rerun setup unless the worktree or tool-cache state
+   was invalidated. Then run the profile's `gates[]` on every pass. Gates are pure
+   checks; a nonzero exit means the diff is not ready. For Kiro Crew that is the
+   diff-scoped test runner / isort / flake8 / mypy, plus `tsc -b` for frontend
+   changes. All gates must exit 0 before review.
 
-   **The gate list is data.** Read it from `profiles/kirocrew.json` `gates[]`. If a
-   CI-blocking gate is missing, add it to the profile, not here —
+   **The setup and gate lists are data.** Read them from
+   `profiles/kirocrew.json` `setup[]` and `gates[]`: provisioning belongs in setup;
+   only checks belong in gates. If a CI prerequisite or blocking gate is missing,
+   add it to the appropriate profile list, not here —
    `test/test_prepare_pr_profiles.py` pins the floor to `ci.yml`. **Before you add,
-   change or remove a gate, read `references/gate-floor.md`**: every entry's shape
-   is load-bearing and not guessable from the command, and that file also records
-   which CI checks have no local entry point.
+   change or remove setup or a gate, read `references/gate-floor.md`**: every
+   entry's shape is load-bearing and not guessable from the command, and that file
+   also records which CI checks have no local entry point.
 
    `scripts/run_scoped_tests.py` prints one of three verdicts and **all three are
    normal**: `cross-surface: N file(s)`, `full suite: the diff touches this

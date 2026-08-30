@@ -42,7 +42,7 @@ from slack_sdk.socket_mode.websockets import SocketModeClient as WSSocketModeCli
 
 import kiro_crew
 import kiro_crew.crash_guard as crash_guard
-from kiro_crew import agent_scratch, beacon, dep_sync, platform_compat, shutdown_event
+from kiro_crew import agent_scratch, beacon, dep_sync, name_grant, platform_compat, shutdown_event
 from kiro_crew.acp.client import AcpError, AcpProcessDied
 from kiro_crew.agents_janitor import sweep_agents_dir
 from kiro_crew.autonudge import (
@@ -279,6 +279,7 @@ from kiro_crew.subagent_completion_meta import (
     wave_final_meta,
 )
 from kiro_crew.taskrunner import TaskRunner
+from kiro_crew.tunnel import set_publish_disabled
 from kiro_crew.wecom.gateway import warn_if_channel_uncredentialed
 
 if TYPE_CHECKING:
@@ -1813,6 +1814,33 @@ class GatewayOrchestrator:
                     and not _child_lf
                     and _is_read_only_tool(event.title or "")
                 )
+                if approve and self._approval_mode == "reads":
+                    # 'reads' is a NAME-shaped grant: it classifies the title,
+                    # and the shell resolves the command's program names again
+                    # through a PATH that can lead with agent-writable
+                    # directories — the same tier the dashboard's trust-reads
+                    # rung verifies. A refused name falls through to the
+                    # interactive prompt below (never a hard block), so a
+                    # PATH-shadowed program cannot ride the reads grant on an
+                    # unattended cron/autonudge turn. 'yolo' is unconditional
+                    # (consumes no event data) and stays unverified by design.
+                    _ng_refusal = await name_grant.refusal_for_event(event)
+                    if _ng_refusal is not None:
+                        logger.warning(
+                            "declining a reads-mode auto-approve: %s; the "
+                            "request falls through to the interactive prompt",
+                            _ng_refusal.log_text,
+                        )
+                        name_grant.log_decline(
+                            source="background",
+                            session_key=parent_session_key,
+                            event=event,
+                            refusal=_ng_refusal,
+                            tier="cli_approval_reads",
+                            metadata={"caller_source": source},
+                            sel_factory=sel,
+                        )
+                        approve = False
                 if approve:
                     # Emit a SEL audit event so the audit trail records WHICH
                     # mode auto-approved the tool. Downstream sites already
@@ -10585,6 +10613,7 @@ async def run_gateway(
     *,
     no_dashboard: bool = False,
     no_crons: bool = False,
+    no_tunnel: bool = False,
     no_open: bool = False,
     port_override: str | None = None,
     json_ready: bool = False,
@@ -10603,6 +10632,15 @@ async def run_gateway(
     # them ``mc-default`` so profilers like py-spy can attribute blocking work
     # to this gateway.  Must run BEFORE any to_thread offload.
     configure_default_executor()
+
+    # ── Publish surface, pinned for the process ──
+    # Recorded BEFORE any service spins up, because both doors out are opened by
+    # services started below: the dashboard's boot-time ``setup_tunnel`` and the
+    # on-demand provisioning in ``slack.allowlist`` that a Slack message can reach
+    # as soon as the gateway is listening. Set unconditionally so a False here
+    # also CLEARS a value a previous gateway left behind in the same process
+    # (the test harness boots more than one), rather than letting it leak.
+    set_publish_disabled(no_tunnel)
 
     # ── Platform context boot (CPP seam) ──
     # Resolve + install the PlatformContext ONCE before any service spins up.

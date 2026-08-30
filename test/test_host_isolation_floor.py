@@ -436,15 +436,13 @@ class TestTheSharedKiroPathRatchet:
         # longer matches the thing it protects -- weakening the guard to satisfy an
         # isolation ratchet, which is backwards.
         ("kiro_crew/security.py", "_EXTRACT_INTO_TRUST_ROOT_RE"): "security anchor: must name the REAL home",
-        # Also not redirectable: the home-anchoring IS the security property. These name
-        # OTHER products' credential stores (kiro-cli, amazon-q), and the module's own
-        # comment records that an entry either equals the home-anchored path inside
-        # `_SENSITIVE_HOME_DIRS`' fence or falls outside it and must not be trusted --
-        # so a redirected value would manufacture a forgeable "trusted" path. They are
-        # only ever READ, and `test_kiro_usage_api.py` stubs the tuples per test, which
-        # is the right seam: stub the READER, never move the anchor.
-        ("kiro_crew/dashboard/handlers/kiro_usage_api.py", "_CLI_SQLITE_DBS"): "security anchor: must name the REAL home",
-        ("kiro_crew/dashboard/handlers/kiro_usage_api.py", "_OTHER_SQLITE_DBS"): "security anchor: must name the REAL home",
+        # The kiro-cli/amazon-q sqlite tuples that used to sit here as direct
+        # ``Path.home()`` bindings are now PROJECTIONS over the canonical table in
+        # ``kiro_crew/identity_stores.py`` (``sqlite_dbs(...)`` resolves the home
+        # inside the call), so they no longer match this tripwire's import-time
+        # shape and need no exclusion. Their anchor rule ("must name the REAL
+        # home"; stub the READER, never move the anchor) is carried forward by
+        # ``test_identity_stores.py::TestUsageTuplesAnchorTheRealHome``.
         # An ALLOW-LIST root, so the same rule applies from the other direction: the
         # file browser's first permitted root is the operator's real home BY DESIGN,
         # since that is the directory the user is entitled to browse. Redirecting it

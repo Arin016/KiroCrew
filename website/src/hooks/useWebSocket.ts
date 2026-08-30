@@ -4,7 +4,7 @@ import { isArtifactEditing } from '../utils/artifactEditGuard'
 import { isReconcileNote } from '../lib/noteContract'
 import { useAppDispatch, useAppSelector } from '../store'
 import { store } from '../store'
-import { sseStatus, sseConnected, sseDisconnected, sseSlots, sseTodoUpdate, setChannelTrusted, sseSlotTitle, triggerRefresh, fetchSlots, markSlotUnread, setUpdateProgress, sseSubagentStatus, sseSubagentText, touchSlotActivity, patchSlotSourceLinks, type SubagentDetail } from '../store/dashboardSlice'
+import { sseStatus, sseYolo, sseConnected, sseDisconnected, sseSlots, sseTodoUpdate, setChannelTrusted, sseSlotTitle, triggerRefresh, fetchSlots, markSlotUnread, setUpdateProgress, sseSubagentStatus, sseSubagentText, touchSlotActivity, patchSlotSourceLinks, type SubagentDetail } from '../store/dashboardSlice'
 import { addNotification, ackNotificationByTs, unackNotificationByTs, removeNotificationByTs, clearAllNotifications, fetchNotifications, markBootNotificationsFetched } from '../store/notificationsSlice'
 import { dispatchMcNotification, TURN_DONE_KIND, APPROVAL_KIND, shouldChimeOnTurnDone } from './notificationEvent'
 import { emitThemeSound } from './themeSound'
@@ -226,6 +226,7 @@ export function useWebSocket() {
   const reconnectingRef = useRef(false)  // suppress markSlotUnread during reconnect catch-up
   const lastVersionRef = useRef<string | null>(null)
   const lastGitlabHostsGenRef = useRef<number | null>(null)
+  const lastFoldersGenRef = useRef<number | null>(null)
   const lastSlotsRawRef = useRef<string | null>(null)
   const lastSlotsArrayRef = useRef<ChatSlot[] | null>(null)
   const voiceQueueRef = useRef<string[]>([])
@@ -243,7 +244,11 @@ export function useWebSocket() {
   // index-map recomputes each dispatch triggers) happen ~per frame instead of
   // ~per token. lastSeq is carried across flushes so cross-batch gap detection
   // mirrors the reducer's per-chunk "N chunk(s) missed" marker.
-  const chunkBufRef = useRef<Map<string, { content: string; lastSeq: number | undefined }>>(new Map())
+  // `thinking` buffers reasoning-stream text (chat_thinking) in the SAME entry
+  // so both content types share one flush cycle and one lifecycle (reconnect
+  // clear, chat_done delete, unmount cancel); the flush dispatches thinking
+  // before content, matching a turn's thought-then-answer arrival order.
+  const chunkBufRef = useRef<Map<string, { content: string; lastSeq: number | undefined; thinking: string }>>(new Map())
   const chunkFlushScheduledRef = useRef(false)
   const chunkRafRef = useRef<number | null>(null)
   const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -547,6 +552,12 @@ export function useWebSocket() {
     const activeSlot = store.getState().chat.activeSlot
     let dispatchedActive = false
     for (const [slot, entry] of buf) {
+      // Thinking first: within a turn the reasoning stream precedes the answer
+      // stream, so a frame holding both must land them in that order.
+      if (entry.thinking) {
+        dispatch(sseThinkingChunk({ slot, content: entry.thinking }))
+        entry.thinking = ''
+      }
       if (!entry.content) continue
       dispatch(sseChatMessage({ slot, role: 'chunk', content: entry.content, seq: entry.lastSeq, batched: true }))
       entry.content = ''
@@ -585,6 +596,22 @@ export function useWebSocket() {
     if (typeof requestAnimationFrame === 'function') chunkRafRef.current = requestAnimationFrame(() => flushChunks())
     else chunkTimerRef.current = setTimeout(() => flushChunks(), 16)
   }, [flushChunks])
+
+  /** Salvage buffered reasoning before the chunk buffer is dropped. Buffered
+   *  CONTENT may be discarded — refreshSlot recovers it from the server — but
+   *  reasoning is client-only (the backend never persists it), so anything
+   *  still buffered when the buffer is cleared (reconnect) or the hook unmounts
+   *  would be permanently lost. A hidden tab makes that window unbounded:
+   *  requestAnimationFrame is suspended there, so the scheduled flush never
+   *  runs while thinking keeps accumulating. */
+  const flushBufferedThinking = useCallback(() => {
+    for (const [slot, entry] of chunkBufRef.current) {
+      if (entry.thinking) {
+        dispatch(sseThinkingChunk({ slot, content: entry.thinking }))
+        entry.thinking = ''
+      }
+    }
+  }, [dispatch])
 
   /** Flush buffered slot-recency bumps: one touchSlotActivity per slot, not per
    *  event. Cancels any pending frame first, mirroring flushChunks. */
@@ -692,6 +719,8 @@ export function useWebSocket() {
       // gateway, so after a restart an equal number can mean a different
       // allowlist. Clearing it makes the next generation frame refetch.
       lastGitlabHostsGenRef.current = null
+      // Same process-local reasoning for the folder-tree generation.
+      lastFoldersGenRef.current = null
       // Forget the last raw slots frame too, so a reconnect whose first frame
       // repeats the last one before it cannot swallow that first frame.
       lastSlotsRawRef.current = null
@@ -720,6 +749,9 @@ export function useWebSocket() {
         chunkRafRef.current = null
         chunkTimerRef.current = null
         chunkFlushScheduledRef.current = false
+        // Reasoning first: it is client-only, so unlike content the refresh
+        // below cannot recover it — land it in the store before the drop.
+        flushBufferedThinking()
         chunkBufRef.current.clear()  // drop pre-disconnect partial chunks; refreshSlot recovers state
         // Same for subagent chunks: pre-disconnect text must not cross a reconnect.
         if (subagentChunkRafRef.current != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(subagentChunkRafRef.current)
@@ -866,7 +898,7 @@ export function useWebSocket() {
             dispatch(sseSlots(data as ChatSlot[]))
             lastSlotsArrayRef.current = store.getState().dashboard.slots
             if (msg.yolo !== undefined) {
-              dispatch(sseStatus({ yolo: msg.yolo } as StatusData))
+              dispatch(sseYolo(msg.yolo))
             }
             if (msg.channelTrusted !== undefined) {
               dispatch(setChannelTrusted(msg.channelTrusted))
@@ -910,6 +942,32 @@ export function useWebSocket() {
                 queryClient.setQueryData<ChatFolder[]>(['chat-folders'], msg.folders as ChatFolder[])
                 // Backfill history_count (omitted from the WS payload) — the seed
                 // marked the query fresh, so nudge the real GET to run.
+                queryClient.invalidateQueries({ queryKey: ['chat-folders'] })
+              }
+            }
+            // Refetch the folder tree when the STORE changed, for every source of
+            // change — an agent, another tab, another device — not just this tab's
+            // own mutation. The seed above deliberately fires once, so without
+            // this a folder created anywhere else stays invisible until a reload:
+            // ['chat-folders'] carries the app-wide staleTime: Infinity, and the
+            // sessions do arrive (their folder_id points at a folder this tab has
+            // never heard of, so they render as Unfiled and the folder looks like
+            // it was never created).
+            //
+            // invalidate, never setQueryData: a refetch is what brings back the
+            // `history_count` the WS payload omits, and the generation only moves
+            // on a real store write, so the value a refetch resolves to already
+            // includes the mutation whose optimistic window it might land in.
+            //
+            // Same process-local trap as gitlabHostsGeneration below: the counter
+            // resets with the gateway, so a restart can hand back a number equal
+            // to the one this client last saw over a different tree. The first
+            // generation frame of each connection is therefore "unknown, refetch",
+            // and comparison only happens within one connection.
+            if (typeof msg.foldersGeneration === 'number') {
+              const prevFoldersGen = lastFoldersGenRef.current
+              lastFoldersGenRef.current = msg.foldersGeneration
+              if (prevFoldersGen === null || prevFoldersGen !== msg.foldersGeneration) {
                 queryClient.invalidateQueries({ queryKey: ['chat-folders'] })
               }
             }
@@ -1138,6 +1196,11 @@ export function useWebSocket() {
             // cached page instead, so neither a grid pane nor a failed-switch
             // restore can resurrect the discarded transcript (#6364 review).
             const clearSlot = data.slot as string
+            // Drop the slot's buffered stream text (content + thinking) too:
+            // an entry buffered before the /clear would otherwise flush on the
+            // next frame and resurrect discarded text into the just-cleared
+            // pane. Keyed delete — other slots' in-flight buffers are theirs.
+            chunkBufRef.current.delete(clearSlot)
             if (clearSlot === store.getState().chat.activeSlot) dispatch(clearMessages())
             else dispatch(clearSlotCache(clearSlot))
             break
@@ -1199,14 +1262,18 @@ export function useWebSocket() {
               bufferSlotActivity(data.slot, (data as { ts?: string }).ts || new Date().toISOString(), true)
             }
             break
-          case 'steer_push':
+          case 'steer_push': {
             // Mid-turn steer echo: show the user's steered text inline in the
             // target slot's transcript. Uses appendSlotMessage so the bubble
             // appears whether or not the slot is currently active (background
             // tabs). Persisted server-side — survives page reload.
+            // `sendId` (present when the initiating client minted one) rides
+            // into the meta so the reconcile in appendSlotMessage can match the
+            // optimistic bubble by id instead of by content (#6075).
+            const steerSid = (data as { sendId?: unknown }).sendId
             dispatch(appendSlotMessage({
               slot: (data as { slot?: string }).slot || store.getState().chat.activeSlot || '',
-              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true }, ts: (data as { ts?: string }).ts },
+              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true, ...(typeof steerSid === 'string' && steerSid ? { sendId: steerSid } : {}) }, ts: (data as { ts?: string }).ts },
             }))
             // Steering is the other way to type into a busy session, so it
             // settles the rank exactly like a queued send. The server appends a
@@ -1220,6 +1287,7 @@ export function useWebSocket() {
               )
             }
             break
+          }
           case 'queue_cancel':
             dispatch(cancelQueuedMessage(data))
             // A cancelled queued message is an answer that never lands. The
@@ -1245,7 +1313,7 @@ export function useWebSocket() {
             if (cs) {
               const buf = chunkBufRef.current
               let entry = buf.get(cs)
-              if (!entry) { entry = { content: '', lastSeq: undefined }; buf.set(cs, entry) }
+              if (!entry) { entry = { content: '', lastSeq: undefined, thinking: '' }; buf.set(cs, entry) }
               // Cross-chunk gap detection via the shared missedChunkMarker,
               // single-sourced with the reducer so the two copies can't drift.
               if (entry.lastSeq !== undefined && data.seq !== undefined) {
@@ -1527,7 +1595,18 @@ export function useWebSocket() {
             break
           case 'chat_thinking': {
             // kiro-cli/ACP reasoning (agent_thought_chunk) -> collapsible block.
-            dispatch(sseThinkingChunk({ slot: data.slot, content: (data as { content?: string }).content || '' }))
+            // Buffered into the shared chunk buffer and flushed once per frame
+            // (see flushChunks): reasoning streams run for hundreds of tokens,
+            // and a per-token dispatch recomputes the O(N) displayItems on each.
+            const thinkSlot = data.slot as string | undefined
+            const thinkText = (data as { content?: string }).content || ''
+            if (thinkSlot && thinkText) {
+              const buf = chunkBufRef.current
+              let entry = buf.get(thinkSlot)
+              if (!entry) { entry = { content: '', lastSeq: undefined, thinking: '' }; buf.set(thinkSlot, entry) }
+              entry.thinking += thinkText
+              scheduleChunkFlush()
+            }
             // Dispatch the status detail only on a genuine kind TRANSITION into
             // 'thinking'. Guarding merely on `!== 'streaming'` would not
             // self-limit — 'thinking' is itself `!== 'streaming'`, so it would
@@ -1773,7 +1852,7 @@ export function useWebSocket() {
     }
 
     ws.onerror = () => { /* onclose will fire */ }
-  }, [dispatch, flushChunks, scheduleChunkFlush, bufferSlotActivity, bufferSubagentChunk, flushSubagentChunks, playNextVoiceChunk, queryClient, stopVoice, syncPendingApprovals, syncPendingQuestions, seedGoalLoops, recordRetiredId])
+  }, [dispatch, flushChunks, flushBufferedThinking, scheduleChunkFlush, bufferSlotActivity, bufferSubagentChunk, flushSubagentChunks, playNextVoiceChunk, queryClient, stopVoice, syncPendingApprovals, syncPendingQuestions, seedGoalLoops, recordRetiredId])
 
   /**
    * Force an immediate reconnect: cancels any pending backoff timer, closes
@@ -1852,6 +1931,9 @@ export function useWebSocket() {
       // otherwise leave a stale sidebar tint. The flush also cancels the scheduled frame.
       flushSlotActivity()
       flushSubagentChunks()
+      // Same for buffered reasoning: it is client-only and unrecoverable, unlike
+      // buffered content (which the next mount's refresh restores from the server).
+      flushBufferedThinking()
       wsRef.current?.close()
       wsRef.current = null
       window.removeEventListener('voice-stop', onVoiceStop)
@@ -1860,7 +1942,7 @@ export function useWebSocket() {
       unsubFocus()
       sendSlotFocusedImpl = () => {}
     }
-  }, [connect, stopVoice, flushSlotActivity, flushSubagentChunks])
+  }, [connect, stopVoice, flushSlotActivity, flushSubagentChunks, flushBufferedThinking])
 
   /** Subscribe to log events — call with callback on mount, null on unmount. */
   const subscribeLogs = useCallback((cb: LogCallback) => {

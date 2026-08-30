@@ -836,6 +836,7 @@ make this tool possible:
 <a href="https://github.com/johnnynaught" title="johnnynaught"><img src="https://github.com/johnnynaught.png?size=64" width="64" height="64" alt="johnnynaught" /></a>
 <a href="https://github.com/josej4m" title="James Joseph"><img src="https://github.com/josej4m.png?size=64" width="64" height="64" alt="James Joseph" /></a>
 <a href="https://github.com/joshymle" title="Joshua Yeung"><img src="https://github.com/joshymle.png?size=64" width="64" height="64" alt="Joshua Yeung" /></a>
+<a href="https://github.com/joyboy5477" title="Akash Vishwakarma"><img src="https://github.com/joyboy5477.png?size=64" width="64" height="64" alt="Akash Vishwakarma" /></a>
 <a href="https://github.com/JPLachance" title="Jean-Philippe Lachance"><img src="https://github.com/JPLachance.png?size=64" width="64" height="64" alt="Jean-Philippe Lachance" /></a>
 <a href="https://github.com/Jpontone" title="JPontone"><img src="https://github.com/Jpontone.png?size=64" width="64" height="64" alt="JPontone" /></a>
 <a href="https://github.com/jtoloui" title="Jamie Toloui"><img src="https://github.com/jtoloui.png?size=64" width="64" height="64" alt="Jamie Toloui" /></a>
@@ -1101,9 +1102,11 @@ make this tool possible:
 
 Listed alphabetically by GitHub username. Internal contributors appear here if they
 consented to public recognition in the contributor survey; open-source contributors are
-included from this repository's pull request history, and from contributions that were
-never a pull request at all — a bug report, a code review, a translation, an idea, a
-private security report — added on request. If you contributed and would like to be
+collected automatically from this repository's merged pull requests — both the author of
+each pull request and the people who reported the issues it closed, so a report that
+led to a real change is credited like the change itself. Contributions that leave
+neither trace — a code review, a translation, an idea, a private security report — are
+added on request. If you contributed and would like to be
 added, corrected, or removed, please open an issue or a pull request.
 
 ## License

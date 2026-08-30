@@ -3451,6 +3451,7 @@
         "command": "kirocrew",
         "forward_to_agent_callback": "",
         "trusted_bot_ids": [],
+        "trusted_bot_turn_limit": 5,
         "allowed_enterprise_ids": [],
         "reactions": {},
         "reactions_enabled": true,
@@ -3585,10 +3586,26 @@
         "slack"
       ],
       "label": "Trusted Bot IDs",
-      "help": "Bot IDs allowed to bypass the bot filter for multi-node mesh communication.",
+      "help": "Bot IDs allowed to bypass the bot filter for multi-node mesh communication. The gateway's own bot ID is never trusted, even if listed (it would reply to itself in a loop).",
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": []
+    },
+    {
+      "path": "slack.trusted_bot_turn_limit",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "slack"
+      ],
+      "label": "Trusted Bot Turn Limit",
+      "help": "Maximum consecutive turns a thread may run on trusted-bot messages before a human message is required (loop guard for mutually trusted gateways). A message from an allowed human resets the count. Minimum 1; values below 1 are treated as 1.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 5
     },
     {
       "path": "slack.allowed_enterprise_ids",
@@ -5634,10 +5651,11 @@
         "avatar": "",
         "merge_queued_messages": false,
         "mcp_probe_timeout_secs": 15,
-        "loop_stall_exit_after_secs": 25,
+        "loop_stall_exit_after_secs": null,
         "cautious_boot": true,
         "widget_density": "more",
         "use_builtin_browser": true,
+        "browser_view_port": 0,
         "verbosity": "default",
         "link_previews": false,
         "usage_text_scrape_enabled": false,
@@ -5929,10 +5947,11 @@
       "sensitive": false,
       "tags": [],
       "label": "Loop-stall Hard-exit Budget (secs)",
-      "help": "Seconds the gateway's event loop may go silent before it dumps all thread stacks and exits so systemd can restart it. Raise it on a host that does heavy subprocess work (long builds, test suites, many child reaps), which can wedge the loop briefly without being genuinely dead. Clamped to 10s..300s. Note the desktop app's liveness probe kills at roughly 20s independently, so a value above that only takes effect for a headless gateway — the desktop probe wins first and the stack dump is lost.",
+      "help": "Seconds the gateway's event loop may go silent before it dumps all thread stacks and exits. Leave unset for the automatic default: 25 seconds for desktop/foreground launches and 90 seconds for a managed systemd/launchd service. An explicit value overrides both. Raise it on a host that does heavy subprocess work (long builds, test suites, many child reaps), which can wedge the loop briefly without being genuinely dead. Clamped to 10s..300s. The desktop app's liveness probe kills at roughly 20s independently, so a value above that only takes effect for a headless gateway — the desktop probe wins first and the stack dump is lost.",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": 25
+      "defaultValue": null,
+      "nullable": true
     },
     {
       "path": "dashboard.cautious_boot",
@@ -5978,6 +5997,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": true
+    },
+    {
+      "path": "dashboard.browser_view_port",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Browser Live-View Port",
+      "help": "Pin the browser live-view server (playwright-cli show) to this loopback port. 0 (the default) picks a fresh OS-assigned ephemeral port on every start. Set a fixed port when the dashboard is viewed remotely through an SSH tunnel that forwards a fixed set of ports, so the Browser panel can always reach the view. The server binds loopback-only either way. A value outside 1-65535 is treated as unset. A changed pin applies the next time the view server (re)starts; an already-running server keeps its current port.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 0
     },
     {
       "path": "dashboard.verbosity",
@@ -6899,6 +6932,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 0.0
+    },
+    {
+      "path": "agents.*.session_color",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Session Color",
+      "help": "Default session color for sessions created by this agent. Accepts a CSS hex color string (#rrggbb, lowercase). Applied at render time to any session this agent started that has no color of its own, so editing it re-tints those sessions live. A color set on the session itself (a manual pick or the dashboard default-color policy) always takes precedence. Empty means no agent color.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
     },
     {
       "path": "agents.*.telegram_account",

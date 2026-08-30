@@ -21,7 +21,7 @@ import shutil
 import stat as _stat
 import threading
 import uuid
-from collections.abc import Callable, Iterable, MutableMapping
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -497,6 +497,18 @@ def _safe_nonnegative_int(value: object, default: int) -> int:
     return result if result >= 0 else default
 
 
+def _port_or_unset(value: object) -> int:
+    """A TCP port, or 0 (unset) when the value is malformed or out of range.
+
+    Deliberately NOT the clamp convention used for bounded knobs: a clamped
+    port is as wrong as a malformed one — a tunnel that forwards 8080 does not
+    forward 65535 either — so anything outside 1..65535 falls back to unset
+    (ephemeral) rather than becoming a live pin the operator never named.
+    """
+    result = _safe_int(value, 0)
+    return result if 0 < result <= 65535 else 0
+
+
 #: Bounds of a context-threshold percentage, and the single statement of the range.
 #: The floor is 1, not 0, because a 0% threshold means "always over" and would fire the
 #: notice/compaction on every turn. Public because the dashboard's channel-config
@@ -617,6 +629,24 @@ def _safe_float(
     if hi is not None and result > hi:
         result = hi
     return result
+
+
+_COLOR_HEX_RE = _re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _safe_color(value: object) -> str:
+    """Return a valid lowercase ``#rrggbb`` hex color, or ``""`` on junk.
+
+    config.json is hand-editable, so a non-string or malformed value must
+    collapse to empty (no agent color) rather than crash the load or propagate
+    to an inline CSS style attribute.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    v = value.strip().lower()
+    if _COLOR_HEX_RE.match(v):
+        return v
+    return ""
 
 
 def _session_work_dir(session_key: str | None) -> Path:
@@ -2781,7 +2811,20 @@ class SlackConfig:
         default_factory=set,
         metadata=_meta(
             "Trusted Bot IDs",
-            "Bot IDs allowed to bypass the bot filter for multi-node mesh communication.",
+            "Bot IDs allowed to bypass the bot filter for multi-node mesh communication. "
+            "The gateway's own bot ID is never trusted, even if listed "
+            "(it would reply to itself in a loop).",
+            tags=["slack"],
+        ),
+    )
+    trusted_bot_turn_limit: int = field(
+        default=5,
+        metadata=_meta(
+            "Trusted Bot Turn Limit",
+            "Maximum consecutive turns a thread may run on trusted-bot messages "
+            "before a human message is required (loop guard for mutually trusted "
+            "gateways). A message from an allowed human resets the count. "
+            "Minimum 1; values below 1 are treated as 1.",
             tags=["slack"],
         ),
     )
@@ -3040,6 +3083,17 @@ class JiraAuthEntry:
     )
 
 
+# dashboard.loop_stall_exit_after_secs -- event-loop silence tolerated before
+# the gateway dumps all thread stacks and hard-exits. ``None`` is the
+# serializable "automatic" sentinel: launch class selects the desktop or
+# managed-service default without an unrelated config save pinning either one.
+LOOP_STALL_EXIT_AFTER_MIN = 10
+LOOP_STALL_EXIT_AFTER_MAX = 300
+LOOP_STALL_EXIT_AFTER_DEFAULT = 25
+LOOP_STALL_EXIT_AFTER_MANAGED_DEFAULT = 90
+_MANAGED_SERVICE_ENV = "KIROCREW_SERVICE_MANAGED"
+
+
 @dataclass
 class DashboardConfig:
     url: str = field(
@@ -3148,15 +3202,17 @@ class DashboardConfig:
             "Seconds to wait for MCP server handshake during probe (5-120).",
         ),
     )
-    loop_stall_exit_after_secs: int = field(
-        default=25,
+    loop_stall_exit_after_secs: int | None = field(
+        default=None,
         metadata=_meta(
             "Loop-stall Hard-exit Budget (secs)",
             "Seconds the gateway's event loop may go silent before it dumps all "
-            "thread stacks and exits so systemd can restart it. Raise it on a "
-            "host that does heavy subprocess work (long builds, test suites, "
-            "many child reaps), which can wedge the loop briefly without being "
-            "genuinely dead. Clamped to 10s..300s. Note the desktop app's "
+            "thread stacks and exits. Leave unset for the automatic default: "
+            "25 seconds for desktop/foreground launches and 90 seconds for a "
+            "managed systemd/launchd service. An explicit value overrides both. "
+            "Raise it on a host that does heavy subprocess work (long builds, "
+            "test suites, many child reaps), which can wedge the loop briefly "
+            "without being genuinely dead. Clamped to 10s..300s. The desktop app's "
             "liveness probe kills at roughly 20s independently, so a value "
             "above that only takes effect for a headless gateway — the desktop "
             "probe wins first and the stack dump is lost.",
@@ -3190,6 +3246,20 @@ class DashboardConfig:
             "Use Built-in Browser",
             "When on, the browser tool opens pages in Kiro Crew's built-in panel "
             "(desktop app only). When off, the agent browses via playwright-cli.",
+        ),
+    )
+    browser_view_port: int = field(
+        default=0,
+        metadata=_meta(
+            "Browser Live-View Port",
+            "Pin the browser live-view server (playwright-cli show) to this "
+            "loopback port. 0 (the default) picks a fresh OS-assigned ephemeral "
+            "port on every start. Set a fixed port when the dashboard is viewed "
+            "remotely through an SSH tunnel that forwards a fixed set of ports, "
+            "so the Browser panel can always reach the view. The server binds "
+            "loopback-only either way. A value outside 1-65535 is treated as "
+            "unset. A changed pin applies the next time the view server "
+            "(re)starts; an already-running server keeps its current port.",
         ),
     )
     verbosity: str = field(
@@ -3601,6 +3671,18 @@ class KiroCrewAgentConfig:
             "Per-agent override for watchdog.tool_stall_hard_cap_secs on sessions "
             "running this agent. 0 inherits the global cap (default 1h). Applies "
             "ONLY to UNKNOWN verdicts — a WORKING session is never acted on.",
+        ),
+    )
+    session_color: str = field(
+        default="",
+        metadata=_meta(
+            "Session Color",
+            "Default session color for sessions created by this agent. Accepts "
+            "a CSS hex color string (#rrggbb, lowercase). Applied at render time "
+            "to any session this agent started that has no color of its own, so "
+            "editing it re-tints those sessions live. A color set on the session "
+            "itself (a manual pick or the dashboard default-color policy) always "
+            "takes precedence. Empty means no agent color.",
         ),
     )
     telegram_account: str = field(
@@ -4195,15 +4277,63 @@ _DEFAULT_CHAT_TURN_TIMEOUT_SECS = int(
 # flush against the ceiling satisfies neither.
 APPROVAL_TURN_MARGIN_SECS = 60
 
-# dashboard.loop_stall_exit_after_secs — event-loop silence tolerated before the
-# gateway dumps all thread stacks and hard-exits for systemd to restart. The
-# floor keeps a stall from being declared faster than ordinary GC/IO pauses; the
-# ceiling keeps a wedged gateway from sitting unrecoverable for minutes. Above
-# ~20s the desktop app's own liveness probe kills first and the dump is lost,
-# which is a documented trade-off rather than a bound (a headless gateway has no
-# such probe), so it is not enforced here.
-LOOP_STALL_EXIT_AFTER_MIN = 10
-LOOP_STALL_EXIT_AFTER_MAX = 300
+
+def resolve_loop_stall_exit_after(
+    dashboard_data: Mapping[str, object] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """Resolve the launch-class default while preserving explicit config.
+
+    The distinction between an absent key and an explicit value exists only at
+    config load. Managed services widen the absent-key default; every explicit
+    operator value, including 25 seconds, is retained.
+    """
+    data = dashboard_data or {}
+    if data.get("loop_stall_exit_after_secs") is not None:
+        return _safe_int(
+            data.get("loop_stall_exit_after_secs"),
+            LOOP_STALL_EXIT_AFTER_DEFAULT,
+            LOOP_STALL_EXIT_AFTER_MIN,
+            LOOP_STALL_EXIT_AFTER_MAX,
+        )
+    source = os.environ if environ is None else environ
+    # The generated service definition is the sole launch-class authority.
+    # Inferring from systemd metadata is ambiguous because descendants inherit
+    # INVOCATION_ID; old definitions are reported by ``kirocrew doctor`` with
+    # the one-time regeneration command instead.
+    managed = source.get(_MANAGED_SERVICE_ENV) == "1"
+    return LOOP_STALL_EXIT_AFTER_MANAGED_DEFAULT if managed else LOOP_STALL_EXIT_AFTER_DEFAULT
+
+
+def consume_managed_service_launch_environment(
+    environ: MutableMapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Remove and return the one-shot managed-service launch marker.
+
+    The generated service definition sets this marker for the gateway itself.
+    Consuming it before the dashboard starts app backends or child terminals
+    prevents those descendants from being misclassified as managed services.
+    """
+    source = os.environ if environ is None else environ
+    value = source.pop(_MANAGED_SERVICE_ENV, None)
+    return {} if value is None else {_MANAGED_SERVICE_ENV: value}
+
+
+def load_loop_stall_exit_after(
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """Load the effective watchdog budget through the canonical config loader.
+
+    The dataclass keeps an absent/null value as ``None`` rather than
+    materializing a launch-specific number, so an unrelated ``save()`` cannot
+    turn the managed 90-second default into an explicit desktop 25 seconds (or
+    leak 90 seconds into a later desktop launch). The normal validated,
+    overlay-aware loader remains the single config reader.
+    """
+    configured = KiroCrewConfig.load().dashboard.loop_stall_exit_after_secs
+    dashboard_data = {} if configured is None else {"loop_stall_exit_after_secs": configured}
+    return resolve_loop_stall_exit_after(dashboard_data, environ)
+
 
 # agent.max_subagents fixed-pin floor. 0 is the "auto-size" sentinel; any other
 # (explicit) value must be >= this floor. A pin of 1 or 2 would silently DISABLE
@@ -7379,6 +7509,7 @@ class KiroCrewConfig:
                             entry.get("watchdog_tool_stall_hard_cap_secs", 0.0), 0.0, lo=0.0
                         ),
                         telegram_account=entry.get("telegram_account", ""),
+                        session_color=_safe_color(entry.get("session_color", "")),
                     )
 
         # Migrate workspaces from flat or structured format
@@ -7866,6 +7997,9 @@ class KiroCrewConfig:
                 trusted_bot_ids={
                     b for b in _safe_list(slack_data.get("trusted_bot_ids")) if isinstance(b, str)
                 },
+                trusted_bot_turn_limit=_safe_int(
+                    slack_data.get("trusted_bot_turn_limit", 5), 5, lo=1
+                ),
                 allowed_enterprise_ids=[
                     e
                     for e in slack_data.get("allowed_enterprise_ids", [])
@@ -7939,11 +8073,15 @@ class KiroCrewConfig:
                 mcp_probe_timeout_secs=_safe_int(
                     dashboard_data.get("mcp_probe_timeout_secs", 15), 15
                 ),
-                loop_stall_exit_after_secs=_safe_int(
-                    dashboard_data.get("loop_stall_exit_after_secs", 25),
-                    25,
-                    LOOP_STALL_EXIT_AFTER_MIN,
-                    LOOP_STALL_EXIT_AFTER_MAX,
+                loop_stall_exit_after_secs=(
+                    None
+                    if dashboard_data.get("loop_stall_exit_after_secs") is None
+                    else _safe_int(
+                        dashboard_data.get("loop_stall_exit_after_secs"),
+                        LOOP_STALL_EXIT_AFTER_DEFAULT,
+                        LOOP_STALL_EXIT_AFTER_MIN,
+                        LOOP_STALL_EXIT_AFTER_MAX,
+                    )
                 ),
                 cautious_boot=_safe_bool(dashboard_data.get("cautious_boot"), True),
                 auto_open_browser=dashboard_data.get("auto_open_browser", True),
@@ -7954,6 +8092,7 @@ class KiroCrewConfig:
                 auto_open_git_panel=_safe_bool(dashboard_data.get("auto_open_git_panel"), False),
                 widget_density=dashboard_data.get("widget_density", "more"),
                 use_builtin_browser=_safe_bool(dashboard_data.get("use_builtin_browser"), True),
+                browser_view_port=_port_or_unset(dashboard_data.get("browser_view_port", 0)),
                 verbosity=dashboard_data.get("verbosity", "default"),
                 link_previews=_safe_bool(dashboard_data.get("link_previews"), False),
                 usage_text_scrape_enabled=_safe_bool(
@@ -9286,7 +9425,7 @@ def _read_hardened_agent_spec(path: Path) -> dict | None:
     try:
         from kiro_crew.agent_discovery import _read_agent_spec
 
-        return _read_agent_spec(path)
+        return _read_agent_spec(path, operation="load_config", source="unknown")
     except Exception:
         return None
 

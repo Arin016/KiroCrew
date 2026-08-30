@@ -1387,6 +1387,73 @@ def parse_usage_update(update: dict[str, Any]) -> tuple[int | float | None, int 
     return _token_count(used), _token_count(size)
 
 
+def parse_usage_cost(update: dict[str, Any]) -> float | None:
+    """Parse a ``usage_update``'s session-cumulative cost into a validated float.
+
+    The claude-agent-acp adapter reports billing as ``cost: {amount, currency}``
+    on ``usage_update`` (session-cumulative). kiro-cli never sends the key, so
+    the kiro path always reads None here. Same defensive posture as
+    ``parse_usage_update`` (the other consumer of this frame): the value comes
+    straight from the agent process, so a malformed shape (non-dict cost,
+    str/list/bool amount, NaN/Infinity, negative) must degrade to "absent",
+    never raise inside the prompt-turn dispatch path. Both consumers store
+    the result in USD-denominated fields, so a present ``currency`` other
+    than exact ``"USD"`` (ISO 4217 uppercase; an absent currency is accepted
+    for adapters that omit it) also degrades the whole cost to absent rather
+    than mislabeling a non-USD amount as USD. Flat-primary with a nested
+    ``update.usage.cost`` fallback, mirroring ``parse_usage_update``.
+    """
+    if not isinstance(update, dict):
+        return None
+    cost = update.get("cost")
+    if cost is None:
+        nested = update.get("usage")
+        if isinstance(nested, dict):
+            cost = nested.get("cost")
+    if not isinstance(cost, dict):
+        return None
+    currency = cost.get("currency")
+    if currency is not None and currency != "USD":
+        logger.debug("acp usage cost: non-USD currency %s, dropping cost", repr(currency)[:40])
+        return None
+    amount = _token_count(cost.get("amount"))
+    if amount is None or amount < 0:
+        return None
+    return float(amount)
+
+
+def parse_prompt_token_usage(result: Any) -> tuple[int, int, int, int] | None:
+    """Parse a PromptResponse's turn-scoped token counts.
+
+    The claude-agent-acp adapter reports per-turn token counts on the prompt
+    RESPONSE (``inputTokens`` / ``outputTokens`` / ``cachedReadTokens`` /
+    ``cachedWriteTokens``); kiro-cli's response carries only ``stopReason``.
+    Returns ``(input, output, cache_read, cache_write)`` with each field
+    validated via ``_token_count`` (bool excluded, finite) plus non-negative,
+    coerced to int; an absent or malformed field reads 0. Returns None when
+    NONE of the four keys is present, so the kiro path never touches the
+    per-turn stats (harness parity: byte-identical behavior for a backend
+    that sends no token counts). Flat-primary with a nested ``result.usage``
+    fallback, mirroring ``parse_usage_update``'s dual-shape read.
+    """
+    if not isinstance(result, dict):
+        return None
+    nested = result.get("usage")
+    nested = nested if isinstance(nested, dict) else {}
+    keys = ("inputTokens", "outputTokens", "cachedReadTokens", "cachedWriteTokens")
+    if not any(k in result or k in nested for k in keys):
+        return None
+
+    def _count(key: str) -> int:
+        value = result.get(key, nested.get(key))
+        n = _token_count(value)
+        if n is None or n < 0:
+            return 0
+        return int(n)
+
+    return _count(keys[0]), _count(keys[1]), _count(keys[2]), _count(keys[3])
+
+
 # Re-export the method names so callers can use a single import site for the
 # kiro handshake (mode/model) requests alongside the param builders.
 __all__ = [
@@ -1398,6 +1465,8 @@ __all__ = [
     "build_permission_event",
     "parse_session_update",
     "parse_usage_update",
+    "parse_usage_cost",
+    "parse_prompt_token_usage",
     "parse_text_chunk",
     "make_unified_diff",
     "select_tool_title",

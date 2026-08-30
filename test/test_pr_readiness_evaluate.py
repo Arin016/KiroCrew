@@ -745,3 +745,90 @@ class TestSameSecondRunCollapse:
                     "a collapse site carries an extra pipeline stage between"
                     f" select() and the collapse: {lines[i - 1]!r}"
                 )
+
+
+class TestAwaitingApprovalIsAttributedToTheMaintainer:
+    @staticmethod
+    def _all_monitored_workflows_await_approval(runner: Runner) -> None:
+        awaiting = _run_json("x.yml", status="completed", conclusion="action_required")
+        (runner.fixtures / "ci_runs.json").write_text(awaiting)
+        (runner.fixtures / "green_runs.json").write_text(awaiting)
+        (runner.fixtures / "check_runs.json").write_text(json.dumps({"check_runs": []}))
+
+    @staticmethod
+    def _lane_state(proc: subprocess.CompletedProcess[str]) -> str:
+        return next(
+            line for line in proc.stdout.splitlines() if line.startswith("pr-readiness: lane state")
+        )
+
+    def test_unapproved_fork_runs_still_block_without_claiming_failure(self, runner: Runner):
+        self._all_monitored_workflows_await_approval(runner)
+
+        proc, outputs = runner.evaluate(fork=True)
+
+        assert proc.returncode == 0, proc.stderr
+        assert outputs["state"] == "action_required"
+        assert outputs["status_state"] == "failure"
+        assert outputs["label"] == "readiness: action required"
+        assert outputs["description"] == (
+            "3 workflow(s) awaiting maintainer approval; none has run yet"
+        )
+        assert len(outputs["description"]) <= 140
+        summary = (runner.temp / "pr-readiness-summary.md").read_text()
+        assert "**Awaiting maintainer approval**" in summary
+        assert "**Blocking**" not in summary
+        assert "**Waiting**" in summary
+        log_line = self._lane_state(proc)
+        assert "failed=[]" in log_line
+        assert "awaiting_approval=[CI Build Code Review]" in log_line
+
+    def test_real_failure_and_approval_wait_are_reported_separately(self, runner: Runner):
+        (runner.fixtures / "ci_runs.json").write_text(
+            _run_json("ci.yml", status="completed", conclusion="failure")
+        )
+        (runner.fixtures / "green_runs.json").write_text(
+            _run_json("x.yml", status="completed", conclusion="action_required")
+        )
+
+        proc, outputs = runner.evaluate(fork=True)
+
+        assert proc.returncode == 0, proc.stderr
+        assert outputs["status_state"] == "failure"
+        assert outputs["description"] == (
+            "1 blocking readiness item(s); 2 awaiting maintainer approval"
+        )
+        summary = (runner.temp / "pr-readiness-summary.md").read_text()
+        assert "**Blocking**" in summary
+        assert "**Awaiting maintainer approval**" in summary
+
+    def test_same_repo_action_required_remains_failure_class(self, runner: Runner):
+        self._all_monitored_workflows_await_approval(runner)
+
+        proc, outputs = runner.evaluate()
+
+        assert proc.returncode == 0, proc.stderr
+        assert outputs["status_state"] == "failure"
+        assert "blocking readiness item" in outputs["description"]
+        assert "awaiting maintainer approval" not in outputs["description"]
+        log_line = self._lane_state(proc)
+        assert "awaiting_approval=[]" in log_line
+        assert "action_required" in log_line
+
+    def test_approval_wait_dominates_a_later_transport_failure(self, runner: Runner):
+        (runner.fixtures / "ci_runs.json").write_text(
+            _run_json("ci.yml", status="completed", conclusion="action_required")
+        )
+
+        proc, outputs = runner.evaluate(
+            fork=True,
+            flaky_substr="build.yml/runs",
+            flaky_fails=3,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert outputs["state"] == "action_required"
+        assert outputs["status_state"] == "failure"
+        assert outputs["description"] == ("1 workflow(s) awaiting maintainer approval")
+        summary = (runner.temp / "pr-readiness-summary.md").read_text()
+        assert "**Awaiting maintainer approval**" in summary
+        assert "Evaluation was truncated" in summary

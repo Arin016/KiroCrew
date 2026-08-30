@@ -51,6 +51,20 @@ export interface StatusData {
    * diverge between a channel switch and the new lane's build landing.
    */
   update_channel?: string
+  /**
+   * Is the running build ahead of everything `update_channel` publishes? True
+   * means that lane has never shipped these bytes, so the install is not on it
+   * and only re-running the installer moves it — the state a channel switch
+   * leaves on an install whose bytes the gateway cannot replace.
+   *
+   * Backend-derived from the feed comparison, deliberately NOT from comparing
+   * `update_channel` against `release_channel`: promotion re-points the soaked
+   * candidate's bytes without re-stamping them, so a promoted stable build
+   * reports `release_channel: 'insider'` while being a stable install with
+   * nothing pending. False on every layout with no feed answer (git checkout,
+   * desktop bundle, container) and on older gateways (absent reads as false).
+   */
+  update_channel_move_pending?: boolean
   update_managed_by?: string
   update_can_arm?: boolean
   /**

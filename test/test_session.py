@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kiro_crew.acp.runtime import AcpWorkspaceBindingError
 from kiro_crew.acp.types import ACP_BACKEND_KAS, ACP_BACKEND_KIRO, AcpPromptStats
 from kiro_crew.config import KiroCrewConfig
 from kiro_crew.messaging.link import ChannelLink
@@ -2977,12 +2978,6 @@ class TestSlackLinkHelpers:
         assert mgr.find_key_by_sid("sid-abc") == "k1"
         assert mgr.find_key_by_sid("unknown") is None
 
-    def test_delete_session_map_entry(self, cfg):
-        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
-        mgr._session_map.set("k1", "sid-abc")
-        mgr.delete_session_map_entry("k1")
-        assert mgr.find_key_by_sid("sid-abc") is None
-
 
 class TestGetPid:
     """Tests for get_pid."""
@@ -3012,22 +3007,26 @@ class TestGetPid:
         assert mgr.get_pid("nonexistent") is None
 
 
-class TestIsProviderAliveFallback:
-    """Test is_provider_alive fallback to is_alive when no is_process_alive."""
+class TestIsProviderAliveProcessVerdict:
+    """Test is_provider_alive reads the provider's process-level verdict.
+
+    The is_alive fallback for a provider that does not override
+    ``is_process_alive`` lives in the LLMProvider ABC default, not here —
+    it is pinned by the ABC contract tests in
+    ``test_session_provider_liveness.py``.
+    """
 
     @pytest.mark.asyncio
-    async def test_fallback_to_is_alive(self, cfg):
+    async def test_returns_the_process_liveness_verdict(self, cfg):
         from unittest.mock import MagicMock
 
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         provider, _, _ = await mgr.get_or_create("k1")
         mgr.release("k1")
-        # Remove is_process_alive so it falls back
-        if hasattr(provider, "is_process_alive"):
-            del provider.is_process_alive
-        provider.is_alive = MagicMock(return_value=True)
-        result = await mgr.is_provider_alive("k1")
-        assert result is True
+        provider.is_process_alive = MagicMock(return_value=True)
+        assert await mgr.is_provider_alive("k1") is True
+        provider.is_process_alive = MagicMock(return_value=False)
+        assert await mgr.is_provider_alive("k1") is False
         await mgr.close_all()
 
     @pytest.mark.asyncio
@@ -4952,6 +4951,33 @@ class TestOpenTaskSession:
         mgr.release(key)
         await mgr.release_subagent_runtime(parent)
         await mgr.close_all()
+
+    @pytest.mark.asyncio
+    async def test_macos_workspace_mismatch_uses_dedicated_provider(self, cfg):
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        runtime = MagicMock()
+        runtime.create_session = AsyncMock(
+            side_effect=AcpWorkspaceBindingError("exact workspace required")
+        )
+        mgr._get_or_bootstrap_run_runtime = AsyncMock(return_value=runtime)
+        dedicated = MagicMock()
+        mgr.get_or_create = AsyncMock(return_value=(dedicated, True, False))
+
+        result = await mgr.open_task_session(
+            "taskrunner:run3:runtime",
+            "taskrunner:run3:task0",
+            agent="kirocrew",
+            cwd="/repo/packages/app",
+            approval_policy="auto",
+        )
+
+        assert result == (dedicated, True, False)
+        mgr.get_or_create.assert_awaited_once_with(
+            "taskrunner:run3:task0",
+            agent="kirocrew",
+            approval_policy="auto",
+            cwd="/repo/packages/app",
+        )
 
 
 class TestLoadRecoveryHistoryReplay:

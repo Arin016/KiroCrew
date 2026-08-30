@@ -1048,6 +1048,8 @@ async def test_runtime_spawn_passes_installed_path_through_exact_wrappers(
         resolve_installed,
     )
     monkeypatch.setattr(runtime_mod, "wrap_argv", capture_wrap)
+    voice_guard = MagicMock()
+    monkeypatch.setattr(runtime_mod, "assert_voice_runtime_outside_agent_workspace", voice_guard)
     monkeypatch.setattr(
         runtime_mod,
         "cgroup_scope_argv",
@@ -1065,6 +1067,7 @@ async def test_runtime_spawn_passes_installed_path_through_exact_wrappers(
         "strip_python_env": True,
         "is_kiro_cli": True,
     }
+    voice_guard.assert_called_once_with(runtime._work_dir)
     assert strip_spawn_shim(wrapped["spawn_args"]) == (
         "/usr/bin/cgroup-wrapper",
         "/usr/bin/sandbox-wrapper",
@@ -1080,6 +1083,80 @@ async def test_runtime_spawn_passes_installed_path_through_exact_wrappers(
     # reachable beside the launch path.
     assert "pass_fds" not in spawn_kwargs
     assert (Path(launch_path).parent / "kiro-cli-chat").exists()
+
+
+@pytest.mark.asyncio
+async def test_bound_macos_runtime_reuses_descriptor_cwd_for_sessions(monkeypatch, tmp_path):
+    import kiro_crew.acp.runtime as runtime_mod
+
+    runtime = AcpRuntime(work_dir=tmp_path)
+    runtime._bound_workspace_fd = 71
+    runtime._spawn_work_dir = "/dev/fd/71"
+    matches = MagicMock(return_value=True)
+    monkeypatch.setattr(runtime_mod, "bound_agent_workspace_matches", matches)
+
+    assert await runtime._session_work_dir(tmp_path) == "/dev/fd/71"
+    matches.assert_called_once_with(71, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_bound_macos_runtime_rejects_descendant_session_workspace(monkeypatch, tmp_path):
+    import kiro_crew.acp.runtime as runtime_mod
+
+    runtime = AcpRuntime(work_dir=tmp_path)
+    runtime._bound_workspace_fd = 71
+    runtime._spawn_work_dir = "/dev/fd/71"
+    descendant = tmp_path / "packages" / "app"
+    matches = MagicMock(return_value=False)
+    monkeypatch.setattr(runtime_mod, "bound_agent_workspace_matches", matches)
+
+    with pytest.raises(AcpRuntimeError, match="exact workspace"):
+        await runtime._session_work_dir(descendant)
+    matches.assert_called_once_with(71, descendant)
+
+
+@pytest.mark.asyncio
+async def test_bound_macos_runtime_rejects_different_session_workspace(monkeypatch, tmp_path):
+    import kiro_crew.acp.runtime as runtime_mod
+
+    runtime = AcpRuntime(work_dir=tmp_path)
+    runtime._bound_workspace_fd = 72
+    runtime._spawn_work_dir = "/dev/fd/72"
+    monkeypatch.setattr(runtime_mod, "bound_agent_workspace_matches", MagicMock(return_value=False))
+
+    with pytest.raises(AcpRuntimeError, match="exact workspace"):
+        await runtime._session_work_dir(tmp_path / "retargeted")
+
+
+@pytest.mark.asyncio
+async def test_kill_cancellation_still_releases_bound_workspace(monkeypatch, tmp_path):
+    import kiro_crew.acp.runtime as runtime_mod
+
+    runtime = AcpRuntime(work_dir=tmp_path)
+    runtime._bound_workspace_fd = 73
+    runtime._spawn_work_dir = "/dev/fd/73"
+    entered = asyncio.Event()
+    closed: list[int] = []
+
+    async def stalled_teardown(*, expected=False):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def record_release(descriptor):
+        closed.append(descriptor)
+
+    monkeypatch.setattr(runtime, "_kill_inner", stalled_teardown)
+    monkeypatch.setattr(runtime_mod, "release_bound_agent_workspace", record_release)
+
+    task = asyncio.create_task(runtime.kill())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed == [73]
+    assert runtime._bound_workspace_fd is None
+    assert runtime._spawn_work_dir == str(tmp_path)
 
 
 # ── Process death propagation ──
@@ -1447,16 +1524,20 @@ def test_get_rss_mb_real_process():
 
 
 def test_get_rss_tree_mb_real_process():
-    """_get_rss_tree_mb sums at least this process's RSS (>0); nonexistent
-    PID returns None. Skips where RSS introspection is unavailable (see
-    test_get_rss_mb_real_process)."""
-    from kiro_crew.acp.runtime import _get_rss_mb, _get_rss_tree_mb
+    """The real tree probe returns a positive sample for this process and None
+    for a nonexistent PID.
 
-    self_rss = _get_rss_mb(os.getpid())
-    if self_rss is None:
-        pytest.skip("RSS introspection unavailable in this environment")
+    Do not compare this sample with a separate single-process RSS read: resident
+    sets are live values and Windows may trim the working set between the two
+    calls.  The deterministic root-plus-descendants arithmetic is covered with
+    fixed values in ``test_platform_compat_coverage.py``.
+    """
+    from kiro_crew.acp.runtime import _get_rss_tree_mb
+
     tree = _get_rss_tree_mb(os.getpid())
-    assert tree is not None and tree >= self_rss  # tree includes self (+ children)
+    if tree is None:
+        pytest.skip("RSS introspection unavailable in this environment")
+    assert tree > 0.0
     assert _get_rss_tree_mb(2**31 - 1) is None
 
 
@@ -2733,6 +2814,110 @@ async def test_dispatch_usage_update():
         assert handle.last_prompt_stats.context_used_tokens == 5000
     finally:
         await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cost_and_prompt_tokens_reach_event_complete():
+    """claude seam billing: a session-cumulative usage_update cost and the
+    PromptResponse token counts are delta'd/folded into last_prompt_stats and
+    surfaced on EVENT_COMPLETE.usage — the wiring issue #6750 adds. Two turns
+    prove the delta: turn 2 is billed only its own movement of the cumulative
+    counter, and its own token counts."""
+    from kiro_crew.acp.types import EVENT_COMPLETE
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+
+        async def run_turn(cost_amount, input_tokens, output_tokens):
+            events: list = []
+
+            async def drive():
+                async for ev in handle.prompt("hi", timeout=3.0):
+                    events.append(ev)
+
+            driver = asyncio.ensure_future(drive())
+            req_id = (await _await_routed(rt, "sA"))["sA"]
+            _feed(
+                reader,
+                {
+                    "method": METHOD_SESSION_UPDATE,
+                    "params": {
+                        "sessionId": "sA",
+                        "update": {
+                            "sessionUpdate": "usage_update",
+                            "used": 5000,
+                            "size": 10000,
+                            "cost": {"amount": cost_amount, "currency": "USD"},
+                        },
+                    },
+                },
+            )
+            _feed(
+                reader,
+                {
+                    "id": req_id,
+                    "result": {
+                        "stopReason": "end_turn",
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
+                        "cachedReadTokens": 7,
+                        "cachedWriteTokens": 3,
+                    },
+                },
+            )
+            await asyncio.wait_for(driver, timeout=3.0)
+            (complete,) = [ev for ev in events if ev.kind == EVENT_COMPLETE]
+            return complete
+
+        first = await run_turn(0.30, 100, 50)
+        assert first.usage.cost_usd == pytest.approx(0.30)
+        assert first.usage.input_tokens == 100
+        assert first.usage.output_tokens == 50
+        assert first.usage.cache_read_tokens == 7
+        assert first.usage.cache_creation_tokens == 3
+
+        # Turn 2: the cumulative counter moved 0.30 -> 0.50, so this turn's
+        # cost is the 0.20 delta, and the token counts are its own, not a sum.
+        second = await run_turn(0.50, 40, 20)
+        assert second.usage.cost_usd == pytest.approx(0.20)
+        assert second.usage.input_tokens == 40
+        assert second.usage.output_tokens == 20
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [
+        "0.5",  # cost not dict-shaped
+        {"amount": "0.5"},
+        {"amount": True},
+        {"amount": float("nan")},
+        {"amount": -0.01},
+        {"amount": 10**400},
+    ],
+)
+def test_handle_update_malformed_cost_is_noop(cost):
+    """A malformed agent-supplied cost must degrade to absent at the
+    parse_usage_cost chokepoint — no exception inside the prompt-turn dispatch
+    path, and no stats movement."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    msg = JsonRpcMessage(
+        method=METHOD_SESSION_UPDATE,
+        params={
+            "sessionId": "sA",
+            "update": {"sessionUpdate": "usage_update", "used": 1, "size": 2, "cost": cost},
+        },
+    )
+    events = handle._handle_update(msg)  # must not raise
+    assert events == []
+    assert handle.last_prompt_stats.cost_usd == 0.0
+    assert handle.last_prompt_stats.cost_session_usd == 0.0
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,7 @@ from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
 from kiro_crew.acp_backends import selectable_backend_values
 from kiro_crew.agent import (
     AGENT_FILENAME,
+    _spec_path_is_safe,
     clear_model_pin,
     get_shipped_tools,
     install_agent,
@@ -37,6 +38,7 @@ from kiro_crew.config.loader import (
     ConfigReadError,
     KiroCrewAgentConfig,
     KiroCrewConfig,
+    _safe_color,
     normalize_agent_model,
     read_config_for_update,
     resolve_agent_bindings,
@@ -96,7 +98,11 @@ def _namespaced_agent_file_exists(agent_name: str) -> bool:
     # glob the real ~/.kiro from an isolated run.
     try:
         for path in kiro_agents_dir_path().glob(f"*--{agent_name}.json"):
-            data = _read_agent_spec(path)
+            data = _read_agent_spec(
+                path,
+                operation="api_agents_sync",
+                source="dashboard",
+            )
             if data is None:
                 continue
             if data.get("name") == agent_name:
@@ -1565,7 +1571,11 @@ async def api_agent_detail(request: web.Request) -> web.Response:
 
     state: DashboardState = request.app["state"]
     for f in kiro_agents_dir_path().glob("*.json"):
-        spec = _read_agent_spec(f)
+        spec = _read_agent_spec(
+            f,
+            operation="api_agent_detail",
+            source="dashboard",
+        )
         if spec is None:
             continue
         # Two-step so ``data`` stays typed ``dict`` for the PATCH branch's
@@ -1674,7 +1684,35 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                     async with _get_config_lock():
                         # Re-read under the lock: the copy above was read before
                         # the lock and a concurrent PATCH may have superseded it.
-                        data = json.loads(f.read_text(encoding="utf-8"))
+                        # The branch writes this data back, so bind the same
+                        # agents directory and apply the stricter no-symlink /
+                        # no-escape fence before the hardened read.  Keep the
+                        # filesystem work off the event loop while the shared
+                        # config lock is held.
+                        agents_dir = kiro_agents_dir_path()
+
+                        def _reread_under_lock(
+                            spec_file: Path = f,
+                            root: Path = agents_dir,
+                        ) -> dict[str, Any] | None:
+                            if not _spec_path_is_safe(spec_file, root):
+                                return None
+                            return _read_agent_spec(
+                                spec_file,
+                                operation="api_agent_detail",
+                                source="dashboard",
+                            )
+
+                        reread_data = await asyncio.to_thread(_reread_under_lock)
+                        if reread_data is None:
+                            return web.json_response(
+                                {
+                                    "error": f"'{name}' changed on disk during update; retry.",
+                                    "code": "agent_changed",
+                                },
+                                status=409,
+                            )
+                        data = reread_data
                         # `spec_str` for the same reason as `declared` above: a
                         # hand-edited spec can carry a structured (non-string)
                         # "name", which would crash the sidecar helper's dict
@@ -2121,6 +2159,10 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"error": "body must be an object", "code": "body_not_object"}, status=400
+        )
     name = body.get("name", "").strip()
     if not name:
         return web.json_response({"error": "Agent name is required"}, status=400)
@@ -2181,6 +2223,13 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
     # {"model": 123} into the literal "123", which normalizes to a string the
     # backend then rejects as an unknown model id.
     model = normalize_agent_model(body.get("model"))
+    _raw_color = body.get("session_color", "")
+    session_color = _safe_color(_raw_color)
+    if _raw_color not in ("", None) and not session_color:
+        return web.json_response(
+            {"error": "session_color must be #rrggbb or empty", "code": "invalid_color_hex"},
+            status=400,
+        )
     async with _get_config_lock():
         cfg = KiroCrewConfig.load()
         if name in cfg.agents:
@@ -2196,6 +2245,7 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
             description=body.get("description", ""),
             triggers=body.get("triggers", ""),
             source=body.get("source", "kirocrew"),
+            session_color=session_color,
         )
         cfg.save()
     _sel().log_api_access(
@@ -2219,6 +2269,10 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"error": "body must be an object", "code": "body_not_object"}, status=400
+        )
     if "model" in body:
         pending_model = normalize_agent_model(body["model"])
     async with _get_config_lock():
@@ -2256,6 +2310,19 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
         if "triggers" in body:
             agent.triggers = body["triggers"]
             changed.append("triggers")
+        if "session_color" in body:
+            _sc = body["session_color"]
+            _norm = _safe_color(_sc)
+            if _sc not in ("", None) and not _norm:
+                return web.json_response(
+                    {
+                        "error": "session_color must be #rrggbb or empty",
+                        "code": "invalid_color_hex",
+                    },
+                    status=400,
+                )
+            agent.session_color = _norm
+            changed.append("session_color")
         if "source" in body:
             agent.source = body["source"]
             changed.append("source")

@@ -1425,6 +1425,24 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "notifications.sound-category-agent",
+    "labelKey": "pages.settings.notificationsPanel.category_agent",
+    "tab": "notifications",
+    "type": "select",
+    "occurrence": 1,
+    "label": "Proactive agent messages",
+    "description": "When the agent proactively messages you outside a chat"
+  },
+  {
+    "id": "notifications.sound-category-skills",
+    "labelKey": "pages.settings.notificationsPanel.category_skills",
+    "tab": "notifications",
+    "type": "select",
+    "occurrence": 1,
+    "label": "Skills",
+    "description": "New skill candidates awaiting your approval"
+  },
+  {
     "id": "notifications.sources",
     "labelKey": "pages.settings.notificationsPanel.sources",
     "tab": "notifications",
@@ -1565,7 +1583,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "section": "rules"
     },
     "label": "Your custom denies",
-    "description": "Add your own deny patterns (Python-compatible regex). These are enforced at Kiro Crew's PreToolUse gate alongside the built-in rules."
+    "description": "Add your own deny patterns (Python-compatible regex). These are enforced at {{productName}}'s PreToolUse gate alongside the built-in rules."
   },
   {
     "id": "shortcuts.enable-shortcuts",
@@ -1733,7 +1751,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.model",
     "label": "Model",
     "labelKey": "pages.settings.sttSettings.model",
-    "description": "Larger models are more accurate but slower to run. A model downloads on first use, so the first dictation after switching models may appear to hang or time out while the download completes.",
+    "description": "Models download on demand. Select one and click Download now; the desktop app already includes every other runtime dependency.",
     "tab": "voice",
     "type": "select",
     "occurrence": 1,

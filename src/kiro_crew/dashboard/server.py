@@ -36,8 +36,11 @@ from kiro_crew.channel_transcript_migration import migrate_channel_transcripts
 from kiro_crew.config import data_home
 from kiro_crew.config.loader import (
     KiroCrewConfig,
+    consume_managed_service_launch_environment,
+    load_loop_stall_exit_after,
     refresh_config_meta_stamp,
     refresh_materialized_agents,
+    resolve_loop_stall_exit_after,
 )
 from kiro_crew.dashboard import (
     cautious_boot,
@@ -1340,9 +1343,13 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_patch("/api/autonudge/{loop_id}", api_autonudge_update)
     app.router.add_delete("/api/autonudge/{loop_id}", api_autonudge_delete)
 
-    # Agent questions — blocking question-card round-trip for the ask_question
-    # MCP tool. The POST holds open until the user answers, so it must not be
-    # wrapped in any short-timeout middleware.
+    # Agent questions. The MCP ask_question tool no longer posts here: it returns
+    # a session directive and the dashboard posts a NON-BLOCKING card (see
+    # mcp_tools.control.ask_question). This API stays live because the UI reads
+    # /pending to rehydrate cards after a reload and answers or dismisses them
+    # through the routes below, and POST /api/ask-question still opens a blocking
+    # wait for any caller that uses it — so it must not be wrapped in any
+    # short-timeout middleware.
     from kiro_crew.dashboard.handlers.ask_question import (
         api_ask_question,
         api_ask_question_answer,
@@ -2626,6 +2633,11 @@ async def start_dashboard(
     assume_kiro_ready: bool = False,
 ) -> tuple[web.AppRunner, DashboardState]:
     """Start the dashboard web server.  Returns ``(runner, state)``."""
+    # The generated service marker describes this launch, not every process the
+    # dashboard may later spawn. Snapshot it before starting app backends or
+    # child terminals, then use only that snapshot to choose the watchdog grace.
+    _launch_environment = consume_managed_service_launch_environment()
+
     # Auto-create consolidator if conversation_log available but no consolidator
     if consolidator is None and conversation_log is not None:
         try:
@@ -3517,10 +3529,12 @@ async def start_dashboard(
     # and a hard-coded 25s turned those into hard exits that lost in-flight
     # work. The default is unchanged; the loader clamps the range.
     try:
-        _exit_after = float(KiroCrewConfig.load().dashboard.loop_stall_exit_after_secs)
+        _exit_after = float(load_loop_stall_exit_after(_launch_environment))
     except Exception:
         logger.debug("loop-stall exit budget config unavailable; using default", exc_info=True)
-        _exit_after = 25.0
+        # Config failure must not erase the managed-service grace that protects
+        # the process while its config filesystem is itself under pressure.
+        _exit_after = float(resolve_loop_stall_exit_after(environ=_launch_environment))
     _loop_watchdog = LoopStallWatchdog(dump_file=_dump_file, exit_after=_exit_after)
 
     async def _loop_heartbeat() -> None:

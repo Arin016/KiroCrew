@@ -355,13 +355,42 @@ async def _monitor_update(session_key: str, args: dict[str, Any]) -> str:
     )
 
 
+def _no_loop_message(svc: Any, binding: str) -> str:
+    """The result for ``autonudge_stop`` when this session resolves no loop.
+
+    ``get_by_slot`` resolves only the loop bound to the CALLING session's
+    binding key, so its miss covers two states that a caller cannot otherwise
+    tell apart: no loop exists anywhere (an idempotent success — the goal
+    already holds), or a loop is running under a different slot key and is
+    simply unreachable from here (nothing was stopped). Counting the service's
+    active loops separates them.
+
+    Reports a COUNT and never a loop id or slot key. The stop tool exposes no
+    loop-id parameter precisely so a session cannot target another session's
+    loop; naming other sessions' loops here would hand the model the
+    identifiers that schema withholds. Cross-session enumeration stays on the
+    token-authed dashboard API. A count is all this branch needs, because the
+    caller's question is whether ITS OWN stop took effect.
+    """
+    active = [lp for lp in svc.list_all() if getattr(lp, "active", True)]
+    if not active:
+        return "No active auto-nudge loop on this session — nothing to stop."
+    return (
+        "NOTHING WAS STOPPED. No auto-nudge loop is bound to this session "
+        f"(binding: {binding}), but {len(active)} auto-nudge loop(s) are running on "
+        "other sessions. A loop can only be stopped from the session it is bound "
+        "to, so this call could not reach them."
+    )
+
+
 async def _autonudge_stop(slot: Any, session_key: str, args: dict[str, Any]) -> str:
     from kiro_crew.autonudge import get_instance
 
     svc = get_instance()
     # "Nothing to stop" is an IDEMPOTENT success — the goal (no loop running on
     # this session) already holds — so the disabled-service and no-loop paths
-    # keep returning. The unsupported-session path is a refusal like its
+    # keep returning; a binding miss that is NOT that state is separated in
+    # ``_no_loop_message``. The unsupported-session path is a refusal like its
     # siblings: the caller asked for an effect this session can never carry.
     if svc is None:
         return "No auto-nudge loop to stop (auto-nudge is disabled on this host)."
@@ -370,7 +399,7 @@ async def _autonudge_stop(slot: Any, session_key: str, args: dict[str, Any]) -> 
         raise _DirectiveDenied("autonudge_stop is not supported from this session type.")
     loop = svc.get_by_slot(binding)
     if not loop:
-        return "No active auto-nudge loop on this session — nothing to stop."
+        return _no_loop_message(svc, binding)
     loop_id = loop.id
     reason = str(args.get("reason") or "").strip()
     # Research Lab consumes a persisted stop record to distinguish deliberate

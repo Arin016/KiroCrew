@@ -10,6 +10,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -34,6 +35,7 @@ from kiro_crew.apps.manager import app_dir, get_app_manifest, list_apps
 from kiro_crew.apps.registry import minimal_env
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import config_dir
+from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.sandbox import (
     RLIMIT_PROFILE_BUILD,
     RLIMIT_PROFILE_TOOL,
@@ -52,6 +54,12 @@ _MAX_PORT = 9200
 _HEALTH_CHECK_TIMEOUT = 5
 _HEALTH_CHECK_RETRIES = 15
 _HEALTH_CHECK_INTERVAL = 2.0
+# ``healthCheck`` is app-authored text. A leading slash terminates the URL authority;
+# the remaining class is the ordinary RFC 3986 path/query set with characters that
+# can be parsed inconsistently (userinfo, fragments, backslashes, brackets) excluded.
+_HEALTH_PATH_RE = re.compile(r"\A/[A-Za-z0-9._~!$&'()*+,;=:/?%-]*\Z")
+_warned_health_paths: set[str] = set()
+_health_warn_lock = threading.Lock()
 
 # Post-startup liveness watch (see _watch_backend_health). The startup poll above only
 # establishes that a backend CAME UP; without a standing watch `healthy` would be a
@@ -207,18 +215,9 @@ def _listening_pids(port: int) -> list[int]:
 
 
 def _probe_adoption_health(port: int, health_path: str) -> bool:
-    """Whether ``127.0.0.1:port`` answers the manifest's health check (< 400)."""
+    """Whether an already-running backend answers its health check."""
 
-    try:
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{port}{health_path}",
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return bool(resp.status < 400)
-    # HTTPException is not an OSError — see _health_probe for why that matters.
-    except (urllib.error.URLError, OSError, http.client.HTTPException):
-        return False
+    return _health_probe(port, health_path, timeout=3)
 
 
 def _capture_adopted_owners(
@@ -1693,8 +1692,38 @@ def _gate_mcp_registration(app_name: str, port: int, *, healthy: bool) -> bool:
         return False
 
 
-def _health_probe(url: str) -> bool:
-    """Whether the health endpoint answers below 400. Never raises.
+def _warn_bad_health_path(health_path: str) -> None:
+    """Log a rejected manifest health path once per distinct value."""
+
+    with _health_warn_lock:
+        if health_path in _warned_health_paths:
+            return
+        _warned_health_paths.add(health_path)
+    logger.warning(
+        "App backend health path %r is unsafe; healthCheck must be an absolute "
+        "loopback path such as /health",
+        health_path,
+    )
+
+
+def _health_probe_url(port: int, health_path: str) -> str | None:
+    """Build a loopback health URL without letting app text change its authority."""
+
+    if not 0 < port < 65536:
+        return None
+    if not _HEALTH_PATH_RE.fullmatch(health_path or ""):
+        _warn_bad_health_path(health_path)
+        return None
+    return f"http://127.0.0.1:{port}{health_path}"
+
+
+def _health_probe(
+    port: int,
+    health_path: str,
+    *,
+    timeout: float = _HEALTH_CHECK_TIMEOUT,
+) -> bool:
+    """Whether the validated loopback health endpoint answers below 400. Never raises.
 
     `http.client.HTTPException` is caught alongside the socket errors because it is NOT
     an `OSError` or `URLError` subclass (only `RemoteDisconnected` is, via
@@ -1705,9 +1734,12 @@ def _health_probe(url: str) -> bool:
     and freeze `healthy` at its last value: silently reinstating the write-once bug this
     module's watch exists to prevent.
     """
+    url = _health_probe_url(port, health_path)
+    if url is None:
+        return False
     try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=_HEALTH_CHECK_TIMEOUT) as resp:
+        with loopback_urlopen(req, timeout=timeout) as resp:
             return bool(resp.status < 400)
     except (urllib.error.URLError, OSError, http.client.HTTPException):
         return False
@@ -1728,13 +1760,12 @@ def _health_check_loop(ap: AppProcess, health_path: str) -> AppProcess | None:
     """
     app_name = ap.app_name
     port = ap.port
-    url = f"http://127.0.0.1:{port}{health_path}"
     for attempt in range(_HEALTH_CHECK_RETRIES):
         time.sleep(_HEALTH_CHECK_INTERVAL)
         with _lock:
             if _processes.get(app_name) is not ap:
                 return None  # replaced or stopped — this poll is a retired generation
-        if _health_probe(url):
+        if _health_probe(port, health_path):
             # Health-gated MCP registration: only now that the
             # backend has passed /health do we write its HTTP MCP url (live port) to
             # global mcp.json. Registering before this could leave a dead-but-enabled
@@ -1845,7 +1876,6 @@ def _watch_backend_health_sweeps(ap: AppProcess, health_path: str) -> None:
     pops it and a restart replaces it, so this needs no separate teardown — the same
     "no longer tracked" guard the startup poll already uses.
     """
-    url = f"http://127.0.0.1:{ap.port}{health_path}"
     consecutive_failures = 0
     while True:
         time.sleep(_HEALTH_WATCH_INTERVAL)
@@ -1887,7 +1917,7 @@ def _watch_backend_health_sweeps(ap: AppProcess, health_path: str) -> None:
                 return
             continue
 
-        if _health_probe(url):
+        if _health_probe(ap.port, health_path):
             consecutive_failures = 0
             healthy = True
         else:

@@ -1682,6 +1682,14 @@ export interface TunnelStatus {
   error: string
   uptime: number
   reconnect_attempt: number
+  /**
+   * Why a `disabled` tunnel is off. `boot_flag` means the gateway was started
+   * with `--no-tunnel` and will never publish, whatever `tunnel.enabled` says in
+   * its config (a Dev Fleet pod always boots that way). Empty for every other
+   * state and for an ordinary unconfigured tunnel. Optional because a gateway
+   * older than this field does not send it.
+   */
+  reason?: string
 }
 
 export interface KiroPrerequisiteStatus {
@@ -2622,6 +2630,19 @@ export const api = {
   // config entry — the card owns that. `token` fences a sibling tab's row.
   connectionsCancel: (slug: string, token?: string) =>
     post('/api/connections/cancel', token ? { slug, token } : { slug }).then(j) as Promise<{ ok: boolean; slug: string; dropped: boolean }>,
+  // Undo a connection on THIS machine: disposes any in-flight mint, deletes the
+  // runtime's stored grant artifacts when they are ours alone, and removes the MCP
+  // entry. `grantRemoved` and `grantSurviving` are separate answers because the
+  // artifacts are a pair and either half can fail alone; `entryRemoved` is false
+  // when the entry configured under this slug points at a different endpoint (so it
+  // is not ours to delete); `grantSharedWith` names the other entries using the same
+  // endpoint, which is why the grant was deliberately kept. `grantCensusUnreadable`
+  // names the sources the census could not read, so the card can say WHICH file to
+  // repair -- optional because the other half of `grantCensusIncomplete` (an entry
+  // whose URL could not be compared) names no file, and a gateway predating the
+  // field sends none.
+  connectionsDisconnect: (slug: string) =>
+    post('/api/connections/disconnect', { slug }).then(j) as Promise<{ ok: boolean; grantRemoved: boolean; grantSurviving: string[]; entryRemoved: boolean; grantSharedWith: string[]; grantCensusIncomplete: boolean; grantCensusUnreadable?: string[] }>,
   // MCP Gateway (shared pool)
   mcpGatewayStatus: () => fetch('/api/mcp-gateway/status').then(j) as Promise<{ enabled: boolean; stub: string[]; stub_count: number; running: boolean; ping_ok: boolean; supported: boolean }>,
   mcpGatewayEnable: (enabled: boolean) => post('/api/mcp-gateway/enable', { enabled }).then(j) as Promise<{ ok: boolean; enabled: boolean; running: boolean; ping_ok: boolean }>,
@@ -2846,8 +2867,13 @@ export const api = {
   // Mid-turn steer: inject into the RUNNING turn instead of queueing. Fire-and-forget
   // JSON response ({ok, steered}); the backend falls back to queue if steer is
   // unavailable so the text is never dropped.
-  steerChat: (message: string, slot?: string) =>
-    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true }) }).then(j),
+  // `sendId` is the client-minted correlation id stamped on the optimistic steer
+  // bubble (same convention as the plain send path). It rides in `meta`, which
+  // BOTH backend paths persist — the accepted-steer row and the new-turn row a
+  // steer that races chat_done falls onto — so the bubble is reconcilable, and
+  // its accepted-vs-new-turn ambiguity resolvable, by id identity (#6075).
+  steerChat: (message: string, slot?: string, sendId?: string) =>
+    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true, ...(sendId ? { meta: { sendId } } : {}) }) }).then(j),
   sessionsHealth: () => fetch('/api/sessions/health').then(j),
   // Knowledge
   knowledgeSearch: (q: string) => get(`/api/knowledge/search-for-context?q=${encodeURIComponent(q)}`).then(j),
@@ -2893,8 +2919,11 @@ export const api = {
    *  ask carries `ask_id`; a stateless card carries `card_id` instead. */
   pendingQuestions: (): Promise<{ ask_id?: string; card_id?: string; slot: string; questions: { question: string; header?: string; multiSelect?: boolean; options: { label: string; description?: string }[] }[]; ts?: number }[]> =>
     fetch('/api/ask-question/pending').then(j),
-  /** Resolve a pending agent question (ask_question MCP tool). Pass no answers
-   *  to dismiss, which unblocks the agent with a timeout-equivalent result. */
+  /** Resolve a pending agent question that carries an `ask_id` — a server-side
+   *  wait opened by `POST /api/ask-question`, not the MCP ask_question tool,
+   *  which posts a stateless `card_id` card instead. Pass no answers to
+   *  dismiss, which unblocks the waiting caller with a timeout-equivalent
+   *  result. */
   answerQuestion: (askId: string, answers?: Record<string, string>) =>
     post('/api/ask-question/' + encodeURIComponent(askId) + '/answer',
       answers ? { answers } : { dismissed: true }).then(j),

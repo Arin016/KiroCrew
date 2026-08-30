@@ -3236,6 +3236,7 @@ def test_audited_decorator_applied_to_mutations():
         "api_dev_fleet_prune_run", "api_dev_fleet_pod_up",
         "api_dev_fleet_pod_down", "api_dev_fleet_pod_restart",
         "api_dev_fleet_pod_token", "api_dev_fleet_pod_provision",
+        "api_dev_fleet_pod_provision_dismiss",
         "api_dev_fleet_rebase", "api_dev_fleet_restart_gateway",
     ]:
         fn = getattr(mod, name)
@@ -6510,6 +6511,38 @@ async def test_auto_prune_once_removes_merged_only_and_records_failures():
     assert res["failed"] == [{"name": "wt-bad", "error": "nope"}]
     # stale-empty is never touched — unattended auto-prune is merged-only.
     assert "wt-stale-empty" not in seen
+
+
+@pytest.mark.asyncio
+async def test_auto_prune_once_never_reaps_closed_candidates():
+    """REGRESSION PIN for hard constraint (a): the unattended reaper MUST stay
+    MERGED-only. A CLOSED-PR worktree routinely holds the only copy of work
+    that never landed, so silently reaping it on a timer would be irrecoverable
+    data loss. This pins that a `closed` candidate — even a clean one that the
+    MANUAL checklist WOULD offer — is never handed to _worktree_remove by the
+    reaper. If someone later adds `closed` to the reaper's filter, this fails.
+    """
+    candidates = {"candidates": [
+        {"name": "wt-merged", "code": "merged"},
+        {"name": "wt-closed", "code": "closed", "unmerged_commits": True},
+        {"name": "wt-closed-clean", "code": "closed", "unmerged_commits": False},
+    ]}
+    seen = []
+
+    async def _fake_remove(name, force=False, _caller="handler"):
+        assert force is False  # reaper never force-removes
+        assert _caller == "reaper"
+        seen.append(name)
+        return {"ok": True}
+
+    with patch.object(mod, "_prune_candidates", new_callable=AsyncMock, return_value=candidates), \
+         patch.object(mod, "_worktree_remove", side_effect=_fake_remove):
+        res = await mod._auto_prune_once()
+    # Only the merged worktree is reaped; NEITHER closed candidate is touched.
+    assert seen == ["wt-merged"]
+    assert res["removed"] == ["wt-merged"]
+    assert "wt-closed" not in seen
+    assert "wt-closed-clean" not in seen
 
 
 @pytest.mark.asyncio

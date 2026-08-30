@@ -741,6 +741,41 @@ async def _live_worktree_path(*, fresh: bool = False) -> str | None:
     return _LIVE_WORKTREE
 
 
+# owner/repo capture, shared by identity normalization and the fallback scan.
+_REPO_PATH_RE = re.compile(r"[:/]([^/]+/[^/]+?)(?:\.git)?$")
+
+
+def _normalize_repo_identity(url: str) -> tuple[str, str] | None:
+    """Return a ``(host, owner/repo)`` identity for a git remote URL, or None.
+
+    Normalizes across the spellings git accepts for the same repository so two
+    aliases of one repo compare equal:
+
+    - ``https://github.com/owner/Repo.git`` and ``git@github.com:owner/repo``
+      collapse to the same identity;
+    - a trailing ``.git`` is stripped and the whole identity is lowercased;
+    - the host is part of the identity, so ``owner/repo`` on two different
+      forges stays distinct.
+
+    Returns None when no ``owner/repo`` can be extracted.
+    """
+    url = url.strip()
+    m = _REPO_PATH_RE.search(url)
+    if not m:
+        return None
+    owner_repo = m.group(1).lower()
+    # Host: scp-style ``user@host:owner/repo`` or a URL with a scheme.
+    host = ""
+    scp = re.match(r"(?:[^@/]+@)?([^/:]+):", url)
+    if scp and "://" not in url:
+        host = scp.group(1).lower()
+    else:
+        scheme = re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/]+@)?([^/:]+)", url)
+        if scheme:
+            host = scheme.group(1).lower()
+    return (host, owner_repo)
+
+
 async def _load_fallback_repos() -> None:
     global _FALLBACK_REPOS
     try:
@@ -749,7 +784,22 @@ async def _load_fallback_repos() -> None:
         # No checkout, no remotes to enumerate; the fallback list stays empty.
         return
     repos: list[str] = []
+    seen: set[tuple[str, str]] = set()
     upstream = await _upstream_remote()
+    # Resolve upstream's own repo identity so a remote carrying upstream's own
+    # repo NAME is not mistaken for a pre-rename repo — whether it is an alias
+    # of upstream (e.g. an ``origin`` left in place after the tracking remote
+    # was renamed) or a fork of it under another owner. ``merge-base
+    # --is-ancestor`` is trivially true for identical refs and stays true for a
+    # fork until it diverges, so either would enter the fallback list under
+    # upstream's own name, and the derived ``<reponame>-wt-`` prefix then flags
+    # every worktree as legacy.
+    upstream_identity: tuple[str, str] | None = None
+    rc_up, up_url, _ = await _run_cmd(
+        ["git", "-C", repo, "remote", "get-url", upstream], timeout=5,
+    )
+    if rc_up == 0:
+        upstream_identity = _normalize_repo_identity(up_url)
     rc, out, _err = await _run_cmd(["git", "-C", repo, "remote"], timeout=5)
     if rc == 0:
         for remote in out.split():
@@ -765,10 +815,31 @@ async def _load_fallback_repos() -> None:
             rc3, url, _ = await _run_cmd(
                 ["git", "-C", repo, "remote", "get-url", remote], timeout=5,
             )
-            if rc3 == 0:
-                m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", url.strip())
-                if m:
-                    repos.append(m.group(1))
+            if rc3 != 0:
+                continue
+            identity = _normalize_repo_identity(url)
+            if identity is None:
+                continue
+            # Skip a remote whose repo NAME is upstream's — an alias of upstream
+            # itself, or a fork of it under another owner. Name equality is the
+            # right predicate for both consumers of the fallback list: the
+            # legacy-worktree prefixes are derived from the repo name alone, so
+            # a same-named entry yields the ``<name>-wt-`` prefix that every
+            # current-convention worktree matches, and the PR-status fallback
+            # should not consult a fork either — a fork is not a pre-rename
+            # repo. Name equality also subsumes identity equality, so the alias
+            # case stays covered. The genuine pre-rename case — a DIFFERENTLY
+            # named repo whose main is an ancestor of upstream's — still
+            # qualifies.
+            if upstream_identity is not None and (
+                identity[1].rsplit("/", 1)[-1]
+                == upstream_identity[1].rsplit("/", 1)[-1]
+            ):
+                continue
+            if identity in seen:
+                continue
+            seen.add(identity)
+            repos.append(identity[1])
     _FALLBACK_REPOS = repos
 
 
@@ -1843,6 +1914,19 @@ def _is_pr_merged(pr: dict | None) -> bool:
     return (pr or {}).get("state") == "MERGED"
 
 
+def _is_pr_closed(pr: dict | None) -> bool:
+    """True when the PR was CLOSED without merging.
+
+    Distinct from ``_is_pr_merged``: a merged PR's content is on the base branch
+    by definition, so its worktree is safe to delete. A closed-unmerged PR was
+    declined or superseded, and its worktree can still hold the only copy of
+    work that never landed — so a closed worktree is prunable ONLY through the
+    manual path, with a dirty-tree refusal and a loss summary. GitHub reports a
+    merged PR as ``MERGED`` (never ``CLOSED``), so this check is unambiguous.
+    """
+    return (pr or {}).get("state") == "CLOSED"
+
+
 # --- per-worktree context: issue/ticket links + purpose one-liner ---
 #
 # Best-effort and TTL-cached per branch exactly like the PR-state cache. Every
@@ -2656,10 +2740,11 @@ async def _provision_reattach_ids() -> dict[str, str]:
 
     A run id is exposed while the run is still executing, or when it finished
     unsuccessfully (the failed stepper + log must survive a reload). A failed
-    id persists until a newer provision for the same checkout overwrites it,
-    the run is evicted from the bounded registry, or the gateway restarts —
-    the UI dismiss is client-side only, so a reload after dismissing re-shows
-    the failure. Successful runs are omitted: the refreshed fleet row already
+    id persists until the UI dismisses it (POST /api/pod/provision/dismiss
+    forgets the id server-side, so a reload after dismissing does NOT re-show
+    the failure), a newer provision for the same checkout overwrites it, the
+    run is evicted from the bounded registry, or the gateway restarts.
+    Successful runs are omitted: the refreshed fleet row already
     reports the built state, so there is nothing to reattach to. Run ids
     evicted from the bounded run registry are omitted too — the UI could not
     fetch their output anyway.
@@ -2674,6 +2759,274 @@ async def _provision_reattach_ids() -> dict[str, str]:
             if run.get("status") == "running" or run.get("exit_code") not in (None, 0):
                 out[name] = rid
     return out
+
+
+# Per-pod system resources (memory / CPU / tasks / home size).
+#
+# The pod units already have CPUAccounting/MemoryAccounting on and systemd
+# tracks MemoryCurrent / CPUUsageNSec / TasksCurrent per unit, plus the
+# unit's own MemoryMax ceiling. We PLUMB that through; we do not collect it.
+# Everything here is best-effort and Linux-only: on macOS (launchd, which
+# emits no MemoryMax/CPUQuota) or any host where the probe fails, the fields
+# are ABSENT (None), never fabricated zeros — the UI hides the readout when a
+# field is absent so a blank pod never reads as "0 B used / 0%".
+# --------------------------------------------------------------------------- #
+
+# Properties fetched in the single batched ``systemctl --user show`` call.
+_POD_RES_PROPS = (
+    # Id first: it is what matches each emitted block back to the unit it
+    # describes. Without it the only pairing available is positional, and a unit
+    # systemd does not know emits no block -- shifting every later record onto
+    # the wrong pod.
+    "Id",
+    "MemoryCurrent",
+    "MemoryMax",
+    "CPUUsageNSec",
+    "TasksCurrent",
+    "MemoryAccounting",
+    "CPUAccounting",
+    # Changes on every unit start, so a CPU sample can be tied to the exact
+    # invocation it was taken from -- see _cpu_percent.
+    "InvocationID",
+)
+
+# CPU% needs two samples: CPUUsageNSec is a monotonic counter, so a percentage
+# is (Δcpu_ns / Δwall_ns) * 100. We keep the PREVIOUS (wall_ns, cpu_ns) per pod
+# unit and report null on the first observation rather than a fake 0% — a
+# fabricated 0 on a busy pod is worse than a blank. Keyed by unit name so a
+# pod that stops and a new pod that reuses the name do not cross samples
+# (the unit name carries the worktree name, which is the pod identity).
+_POD_CPU_SAMPLES: dict[str, tuple[float, int, str]] = {}
+
+# ``du`` over a multi-GB pod HOME is far too expensive to run on every poll,
+# and the fleet payload is polled repeatedly by an open dashboard. Cache the
+# size behind a TTL keyed by unit name: (measured_at_monotonic, size_bytes).
+_POD_HOME_SIZE_CACHE: dict[str, tuple[float, int]] = {}
+_POD_HOME_SIZE_TTL = 60.0  # seconds
+
+
+def _parse_systemctl_records(text: str) -> list[dict[str, str]]:
+    """Split a batched ``systemctl show`` dump into one dict per unit.
+
+    ``systemctl show a b c -p ...`` emits the property block for each unit in
+    argument order, separated by a blank line. Records are returned in that
+    same order so the caller can zip them back to the unit list it asked for.
+    Lines without ``=`` (there should be none) are ignored.
+    """
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            if current:
+                records.append(current)
+                current = {}
+            continue
+        key, sep, val = line.partition("=")
+        if sep:
+            current[key.strip()] = val.strip()
+    if current:
+        records.append(current)
+    return records
+
+
+def _coerce_uint(raw: str | None) -> int | None:
+    """A non-negative int from a systemd property value, else None.
+
+    systemd reports an unset/unknown numeric property as the sentinel
+    ``[not set]`` or the max-uint ``18446744073709551615`` (``infinity`` for
+    MemoryMax). Those are NOT measurements, so they collapse to None — the
+    caller renders "no ceiling" / absent rather than an absurd byte count.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw or not raw.lstrip("-").isdigit():
+        return None
+    val = int(raw)
+    if val < 0 or val >= 0xFFFFFFFFFFFFFFFF:
+        return None
+    return val
+
+
+def _pod_resources_sync(cfg: Any, running_names: list[str]) -> dict[str, dict]:
+    """Batched per-pod resource probe for the RUNNING pods only.
+
+    ONE ``systemctl --user show`` invocation covering every running pod unit,
+    not one subprocess per row. Returns ``{worktree_name: {mem_current,
+    mem_max, cpu_pct, tasks, home_bytes}}`` where any field the host cannot
+    measure is ``None``.
+
+    Linux-only: ``rt.systemctl`` calls ``require_systemd`` which raises off
+    Linux, so the whole probe degrades to ``{}`` (all rows absent) there. Any
+    other failure degrades the same way — never partial fabricated data.
+    """
+    if not running_names:
+        # No pods running is still liveness information: every cached sample now
+        # belongs to a pod that is gone. Returning early WITHOUT pruning left
+        # both caches holding every entry forever -- the CPU samples would then
+        # be compared against a restarted pod's counter, and a stale home size
+        # would keep feeding the fleet total. Prune first, then answer.
+        _POD_CPU_SAMPLES.clear()
+        _POD_HOME_SIZE_CACHE.clear()
+        return {}
+    units = [rt.pod_unit(cfg, n) for n in running_names]
+    prop_args: list[str] = []
+    for prop in _POD_RES_PROPS:
+        prop_args.extend(["-p", prop])
+    try:
+        cp = rt.systemctl("show", *units, *prop_args, timeout=10)
+    except Exception:  # noqa: BLE001 — off-Linux (require_systemd) or probe error
+        return {}
+    records = _parse_systemctl_records(cp.stdout or "")
+    now = time.monotonic()
+    out: dict[str, dict] = {}
+    # Match each record to its unit by the Id systemd echoes back, NOT by
+    # position. `systemctl show` emits blocks in argument order, but a unit it
+    # does not know contributes no block -- so a positional zip would shift every
+    # later record onto the wrong pod and publish one pod's memory and CPU under
+    # another pod's name. Misattributed resource figures are worse than absent
+    # ones: they read as measured. A record whose Id is missing or unknown is
+    # dropped, leaving that pod's fields absent.
+    by_unit = {rec["Id"]: rec for rec in records if rec.get("Id")}
+    for name, unit in zip(running_names, units):
+        rec = by_unit.get(unit)
+        if rec is None:
+            continue
+        mem_current = (
+            _coerce_uint(rec.get("MemoryCurrent")) if rec.get("MemoryAccounting") == "yes" else None
+        )
+        mem_max = _coerce_uint(rec.get("MemoryMax"))
+        tasks = _coerce_uint(rec.get("TasksCurrent"))
+        cpu_pct = _cpu_percent(unit, rec, now)
+        out[name] = {
+            "mem_current": mem_current,
+            "mem_max": mem_max,
+            "cpu_pct": cpu_pct,
+            "tasks": tasks,
+            # Filled in by the caller: the pod-HOME `du` goes through the async
+            # routed chokepoint (`_run_cmd`), which cannot be awaited from this
+            # sync probe. Absent until then, never a fabricated 0.
+            "home_bytes": None,
+        }
+    # Drop CPU samples for pods no longer running so a stopped-then-restarted
+    # pod starts fresh (null on its first new observation) and the dict cannot
+    # grow without bound across a long-lived gateway.
+    for stale in set(_POD_CPU_SAMPLES) - set(units):
+        _POD_CPU_SAMPLES.pop(stale, None)
+    # Same for the home-size cache, which was previously left to expire on its
+    # TTL. A worktree evicted mid-TTL kept a cached size that went on being
+    # summed into the fleet total, so the header reported disk for a pod that no
+    # longer existed -- and the dict grew unbounded besides. Dropping it here
+    # ties both to the same liveness signal.
+    for stale in set(_POD_HOME_SIZE_CACHE) - set(units):
+        _POD_HOME_SIZE_CACHE.pop(stale, None)
+    return out
+
+
+def _cpu_percent(unit: str, rec: dict[str, str], now: float) -> float | None:
+    """CPU% from two CPUUsageNSec samples; None on the first observation.
+
+    Reports None (not 0) the first time a pod is seen and whenever accounting
+    is off or the counter is unreadable, so the UI shows a blank rather than a
+    fabricated 0% on a busy pod.
+
+    Each sample is tied to the unit's ``InvocationID``, which systemd changes on
+    every start. Keying on the unit NAME alone is not enough: a pod that stops
+    and restarts between two polls keeps its name while ``CPUUsageNSec`` restarts
+    from zero, and the backwards-counter guard below only catches that when the
+    new invocation has not yet burned past the old total. A fast restart with
+    heavy startup work passes that guard and yields a positive delta spanning two
+    different processes -- a number that looks like a measurement and is not. A
+    changed invocation discards the previous sample instead.
+    """
+    invocation = rec.get("InvocationID") or ""
+    if rec.get("CPUAccounting") != "yes":
+        _POD_CPU_SAMPLES.pop(unit, None)
+        return None
+    cpu_ns = _coerce_uint(rec.get("CPUUsageNSec"))
+    if cpu_ns is None:
+        _POD_CPU_SAMPLES.pop(unit, None)
+        return None
+    prev = _POD_CPU_SAMPLES.get(unit)
+    _POD_CPU_SAMPLES[unit] = (now, cpu_ns, invocation)
+    if prev is None:
+        return None
+    prev_wall, prev_cpu, prev_invocation = prev
+    # A different (or newly unknown) invocation means the counter belongs to a
+    # different process than the one we sampled. Not comparable.
+    if prev_invocation != invocation:
+        return None
+    wall_delta_ns = (now - prev_wall) * 1e9
+    cpu_delta_ns = cpu_ns - prev_cpu
+    # A non-positive wall delta (clock jump / same instant) or a counter that
+    # went backwards (restart the invocation check somehow missed) is not a
+    # measurement.
+    if wall_delta_ns <= 0 or cpu_delta_ns < 0:
+        return None
+    return round(cpu_delta_ns / wall_delta_ns * 100.0, 1)
+
+
+async def _pod_home_size(cfg: Any, name: str, unit: str, now: float) -> int | None:
+    """Pod HOME size in bytes, cached behind a TTL.
+
+    ``du`` over a multi-GB tree is too expensive to run every poll, so the
+    result is cached per pod for ``_POD_HOME_SIZE_TTL`` seconds. The HOME path
+    is resolved through the existing ``rt.pod_home`` — never hardcoded. Any
+    failure (missing tree, du error) yields None, not 0.
+
+    The ``du`` itself goes through ``_run_cmd``, the same routed chokepoint the
+    module's two other ``du`` calls use. That is deliberately not a bare
+    ``subprocess.run``: routing is what vets the binary instead of trusting the
+    service PATH (which leads with agent-writable directories), pins the child's
+    PATH and encoding, and keeps the spawn inside the sandbox chokepoint the
+    repo's spawn audit requires. Doing it by hand needed three separate
+    exceptions and still would not have been the module's own pattern.
+    """
+    cached = _POD_HOME_SIZE_CACHE.get(unit)
+    if cached is not None and (now - cached[0]) < _POD_HOME_SIZE_TTL:
+        return cached[1]
+    try:
+        home = rt.pod_home(cfg, name)
+    except Exception:  # noqa: BLE001
+        return cached[1] if cached is not None else None
+    rc, stdout, _ = await _run_cmd(["du", "-sb", str(home)], timeout=20)
+    if rc != 0:
+        return cached[1] if cached is not None else None
+    try:
+        size = int(stdout.split()[0])
+    except (ValueError, IndexError):
+        return cached[1] if cached is not None else None
+    _POD_HOME_SIZE_CACHE[unit] = (now, size)
+    return size
+
+
+# Fleet-level totals for the page header ("this needs cleaning" legibility).
+#
+# Worktree disk is deliberately NOT computed here. The dashboard already shows
+# it, sourced from the pre-existing ``/disk`` endpoint, and that endpoint is
+# async out-of-band on purpose: a ``du`` over every worktree is slow (tens of
+# GB across tens of trees), so it runs as a background task behind an
+# idle/computing/done handshake rather than inside a request. Measuring it a
+# second time in ``_build_fleet`` would put that same ``du`` on the POLLED
+# payload path -- paid again on every TTL expiry, for a figure the page is
+# already displaying from another source. Two independently-computed values
+# under one label is also a number an operator cannot trust. So this leaves
+# worktree disk to its existing owner and carries only what is genuinely new
+# and cheap: pod-home disk (already measured per running pod for the row
+# readout, so summing it is free) and the orphan count (a directory scan).
+
+
+def _orphan_count_sync(cfg: Any) -> int | None:
+    """Count of pod HOMEs left on disk with no live pod. None on failure.
+
+    Reuses ``rt.orphan_homes`` (a cheap directory scan, no ``du``) — the same
+    predicate the prune flow uses — so the header's "N to clean" agrees with
+    what a prune would actually reclaim.
+    """
+    try:
+        return len(rt.orphan_homes(cfg))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _build_fleet() -> dict:
@@ -2767,7 +3120,97 @@ async def _build_fleet() -> dict:
             "legacy": bool(legacy_prefixes) and not is_main
             and name.lower().startswith(legacy_prefixes),
             "last_updated_at": g["last_updated_at"],
+            # Per-pod system resources (memory/CPU/tasks/home size). Filled in
+            # by one batched probe after the loop for running pods on Linux;
+            # stays None for stopped pods, the main row, and off Linux — the
+            # UI hides the readout entirely when it is absent.
+            "pod_resources": None,
         })
+    # ONE batched resource probe for every running pod, off the row loop so the
+    # payload never spawns a subprocess per row per poll. Best-effort and
+    # Linux-only (the probe itself degrades to {} off Linux / on failure), so a
+    # miss simply leaves ``pod_resources`` None and the UI hides the readout.
+    if _POD_AVAILABLE and cfg:
+        # Rows are keyed by the worktree's BASENAME, and a pod is identified by
+        # that same name -- so two worktrees under different parents that share a
+        # basename resolve to ONE pod unit. Probing under that name would then
+        # publish that single pod's memory, CPU and disk on BOTH rows, as though
+        # each had its own. We cannot tell which row owns the pod (this module
+        # already treats a basename collision as unattributable -- see
+        # `_reclaim_pod_locked`), so a collided name is withheld from the probe
+        # entirely and both rows keep `pod_resources` absent. Duplicated figures
+        # would read as measured; absent ones are honest.
+        live_row_names = [w["name"] for w in wts if w.get("running") and not w.get("is_main")]
+        collided = {nm for nm in live_row_names if live_row_names.count(nm) > 1}
+        running_names = [nm for nm in live_row_names if nm not in collided]
+        if collided:
+            logger.warning(
+                "dev-fleet: withholding pod resources for %d ambiguous worktree "
+                "basename(s) -- a shared basename cannot be attributed to one pod",
+                len(collided),
+            )
+        if running_names:
+            try:
+                res = await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(),
+                    functools.partial(_pod_resources_sync, cfg, running_names),
+                )
+            except Exception:  # noqa: BLE001
+                res = {}
+            # Pod-HOME size is the one figure the sync probe cannot take: its
+            # `du` goes through the async routed chokepoint. TTL-cached, so this
+            # is a no-op on most polls.
+            now = time.monotonic()
+            for nm in running_names:
+                if nm not in res:
+                    continue
+                try:
+                    res[nm]["home_bytes"] = await _pod_home_size(
+                        cfg, nm, rt.pod_unit(cfg, nm), now
+                    )
+                except Exception:  # noqa: BLE001
+                    res[nm]["home_bytes"] = None
+            for w in wts:
+                if w["name"] in res:
+                    w["pod_resources"] = res[w["name"]]
+    # Fleet-level totals for the header: worktree disk (batched du, TTL-cached),
+    # pod-home disk (summed from the resource probe above), and orphan count.
+    # All best-effort — a field stays None and the header omits it rather than
+    # rendering a fabricated 0.
+    fleet_totals: dict[str, Any] = {
+        "pod_home_bytes": None,
+        "orphan_pods": None,
+    }
+    if _POD_AVAILABLE and cfg:
+        # A TOTAL has to cover everything it claims to. Summing only the pods
+        # that reported would publish a partial figure under a total's label --
+        # the operator reads "Pod-home disk: 2.1GB" and cannot tell that a pod
+        # whose `du` failed is missing from it. That is the same fabrication the
+        # per-row fields are careful to avoid, one level up. So the total is
+        # published only when EVERY running pod measured; otherwise it is absent
+        # and the header omits it.
+        measured = [
+            w["pod_resources"]["home_bytes"]
+            for w in wts
+            if w.get("pod_resources") and w["pod_resources"].get("home_bytes") is not None
+        ]
+        # `expected` is the number of pods actually RUNNING -- not the number that
+        # happened to come back with a record. Counting only rows that already
+        # have `pod_resources` made the check self-consistent instead of true: a
+        # pod dropped by the record matching, or withheld for an ambiguous
+        # basename, has no `pod_resources` and so vanished from both sides of the
+        # comparison, letting a total publish while a running pod was missing
+        # from it.
+        expected = sum(1 for w in wts if w.get("running") and not w.get("is_main"))
+        if measured and len(measured) == expected:
+            fleet_totals["pod_home_bytes"] = sum(measured)
+        try:
+            fleet_totals["orphan_pods"] = await asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(),
+                functools.partial(_orphan_count_sync, cfg),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     # The run pointers a reloaded page reattaches to -- `sync_run_id` and each
     # row's `provision_run_id` -- are deliberately NOT set here. This snapshot is
     # cached and served stale-while-revalidate, so a pointer written at build
@@ -2809,6 +3252,7 @@ async def _build_fleet() -> dict:
         # non-Linux user saw pod controls that silently failed with no
         # explanation. The UI uses these to disable those controls and say why.
         "pods_available": _POD_AVAILABLE,
+        "fleet_totals": fleet_totals,
         "pods_unavailable_reason": _POD_ERROR or None,
     }
 
@@ -3385,6 +3829,18 @@ async def _pod_provision(name: str) -> dict:
         )
         _PROVISION_INFLIGHT[name] = rid
     return {"ok": True, "run_id": rid}
+
+
+async def _pod_provision_dismiss(name: str, run_id: str) -> dict:
+    """Forget one terminal provision run without racing a replacement run."""
+    async with _PROVISION_LOCK:
+        if _PROVISION_INFLIGHT.get(name) != run_id:
+            return {"ok": True, "dismissed": False}
+        async with _RUNS_LOCK:
+            if _RUNS.get(run_id, {}).get("status") == "running":
+                return {"ok": False, "error": "cannot dismiss a running provision"}
+        _PROVISION_INFLIGHT.pop(name, None)
+    return {"ok": True, "dismissed": True}
 
 
 # --- disk aggregation ---
@@ -4914,7 +5370,11 @@ _GIT_MUTATION_LOCK = LoopBoundLock()
 # merged_* verdicts about commit divergence, which a discard says nothing about.
 # `active` stays in: dirt is one of its two causes, and when the cause is
 # unmerged commits instead, the removal's own PR gate refuses it a moment later.
-_DISCARD_OVERRIDABLE_CODES = frozenset({"merged_dirty", "active"})
+# `closed_dirty` joins them: like `merged_dirty` the DIRT is what withheld the
+# candidate, so a discard of exactly the untracked files the operator was shown
+# is the consent that unblocks it. Force is still required for a tracked-file
+# modification; a discard alone never destroys tracked work.
+_DISCARD_OVERRIDABLE_CODES = frozenset({"merged_dirty", "closed_dirty", "active"})
 
 
 async def _prunable(path: str, branch: str | None) -> dict:
@@ -4963,6 +5423,51 @@ async def _prunable(path: str, branch: str | None) -> dict:
         if not await _head_contained_in_pr(path, head_oid, pr_oid):
             return {**base, "ok": False, "code": "merged_new_commits"}
         return {**base, "ok": True, "code": "merged"}
+    if _is_pr_closed(pr):
+        # A CLOSED-unmerged PR is prunable through the MANUAL path only (the
+        # reaper filters to code=="merged"; see _auto_prune_once). Unlike a
+        # merged tree, nothing guarantees this worktree's content is on the base
+        # branch — the PR was declined or superseded while the tree kept moving
+        # — so three guards stand between the operator and data loss:
+        #
+        #  * A dirty tree is REFUSED by default (code "closed_dirty"), reusing
+        #    the same dirty/dirty_tracked/force plumbing as merged_dirty. The
+        #    dirt breakdown already sits in `base` via _dirt_fields, so the
+        #    checklist can tell the operator exactly what a discard/force would
+        #    destroy (N modified tracked files, N untracked files) instead of
+        #    asking for a blind confirm.
+        #  * `own` (commits on this branch not reachable from the base branch,
+        #    from _own_commits_count) is surfaced as `unmerged_commits`. A
+        #    clean closed tree that is ALSO ahead of base is a stronger warning
+        #    than a clean merged tree, whose content is shipped by definition;
+        #    the UI raises the alarm on this flag rather than re-deriving
+        #    ancestry with a fresh git call.
+        unmerged = bool(own and own > 0)
+        if dirty:
+            return {**base, "ok": False, "code": "closed_dirty",
+                    "unmerged_commits": unmerged}
+        #  * The verdict is BOUND TO THE BRANCH HEAD, exactly as the merged path
+        #    above binds its own. A closed PR is looked up by branch NAME, so a
+        #    branch that was reused after its PR closed -- new commits, work the
+        #    closed PR never saw, possibly a replacement PR not opened yet --
+        #    still resolves to that stale CLOSED verdict. Without this check the
+        #    tree would be offered as prunable and removing it would destroy
+        #    work that has nothing to do with the PR that was declined. The
+        #    guard is fail-closed: an OID that cannot be established withholds
+        #    the candidate rather than trusting the name-based lookup.
+        pr_oid = (
+            await _fetch_pr_head_oid(branch, repo=(pr or {}).get("_repo"))
+            if branch
+            else None
+        )
+        if not head_oid or not pr_oid:
+            return {**base, "ok": False, "code": "closed_unverified",
+                    "unmerged_commits": unmerged}
+        if not await _head_contained_in_pr(path, head_oid, pr_oid):
+            return {**base, "ok": False, "code": "closed_new_commits",
+                    "unmerged_commits": unmerged}
+        return {**base, "ok": True, "code": "closed",
+                "unmerged_commits": unmerged}
     if own == 0 and not dirty:
         if age_h and age_h > 48:
             return {**base, "ok": True, "code": "empty"}
@@ -4980,6 +5485,13 @@ async def _prune_candidates() -> dict:
         v = await _prunable(w["path"], w.get("branch"))
         row = {"name": name, "code": v["code"], "branch": w.get("branch")}
         if v["ok"]:
+            # A closed-PR candidate carries the ancestry warning so the
+            # checklist can flag a clean-but-ahead tree distinctly from a
+            # merged one (whose content is shipped by definition). The key is
+            # absent on merged rows, which the frontend reads as "not
+            # applicable".
+            if v.get("code") == "closed":
+                row["unmerged_commits"] = bool(v.get("unmerged_commits"))
             candidates.append(row)
         else:
             # Surface dirty flag so the frontend can pre-disable force-selection
@@ -5066,8 +5578,22 @@ async def _prune_run(
                     result = {"name": nm, "ok": False, "error": err}
                 else:
                     is_forced = nm in _force
+                    # A regular candidate re-verified as `closed` (a clean,
+                    # CLOSED-PR worktree) needs the force PATH at removal: with
+                    # force=False, _worktree_remove refuses any tree whose PR is
+                    # not merged and is ahead of base, which a closed candidate
+                    # routinely is. Force here does NOT mean `git worktree
+                    # remove --force` — for a clean unmerged tree that gate
+                    # drops the git flag and lets git's own dirty check fire at
+                    # removal time (the TOCTOU guard), so a late edit still
+                    # blocks it. It only lifts the "PR not merged" refusal, and
+                    # only after the fresh _prunable verdict below CONFIRMED the
+                    # tree is clean and closed.
+                    remove_force = is_forced
                     if not is_forced:
                         verdict = await _prunable(target["path"], target.get("branch"))
+                        if verdict.get("code") == "closed" and verdict.get("ok"):
+                            remove_force = True
                         if not verdict.get("ok"):
                             # A discard approval overrides ONLY a verdict whose
                             # blocker is the dirt the caller just consented to.
@@ -5088,7 +5614,7 @@ async def _prune_run(
 
                         res = await _worktree_remove(
                             nm,
-                            force=is_forced,
+                            force=remove_force,
                             progress=_progress,
                             _caller="prune",
                             discard_untracked_paths=_discard_paths.get(nm),
@@ -5248,6 +5774,18 @@ async def _auto_prune_once() -> dict:
     a running pod first (then re-verifies) and applies the squash-safe OID race
     guard. Nothing is force-removed. Best-effort: never raises; returns
     ``{removed, failed}``.
+
+    The ``closed`` class (PR CLOSED without merging) is DELIBERATELY excluded
+    here, for a stronger reason than the stale-empty exclusion above. A merged
+    worktree is safe to delete because its content is on the base branch by
+    definition; a closed one carries no such guarantee — the PR was declined or
+    superseded while the tree kept moving, so it routinely holds the only copy
+    of work that never landed (measured on a real fleet: one closed worktree
+    held a multi-hundred-line uncommitted rewrite, another held brand-new
+    untracked source files in no commit and no PR). Reaping that on a timer,
+    with no human to read the loss summary, would destroy it irrecoverably.
+    Closed worktrees are therefore prunable ONLY through the manual checklist,
+    which refuses a dirty tree by default and names what a removal would lose.
     """
     removed: list[str] = []
     failed: list[dict] = []
@@ -5261,7 +5799,9 @@ async def _auto_prune_once() -> dict:
     for row in cand.get("candidates", []):
         name = row.get("name")
         # Restrict unattended auto-prune to MERGED worktrees only; the
-        # stale-empty class stays manual (see docstring).
+        # stale-empty AND closed classes stay manual (see docstring). A closed
+        # worktree may hold the only copy of unmerged work, so it is never
+        # reaped on a timer.
         if not name or row.get("code") != "merged":
             continue
         try:
@@ -5491,13 +6031,28 @@ async def api_dev_fleet_sync(request: web.Request) -> web.Response:
     return web.json_response(result, status=code)
 
 
-async def _json_body(request: web.Request) -> tuple[dict | None, web.Response | None]:
-    """Parse a JSON object body; (body, None) on success, (None, 400) otherwise."""
+async def _json_body(
+    request: web.Request, *, code: str | None = None
+) -> tuple[dict | None, web.Response | None]:
+    """Parse a JSON object body; (body, None) on success, (None, 400) otherwise.
+
+    Pass ``code`` for endpoints whose error contract promises a
+    machine-readable ``code`` on every failure response; the rejection then
+    carries it alongside the human-readable ``error``.
+    """
     try:
         body = await request.json() if request.content_length else {}
     except ValueError:
+        if code:
+            return None, web.json_response(
+                {"error": "invalid JSON body", "code": code}, status=400
+            )
         return None, web.json_response({"error": "invalid JSON body"}, status=400)
     if not isinstance(body, dict):
+        if code:
+            return None, web.json_response(
+                {"error": "body must be an object", "code": code}, status=400
+            )
         return None, web.json_response({"error": "body must be an object"}, status=400)
     return body, None
 
@@ -5662,6 +6217,38 @@ async def api_dev_fleet_pod_token(request: web.Request) -> web.Response:
 @_audited("dev_fleet_pod_provision")
 async def api_dev_fleet_pod_provision(request: web.Request) -> web.Response:
     return await _pod_name_action(request, _pod_provision)
+
+
+@_audited("dev_fleet_pod_provision_dismiss")
+async def api_dev_fleet_pod_provision_dismiss(request: web.Request) -> web.Response:
+    body, err = await _json_body(request, code="invalid_body")
+    if err is not None:
+        return err
+    assert body is not None
+    name = body.get("name")
+    run_id = body.get("run_id")
+    if not isinstance(name, str) or not name:
+        return web.json_response(
+            {"error": "'name' must be a non-empty string", "code": "invalid_name"}, status=400
+        )
+    if not isinstance(run_id, str) or not run_id:
+        return web.json_response(
+            {"error": "'run_id' must be a non-empty string", "code": "invalid_run_id"}, status=400
+        )
+    target, ferr = await _find_worktree(name)
+    if target is None:
+        return web.json_response({"error": ferr, "code": "invalid_worktree"}, status=400)
+    result = await _pod_provision_dismiss(name, run_id)
+    if result.get("ok"):
+        return web.json_response(result, status=200)
+    return web.json_response(
+        {
+            "ok": False,
+            "error": result.get("error", "cannot dismiss provision"),
+            "code": "provision_dismiss_conflict",
+        },
+        status=409,
+    )
 
 
 @_audited("dev_fleet_rebase")
@@ -7081,6 +7668,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/pod/restart", api_dev_fleet_pod_restart)
     app.router.add_post("/api/pod/token", api_dev_fleet_pod_token)
     app.router.add_post("/api/pod/provision", api_dev_fleet_pod_provision)
+    app.router.add_post("/api/pod/provision/dismiss", api_dev_fleet_pod_provision_dismiss)
     app.router.add_post("/api/rebase", api_dev_fleet_rebase)
     app.router.add_post("/api/restart-gateway", api_dev_fleet_restart_gateway)
     app.router.add_post("/api/make-live", api_dev_fleet_make_live)

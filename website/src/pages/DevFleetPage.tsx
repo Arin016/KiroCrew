@@ -25,7 +25,7 @@ import * as api from './devFleetApi'
 import { ApiError } from '../api/client'
 
 import { i18nT } from '../i18n/t'
-import { compareText } from '../i18n/format'
+import { compareText, fmtBytes, fmtPercent } from '../i18n/format'
 /* ─── Notification helper (replaces useNotify) ─── */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _dispatch: any = null
@@ -197,6 +197,10 @@ export function mergeLogWindow(buffer: string[], window: string[]): string[] {
 export function pruneVerdictLabel(code?: string): string {
   switch (code) {
     case 'merged': return i18nT('pages.devFleetPage.pr_merged')
+    case 'closed': return i18nT('pages.devFleetPage.pr_closed_not_on_main')
+    case 'closed_dirty': return i18nT('pages.devFleetPage.pr_closed_uncommitted_changes')
+    case 'closed_new_commits': return i18nT('pages.devFleetPage.pr_closed_but_branch_has_newer_commits')
+    case 'closed_unverified': return i18nT('pages.devFleetPage.pr_closed_but_verification_unavailable_retry')
     case 'empty': return i18nT('pages.devFleetPage.no_commits_stale')
     case 'merged_dirty': return i18nT('pages.devFleetPage.pr_merged_uncommitted_changes')
     case 'fresh': return i18nT('pages.devFleetPage.created_recently')
@@ -279,6 +283,73 @@ function relTime(epoch: number | null | undefined): string {
 
 function iconLabel(icon: ReactNode, label: string) {
   return <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 } as CSSProperties}>{icon}{label}</span>
+}
+
+// Colour for the memory readout as the pod approaches its cgroup MemoryMax.
+// Crossing MemoryMax is an OOM kill, so the readout shifts warn -> danger as
+// the ratio climbs. No ceiling (mem_max absent) -> neutral, since there is
+// nothing to be close to.
+function memColor(current: number | null | undefined, max: number | null | undefined): string {
+  if (current == null || max == null || max <= 0) return 'var(--muted)'
+  const ratio = current / max
+  if (ratio >= 0.9) return 'var(--danger)'
+  if (ratio >= 0.75) return 'var(--warn)'
+  return 'var(--muted)'
+}
+
+interface PodResources {
+  mem_current?: number | null
+  mem_max?: number | null
+  cpu_pct?: number | null
+  tasks?: number | null
+  home_bytes?: number | null
+}
+
+interface FleetTotals {
+  pod_home_bytes?: number | null
+  orphan_pods?: number | null
+}
+
+// Compact inline readout for a running pod: memory against its ceiling, CPU%,
+// task count. Each field is rendered ONLY when present — an absent field
+// (probe failed, off Linux, accounting off, or first CPU sample) contributes
+// nothing, so a blank never reads as a measured 0. Returns null when there is
+// nothing at all to show.
+function PodReadout({ r }: { r?: PodResources | null }) {
+  if (!r) return null
+  const parts: ReactNode[] = []
+  const chip: CSSProperties = { fontVariantNumeric: 'tabular-nums', fontFamily: 'ui-monospace, SF Mono, Menlo, monospace' }
+  if (r.mem_current != null) {
+    const label = r.mem_max != null
+      ? fmtBytes(r.mem_current) + ' / ' + fmtBytes(r.mem_max)
+      : fmtBytes(r.mem_current)
+    parts.push(
+      <span key="mem" style={{ ...chip, color: memColor(r.mem_current, r.mem_max) }}
+        title={i18nT('pages.devFleetPage.pod_memory_of_ceiling')}>{label}</span>,
+    )
+  }
+  if (r.cpu_pct != null) {
+    parts.push(<span key="cpu" style={chip} title={i18nT('pages.devFleetPage.pod_cpu_usage')}>{fmtPercent(r.cpu_pct / 100, { maximumFractionDigits: 1 })}</span>)
+  }
+  if (r.tasks != null) {
+    parts.push(<span key="tasks" style={chip} title={i18nT('pages.devFleetPage.pod_task_count')}>{r.tasks} {i18nT('pages.devFleetPage.pod_tasks_label')}</span>)
+  }
+  if (parts.length === 0) return null
+  return (
+    // The readout must never squeeze the worktree NAME out of the row: `flexShrink: 0`
+    // made it demand its full intrinsic width, so at a narrow viewport the metrics
+    // ran past the cell and the name lost its space. It now shrinks and clips
+    // instead, capped so the name always keeps the larger share. The chips are
+    // ordered memory -> CPU -> tasks, so what disappears first when space runs out
+    // is the least decision-critical figure; memory, the OOM signal, is kept.
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--muted)', flexShrink: 1, minWidth: 0, maxWidth: 'min(340px, 45%)', overflow: 'hidden', whiteSpace: 'nowrap' } as CSSProperties}>
+      {parts.map((p, i) => (
+        <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          {i > 0 ? <span style={{ opacity: 0.4 }}>{'\u00b7'}</span> : null}{p}
+        </span>
+      ))}
+    </span>
+  )
 }
 
 /* ─── Sub-components ─── */
@@ -582,8 +653,10 @@ interface Worktree {
   dirty_tracked?: boolean | null; dirty_untracked?: number; dirty_untracked_paths?: string[]
   path?: string
   provision_run_id?: string | null
+  // Per-pod system resources (running pods on Linux only); absent otherwise.
+  pod_resources?: PodResources | null
 }
-interface FleetData { worktrees: Worktree[]; error?: string; needs_setup?: boolean; main_repo?: string; main_repo_inferred?: boolean; base_branch?: string; sync_run_id?: string; build_pending?: boolean; gateway_service_active?: boolean; gateway_service_reason?: string | null; pods_available?: boolean; pods_unavailable_reason?: string | null; serving_install_reason?: string | null; staged_target?: string | null; staged_cancel_available?: boolean; manual_restart?: string }
+interface FleetData { worktrees: Worktree[]; error?: string; needs_setup?: boolean; main_repo?: string; main_repo_inferred?: boolean; base_branch?: string; sync_run_id?: string; build_pending?: boolean; gateway_service_active?: boolean; gateway_service_reason?: string | null; pods_available?: boolean; pods_unavailable_reason?: string | null; serving_install_reason?: string | null; staged_target?: string | null; staged_cancel_available?: boolean; manual_restart?: string; fleet_totals?: FleetTotals }
 // `lastIsCause` distinguishes the two things `last` can hold. A gateway-composed
 // diagnosis is decision-critical prose ending in the action to take, so it must
 // not render in the muted 11.5px monospace the raw log tail uses.
@@ -591,7 +664,7 @@ interface SyncRun { rid: string; status: 'running' | 'done' | 'error'; lines: st
 // Provision run state: the FULL output is kept (not just the last
 // line) so the expandable log panel can show everything, and a failed run
 // persists (failed=true) until the user dismisses it rather than vanishing.
-interface ProvRun { status: 'starting' | 'running' | 'done' | 'failed'; lines: string[]; startedAt: number; exit?: number | null; failed?: boolean; done?: boolean }
+interface ProvRun { rid?: string; status: 'starting' | 'running' | 'done' | 'failed'; lines: string[]; startedAt: number; exit?: number | null; failed?: boolean; done?: boolean }
 interface RebaseResult { kind: 'ok' | 'conflict' | 'error'; text: string }
 
 /* ─── Detail Panel (expanded row) ─── */
@@ -662,6 +735,31 @@ function DetailPanel({ w, d, busy, onRemove, onLoadLogs, logs, logsLoading }: { 
       {d.pod_running ? (
         <div style={mutedSm}>
           {i18nT('pages.devFleetPage.pod_running_on')}{d.pod_port || '?'}
+        </div>
+      ) : null}
+      {/* Full per-pod resource breakdown for a running pod. Each line renders
+          only when its field is present — an absent field (probe failed, off
+          Linux, accounting off) shows nothing rather than a measured-looking 0. */}
+      {w.pod_resources ? (
+        <div style={{ ...mutedSm, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {w.pod_resources.mem_current != null ? (
+            <div style={{ ...mono, color: memColor(w.pod_resources.mem_current, w.pod_resources.mem_max) }}>
+              {i18nT('pages.devFleetPage.pod_memory', {
+                value: w.pod_resources.mem_max != null
+                  ? fmtBytes(w.pod_resources.mem_current) + ' / ' + fmtBytes(w.pod_resources.mem_max)
+                  : fmtBytes(w.pod_resources.mem_current),
+              })}
+            </div>
+          ) : null}
+          {w.pod_resources.cpu_pct != null ? (
+            <div style={{ ...mono, color: 'var(--text)' }}>{i18nT('pages.devFleetPage.pod_cpu', { value: fmtPercent(w.pod_resources.cpu_pct / 100, { maximumFractionDigits: 1 }) })}</div>
+          ) : null}
+          {w.pod_resources.tasks != null ? (
+            <div style={{ ...mono, color: 'var(--text)' }}>{i18nT('pages.devFleetPage.pod_tasks', { value: w.pod_resources.tasks })}</div>
+          ) : null}
+          {w.pod_resources.home_bytes != null ? (
+            <div style={{ ...mono, color: 'var(--text)' }}>{i18nT('pages.devFleetPage.pod_home_size', { value: fmtBytes(w.pod_resources.home_bytes) })}</div>
+          ) : null}
         </div>
       ) : null}
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
@@ -795,9 +893,28 @@ export default function DevFleetPage() {
     if (rid) cancelledRunsRef.current.add(rid)
     setSyncRun(null); setSyncLogOpen(false)
   }
-  function dismissProv(name: string) {
+  async function dismissProv(name: string) {
+    const rid = prov[name]?.rid
+    if (rid) {
+      try {
+        await api.post('/pod/provision/dismiss', { name, run_id: rid })
+      } catch (e: unknown) {
+        notify((e as Error)?.message || String(e), { type: 'error' })
+        return
+      }
+    }
+    // The POST above is awaited, so a REPLACEMENT provision can fail and
+    // reattach to this worktree while the dismiss is in flight. Clear only the
+    // strip the user actually dismissed: if `rid` moved underneath us a newer
+    // failure is on screen, and deleting it would hide that run (and its log)
+    // until the next reload.
+    let stale = false
+    setProv((p) => {
+      if (p[name]?.rid !== rid) { stale = true; return p }
+      const n = { ...p }; delete n[name]; return n
+    })
+    if (stale) return
     clearTimeout(provDoneTimersRef.current[name])
-    setProv((p) => { const n = { ...p }; delete n[name]; return n })
     setProvLogOpen((o) => { const n = { ...o }; delete n[name]; return n })
     invalidateFleet()
   }
@@ -833,7 +950,7 @@ export default function DevFleetPage() {
   // checkout, so the restart confirm must say so — that hazard does not
   // depend on whether the pointer-only cancel is available.
   const pendingStage = (fleet?.worktrees || []).find((x) => x.is_staged && !x.is_live) || null
-  const [pruneDialog, setPruneDialog] = useState<{ candidates: { name: string; code?: string }[]; kept: { name: string; code?: string; dirty?: boolean; dirty_tracked?: boolean | null; dirty_untracked?: number; dirty_untracked_paths?: string[] }[]; scanned: number } | null>(null)
+  const [pruneDialog, setPruneDialog] = useState<{ candidates: { name: string; code?: string; unmerged_commits?: boolean }[]; kept: { name: string; code?: string; dirty?: boolean; dirty_tracked?: boolean | null; dirty_untracked?: number; dirty_untracked_paths?: string[] }[]; scanned: number } | null>(null)
   const [pruneSelected, setPruneSelected] = useState<Set<string>>(new Set())
   const [pruneForceSelected, setPruneForceSelected] = useState<Set<string>>(new Set())
   const [pruneProgress, setPruneProgress] = useState<{ names: string[]; items: Record<string, { status: string; error?: string | null }>; done: number; total: number; running: boolean } | null>(null)
@@ -900,12 +1017,12 @@ export default function DevFleetPage() {
           const t0 = run.started ? run.started * 1000 : Date.now()
           const lines = run.output || []
           if (run.status === 'running') {
-            setProv((p) => ({ ...p, [name]: { status: 'running', lines, startedAt: t0 } }))
+            setProv((p) => ({ ...p, [name]: { rid, status: 'running', lines, startedAt: t0 } }))
             void pollProvisionRun(name, rid, t0, lines)
           } else if (run.exit_code !== 0) {
             // Only unsuccessful runs are exposed by the backend, but guard
             // anyway: a successful run has nothing to reattach.
-            setProv((p) => ({ ...p, [name]: { status: 'failed', failed: true, lines, startedAt: t0, exit: run.exit_code ?? null } }))
+            setProv((p) => ({ ...p, [name]: { rid, status: 'failed', failed: true, lines, startedAt: t0, exit: run.exit_code ?? null } }))
             setProvLogOpen((o) => ({ ...o, [name]: true }))
           }
         })
@@ -1126,7 +1243,7 @@ export default function DevFleetPage() {
         if (ok) {
           // Flash a brief green "Provisioned", then clear. The
           // fleet refetch flips the row to its built state in the meantime.
-          setProv((p) => ({ ...p, [name]: { status: 'done', done: true, lines, startedAt, exit: 0 } }))
+          setProv((p) => ({ ...p, [name]: { rid, status: 'done', done: true, lines, startedAt, exit: 0 } }))
           invalidateFleet()
           provDoneTimersRef.current[name] = setTimeout(() => {
             setProv((p) => { const n = { ...p }; delete n[name]; return n })
@@ -1136,7 +1253,7 @@ export default function DevFleetPage() {
           // FAILURE PERSISTENCE: keep the run, auto-expand the log, hold until
           // the user dismisses it — a multi-minute failed provision must not
           // vanish into an empty row.
-          setProv((p) => ({ ...p, [name]: { status: 'failed', failed: true, lines, startedAt, exit: run.exit_code } }))
+          setProv((p) => ({ ...p, [name]: { rid, status: 'failed', failed: true, lines, startedAt, exit: run.exit_code } }))
           setProvLogOpen((o) => ({ ...o, [name]: true }))
           invalidateFleet()
         }
@@ -1144,17 +1261,17 @@ export default function DevFleetPage() {
       }
       if (run.status !== 'running') {
         notify(run.status === 'timeout' ? i18nT('pages.devFleetPage.provision_timed_out') : i18nT('pages.devFleetPage.provision_failed_status', { status: run.status }), { type: 'error' })
-        setProv((p) => ({ ...p, [name]: { status: 'failed', failed: true, lines: lines.length ? lines : ['Provision ' + run.status], startedAt, exit: run.exit_code ?? null } }))
+        setProv((p) => ({ ...p, [name]: { rid, status: 'failed', failed: true, lines: lines.length ? lines : ['Provision ' + run.status], startedAt, exit: run.exit_code ?? null } }))
         setProvLogOpen((o) => ({ ...o, [name]: true }))
         invalidateFleet()
         return
       }
-      setProv((p) => ({ ...p, [name]: { status: 'running', lines, startedAt } }))
+      setProv((p) => ({ ...p, [name]: { rid, status: 'running', lines, startedAt } }))
     }
     // Poll budget exhausted (e.g. run id lost across a gateway restart): keep
     // the failed marker + accumulated log so the user has something to act on.
     notify(i18nT('pages.devFleetPage.provision_polling_timed_out_check_pod_logs'), { type: 'error' })
-    setProv((p) => ({ ...p, [name]: { status: 'failed', failed: true, lines: acc.length ? acc : ['Provision polling timed out \u2014 check pod logs'], startedAt, exit: null } }))
+    setProv((p) => ({ ...p, [name]: { rid, status: 'failed', failed: true, lines: acc.length ? acc : ['Provision polling timed out \u2014 check pod logs'], startedAt, exit: null } }))
     setProvLogOpen((o) => ({ ...o, [name]: true }))
     invalidateFleet()
   }
@@ -1296,7 +1413,7 @@ export default function DevFleetPage() {
   async function pruneShipped() {
     setFlag('__prune', true)
     try {
-      const r = await api.get<{ ok?: boolean; candidates?: { name: string; code?: string }[]; kept?: { name: string; code?: string; dirty?: boolean; dirty_tracked?: boolean | null; dirty_untracked?: number; dirty_untracked_paths?: string[] }[]; scanned?: number; error?: string }>('/prune-candidates')
+      const r = await api.get<{ ok?: boolean; candidates?: { name: string; code?: string; unmerged_commits?: boolean }[]; kept?: { name: string; code?: string; dirty?: boolean; dirty_tracked?: boolean | null; dirty_untracked?: number; dirty_untracked_paths?: string[] }[]; scanned?: number; error?: string }>('/prune-candidates')
       if (!r || r.ok === false) { notify(r?.error || i18nT('pages.devFleetPage.prune_preview_failed'), { type: 'error' }); return }
       const cands = r.candidates || []
       const kept = r.kept || []
@@ -1794,7 +1911,7 @@ export default function DevFleetPage() {
           <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--danger)', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4 }}><X size={12} className="lucide-inline" />{pr.exit != null ? i18nT('pages.devFleetPage.provision_failed_exit_code', { code: pr.exit }) : i18nT('pages.devFleetPage.provision_failed')}</span>
           <span style={{ ...mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } as CSSProperties} title={lastLine(pr.lines)}>{lastLine(pr.lines)}</span>
           {logToggle}
-          <Clickable aria-label={i18nT('pages.devFleetPage.dismiss_provision_status')} onClick={() => dismissProv(w.name)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 14, padding: 2 } as CSSProperties}>{"\u00d7"}</Clickable>
+          <Clickable aria-label={i18nT('pages.devFleetPage.dismiss_provision_status')} onClick={() => { void dismissProv(w.name) }} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 14, padding: 2 } as CSSProperties}>{"\u00d7"}</Clickable>
         </div>
       )
     }
@@ -1862,6 +1979,11 @@ export default function DevFleetPage() {
               ? i18nT('pages.devFleetPage.cutover_staged_run_cmd_to_finish_or_cancel', { cmd: fleet?.manual_restart || 'kirocrew restart' })
               : i18nT('pages.devFleetPage.cutover_staged_run_the_restart_command_to_finish', { cmd: fleet?.manual_restart || 'kirocrew restart' })}>{i18nT('pages.devFleetPage.restart_pending')}</Badge> : null}
             {w.summary ? <span title={w.summary} style={{ fontSize: 11.5, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: '0 1 auto' } as CSSProperties}>{w.summary}</span> : null}
+            {/* Inline system readout for a running pod: memory vs ceiling
+                (colour-shifting near MemoryMax), CPU%, task count. Absent
+                fields render nothing, so a pod the host cannot measure shows
+                no readout rather than a fake 0. */}
+            {w.running && !w.is_main ? <PodReadout r={w.pod_resources} /> : null}
           </div>
           {isMainWithStepper ? renderSyncStepper() : provActive ? renderProvStepper(w) : (
             <>
@@ -1964,14 +2086,40 @@ export default function DevFleetPage() {
     return (
       <Modal open={true} onClose={() => setPruneDialog(null)} title={i18nT('pages.devFleetPage.prune_worktrees')} maxWidth={480} footer={<><Btn onClick={() => setPruneDialog(null)}>{i18nT('pages.devFleetPage.cancel')}</Btn><Btn danger onClick={handleRemove}>{i18nT('pages.devFleetPage.remove_selected')}</Btn></>}>
         <div style={{ maxHeight: 360, overflowY: 'auto' }}>
-          {pruneDialog.candidates.length > 0 && (
+          {pruneDialog.candidates.filter((c) => c.code !== 'closed').length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 10, letterSpacing: '0.08em', color: 'var(--muted)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)', paddingBottom: 3, marginBottom: 4 }}>{i18nT('pages.devFleetPage.remove')}</div>
-              {pruneDialog.candidates.map((c) => (
+              {pruneDialog.candidates.filter((c) => c.code !== 'closed').map((c) => (
+                // eslint-disable-next-line jsx-a11y/label-has-for -- deprecated rule; the control is nested in the label and carries an aria-label, so it is properly associated.
                 <label key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: 'pointer' }}>
                   <Checkbox checked={pruneSelected.has(c.name)} onChange={(e) => setPruneSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(c.name); else next.delete(c.name); return next })} aria-label={i18nT('pages.devFleetPage.select', { name: c.name })} />
-                  <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{c.name}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{pruneVerdictLabel(c.code)}</span>
+                  <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '1 1 auto', minWidth: 0 }}>{c.name}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0, maxWidth: 'min(200px, 55%)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{pruneVerdictLabel(c.code)}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {/* Closed-PR worktrees are a DISTINCT group with its own header and
+              warning copy, never folded into the merged "Remove" list — a
+              merged tree's content is on main by definition, a closed one's is
+              not, so the operator must never mistake one for the other. Rows
+              whose branch is ahead of main carry an extra per-row alarm. */}
+          {pruneDialog.candidates.filter((c) => c.code === 'closed').length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, letterSpacing: '0.08em', color: 'var(--warn)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)', paddingBottom: 3, marginBottom: 4 }}>{i18nT('pages.devFleetPage.remove_closed_pr')}</div>
+              <p style={{ fontSize: 11, color: 'var(--muted)', margin: '0 0 6px' }}>{i18nT('pages.devFleetPage.closed_pr_not_on_main_hint')}</p>
+              {pruneDialog.candidates.filter((c) => c.code === 'closed').map((c) => (
+                // eslint-disable-next-line jsx-a11y/label-has-for -- deprecated rule; the control is nested in the label and carries an aria-label, so it is properly associated.
+                <label key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: 'pointer' }}>
+                  <Checkbox checked={pruneSelected.has(c.name)} onChange={(e) => setPruneSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(c.name); else next.delete(c.name); return next })} aria-label={i18nT('pages.devFleetPage.select', { name: c.name })} />
+                  <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '1 1 auto', minWidth: 0 }}>{c.name}</span>
+                  {/* The status must never starve the NAME: this row selects a
+                      worktree for permanent deletion, so the operator has to be
+                      able to read which one. A nowrap status with no shrink
+                      basis takes its full intrinsic width -- and a long
+                      localized string in a 320px modal then collapses the
+                      flexible name to an ellipsis. */}
+                  <span style={{ marginLeft: 'auto', fontSize: 11, color: c.unmerged_commits ? 'var(--danger)' : 'var(--muted)', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0, maxWidth: 'min(200px, 55%)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.unmerged_commits ? i18nT('pages.devFleetPage.closed_has_unmerged_commits') : pruneVerdictLabel(c.code)}</span>
                 </label>
               ))}
             </div>
@@ -1995,13 +2143,19 @@ export default function DevFleetPage() {
                 const disabled = guarded || cannotForce
                 const checked = pruneForceSelected.has(k.name)
                 return (
+                  // eslint-disable-next-line jsx-a11y/label-has-for -- deprecated rule; the control is nested in the label and carries an aria-label, so it is properly associated.
                   <label key={k.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1 }}>
                     {guarded
                       ? <span style={{ width: 13, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><ShieldAlert size={13} style={{ color: 'var(--muted)' }} /></span>
                       : <Checkbox checked={checked} disabled={cannotForce} onChange={(e) => setPruneForceSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(k.name); else next.delete(k.name); return next })} aria-label={i18nT('pages.devFleetPage.force_remove', { name: k.name })} />
                     }
-                    <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, color: checked ? 'var(--danger)' : guarded ? 'var(--muted)' : 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{k.name}</span>
-                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }} title={scratchOnly ? (k.dirty_untracked_paths ?? []).join(', ') : pruneVerdictLabel(k.code)}>
+                    <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace', fontSize: 12, color: checked ? 'var(--danger)' : guarded ? 'var(--muted)' : 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '1 1 auto', minWidth: 0 }}>{k.name}</span>
+                    {/* `min(200px, 55%)` rather than a flat 200px: a fixed cap
+                        does not scale down, so in a 320px modal the status took
+                        200px of it and the flexible name collapsed to nothing --
+                        leaving a consequence with no visible subject. The px arm
+                        keeps the roomier desktop reading. */}
+                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 'min(200px, 55%)' }} title={scratchOnly ? (k.dirty_untracked_paths ?? []).join(', ') : pruneVerdictLabel(k.code)}>
                       {guarded && i18nT('pages.devFleetPage.protected_worktree')}
                       {/* A scratch-only row shows the FILENAMES it would
                           discard, not the verdict label. Two rows can carry the
@@ -2097,6 +2251,35 @@ export default function DevFleetPage() {
               <span className="text-text-strong">{i18nT('pages.devFleetPage.prune')}</span> {i18nT('pages.devFleetPage.safely_removes_worktrees_whose_pr_has_already_me')}
             </p>
             )}
+            {/* Fleet-level totals: worktree disk, pod-home disk, and orphan
+                count — so "this needs cleaning" is legible where the operator
+                already is. Each figure renders only when the host could
+                measure it; the whole strip is hidden when none are present. */}
+            {!noFleet && fleet?.fleet_totals && (
+              fleet.fleet_totals.pod_home_bytes != null ||
+              (fleet.fleet_totals.orphan_pods != null && fleet.fleet_totals.orphan_pods > 0)
+            ) ? (
+              <div
+                data-testid="fleet-totals"
+                className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-[12px] leading-relaxed text-muted"
+                style={{ fontVariantNumeric: 'tabular-nums' } as CSSProperties}
+              >
+                {/* Worktree disk is intentionally absent here: the stat cards
+                    below already show it, sourced from the async `/disk`
+                    endpoint. Repeating it from a second measurement would give
+                    one label two numbers. */}
+                {fleet.fleet_totals.pod_home_bytes != null ? (
+                  <span title={i18nT('pages.devFleetPage.total_disk_used_by_running_pod_homes')}>
+                    <Server size={12} className="lucide-inline" /> <span className="text-text-strong">{i18nT('pages.devFleetPage.pod_home_disk', { value: fmtBytes(fleet.fleet_totals.pod_home_bytes) })}</span>
+                  </span>
+                ) : null}
+                {fleet.fleet_totals.orphan_pods != null && fleet.fleet_totals.orphan_pods > 0 ? (
+                  <span title={i18nT('pages.devFleetPage.pod_homes_left_on_disk_with_no_live_pod')} style={{ color: 'var(--warn)' } as CSSProperties}>
+                    <AlertTriangle size={12} className="lucide-inline" /> {i18nT('pages.devFleetPage.orphan_pods_label', { value: fleet.fleet_totals.orphan_pods })}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
             {!noFleet && fleet?.main_repo_inferred && fleet.main_repo && (
               <div
                 role="note"

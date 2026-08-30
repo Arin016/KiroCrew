@@ -1124,8 +1124,6 @@ class TestRegistry:
             reg.update("cd-1", id="nope")
         with pytest.raises(InstanceNotFoundError):
             reg.update("ghost", name="z")
-        reg.set_last_active("cd-1")
-        assert reg.get_last_active().id == "cd-1"
 
     def test_update_mark_last_active_is_one_mutation(self, tmp_path):
         """update(mark_last_active=True) records the auto-revive target in the
@@ -1146,7 +1144,7 @@ class TestRegistry:
     def test_remove_clears_last_active_and_reload(self, tmp_path):
         reg = self._reg(tmp_path)
         reg.add(name="CD", ssh_host="cd-1", instance_id="cd-1")
-        reg.set_last_active("cd-1")
+        reg.update("cd-1", mark_last_active=True)
         assert reg.remove("cd-1") is True
         assert reg.remove("cd-1") is False
         assert reg.get_last_active() is None
@@ -2229,6 +2227,95 @@ class TestHandlers:
         assert "token" not in _body(r)  # never serve a token we couldn't confirm
         assert "STALE_TOK" not in r.body.decode()
 
+    def test_connect_failure_promotes_the_diagnosis_verdict_to_a_top_level_code(
+        self, tmp_path, monkeypatch
+    ):
+        """A failed connect names WHICH link broke where a client can read it.
+
+        The ladder's verdict already travels in ``diagnosis.code``, but the
+        dashboard's error journal reads a top-level ``code`` — so without the
+        promotion the one field that distinguishes "cannot SSH at all" from "SSH
+        works, the remote gateway is down" never reaches the surface that offers to
+        act on it. Only a NEGATIVE verdict is promoted: the stored diagnosis is the
+        last ladder run, so a stale ``ok`` must not be published as this call's
+        reason.
+        """
+        from kiro_crew.dashboard import handlers_instances as handlers
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState, TunnelStatus
+
+        _enable(tmp_path, monkeypatch)
+        reg = self._reg(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+
+        def connect_returning(status):
+            class FakeMgr:
+                async def connect(self, iid):
+                    return status
+
+            return asyncio.run(
+                handlers.api_instances_connect(
+                    _FakeReq(_State(reg, FakeMgr()), match={"id": "cd-1"})
+                )
+            )
+
+        diagnosed = connect_returning(
+            TunnelStatus(
+                "cd-1",
+                TunnelState.ERROR,
+                error="tunnel failed",
+                diagnosis={
+                    "code": "ssh_unreachable",
+                    "ok": False,
+                    "reason": "Can't SSH to the host",
+                    "probes": [{"name": "ssh", "ok": False}],
+                },
+            )
+        )
+        assert diagnosed.status == 502 and _body(diagnosed)["code"] == "ssh_unreachable"
+
+        # No diagnosis on record — the response still names the stage that failed
+        # rather than leaving the client to parse prose.
+        undiagnosed = connect_returning(
+            TunnelStatus("cd-1", TunnelState.ERROR, error="tunnel failed")
+        )
+        assert undiagnosed.status == 502
+        assert _body(undiagnosed)["code"] == "instance_connect_failed"
+
+        # A stale healthy verdict is not this failure's reason.
+        stale_ok = connect_returning(
+            TunnelStatus(
+                "cd-1",
+                TunnelState.ERROR,
+                error="tunnel failed",
+                diagnosis={"code": "ok", "ok": True, "reason": "all good", "probes": []},
+            )
+        )
+        assert _body(stale_ok)["code"] == "instance_connect_failed"
+
+    def test_connect_missing_manager_and_unknown_id_carry_codes(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as handlers
+
+        _enable(tmp_path, monkeypatch)
+        reg = self._reg(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+
+        no_mgr = asyncio.run(
+            handlers.api_instances_connect(_FakeReq(_State(reg), match={"id": "cd-1"}))
+        )
+        assert no_mgr.status == 503
+        assert _body(no_mgr)["code"] == "instances_manager_unavailable"
+
+        class MissingMgr:
+            async def connect(self, iid):
+                raise KeyError(iid)
+
+        ghost = asyncio.run(
+            handlers.api_instances_connect(
+                _FakeReq(_State(reg, MissingMgr()), match={"id": "ghost"})
+            )
+        )
+        assert ghost.status == 404 and _body(ghost)["code"] == "instance_not_found"
+
     def test_status_404(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard import handlers_instances as handlers
 
@@ -2308,6 +2395,44 @@ class TestHandlers:
         assert asyncio.run(handlers.api_instances_add(_FakeReq(state))).status == 400
         # body not an object -> 400
         assert asyncio.run(handlers.api_instances_add(_FakeReq(state, body=["x"]))).status == 400
+
+    def test_add_error_bodies_carry_a_machine_readable_code(self, tmp_path, monkeypatch):
+        """Every add rejection names its cause in ``code``, not only in prose.
+
+        The dashboard reads this field (``utils/errorReport``'s ``parseErrorCode``)
+        to attach the failure's cause to an agent hand-off, and a first-time setup
+        rejection is exactly the case where the user cannot diagnose it alone. A
+        duplicate is kept distinct from an invalid field because the two are
+        different user actions — rename versus correct — and a client that cannot
+        tell them apart has to match on prose.
+        """
+        from kiro_crew.dashboard import handlers_instances as handlers
+
+        _enable(tmp_path, monkeypatch)
+        state = _State(self._reg(tmp_path))
+        body = {"name": "CD", "ssh_host": "cd-1-alias", "id": "cd-1"}
+        assert asyncio.run(handlers.api_instances_add(_FakeReq(state, body=body))).status == 201
+
+        dup = asyncio.run(handlers.api_instances_add(_FakeReq(state, body=body)))
+        assert dup.status == 400 and _body(dup)["code"] == "instance_duplicate"
+
+        no_json = asyncio.run(handlers.api_instances_add(_FakeReq(state)))
+        assert no_json.status == 400 and _body(no_json)["code"] == "invalid_json"
+
+        not_object = asyncio.run(handlers.api_instances_add(_FakeReq(state, body=["x"])))
+        assert not_object.status == 400 and _body(not_object)["code"] == "invalid_body"
+
+        bad_field = asyncio.run(
+            handlers.api_instances_add(
+                _FakeReq(state, body={"name": "Bad", "ssh_host": "h", "remote_port": "not-a-port"})
+            )
+        )
+        assert bad_field.status == 400 and _body(bad_field)["code"] == "invalid_field"
+
+        rejected = asyncio.run(
+            handlers.api_instances_add(_FakeReq(state, body={"name": "", "ssh_host": ""}))
+        )
+        assert rejected.status == 400 and _body(rejected)["code"] == "instance_invalid"
 
     def test_update_paths(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard import handlers_instances as handlers
@@ -6493,16 +6618,53 @@ class TestProxyHandlerPolicy:
         assert _proxy_canonical_path("api/chat") == ("api/chat", "")
         assert _proxy_canonical_path("/api/chat/") == ("api/chat", "")
 
+    def test_event_stream_prefix_is_forwarded(self):
+        """`GET /api/stream` is the out-of-turn half of the chat view: the peer's
+        own SSE broadcast, carrying session-list and slot-state changes while the
+        per-turn reply streams back from `api/chat`. It is a leaf endpoint, so
+        the bare prefix is the whole surface this row grants."""
+        from kiro_crew.dashboard.handlers_instances import _proxy_canonical_path
+
+        assert _proxy_canonical_path("api/stream") == ("api/stream", "")
+        assert _proxy_canonical_path("/api/stream/") == ("api/stream", "")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "api/ws",  # the SSE sibling: an upgrade cannot cross this proxy
+            "api/ws/stt",
+            "api/streaming",  # whole-segment match, not a string prefix
+            "api/stream-x",
+            "api/file-stream",  # a DIFFERENT endpoint that merely ends in stream
+        ],
+    )
+    def test_stream_row_does_not_admit_its_neighbours(self, raw):
+        """The row is `("api", "stream")` — whole segments, nothing adjacent.
+
+        `api/ws` is the one to keep refused on purpose: it is the same event bus
+        over WebSocket, and admitting it would require a `101 Switching
+        Protocols` to pass the reply content-type gate that exists to stop a peer
+        serving active content onto the authenticated hub origin.
+        """
+        from kiro_crew.dashboard.handlers_instances import (
+            _PROXY_PATH_DENIED_REASON,
+            _proxy_canonical_path,
+        )
+
+        path, reason = _proxy_canonical_path(raw)
+        assert path == ""
+        assert reason == _PROXY_PATH_DENIED_REASON
+
     def test_allowlist_constant_is_pinned_exactly(self):
         """Widening the proxied surface must be a REVIEWED act: this pins the
-        constant's exact value, so adding a row (e.g. the deferred api/ws)
-        fails here until the test is updated alongside it. The shape floor
-        (every row >= 2 segments, rooted at `api`) guards the fail-open edits
-        an exact pin alone would also catch — kept separate so the failure
-        message names the broken invariant."""
+        constant's exact value, so adding a row fails here until the test is
+        updated alongside it. The shape floor (every row >= 2 segments, rooted
+        at `api`) guards the fail-open edits an exact pin alone would also
+        catch — kept separate so the failure message names the broken
+        invariant."""
         from kiro_crew.dashboard.handlers_instances import _PROXY_ALLOWED_PREFIXES
 
-        assert _PROXY_ALLOWED_PREFIXES == (("api", "chat"),)
+        assert _PROXY_ALLOWED_PREFIXES == (("api", "chat"), ("api", "stream"))
         for prefix in _PROXY_ALLOWED_PREFIXES:
             # An empty row prefix-matches EVERYTHING and a one-segment row
             # restores the whole peer /api/ surface; both must be impossible.

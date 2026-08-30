@@ -17,7 +17,7 @@ const {
   SPAWN_MARKER,
 } = require("./bundle-integrity");
 const { findConfiguredDashboardPort } = require("./data-home");
-const { createTokenRetryHandler } = require("./token-retry");
+const { createTokenRetryHandler, dashboardRetryPath } = require("./token-retry");
 const { createRendererRecovery } = require("./renderer-recovery");
 const { classifyAuthBlock, defaultedPort } = require("./gateway-auth-hint");
 const { exitImmersiveModes } = require("./blocking-prompt");
@@ -3076,7 +3076,17 @@ async function showUnrecoverableGatewayError(win, port, options = {}) {
   if (win === mainWindow) { isQuitting = true; app.quit(); } else { win.destroy(); }
 }
 
-async function showLoadingThenConnect(win, backendUrl = BACKEND_URL, { reconnect = false } = {}) {
+function dashboardEntryUrl(backendUrl, initialPath = "", token = "") {
+  const target = initialPath ? new URL(initialPath, backendUrl) : new URL(backendUrl);
+  if (token) target.searchParams.set("token", token);
+  return target.toString();
+}
+
+async function showLoadingThenConnect(
+  win,
+  backendUrl = BACKEND_URL,
+  { reconnect = false, initialPath = "" } = {},
+) {
   const healthUrl = `${backendUrl}/api/status`;
   const wc = win.webContents;
   // Paint the splash in the user's chosen accent (persisted from a prior session
@@ -3109,8 +3119,8 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL, { reconnect
         // gateway is ready, then fade out and hand off to the dashboard.
         await fadeLoadingScreen(wc);
         if (win.isDestroyed()) return;
-        wc.loadURL(`${backendUrl}?token=${token}`);
-        if (backendUrl === BACKEND_URL) startLivenessMonitor(win);
+        wc.loadURL(dashboardEntryUrl(backendUrl, initialPath, token));
+        if (backendUrl === BACKEND_URL && win === mainWindow) startLivenessMonitor(win);
         return;
       }
 
@@ -3125,8 +3135,8 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL, { reconnect
 
       if (status !== 403) {
         // Not an auth block — the gateway serves without a token.
-        wc.loadURL(backendUrl);
-        if (backendUrl === BACKEND_URL) startLivenessMonitor(win);
+        wc.loadURL(dashboardEntryUrl(backendUrl, initialPath));
+        if (backendUrl === BACKEND_URL && win === mainWindow) startLivenessMonitor(win);
         return;
       }
 
@@ -3314,7 +3324,7 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL, { reconnect
         // Deliberately NOT flagged as a reconnect: every path here goes through a
         // dialog button the user just clicked, so the re-entry may raise (#6373).
         if (win.isDestroyed()) return;
-        return showLoadingThenConnect(win, backendUrl);
+        return showLoadingThenConnect(win, backendUrl, { initialPath });
       }
       // Quit
       if (win === mainWindow) {
@@ -3326,6 +3336,69 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL, { reconnect
       return;
     }
   }
+}
+
+// ── Standalone dashboard windows ──
+
+function createConnectionWindow(backendUrl, port, initialPath = "") {
+  const connOpts = {
+    width: 1280,
+    height: 860,
+    minWidth: 550,
+    minHeight: 600,
+    backgroundColor: "#0f1117",
+  };
+  // Same platform-conditional chrome as the main window (see createWindow):
+  // frameless + inset traffic lights on macOS, titleBarOverlay on Windows,
+  // frame:false on CSD-preferring Linux desktops, native frame elsewhere.
+  if (IS_MAC) connOpts.titleBarStyle = "hidden";
+  if (IS_MAC) connOpts.trafficLightPosition = trafficLightPositionForZoom(1);
+  if (IS_WINDOWS) {
+    connOpts.titleBarStyle = "hidden";
+    connOpts.autoHideMenuBar = true;
+    connOpts.titleBarOverlay = {
+      color: WINDOWS_TITLEBAR_BACKGROUND,
+      symbolColor: nativeTheme.shouldUseDarkColors
+        ? WINDOWS_TITLEBAR_SYMBOL_DARK
+        : WINDOWS_TITLEBAR_SYMBOL_LIGHT,
+      height: HEADER_CSS_PX,
+    };
+  }
+  if (LINUX_FRAMELESS) {
+    connOpts.frame = false;
+    connOpts.autoHideMenuBar = true; // same rationale as createWindow
+  }
+  const connWin = new BaseWindow(connOpts);
+  if (IS_WINDOWS && typeof connWin.setMenuBarVisibility === "function") {
+    connWin.setMenuBarVisibility(false);
+  }
+
+  setupWindowContents(connWin, backendUrl);
+
+  // `initialPath` may carry a one-shot intent ("/chat?new=1" mints a blank
+  // session), so the 403 retry must re-request where the window ACTUALLY is --
+  // replaying a consumed intent would mint a second session over the one on
+  // screen. Updated before onNavigate runs, so a 403 uses the URL that failed.
+  let retryTarget = initialPath;
+  const onNavigate = createTokenRetryHandler(async () => {
+    let token = await fetchLocalToken(backendUrl);
+    if (!token) ({ token } = await fetchRemoteToken(port));
+    if (token && !connWin.isDestroyed()) {
+      connWin.webContents.loadURL(dashboardEntryUrl(backendUrl, retryTarget, token));
+    }
+  });
+  connWin.webContents.on("did-navigate", (_e, url, httpCode) => {
+    retryTarget = dashboardRetryPath(url, backendUrl, retryTarget);
+    onNavigate(httpCode).catch((err) => console.error("Token retry failed:", err));
+  });
+
+  return connWin;
+}
+
+async function openNewSessionWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const win = createConnectionWindow(BACKEND_URL, PORT, "/chat?new=1");
+  await showLoadingThenConnect(win, BACKEND_URL, { initialPath: "/chat?new=1" });
 }
 
 // ── New Connection Window ──
@@ -3368,51 +3441,7 @@ async function openNewConnectionWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
 
     const backendUrl = `http://localhost:${port}`;
-    const connOpts = {
-      width: 1280,
-      height: 860,
-      minWidth: 550,
-      minHeight: 600,
-      backgroundColor: "#0f1117",
-    };
-    // Same platform-conditional chrome as the main window (see createWindow):
-    // frameless + inset traffic lights on macOS, titleBarOverlay on Windows,
-    // frame:false on CSD-preferring Linux desktops, native frame elsewhere.
-    if (IS_MAC) connOpts.titleBarStyle = "hidden";
-    if (IS_MAC) connOpts.trafficLightPosition = trafficLightPositionForZoom(1);
-    if (IS_WINDOWS) {
-      connOpts.titleBarStyle = "hidden";
-      connOpts.autoHideMenuBar = true;
-      connOpts.titleBarOverlay = {
-        color: WINDOWS_TITLEBAR_BACKGROUND,
-        symbolColor: nativeTheme.shouldUseDarkColors
-          ? WINDOWS_TITLEBAR_SYMBOL_DARK
-          : WINDOWS_TITLEBAR_SYMBOL_LIGHT,
-        height: HEADER_CSS_PX,
-      };
-    }
-    if (LINUX_FRAMELESS) {
-      connOpts.frame = false;
-      connOpts.autoHideMenuBar = true; // same rationale as createWindow
-    }
-    const connWin = new BaseWindow(connOpts);
-    if (IS_WINDOWS && typeof connWin.setMenuBarVisibility === "function") {
-      connWin.setMenuBarVisibility(false);
-    }
-
-    setupWindowContents(connWin, backendUrl);
-
-    const onNavigate = createTokenRetryHandler(async () => {
-      let token = await fetchLocalToken(backendUrl);
-      if (!token) ({ token } = await fetchRemoteToken(port));
-      if (token && !connWin.isDestroyed()) {
-        connWin.webContents.loadURL(`${backendUrl}?token=${token}`);
-      }
-    });
-    connWin.webContents.on("did-navigate", (_e, _url, httpCode) => {
-      onNavigate(httpCode).catch((err) => console.error("Token retry failed:", err));
-    });
-
+    const connWin = createConnectionWindow(backendUrl, port);
     // Every connection is a standalone window (tracked for menu actions).
     await showLoadingThenConnect(connWin, backendUrl);
   });
@@ -3676,6 +3705,7 @@ app.whenReady().then(async () => {
       // same persisted state createWindow() restores from.
       alwaysOnTop: !!(store.get("windowState") || {}).alwaysOnTop,
       toggleAlwaysOnTop,
+      openNewSessionWindow: () => openNewSessionWindow(),
       openNewConnectionWindow: () => openNewConnectionWindow(),
       renameCurrentWindow: () => renameCurrentWindow(),
       promptRemoteHost: () => promptRemoteHost(),

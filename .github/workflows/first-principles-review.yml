@@ -306,6 +306,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           SURFACE: ${{ steps.scope.outputs.surface }}
           CONTRACT: ${{ steps.contract.outputs.available }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
         run: |
           if [ "$HUMAN_OVERRIDE" = "true" ]; then
             OV_MARKER="<!-- first-principles-review -->"
@@ -335,10 +336,17 @@ jobs:
             echo "verdict=SKIPPED" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ "$SURFACE" = "true" ] && [ "$CONTRACT" != "true" ]; then
-            # The contract does not exist on the base commit: the lane cannot
-            # review the PR that introduces or moves it. Say so plainly rather
-            # than reporting a verdict it never produced.
+          if [ "$SURFACE" = "true" ] && [ "$CONTRACT" = "false" ]; then
+            # `false`, not just "not true": the contract step RAN and reported the
+            # contract absent from the base commit, so the lane cannot review the
+            # PR that introduces or moves it. Say so plainly rather than reporting
+            # a verdict it never produced. An EMPTY value would mean that step
+            # never ran, which is a different fact and must not be reported as a
+            # missing contract -- it falls through to the incomplete branch below.
+            # Not reachable in this lane today (the contract step runs before
+            # everything that could fail closed), but it IS reachable in
+            # fork-first-principles-review.yml, where the intent fetch sits in
+            # between; keep the two guards identical.
             echo "verdict=NO_CONTRACT" >> "$GITHUB_OUTPUT"
             {
               echo "$MARKER"
@@ -420,11 +428,23 @@ jobs:
             # NOT post the raw model/error text: it can carry internal detail
             # (AWS account ids, ARNs, endpoints, stack traces) into a public
             # comment. Post a generic, leak-safe notice; humans read the job logs.
+            # Name the cause from the model step's OWN outcome instead of
+            # asserting one: this branch is reached both when the model ran and
+            # returned nothing usable and when the model was never called at all,
+            # and "the model call errored" sent contributors to debug a call that
+            # had not happened.
+            case "${REVIEW_OUTCOME:-}" in
+              skipped) why="the review step never ran, because an earlier step in this job failed — no model call was made" ;;
+              failure) why="the review step failed" ;;
+              cancelled) why="the review step was cancelled" ;;
+              success) why="the review step completed but returned no verdict header" ;;
+              *)       why="the review step reported no outcome" ;;
+            esac
             {
               echo "$MARKER"
               echo "## First Principles Review (Fable 5) — ⚠️ could not complete"
               echo
-              echo "_The first-principles review did not produce a verdict for \`$HEAD\` (the model call errored or returned no verdict header). See the First Principles Review job logs. Advisory — does not block merge._"
+              echo "_The first-principles review did not produce a verdict for \`$HEAD\` ($why). See the First Principles Review job logs. Advisory — does not block merge._"
             } > /tmp/fp-comment.md
           fi
           # Defense-in-depth: scrub credential shapes AND AWS account ids / ARNs

@@ -35,6 +35,7 @@ import { api } from '../api/client'
 import { useBlockAssembler, maskInlineCode } from '../hooks/useBlockAssembler'
 import { usePathKind, type PathKind } from '../hooks/usePathKind'
 import { useGatewayPlatform, type GatewayPlatform } from '../hooks/useGatewayPlatform'
+import { DOUBLE_TAP_MS, DOUBLE_TAP_SLOP, DOUBLE_TAP_ZOOM } from '../hooks/usePinchZoom'
 import { fileIcon } from '../utils/fileIcons'
 import { urlTransform, ALLOWED_PROTOCOLS, WINDOWS_ABS_PATH_RE, decodeLocalPath } from '../utils/urlTransform'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -3426,6 +3427,7 @@ export function Lightbox() {
       // pinch's vertical component as pull-to-close, and the <img> pan would fight
       // the scale over the same two contacts.
       abortSwipeRef.current?.()
+      lastTapRef.current = { t: 0, x: 0, y: 0 }
       const d = dragRef.current
       if (d.active) { d.active = false; d.dragging = false; setDragging(false) }
     },
@@ -3477,6 +3479,34 @@ export function Lightbox() {
   }, [])
   // Publish it for the hook's `onPinchStart`, which is constructed above this.
   abortSwipeRef.current = abortSwipe
+
+  // ── double-tap to zoom (touch) ───────────────────────────────────────────
+  const lastTapRef = useRef({ t: 0, x: 0, y: 0 })
+  const onDoubleTap = useCallback((e: React.PointerEvent<HTMLElement>): boolean => {
+    if (e.pointerType === 'mouse') return false
+    if ((e.target as HTMLElement | null)?.closest('button')) return false
+    const now = Date.now()
+    const last = lastTapRef.current
+    const isDouble = now - last.t < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_SLOP
+    lastTapRef.current = { t: now, x: e.clientX, y: e.clientY }
+    if (!isDouble) return false
+    lastTapRef.current = { t: 0, x: 0, y: 0 }
+    suppressClickRef.current = true
+    abortSwipe()
+    const d = dragRef.current
+    if (d.active) { d.active = false; d.dragging = false; setDragging(false) }
+    if (zoomRef.current > LIGHTBOX_ZOOM_MIN) {
+      setZoom(LIGHTBOX_ZOOM_MIN)
+      setPan({ x: 0, y: 0 })
+      return true
+    }
+    const cx = window.innerWidth / 2
+    const cy = window.innerHeight / 2
+    const z = DOUBLE_TAP_ZOOM
+    setZoom(z)
+    setPan(clampPan((e.clientX - cx) * (1 - z), (e.clientY - cy) * (1 - z), z))
+    return true
+  }, [abortSwipe, clampPan, setPan, setZoom, zoomRef])
   // ── pinch-to-zoom (touch, two fingers) ───────────────────────────────────
   // Browser page zoom is off on touch across the shell (viewport meta in
   // index.html, root `touch-action` in index.css, `gesturestart` suppression in
@@ -3503,12 +3533,19 @@ export function Lightbox() {
     // cases (drag live, already zoomed) a pinch is most likely to start from.
     // The hook records the contact and, when a pinch seats, calls `onPinchStart`
     // (which drops the swipe and the <img> drag) and returns true.
-    if (trackPointerDown(e)) return
-    if (zoomRef.current > LIGHTBOX_ZOOM_MIN) return // the <img> pan owns this gesture
-    // Toolbar taps must stay taps — never start a drag from a control.
+    if (trackPointerDown(e)) {
+      lastTapRef.current = { t: 0, x: 0, y: 0 }
+      return
+    }
+    // Toolbar taps must stay taps — never start a gesture from a control.
     if ((e.target as HTMLElement | null)?.closest('button')) return
+    // A consumed double-tap changes zoom synchronously through the live ref's
+    // owner but React publishes that new value on the next render. Return now
+    // instead of consulting the still-fit ref and re-arming swipe-to-dismiss.
+    if (onDoubleTap(e)) return
+    if (zoomRef.current > LIGHTBOX_ZOOM_MIN) return // the <img> pan owns this gesture
     swipeRef.current = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, active: true, engaged: false }
-  }, [trackPointerDown, zoomRef])
+  }, [trackPointerDown, onDoubleTap, zoomRef])
   const onOverlayPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     // A live pinch consumes the move (scale + focal-anchored pan).
     if (trackPointerMove(e)) return
@@ -3523,6 +3560,7 @@ export function Lightbox() {
       if (Math.abs(dx) > Math.abs(dy)) { s.active = false; return }
       s.engaged = true
       setSwiping(true)
+      lastTapRef.current = { t: 0, x: 0, y: 0 }
     }
     // Downward travel tracks the finger 1:1; upward is rubber-banded, since
     // pulling up is not a dismiss but should not feel dead either.
@@ -3578,6 +3616,7 @@ export function Lightbox() {
   useEffect(() => {
     setSwipeY(0)
     setSwiping(false)
+    lastTapRef.current = { t: 0, x: 0, y: 0 }
     swipeRef.current.active = false
     swipeRef.current.engaged = false
     swipeRef.current.pointerId = -1
@@ -3618,8 +3657,18 @@ export function Lightbox() {
         if (cur) void downloadLightboxImage(cur.images[cur.index])
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    // CAPTURE phase, matching DiagramLightbox: dialog panels (Modal, the Radix
+    // ui/dialog family) stop bubble-phase keydown propagation so the page's
+    // global shortcuts don't fire under them, and this viewer opens ABOVE
+    // those dialogs (a README image inside SkillBrowserModal / McpBrowserModal
+    // etc). With focus still inside the dialog panel, a bubble-phase listener
+    // here never sees the key — arrows/zoom go dead while Escape still works.
+    // Capture runs before any panel handler. It also fixes Escape ordering
+    // over a Modal: this handler's preventDefault now lands BEFORE Modal's
+    // bubble-phase window listener, so its defaultPrevented skip keeps the
+    // modal open and Escape closes only the viewer.
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [isOpen, zoomIn, zoomOut])
   if (!state) return null
   const img = state.images[state.index]
@@ -3676,7 +3725,11 @@ export function Lightbox() {
             const dx = e.clientX - d.startX
             const dy = e.clientY - d.startY
             d.moved = Math.max(d.moved, Math.hypot(dx, dy))
-            if (d.moved > 4 && !d.dragging) { d.dragging = true; setDragging(true) }
+            if (d.moved > 4 && !d.dragging) {
+              d.dragging = true
+              setDragging(true)
+              lastTapRef.current = { t: 0, x: 0, y: 0 }
+            }
             setPan(clampPan(d.baseX + dx, d.baseY + dy))
           }}
           onPointerUp={endDrag}

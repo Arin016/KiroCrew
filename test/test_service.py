@@ -83,6 +83,49 @@ class TestPlatformDetection:
             assert current_platform() == Platform.UNSUPPORTED
 
 
+class TestManagedServiceMarkerDetection:
+    def test_no_installed_definition_is_not_applicable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.SYSTEMD)
+        monkeypatch.setattr(controller.linux, "UNIT_PATH", tmp_path / "missing.service")
+        assert controller.installed_service_has_managed_marker() is None
+
+    def test_systemd_definition_requires_explicit_marker(self, monkeypatch, tmp_path):
+        path = tmp_path / "kirocrew.service"
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.SYSTEMD)
+        monkeypatch.setattr(controller.linux, "UNIT_PATH", path)
+        path.write_text("[Service]\nExecStart=kirocrew gateway\n", encoding="utf-8")
+        assert controller.installed_service_has_managed_marker() is False
+        path.write_text(
+            '[Service]\nEnvironment="KIROCREW_SERVICE_MANAGED=1"\n',
+            encoding="utf-8",
+        )
+        assert controller.installed_service_has_managed_marker() is True
+
+    def test_launchd_definition_reads_environment_dictionary(self, monkeypatch, tmp_path):
+        path = tmp_path / "dev.kirocrew.gateway.plist"
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.LAUNCHD)
+        monkeypatch.setattr(controller.macos, "PLIST_PATH", path)
+        path.write_bytes(plistlib.dumps({"Label": "dev.kirocrew.gateway"}))
+        assert controller.installed_service_has_managed_marker() is False
+        path.write_bytes(
+            plistlib.dumps(
+                {"EnvironmentVariables": {"KIROCREW_SERVICE_MANAGED": "1"}}
+            )
+        )
+        assert controller.installed_service_has_managed_marker() is True
+
+    def test_malformed_launchd_definition_is_reported_stale(self, monkeypatch, tmp_path):
+        path = tmp_path / "dev.kirocrew.gateway.plist"
+        monkeypatch.setattr(controller, "current_platform", lambda: Platform.LAUNCHD)
+        monkeypatch.setattr(controller.macos, "PLIST_PATH", path)
+        path.write_text(
+            "<plist><dict><key>Label</key><string>Kiro & Crew</string></dict></plist>",
+            encoding="utf-8",
+        )
+
+        assert controller.installed_service_has_managed_marker() is False
+
+
 class TestShutdownBudget:
     def test_service_deadline_covers_gateway_grace(self):
         from kiro_crew.gateway_shutdown_budget import (
@@ -169,9 +212,17 @@ class TestLinuxUnitRendering:
         assert 'Environment="USER=tester"\n' in unit
         assert 'Environment="HOME=' in unit
         assert 'Environment="PATH=' in unit
+        assert 'Environment="KIROCREW_SERVICE_MANAGED=1"\n' in unit
         service = unit.index("[Service]")
         install = unit.index("[Install]")
-        for key in ("HOME", "USER", "PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        for key in (
+            "HOME",
+            "USER",
+            "PATH",
+            "KIROCREW_SERVICE_MANAGED",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ):
             at = unit.index(f'Environment="{key}=')
             assert service < at < install, f"Environment={key} escaped [Service]"
         assert unit.index('Environment="PATH=') < unit.index('Environment="XDG_RUNTIME_DIR=')
@@ -207,6 +258,7 @@ class TestLinuxUnitRendering:
         keys = set(service_environment("/home/tester"))
         assert "XDG_RUNTIME_DIR" not in keys
         assert "DBUS_SESSION_BUS_ADDRESS" not in keys
+        assert service_environment("/home/tester")["KIROCREW_SERVICE_MANAGED"] == "1"
 
     def test_current_uid_returns_none_for_an_unknown_user(self):
         from kiro_crew.service import linux as svc_linux
@@ -1698,6 +1750,7 @@ class TestServiceEnvironment:
             plist = svc_macos.render_plist()
         envs = plist.split("<key>EnvironmentVariables</key>", 1)[1].split("</dict>", 1)[0]
         assert "<key>KIROCREW_PORT</key>" in envs and "<string>5477</string>" in envs
+        assert "<key>KIROCREW_SERVICE_MANAGED</key>" in envs
 
         monkeypatch.setenv("USER", "tester")
         gid = MagicMock(returncode=0, stdout="staff\n", stderr="")
@@ -1706,6 +1759,7 @@ class TestServiceEnvironment:
         ), patch("kiro_crew.service.linux.subprocess.run", return_value=gid):
             unit = svc_linux.render_unit()
         assert "KIROCREW_PORT=5477" in unit
+        assert "KIROCREW_SERVICE_MANAGED=1" in unit
 
     def test_propagates_kiro_bin_pin_only_when_set(self, monkeypatch):
         monkeypatch.delenv("KIROCREW_KIRO_BIN", raising=False)

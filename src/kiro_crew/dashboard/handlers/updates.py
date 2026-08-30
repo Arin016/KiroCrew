@@ -122,6 +122,11 @@ _update_info: dict[str, object] = {
     #: can run on itself. Carried on the wire so the SPA never renders an Arm
     #: button that the arm endpoint would 409.
     "can_arm": False,
+    #: Is the RUNNING build ahead of what the FOLLOWED channel publishes? See
+    #: :func:`_channel_move_pending`. Set only by a successful feed check, so a
+    #: feedless layout (git checkout, desktop bundle, container) and every
+    #: unchecked or failed check leave it False.
+    "channel_move_pending": False,
 }
 #: Bumped whenever the thing a check is computed AGAINST changes (today: a channel
 #: switch). A check already talking to the OLD channel's feed cannot be cancelled,
@@ -203,15 +208,54 @@ def _display_version(version: str, channel: str) -> str:
     event loop. DISPLAY ONLY -- every version COMPARISON (``_is_newer``,
     ``update_required``, the feed check) still uses the raw ``__version__``, so
     folding here can never make a client miscompare or loop on updates.
+
+    Correct for a version the followed channel actually PUBLISHES, which is what
+    every caller passes for a REMOTE version. For the RUNNING build, go through
+    :func:`_display_local_version`, which additionally refuses to fold bytes the
+    stable lane has never shipped -- see ``channel_move_pending``.
     """
     return base_version(version) if channel == "stable" else version
+
+
+def _channel_move_pending() -> bool:
+    """Is the RUNNING build ahead of what the followed channel publishes?
+
+    True means the followed lane has never shipped these bytes, so this install
+    is not ON that lane no matter what its ``channel`` file says: flipping the
+    switcher to stable while running an insider build (``0.5.0rc3`` against a
+    stable feed at ``0.4.1rc1``) is exactly this state, and it is only left by
+    re-running the installer for the chosen channel.
+
+    Derived from the FEED's own answer rather than from the version string's
+    prerelease stamp, and that is the whole point. Promotion never re-stamps, so
+    the stable lane's current release IS ``0.4.1rc1`` -- a stamp-based rule
+    ("insider-looking bytes mean an insider install") therefore misreads the
+    entire promoted-stable population as mid-switch, which is the false positive
+    this predicate replaces. A stable install merely running BEHIND (``0.4.0rc14``
+    against a feed at ``0.4.1rc1``) is not newer, so it is not a move: it is an
+    ordinary available update, and ``update_available`` already says so.
+
+    False whenever no feed answer exists -- an unchecked, failed, or feedless
+    layout (a git checkout, a desktop bundle, a container) must never be told it
+    is mid-switch on the strength of a comparison that never happened.
+    """
+    return bool(_update_info.get("channel_move_pending"))
 
 
 def _display_local_version() -> str:
     """``_local_version`` folded for display, keyed on the off-loop channel that
     a prior ``_do_update_check`` resolved into ``_update_info`` -- a plain dict
     read, so this stays off the event loop.
+
+    A pending channel move SUPPRESSES the fold. The fold's premise is that a
+    prerelease-looking stamp on a stable install is a promoted candidate, so the
+    clean base is the honest label; that premise fails for a build the stable
+    lane never published. Folding there renamed a running ``0.5.0rc3`` insider
+    build to ``0.5.0`` the moment the switcher was flipped to stable -- claiming
+    a stable release that does not exist, next to an "up to date" badge.
     """
+    if _channel_move_pending():
+        return _local_version
     return _display_version(_local_version, str(_update_info.get("channel") or ""))
 
 
@@ -224,17 +268,17 @@ def _feed_requires_update() -> bool:
     an update it cannot prove is needed.
 
     The local version is folded per channel before the comparison (the same
-    rule as ``_display_version``): a promoted STABLE build keeps its soaked
-    candidate's prerelease stamp (``0.3.0rc13`` IS the ``0.3.0`` release), so
-    comparing the raw stamp against a bare floor of ``0.3.0`` would force an
-    update onto the very build the floor names. On insider/nightly the stamp
-    is a real prerelease and stays significant.
+    rule as ``_display_local_version``, delegated to it so the two cannot
+    drift): a promoted STABLE build keeps its soaked candidate's prerelease
+    stamp (``0.3.0rc13`` IS the ``0.3.0`` release), so comparing the raw stamp
+    against a bare floor of ``0.3.0`` would force an update onto the very build
+    the floor names. On insider/nightly the stamp is a real prerelease and stays
+    significant.
     """
     floor = _update_info.get("feed_min_version")
     if not isinstance(floor, str) or not floor:
         return False
-    local = _display_version(_local_version, str(_update_info.get("channel") or ""))
-    return _is_newer(floor, local) is True
+    return _is_newer(floor, _display_local_version()) is True
 
 
 def _effective_update_required() -> bool:
@@ -307,6 +351,14 @@ def status_update_fields() -> dict[str, object]:
             str(_update_info.get("channel") or ""),
         ),
         "update_channel": str(_update_info.get("channel") or ""),
+        # Is the running build ahead of everything the FOLLOWED channel
+        # publishes? The panel keys its "you must re-run the installer to move
+        # onto this lane" copy on this rather than on a comparison of
+        # ``update_channel`` against the version-derived ``release_channel``:
+        # promotion never re-stamps, so every promoted-stable install looks
+        # insider-stamped and read as permanently mid-switch. See
+        # ``_channel_move_pending``.
+        "update_channel_move_pending": _channel_move_pending(),
         # The panel needs WHO manages the update to speak honestly: a
         # command-managed host must not render the self-managed installer
         # instructions its policy exists to bypass.
@@ -528,6 +580,7 @@ def _set_update_info(**fields: object) -> None:
             "unavailable_reason": None,
             "remediation": None,
             "can_arm": False,
+            "channel_move_pending": False,
         }
     )
     _update_info.update(fields)
@@ -1108,6 +1161,12 @@ async def _check_release_feed(capability: UpdateCapability) -> None:
         # the two agree by construction. Reported anyway so the field means the
         # same thing on every layout and no consumer has to special-case one.
         version_newer=available,
+        # The other direction of the same comparison, and the only place it can
+        # honestly be computed: the running build is ahead of everything this
+        # lane publishes, so the lane never shipped it. Written from the same
+        # response as the verdict so a consumer can never pair one channel's
+        # move state with another channel's version.
+        channel_move_pending=_is_newer(_local_version, remote_version) is True,
         check_status=CHECK_SUCCEEDED,
         **extra,
     )

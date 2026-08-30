@@ -61,7 +61,38 @@ A nonempty text or Markdown file is accepted. The runner sends its content to th
 
 ## Tool Approval
 
-Runs launched from the dashboard, chat, or Slack can request interactive tool approval. `kirocrew run TASK.md` has no interactive approval surface and rejects tool calls unless they match `hooks.auto_approve_tools`; deny rules always win. Scope allowlist patterns to the tools the task needs rather than using a blanket `*`.
+Approval depends on how the run was launched:
+
+- **Dashboard / chat `run` / Slack `run`** (inside the gateway): tool calls that aren't allow/deny-listed **prompt** interactively.
+- **`kirocrew run TASK.md`** (standalone CLI): no interactive channel, so it's **deny-by-default** — a tool runs only if it matches `hooks.auto_approve_tools`; otherwise it's rejected and logged with `reason: headless_no_authorization`. (`TOOL_DENY` / `auto_deny_tools` always wins; the allowlist works with or without a handler.)
+
+During **step execution**, an allowlisted **shell** tool is additionally
+verified before the grant is honoured: each program name in the command must
+still resolve to the program it appears to name. A name that is shadowed on
+`PATH`, resolves inside a tree the agent can write (the project checkout,
+`.venv/bin`, `node_modules/.bin`), or has never been identified by a dashboard
+approval is declined — interactively launched runs fall back to the prompt;
+headless runs record the decline as `reason: name_grant` with the refusal
+code, then reject the tool as `reason: headless_no_authorization` (the same
+deny-by-default row as an unmatched tool). On Windows this verification cannot
+model the shell's lookup at all, so headless shell auto-approve is declined
+entirely there. This is deliberate: an unattended run is exactly where a
+planted `~/.local/bin/head` would otherwise inherit the grant with nobody
+watching. Programs the system directories carry (`/usr/bin/pytest` installed
+system-wide) keep auto-approving; a project-local `.venv/bin/pytest` needs the
+interactive prompt (or a dashboard-approved identity) instead.
+
+To let `kirocrew run` use tools, allowlist them in `~/.kiro/crew/config.json`:
+
+```json
+{
+  "hooks": {
+    "auto_approve_tools": ["read", "Reading *", "Running: pytest *", "fs_write"]
+  }
+}
+```
+
+Patterns match the tool title with or without the `Running: `/`Reading ` prefix and support `*` globs. Scope it to the tools the task needs — a blanket `*` re-opens the gap. Or run from the dashboard to approve interactively instead.
 
 ## Progress Tracking
 

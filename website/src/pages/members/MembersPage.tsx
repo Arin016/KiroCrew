@@ -25,11 +25,14 @@ import { ArrowLeft, Pencil, Users, X } from 'lucide-react'
 import { PanelRightSolid } from '../../components/icons/panels'
 import { useTranslation } from 'react-i18next'
 import { api, type MemberRosterRow } from '../../api/client'
-import { useAppSelector } from '../../store'
+import { useAppDispatch, useAppSelector } from '../../store'
+import { markSlotRead } from '../../store/dashboardSlice'
 import CrewAvatar from '../../components/CrewAvatar'
 import ChatPane from '../../components/ChatPane'
 import ErrorBoundary from '../../components/ErrorBoundary'
 import { SearchInput } from '../../components/ui'
+import { AnimatePresence, motion } from 'framer-motion'
+import { sidePanelDockMotion } from '../chat/sidePanelMount'
 import ResizeHandle from '../../components/ResizeHandle'
 import { useColumnResize } from '../../hooks/useColumnResize'
 import { loadColumnWidth } from '../../lib/columnWidth'
@@ -121,6 +124,9 @@ export default function MembersPage() {
   // members fall to the bottom alphabetically. Sorted once from the roster
   // snapshot — live re-sorting mid-session would move rows under the cursor.
   const [filter, setFilter] = useState('')
+  // The chat side panel's right-dock mount preset — module-pure, so one
+  // constant serves every render.
+  const drawerMotion = sidePanelDockMotion('right')
   const sortedMembers = useMemo(() => {
     const ordered = [...members].sort(
       (a, b) =>
@@ -131,6 +137,36 @@ export default function MembersPage() {
   }, [members, filter])
   const activeSlot = active ? slots[active.name] ?? '' : ''
   const activeError = active ? errors[active.name] ?? '' : ''
+
+  // Mounting a member thread IS reading it, but nothing on this page moves
+  // `chat.activeSlot` (that transition belongs to the Sessions page's
+  // switchSlot, the only other markSlotRead caller), so the websocket
+  // unread-marker keeps flagging this slot even while the user is looking at
+  // it. Drain it here instead: once when the thread opens, and again every
+  // time a live message re-flags the mounted thread. Without this the rail
+  // badge is permanent — no code path clears a live member slot's unread
+  // until the slot itself is deleted.
+  const dispatch = useAppDispatch()
+  const activeSlotUnread = useAppSelector(
+    (s) => !!activeSlot && s.dashboard.unreadSlots.includes(activeSlot),
+  )
+  useEffect(() => {
+    if (activeSlot && activeSlotUnread) dispatch(markSlotRead(activeSlot))
+  }, [activeSlot, activeSlotUnread, dispatch])
+
+  // Per-row unread marker: the rail badge says "1", this says WHICH member.
+  // Keyed the same way isRunning resolves a member's slot (thread-endpoint
+  // cache first, roster binding as the cold-start fallback), and read straight
+  // from unreadSlots so the drain effect above clears the dot the moment the
+  // thread is opened.
+  const unreadSlots = useAppSelector((s) => s.dashboard.unreadSlots)
+  const isUnread = useCallback(
+    (m: MemberRosterRow) => {
+      const key = slots[m.name] || m.slot_key
+      return !!key && unreadSlots.includes(key)
+    },
+    [slots, unreadSlots],
+  )
 
   const openMember = useCallback(
     (m: MemberRosterRow) => {
@@ -251,12 +287,16 @@ export default function MembersPage() {
               >
                 <span className="relative shrink-0">
                   <CrewAvatar seed={m.name} size={36} />
-                  <span
-                    className={`absolute -right-0.5 -bottom-0.5 w-2.5 h-2.5 rounded-full border-2 border-bg ${
-                      isRunning(m) ? 'bg-ok' : 'bg-muted/50'
-                    }`}
-                    aria-hidden="true"
-                  />
+                  {/* Presence dot renders only while the member is working —
+                      an idle member shows nothing rather than a gray dot,
+                      which read as a broken/disabled state. */}
+                  {isRunning(m) && (
+                    <span
+                      className="absolute -right-0.5 -bottom-0.5 w-2.5 h-2.5 rounded-full border-2 border-bg bg-ok"
+                      aria-hidden="true"
+                      data-testid="member-presence-dot"
+                    />
+                  )}
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-[13px] font-medium truncate">{m.name}</span>
@@ -267,6 +307,22 @@ export default function MembersPage() {
                     {m.last_message || '\u00a0'}
                   </span>
                 </span>
+                {/* Unread marker on the row's right edge — the IM convention
+                    (and where the rail badge sits), vertically centered by the
+                    row's items-center. Accent-filled w-2 h-2 like ChatSidebar's
+                    unread dot, with a real accessible name: nothing else on
+                    the row says "unread". The left side is taken — presence
+                    rides the avatar. */}
+                {isUnread(m) && (
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ background: 'var(--accent)' }}
+                    role="img"
+                    aria-label={t('pages.membersPage.unread_message')}
+                    title={t('pages.membersPage.unread_message')}
+                    data-testid="member-unread-dot"
+                  />
+                )}
               </button>
             </li>
           ))}
@@ -354,14 +410,28 @@ export default function MembersPage() {
 
       {/* Detail drawer — read-only observation; writes live in the crew manager.
           Below md it overlays the thread instead of claiming 300px of row
-          width, and it starts closed there (the width-gated useState above). */}
-      {active && drawerOpen && (
-        <aside
-          id="member-drawer"
-          className="fixed top-safe bottom-safe right-safe z-40 w-[300px] max-w-full bg-bg-elevated border-l border-border p-4 overflow-y-auto md:static md:z-auto md:shrink-0 md:border md:rounded-xl md:shadow-sm"
-          data-testid="member-drawer"
-          aria-label={t('pages.membersPage.details')}
-        >
+          width, and it starts closed there (the width-gated useState above).
+          Mount/unmount reuses the chat page's side-panel motion preset
+          (sidePanelDockMotion + the same 0.18s ease), so the two right panels
+          open with one gesture AND one animation. On mobile the aside is
+          position:fixed (out of flow), so the width tween is inert there and
+          only the opacity fade applies — acceptable, not a defect. */}
+      <AnimatePresence>
+        {active && drawerOpen && (
+          <motion.div
+            key="member-drawer-motion"
+            initial={drawerMotion.initial}
+            animate={drawerMotion.animate}
+            exit={drawerMotion.exit}
+            transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
+            className="h-full overflow-visible flex justify-end md:shrink-0"
+          >
+            <aside
+              id="member-drawer"
+              className="fixed top-safe bottom-safe right-safe z-40 w-[300px] max-w-full bg-bg-elevated border-l border-border p-4 overflow-y-auto md:static md:z-auto md:shrink-0 md:border md:rounded-xl md:shadow-sm"
+              data-testid="member-drawer"
+              aria-label={t('pages.membersPage.details')}
+            >
           <div className="flex items-center mb-2">
             <div className="text-[11px] font-semibold tracking-wide text-muted flex-1">
               {t('pages.membersPage.configuration')}
@@ -415,7 +485,9 @@ export default function MembersPage() {
             {t('pages.membersPage.edit_in_crew_manager')}
           </button>
         </aside>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

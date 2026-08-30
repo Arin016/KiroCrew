@@ -1145,7 +1145,7 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "Auto Triage Pipeline dashboard strings",
-        "apps/builtins/auto_triage_pipeline/backend/pipeline_fold.py",
+        "apps/builtins/issue_radar/backend/pipeline_fold.py",
         "Every string this read-only fold hands to its routes -- issue titles, "
         "assignee and author logins, labels, event names, slot keys -- funnels "
         "through one `_printable` helper before serialization, and the routes render "
@@ -1204,6 +1204,12 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # hygiene so a response echoing a credential or exfiltration URL cannot
         # leak into the log ring / /api/logs stream; not an egress boundary.
         "task_planner.py",
+        # Audit-side log hygiene: log_decline scrubs the model-authored tool
+        # title before writing the shared auto_approve_declined SEL row. The
+        # audit log is a gate-side record, not an output bound for a human or
+        # a third party — the surfaces that SHOW a refusal (the dashboard's
+        # notice line) are the registered sinks.
+        "name_grant.py",
         # The shared recursive redactor helper itself — a pure scrubber, not an
         # egress boundary; the modules that CALL it (mochi routes/hooks) are the
         # registered sinks.
@@ -1516,6 +1522,11 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         "apps/builtins/dev_fleet/server.py",
         "apps/builtins/issue_radar/backend/routes.py",
         "apps/builtins/meetings/backend/domain/session.py",
+        # Live translation redacts the MODEL's answer before writing it to the
+        # meeting's translations.json. The source line was already redacted at
+        # dispatch, so this covers only what a model reintroduced, and the
+        # user-visible surface is the app's own translations route.
+        "apps/builtins/meetings/backend/domain/translate.py",
         "apps/builtins/meetings/backend/providers/calendar.py",
         "apps/builtins/meetings/backend/providers/tasks.py",
         "apps/builtins/meetings/backend/routes/agents.py",

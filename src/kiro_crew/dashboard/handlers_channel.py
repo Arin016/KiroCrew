@@ -290,15 +290,32 @@ async def api_channel_post(request: web.Request) -> web.Response:
     content = raw_content.strip()[:10000]
     if not content:
         return web.json_response({"error": "content required"}, status=400)
-    # Validate mentions
+    # Validate mentions. Membership is a dict lookup, so an unhashable value
+    # here raises TypeError rather than simply failing to match.
     raw_mention = body.get("mention")
-    if raw_mention:
+    if raw_mention is not None:
         if isinstance(raw_mention, list):
-            raw_mention = [m for m in raw_mention if m in ch.members]
+            if not all(isinstance(name, str) for name in raw_mention):
+                return _agent_field_error(
+                    "mention entries must be strings",
+                    "channel_message_mention_type_invalid",
+                )
+            raw_mention = [name for name in raw_mention if name in ch.members]
+        elif not isinstance(raw_mention, str):
+            return _agent_field_error(
+                "mention must be a string or an array of strings",
+                "channel_message_mention_type_invalid",
+            )
         elif raw_mention not in ch.members:
             raw_mention = None
     # Validate thread_id
     thread_id = body.get("thread_id")
+    if thread_id is not None:
+        if not isinstance(thread_id, str):
+            return _agent_field_error(
+                "thread_id must be a string",
+                "channel_message_thread_id_type_invalid",
+            )
     if thread_id and thread_id not in ch._msg_index:
         thread_id = None
     msg = await ch.post(

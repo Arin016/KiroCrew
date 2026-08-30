@@ -213,12 +213,12 @@ def _provider_effectively_alive(provider: Any) -> bool:
     the won-race re-validate). The in-lock live fast path keeps its own inline
     copy of this decision because it also evicts the stale entry and emits
     path-specific logging; that copy must stay in sync with this helper.
+
+    Read straight off the declared ABC: ``LLMProvider.is_process_alive``
+    defaults to ``is_alive()``, so every provider answers the call and no
+    capability probe is needed (harness-parity H14).
     """
-    alive = (
-        provider.is_process_alive()
-        if hasattr(provider, "is_process_alive")
-        else provider.is_alive()
-    )
+    alive = provider.is_process_alive()
     if (
         not alive
         and ClaudeCodeProvider is not None
@@ -1992,12 +1992,16 @@ class SessionManager:
         own the runtime (and the key is not the runtime's parent key),
         ``reset`` terminates only this session — the shared runtime survives and
         is freed once via ``release_subagent_runtime(parent_session_key)`` at run
-        end/cancel.
+        end/cancel. Descriptor-bound macOS runtimes are the exception: a step
+        requesting a different exact cwd uses a dedicated provider, because ACP's
+        string-only cwd cannot safely name a later descendant through the fd the
+        shared child inherited.
 
         Returns ``(provider, is_new, resumed)`` mirroring ``get_or_create``.
         Acquires the per-session semaphore; the caller MUST ``release`` it.
         """
         # circular import: session -> acp.session_provider -> acp.client -> session
+        from kiro_crew.acp.runtime import AcpWorkspaceBindingError
         from kiro_crew.acp.session_provider import AcpSessionProvider
 
         key = self._fold_key(session_key)
@@ -2030,7 +2034,20 @@ class SessionManager:
         # I/O (get_subagent_runtime spawn + create_session) is kept OUTSIDE the
         # global lock to avoid pinning it across subprocess/RPC work.
         runtime = await self._get_or_bootstrap_run_runtime(parent_session_key, agent=agent, cwd=cwd)
-        handle = await runtime.create_session(cwd=cwd or None, agent=agent or None)
+        try:
+            handle = await runtime.create_session(cwd=cwd or None, agent=agent or None)
+        except AcpWorkspaceBindingError:
+            # A macOS runtime passes an exact workspace descriptor to its child
+            # at spawn.  ACP accepts only a cwd string, so a later descendant
+            # cannot be represented without reopening mutable pathname lookup.
+            # Preserve the requested cwd by using the normal dedicated-provider
+            # path, which spawns and binds a runtime at that exact directory.
+            return await self.get_or_create(
+                key,
+                agent=agent,
+                approval_policy=approval_policy,
+                cwd=cwd,
+            )
         provider = AcpSessionProvider(handle, runtime)
 
         dup: LLMProvider | None = None
@@ -2266,7 +2283,7 @@ class SessionManager:
             still_alive = platform_compat.pid_exists(pid)
         else:
             try:
-                still_alive = hasattr(provider, "is_process_alive") and provider.is_process_alive()
+                still_alive = provider.is_process_alive()
             except Exception:
                 still_alive = False
         if still_alive:
@@ -2344,9 +2361,7 @@ class SessionManager:
                 # healthy provider is routine (INFO); one that also died before
                 # aging out is a genuine anomaly and keeps WARNING.
                 try:
-                    ttl_alive = (
-                        hasattr(provider, "is_process_alive") and provider.is_process_alive()
-                    )
+                    ttl_alive = provider.is_process_alive()
                 except Exception:
                     ttl_alive = False
                 ttl_log = logger.info if ttl_alive else logger.warning
@@ -2363,9 +2378,9 @@ class SessionManager:
             # which has a 600s stale-activity threshold.  Pool processes are
             # expected to be idle (no I/O after init) so the stale check would
             # falsely discard healthy processes after ~10 min.
-            alive = hasattr(provider, "is_process_alive") and provider.is_process_alive()
+            alive = provider.is_process_alive()
             if not alive:
-                rc = provider.exit_code if hasattr(provider, "exit_code") else None
+                rc = provider.exit_code
                 logger.warning(
                     "Warm pool: claimed provider is dead (returncode=%s), discarding", rc
                 )
@@ -2497,9 +2512,7 @@ class SessionManager:
                     # anomaly: keep the pre-existing WARNING for it (same
                     # message, same discard path — severity only).
                     try:
-                        ttl_alive = (
-                            hasattr(provider, "is_process_alive") and provider.is_process_alive()
-                        )
+                        ttl_alive = provider.is_process_alive()
                     except Exception:
                         ttl_alive = False
                     ttl_log = logger.info if ttl_alive else logger.warning
@@ -2512,11 +2525,11 @@ class SessionManager:
                     to_shutdown.append(provider)
                     continue
                 try:
-                    alive = hasattr(provider, "is_process_alive") and provider.is_process_alive()
+                    alive = provider.is_process_alive()
                 except Exception:
                     alive = False
                 if not alive:
-                    rc = provider.exit_code if hasattr(provider, "exit_code") else None
+                    rc = provider.exit_code
                     logger.warning(
                         "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), discarding",
                         pid,
@@ -2705,8 +2718,9 @@ class SessionManager:
           mtime, so entries also expire after ``_AGENT_MODEL_CACHE_TTL`` seconds
           and are re-resolved.
         """
+        agents_dir = kiro_agents_dir_path()
         try:
-            dir_mtime = kiro_agents_dir_path().stat().st_mtime
+            dir_mtime = agents_dir.stat().st_mtime
         except OSError:
             dir_mtime = 0.0
         now = time.monotonic()
@@ -2723,22 +2737,20 @@ class SessionManager:
 
         model = "auto"
         try:
-            for af in kiro_agents_dir_path().glob("*.json"):
-                # The hardened, size-capped reader, same as every other spec
-                # read: the agents directory is user-writable and shared with
-                # other tools, and this result is cached and served to
-                # ``/api/sessions/context``. It also supplies the malformed- and
-                # non-object-JSON skip this loop needs.
-                ad = _read_agent_spec(af)
-                if ad is None:
+            # Use the SAME directory as the cache stamp and preserve the former
+            # native-order, first-match scan.  This runs on the event-loop
+            # thread, so a match must stop all later spec reads rather than
+            # building a full map on every cache miss / TTL expiry.
+            for agent_file in agents_dir.glob("*.json"):
+                data = _read_agent_spec(
+                    agent_file,
+                    operation="resolve_agent_model",
+                    source="unknown",
+                )
+                if data is None:
                     continue
-                if ad.get("name") == agent or af.stem == agent:
-                    # Coerced, not raw: this method is annotated ``-> str`` and
-                    # its result is CACHED, fed to ``/api/sessions/context``
-                    # (where the dashboard calls ``.replace()`` on it) and
-                    # compared/translated as a model id in ``claim_pooled``. A
-                    # foreign spec's ``{"id": ...}`` would poison all three.
-                    model = spec_model(ad)
+                if data.get("name") == agent or agent_file.stem == agent:
+                    model = spec_model(data)
                     break
         except Exception:
             pass
@@ -2982,10 +2994,9 @@ class SessionManager:
                     # with is_new=True — ensuring full context re-injection.
                     # Use process-level check, not is_alive() which has a 600s
                     # stale-activity threshold that falsely kills idle sessions.
-                    if hasattr(sess.provider, "is_process_alive"):
-                        _alive = sess.provider.is_process_alive()
-                    else:
-                        _alive = sess.provider.is_alive()
+                    # The ABC defaults is_process_alive to is_alive(), so the
+                    # direct call needs no capability probe.
+                    _alive = sess.provider.is_process_alive()
                     if not _alive:
                         # CC per_session: process died but session state is on
                         # disk — reconnect transparently instead of removing.
@@ -5500,10 +5511,10 @@ class SessionManager:
         if sess is None:
             return None
         # Use process-level check, not is_alive() which has a 600s
-        # stale-activity threshold that falsely kills idle sessions.
-        if hasattr(sess.provider, "is_process_alive"):
-            return sess.provider.is_process_alive()
-        return sess.provider.is_alive()
+        # stale-activity threshold that falsely kills idle sessions. The ABC
+        # defaults is_process_alive to is_alive(), so the direct call needs
+        # no capability probe.
+        return sess.provider.is_process_alive()
 
     def get_approval_policy(self, key: str) -> str:
         """Return the approval policy for a session, or empty string."""
@@ -5768,9 +5779,6 @@ class SessionManager:
     def max_generation(self, bucket: str) -> int:
         """Highest persisted DM generation for a session bucket (see SessionMap)."""
         return self._session_map.max_generation(bucket)
-
-    def delete_session_map_entry(self, key: str) -> None:
-        self._session_map.delete(key)
 
     async def set_thread(self, key: str, thread_ts: str) -> None:
         """Set thread for a session. Prefer set_slack_link for new code."""

@@ -179,6 +179,7 @@ import { useVoiceInput, voiceInputSupported, type TranscriptOrigin } from '../ho
 import { usePushToTalk } from '../hooks/usePushToTalk'
 import VoiceDisabledModal from '../components/VoiceDisabledModal'
 import { ChatFooter, AssistantMessage, UserMessage, PinnedPrompt } from './chat'
+import { useStreamIdle } from './chat/ChatFooter'
 import type { TurnStats } from './chat/AssistantMessage'
 import { turnHadPolicyBlock } from '../app-sdk/turnPolicyBlock'
 import MarkdownRenderer from '../components/MarkdownRenderer'
@@ -191,11 +192,12 @@ import SubagentProgressBar from './chat/SubagentProgressBar'
 import TaskProgressBar from './chat/TaskProgressBar'
 import SidePanel, { CHAT_PANE_MIN_W, sidePanelFillWidth } from './chat/SidePanel'
 import { useSidePanelDock } from '../hooks/useSidePanelDock'
-import { groupDisplayItems, applyRunningState, hasReasoningContent, isReasoningRole } from './chat/groupDisplayItems'
+import { createTurnGrouper, applyRunningState, hasReasoningContent, isReasoningRole } from './chat/groupDisplayItems'
 import { setSessionPreviewPending, normalizeUrl, PREVIEW_EXPAND_EVENT, PREVIEW_SNIP_EVENT } from '../components/WebPreviewPanel'
 import { detectPreviewUrl, previewFeedDecision } from '../utils/detectPreviewUrl'
 import { fileLandingSlot } from '../utils/uploadRouting'
-import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
+import ChatSidebar from './ChatSidebar'
+import { SIDEBAR_MIN, SIDEBAR_MAX, clampSidebarWidth } from './chat/sidebarWidth'
 import { toSlug, resolveMsgIndex } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, mergeIntoDraft, mergeRecoveredDraft, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
 import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } from '../utils/chatFileDrafts'
@@ -387,6 +389,15 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: 
  *  suffix is as reload-stable as the key it disambiguates. Rows without a
  *  `mid` (locally-minted streaming/optimistic bubbles) fall back to `msgKey`
  *  alone, which is exactly the uniqueness they had before. */
+/** Client-generated one-shot correlation id for an optimistic user bubble.
+ *  The server preserves meta fields on the user row it appends, so an echo or
+ *  transcript page carries this id back and the bubble is matchable without
+ *  relying on content equality (#2845). Shared by the plain send path and the
+ *  mid-turn steer path (#6075) so the two cannot drift in id shape. */
+function mintSendId(): string {
+  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 function msgIdentityKey(m: ChatMessage, msgKey: (m: ChatMessage) => string): string {
   const mid = m.meta?.mid
   return typeof mid === 'string' && mid ? `${msgKey(m)}~${mid}` : msgKey(m)
@@ -1222,7 +1233,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // Mid-turn steer is a POST write, so it goes through useMutation for
   // consistent error/loading-state handling (fire-and-forget: no onSuccess).
   const steerMutation = useMutation({
-    mutationFn: (text: string) => api.steerChat(text, activeSlot!),
+    mutationFn: ({ text, sendId }: { text: string; sendId?: string }) => api.steerChat(text, activeSlot!, sendId),
     onError: (e) => { console.error('steer failed', e) },
   })
   const [reasoningEffortDropdown, setReasoningEffortDropdown] = useState(false)
@@ -3694,19 +3705,46 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // still stuck at 'POP'.
   const lastLocKeyRef = useRef<string | null>(null)
   const [sidError, setSidError] = useState('')
+  const [newSlotFailed, setNewSlotFailed] = useState(false)
   const [highlightTs, setHighlightTs] = useState<string | null>(null)
-  // Embed ?new=1: create a new chat slot and navigate to it
-  const embedNewSlotMutation = useMutation({
+  // ?new=1: create a blank slot for an embed or a fresh desktop window.
+  const newSlotMutation = useMutation({
     mutationFn: () => dispatch(createSlot({ mode })).unwrap(),
     onSuccess: (slot) => {
-      if (slot?.key) navigate(`/embed/chat/${slot.key}`, { replace: true })
+      newSessionRef.current = false
+      setNewSlotFailed(false)
+      setSidError('')
+      if (!slot?.key) return
+      navigate(
+        embedMode ? `/embed/chat/${slot.key}` : `/chat?sid=${encodeURIComponent(slot.key)}`,
+        { replace: true },
+      )
+    },
+    onError: () => {
+      // Keep the failed window on its blank-session surface. Clearing only the
+      // ref lets the auto-select effect silently fall back to an older session,
+      // which makes a failed "New Window" look as if it copied that session.
+      newSessionRef.current = false
+      setNewSlotFailed(true)
+      setSidError(i18nT('pages.chatPage.could_not_start_a_new_session'))
     },
   })
   useEffect(() => {
-    if (!initialNewRef.current || !embedMode) return
+    if (!initialNewRef.current || (embedded && !embedMode) || popout) return
     initialNewRef.current = false
-    embedNewSlotMutation.mutate()
+    newSessionRef.current = true
+    setNewSlotFailed(false)
+    setSidError('')
+    if (!embedMode) dispatch(setActiveSlot(null))
+    newSlotMutation.mutate()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Choosing a real session explicitly abandons a failed blank-window intent;
+  // its banner must not follow the user into the selected conversation.
+  useEffect(() => {
+    if (!activeSlot || !newSlotFailed) return
+    setNewSlotFailed(false)
+    setSidError('')
+  }, [activeSlot, newSlotFailed])
   // On mount, URL ?sid= drives which session is active (URL wins over localStorage)
   useEffect(() => {
     if (embedded && !embedMode) return
@@ -3936,6 +3974,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // is still creating + slack-linking its session; otherwise we'd switch to
     // a different slot and orphan the linked one (breaking Slack mirroring).
     if (tokenConsumingRef.current) return
+    if (newSessionRef.current || newSlotFailed) return
     if (searchParams.get('slot') || searchParams.get('sid') || initialSidRef.current) return
     if (filteredSlots.length > 0) {
       const saved = localStorage.getItem(slotStorageKey)
@@ -3946,7 +3985,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       autoCreatedRef.current = true
       dispatch(createSlot({ agent: defaultAgent || undefined, mode }))
     }
-  }, [activeSlot, filteredSlots, searchParams, dispatch, slotStorageKey, connected, slotsLoaded, defaultAgent, mode])
+  }, [activeSlot, filteredSlots, searchParams, dispatch, slotStorageKey, connected, slotsLoaded, defaultAgent, mode, newSlotFailed])
 
   // Slot switch: the virtualizer (keyed on sessionId = activeSlot) force-pins
   // to the true bottom itself in a layout effect. Here we just re-arm the
@@ -4383,7 +4422,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // to this exact optimistic bubble without relying on content equality.
     // The server preserves meta fields on the user row it appends, so the
     // echo carries both this sendId AND the server-minted `mid` (#2845).
-    const sendId = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const sendId = mintSendId()
     meta.sendId = sendId
     const metaPayload = meta
     // Skip optimistic user bubble when the slot is busy (shared rule:
@@ -4627,8 +4666,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // Any UI feeding this path must offer only those decisions — a Trust
   // affordance here would claim a standing grant the backend never records
   // (#5400 on the spawn-approval card, #5434 on the collapsed tool row).
-  const toApiDecision = (action: string): 'approve' | 'reject' =>
-    action === 'approved' ? 'approve' : 'reject'
+  const toApiDecision = useCallback((action: string): 'approve' | 'reject' =>
+    action === 'approved' ? 'approve' : 'reject', [])
   const dismissApproval = useCallback((aid: string, decision?: string) => {
     dispatch(resolveByApprovalId({ id: aid, decision }))
     const n = store.getState().notifications.items.find(x => x.approval_id === aid)
@@ -5559,6 +5598,21 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // or a tool group holding the trailing 'streaming' message open). 0 whenever no
   // streaming message is in flight.
   const streamTick = lastRole === 'streaming' ? (messages[messages.length - 1]?.content.length ?? 0) : 0
+  // Transcript heat: advances on ANY transcript mutation (streamed chunk, tool
+  // row, thinking burst), so useStreamIdle can tell a high-frequency burst from
+  // a quiet running turn. Render-phase ref bump, guarded on the identity change
+  // — the same pattern as a lazy initializer, so it is StrictMode-safe.
+  const heatMessagesRef = useRef<ChatMessage[] | null>(null)
+  const heatTickRef = useRef(0)
+  if (heatMessagesRef.current !== messages) { heatMessagesRef.current = messages; heatTickRef.current++ }
+  // Hot while the slot runs and mutations landed within the idle window. The
+  // state update inside useStreamIdle commits AFTER the render that delivered a
+  // mutation, so a row mounting on the first mutation after a quiet spell still
+  // reads idle=true (hot=false) and keeps its entrance ease; only rows mounting
+  // inside a burst (a second mutation within 700ms) snap. Passed down to
+  // ToolCallLine to gate its height animations — see `transcriptHot` there.
+  const transcriptIdle = useStreamIdle(heatTickRef.current, slotRunning)
+  const transcriptHot = slotRunning && !transcriptIdle
   // Precompute: index of last finalized assistant message (tools after this are "trailing")
   // The activity panel has exactly two modes, and the question that picks one
   // is NOT "how wide is the window" — it is "how much width is left for the
@@ -5583,6 +5637,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
+  // Stored width is validated against SIDEBAR_MIN..SIDEBAR_MAX only, never the
+  // window; clamp for render but leave the preference for the wide viewport.
+  const effectiveSidebarWidth = clampSidebarWidth({ stored: sidebarWidth, winW, railW: railWidth })
   const toggleAct = useCallback(() => {
     // Opening with no tabs shows the empty-state launcher grid (no seeded
     // default view) -- the user picks what to open.
@@ -5643,7 +5700,13 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // every turn start/stop just to flip that flag, and the new identity cascaded into
   // messageToDisplayIdx / visibleIndexMap / the virtualizer. Split: group once, then
   // apply the flag in O(1).
-  const groupedTurns = useMemo(() => groupDisplayItems(messages), [messages])
+  //
+  // The grouper is the per-page identity cache (see createTurnGrouper): each
+  // streaming flush replaces `messages`, so this memo re-runs per flush — the
+  // grouper reconciles against the previous result so settled turns keep their
+  // object identity and memo(TurnBlock) / mergeTurnThinking bail out.
+  const groupTurns = useMemo(() => createTurnGrouper(), [])
+  const groupedTurns = useMemo(() => groupTurns(messages), [groupTurns, messages])
 
   const displayItems = useMemo<DisplayItem[]>(
     () => applyRunningState(groupedTurns, slotRunning),
@@ -5920,9 +5983,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // once the backend echoes it via the 'steer_push' WS event, making it look
     // like nothing happened until the response resumes.
     // Tagged meta.optimistic so the echo reconciles this bubble in place
-    // (appendSlotMessage) instead of rendering a duplicate.
-    dispatch(appendMessage({ role: 'user', content: llmTxt, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { steer: true, optimistic: true } }))
-    steerMutation.mutate(llmTxt)
+    // (appendSlotMessage) instead of rendering a duplicate. The sendId is the
+    // reconciliation key: it travels in the POST's meta, which both backend
+    // paths persist — the accepted-steer row and the new-turn row a steer that
+    // races chat_done falls onto — so the bubble is resolvable by id identity
+    // whichever path the server took (#6075).
+    const steerSendId = mintSendId()
+    dispatch(appendMessage({ role: 'user', content: llmTxt, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { steer: true, optimistic: true, sendId: steerSendId } }))
+    steerMutation.mutate({ text: llmTxt, sendId: steerSendId })
     // Staged session references are deliberately NOT part of steering: neither
     // carried into the payload nor cleared. `steerMutation`'s onError only logs,
     // so anything cleared here is gone for good — text, attachments and pastes
@@ -6319,6 +6387,19 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     [sessionDocs],
   )
 
+  // Flush-volatile positional state is read through refs so a streaming flush
+  // (which replaces `messages` and rebuilds the derived index/tail values)
+  // does not mint a new renderMessage -> renderTurnItem identity and defeat
+  // memo(TurnBlock) for every settled turn. The refs are synced per render, so
+  // a callback invoked during THIS render's children sees current values.
+  // UI-state deps (chatConfig, linkPreviewsOn, disclosure, pin state, ...)
+  // deliberately STAY in the dep array: when they change, settled turns must
+  // re-render with the new behavior, and the changed identity is what breaks
+  // through the memo.
+  const visibleIndexMapRef = useRef(visibleIndexMap); visibleIndexMapRef.current = visibleIndexMap
+  const lastTextIdxRef = useRef(lastTextIdx); lastTextIdxRef.current = lastTextIdx
+  const slotStateRef2 = useRef(slotState); slotStateRef2.current = slotState
+
   const renderMessage = useCallback((i: number, m: ChatMessage) => {
     // Key identity rules (clientTs preference + streaming→assistant role
     // normalization) live in messageRowKey — see its doc comment.
@@ -6341,8 +6422,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       const spawnLaunch = extractSpawnRunLaunch(m)
       if (spawnLaunch) return <SubagentRunCard key={key} launch={spawnLaunch} slot={activeSlot || ''} />
       // Animate tools in the trailing group (after last assistant/streaming text)
-      const isInTrailingGroup = slotState === 'tool_running' && i > lastTextIdx
-      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} onFileOpen={handleFileOpen} disclosure={toolDisclosure[key]} disclosureKey={key} onDisclosureChange={setToolDisclosureFor} appInPanel={mcpAppPanel} onOpenApp={revealAppInPanel} />
+      const isInTrailingGroup = slotStateRef2.current === 'tool_running' && i > lastTextIdxRef.current
+      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} onFileOpen={handleFileOpen} disclosure={toolDisclosure[key]} disclosureKey={key} onDisclosureChange={setToolDisclosureFor} appInPanel={mcpAppPanel} onOpenApp={revealAppInPanel} transcriptHot={transcriptHot} />
     }
     if (m.role === 'file') {
       try {
@@ -6404,7 +6485,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // on AssistantMessage can short-circuit when only unrelated state changes.
     // visibleIndexMap is O(1) per row.
     const canFork = canForkAtWindow({ isStreaming, isInject, slotHasMore, cursorIsForActiveSlot })
-    const forkIndex = canFork ? visibleIndexMap.get(i) : undefined
+    const forkIndex = canFork ? visibleIndexMapRef.current.get(i) : undefined
     const msgTime = fmtMessageTime(m.ts)
     const msgTimeFull = fmtMessageTimeFull(m.ts)
     return (
@@ -6453,17 +6534,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             })()
           ) : (
             <div className="flex flex-col gap-0">
-              <AssistantMessage suppressSteerAck={turnHadPolicyBlock(messages, i)} linkPreviews={linkPreviewsOn} content={m.content} isStreaming={isStreaming} isRegenerating={regenerating && i === lastTextIdx} onFileOpen={handleFileOpen} onFolderOpen={handleFolderOpen} onArtifactOpen={handleArtifactOpen} onQuote={handleQuote} onAsk={handleAsk} slotRunning={slotRunning} planTaskId={planTaskId} timestamp={chatConfig.showTimestamps ? msgTime : undefined} timestampTitle={msgTimeFull} messageTs={m.ts} slotKey={activeSlot || undefined} slotTitle={activeSlotTitle} mode={mode} fileChanges={(m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined} turnStats={chatConfig.showTurnStats ? (m.meta as Record<string, unknown> | undefined)?.turn_stats as TurnStats | undefined : undefined} onOpenDiff={handleOpenDiff} fileChipStyle={chatConfig.fileChipStyle} artifactPaths={artifactPaths} pinned={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? isPinned((m.meta as Record<string, unknown>).mid as string) : false} onTogglePin={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? () => handleTogglePinForMessage((m.meta as Record<string, unknown>).mid as string, m.ts!, 'assistant', m.content) : undefined} showFooter={(() => {
+              <AssistantMessage suppressSteerAck={turnHadPolicyBlock(messagesRef.current, i)} linkPreviews={linkPreviewsOn} content={m.content} isStreaming={isStreaming} isRegenerating={regenerating && i === lastTextIdxRef.current} onFileOpen={handleFileOpen} onFolderOpen={handleFolderOpen} onArtifactOpen={handleArtifactOpen} onQuote={handleQuote} onAsk={handleAsk} slotRunning={slotRunning} planTaskId={planTaskId} timestamp={chatConfig.showTimestamps ? msgTime : undefined} timestampTitle={msgTimeFull} messageTs={m.ts} slotKey={activeSlot || undefined} slotTitle={activeSlotTitle} mode={mode} fileChanges={(m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined} turnStats={chatConfig.showTurnStats ? (m.meta as Record<string, unknown> | undefined)?.turn_stats as TurnStats | undefined : undefined} onOpenDiff={handleOpenDiff} fileChipStyle={chatConfig.fileChipStyle} artifactPaths={artifactPaths} pinned={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? isPinned((m.meta as Record<string, unknown>).mid as string) : false} onTogglePin={m.ts && (m.meta as Record<string, unknown> | undefined)?.mid ? () => handleTogglePinForMessage((m.meta as Record<string, unknown>).mid as string, m.ts!, 'assistant', m.content) : undefined} showFooter={(() => {
                 // Show footer on the last assistant message of each completed turn
                 if (isStreaming) return false
                 // Find next message after this one that's assistant, user, or streaming
-                for (let j = i + 1; j < messages.length; j++) {
-                  if (messages[j].role === 'user') return true // end of turn — show footer
-                  if (messages[j].role === 'assistant' || messages[j].role === 'streaming') return false // not last assistant in turn
+                for (let j = i + 1; j < messagesRef.current.length; j++) {
+                  if (messagesRef.current[j].role === 'user') return true // end of turn — show footer
+                  if (messagesRef.current[j].role === 'assistant' || messagesRef.current[j].role === 'streaming') return false // not last assistant in turn
                 }
                 // End of messages — show footer only if agent is done
                 return !slotRunning
-              })()} onSpeak={handleSpeak} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
+              })()} onSpeak={handleSpeak} onRegenerate={i === lastTextIdxRef.current && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdxRef.current && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
                 showRefusedPress('switch_variant', e)
               }) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onLoadEarlier={cursorIsForActiveSlot ? handleLoadEarlier : undefined} loadingOlder={loadingOlder} earlierRemaining={slotOldestIndex} onApplyPlan={handleApplyPlan} />
             </div>
@@ -6479,7 +6560,39 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // through renderUserContentCb), so they are omitted to keep it stable.
     // cursorIsForActiveSlot/slotOldestIndex/handleLoadEarlier belong here: a switch
     // back restores the cursor while changing no other dep, stranding Fork shut.
-  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleArtifactOpen, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, loadingOlder, cursorIsForActiveSlot, slotOldestIndex, handleLoadEarlier, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage, connectionsUiOn, showRefusedPress])
+  }, [slotRunning, handleFileOpen, handleArtifactOpen, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, loadingOlder, cursorIsForActiveSlot, slotOldestIndex, handleLoadEarlier, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage, connectionsUiOn, showRefusedPress, transcriptHot])
+
+  // Hoisted out of the row map so every TurnBlock receives the SAME function
+  // identity per render — an inline closure there re-created it per row per
+  // render and defeated memo(TurnBlock) even when the turn identity was stable
+  // (see createTurnGrouper). It depends on nothing row-specific.
+  const renderTurnItem = useCallback((it: TurnItem, _j: number) => {
+    // Skip hidden tool messages (✅/🚫 completions) to avoid empty py-1 wrappers
+    if (it.kind === 'single' && it.msg.role === 'tool' && !it.msg.content.startsWith('🔧')) return null
+    return <div key={turnLeadKey(it, stableMsgKey)} className={`px-4 mx-auto w-full py-1`} style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
+      {it.kind === 'group' ? (() => {
+        const unresolvedPerms = it.msgs.filter(m => m.role === 'permission' && !m.meta?.resolved)
+        // Skip group entirely if it only contains unresolved permissions (handled by ApprovalBar)
+        if (it.msgs.every(m => m.role === 'permission')) return null
+        return (
+        <CollapsibleToolGroup
+          count={it.msgs.filter(m => m.role !== 'permission').length}
+          disclosureKey={`ctg-${turnLeadKey(it, stableMsgKey)}`}
+          hasPermission={false}
+          isRunning={false}
+          permissionMeta={unresolvedPerms.at(-1)?.meta as Record<string, unknown> | undefined}
+          pendingPermCount={unresolvedPerms.length}
+          onApprove={(() => {
+            const aid = unresolvedPerms.at(-1)?.meta?.approval_id as string | undefined
+            if (!aid) return approve
+            return async (action: string) => { await api.resolveApproval(aid, toApiDecision(action)); dismissApproval(aid) }
+          })()}
+          onViewActivity={toggleAct}
+          activityOpen={activityOpen}
+        >{it.msgs.map((m, j) => <div key={msgIdentityKey(m, stableMsgKey)}>{renderMessage(it.startIdx + j, m)}</div>)}</CollapsibleToolGroup>)
+      })() : renderMessage(it.idx, it.msg)}
+    </div>
+  }, [stableMsgKey, renderMessage, approve, toApiDecision, dismissApproval, toggleAct, activityOpen])
 
   /**
    * Mobile sessions drawer, as ONE value rather than an open flag plus a
@@ -6779,7 +6892,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // plus a usable chat-pane minimum. On mobile the panel is full-screen (no
   // shared row), so no reserve applies.
   const CHAT_PANE_MIN = CHAT_PANE_MIN_W
-  const panelReserve = isMobile ? undefined : (sidebarOpen ? sidebarWidth : 0) + CHAT_PANE_MIN
+  const panelReserve = isMobile ? undefined : (sidebarOpen ? effectiveSidebarWidth : 0) + CHAT_PANE_MIN
   // The panel takes its maximum only while the session list is actually hidden.
   // That maximum is measured against the header's reserve, which knows nothing
   // about the session list's width — so keeping it while the user reopens the
@@ -6801,7 +6914,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const panelFillWidth = sidePanelFillWidth({
     winW,
     railW: railWidth,
-    sidebarW: !isMobile && sidebarOpen ? sidebarWidth : 0,
+    sidebarW: !isMobile && sidebarOpen ? effectiveSidebarWidth : 0,
     isMobile,
   })
 
@@ -6858,7 +6971,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             slots={filteredSlots}
             activeSlot={activeSlot}
             unreadSlots={surfaceUnreadSlots}
-            panelWidth={sidebarWidth}
+            panelWidth={effectiveSidebarWidth}
             // The panel's own height (OverlayDrawer carries pb-2), so the
             // flyout can never be taller than the thing it grows into.
             maxHeight={Math.max(0, containerH - 8)}
@@ -6892,7 +7005,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           />
         </div>
       ) : (
-      <OverlayDrawer open={isMobile ? drawerMounted : sidebarOpen} width={isMobile ? window.innerWidth : sidebarWidth} dragging={sidebarDragging} slideX={isMobile ? drawerX : undefined} morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? 'mobile-sessions-overlay fixed top-safe-offset-[42px] bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
+      <OverlayDrawer open={isMobile ? drawerMounted : sidebarOpen} width={isMobile ? winW : effectiveSidebarWidth} dragging={sidebarDragging} slideX={isMobile ? drawerX : undefined} morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? 'mobile-sessions-overlay fixed top-safe-offset-[42px] bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
         <ChatSidebar
           slots={filteredSlots}
           activeSlot={activeSlot}
@@ -7019,7 +7132,23 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         ) : !activeSlot ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-4 px-8">
             <EmptyState icon={<MessageSquare className="lucide-inline" />} title={i18nT('pages.chatPage.what_can_i_do_for_you')} subtitle={i18nT('pages.chatPage.start_a_new_chat_to_begin')} />
-            <Btn primary onClick={() => dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, model: pendingModel || undefined, mode }))}>{i18nT('pages.chatPage.start_a_new_chat')}</Btn>
+            <Btn
+              primary
+              disabled={newSlotMutation.isPending}
+              onClick={() => {
+                if (newSlotFailed) {
+                  // Re-arm before state updates can let auto-selection run.
+                  newSessionRef.current = true
+                  setNewSlotFailed(false)
+                  setSidError('')
+                  newSlotMutation.mutate()
+                  return
+                }
+                dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, model: pendingModel || undefined, mode }))
+              }}
+            >
+              {i18nT('pages.chatPage.start_a_new_chat')}
+            </Btn>
           </div>
         ) : (
           <SearchHighlightContext.Provider value={searchCtxValue}>
@@ -7028,7 +7157,15 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 Inset on the right by the 6px scrollbar width (see ::-webkit-scrollbar
                 in index.css) so the overlay never paints over the scroller's scrollbar
                 track — otherwise the thumb is hidden/un-grabbable when scrolled to top. */}
-            <div className="absolute top-0 left-0 right-1.5 z-[45] pointer-events-none" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            {/* z-[45] at rest keeps this row BELOW the mobile drawer scrim
+                (z-[46]) so an open sessions drawer dims it. While it hosts the
+                rename editor it lifts to z-[47], above the composer status bars
+                (z-[46]): those are flex-flow chrome, not overlays, and they rise
+                into this band once the transcript scroller collapses to zero —
+                what a phone keyboard does — where they painted over the caret.
+                Scoping the lift to the edit is safe because opening the drawer
+                blurs the input, which commits and closes the editor. */}
+            <div className={`absolute top-0 left-0 right-1.5 ${editingTitle ? 'z-[47]' : 'z-[45]'} pointer-events-none`} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               {/* The row's left padding GLIDES between its open (20px) and
                   collapsed (60px, clearing the stationary toggle + divider)
                   values on the same 320ms curve as the panel — an instant
@@ -7308,34 +7445,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 const item = vi.data
                 const displayIdx = vi.index
                 if (item.kind === 'turn') {
-                  const renderTurnItem = (it: TurnItem, _j: number) => {
-                    // Skip hidden tool messages (✅/🚫 completions) to avoid empty py-1 wrappers
-                    if (it.kind === 'single' && it.msg.role === 'tool' && !it.msg.content.startsWith('🔧')) return null
-                    return <div key={turnLeadKey(it, stableMsgKey)} className={`px-4 mx-auto w-full py-1`} style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
-                      {it.kind === 'group' ? (() => {
-                        const unresolvedPerms = it.msgs.filter(m => m.role === 'permission' && !m.meta?.resolved)
-                        // Skip group entirely if it only contains unresolved permissions (handled by ApprovalBar)
-                        if (it.msgs.every(m => m.role === 'permission')) return null
-                        return (
-                        <CollapsibleToolGroup
-                          count={it.msgs.filter(m => m.role !== 'permission').length}
-                          disclosureKey={`ctg-${turnLeadKey(it, stableMsgKey)}`}
-                          hasPermission={false}
-                          isRunning={false}
-                          permissionMeta={unresolvedPerms.at(-1)?.meta as Record<string, unknown> | undefined}
-                          pendingPermCount={unresolvedPerms.length}
-                          onApprove={(() => {
-                            const aid = unresolvedPerms.at(-1)?.meta?.approval_id as string | undefined
-                            if (!aid) return approve
-                            return async (action: string) => { await api.resolveApproval(aid, toApiDecision(action)); dismissApproval(aid) }
-                          })()}
-                          onViewActivity={toggleAct}
-                          activityOpen={activityOpen}
-                        >{it.msgs.map((m, j) => <div key={msgIdentityKey(m, stableMsgKey)}>{renderMessage(it.startIdx + j, m)}</div>)}</CollapsibleToolGroup>)
-                      })() : renderMessage(it.idx, it.msg)}
-                    </div>
-                  }
-                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} appToolCallIds={appToolCallIds} disclosure={turnDisclosure[vi.key]} onDisclosureChange={(next: boolean) => setTurnDisclosureFor(vi.key, next)} /></div>
+                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} appToolCallIds={appToolCallIds} disclosure={turnDisclosure[vi.key]} disclosureKey={vi.key} onDisclosureChange={setTurnDisclosureFor} /></div>
                 }
                 return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx} className={`px-4 mx-auto w-full py-1`} style={{
                   maxWidth: 'var(--mc-content-width, 900px)',
@@ -7476,6 +7586,32 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   ><ArrowDown size={14} strokeWidth={2.5} /></button>
                 </div>
               )}
+              {/* Status chrome never claims more than half the pane. These bars
+                  are flex-flow siblings of the transcript scroller, which has an
+                  automatic minimum size of 0 and collapses under pressure — an
+                  opening keyboard shrinks the layout viewport, so an uncapped
+                  stack rises into the title band at the top of the pane and
+                  covers the rename editor. Capping makes the stack yield first.
+                  `svh` not `%` (a percentage resolves against this wrapper's own
+                  content-derived height, so it computes to none) and not `vh`
+                  (which over-measures a phone showing its URL bar). Scoped to
+                  the bars: FlyingQuote, the composer and the `absolute -top-10`
+                  scroll-to-bottom button must all stay outside the scroll box.
+                  `pb-[11px] mb-[-11px]` cancels QueueStack's OVERLAP: its -11px
+                  fuse margin is what pulls the queue card into the composer, and
+                  a scroll container turns that overhang into permanent internal
+                  overflow (measured: scrollHeight-clientHeight == 11 with a
+                  collapsed queue at any height, so a thumb showed and the card's
+                  bottom 11px clipped). The padding lands the child's margin edge
+                  exactly on the padding box, and the equal negative margin keeps
+                  the wrapper's contribution to the column unchanged, so the seam
+                  still fuses. Layout-neutral when the queue is empty: the pair
+                  cancels. `scrollbar-overlay` is what every other internal
+                  scroller here uses (SkillDirectoryBrowser pairs it with the same
+                  `overflow-y-auto overscroll-contain`): it replaces the global
+                  always-visible `var(--border)` thumb with a hover-revealed
+                  overlay one, so the capped box does not carry a permanent bar. */}
+              <div className="max-h-[50svh] overflow-y-auto overscroll-contain scrollbar-overlay pb-[11px] mb-[-11px]" data-testid="composer-status-stack">
               {/* Not gated on activityOpen (unlike the two bars below): the
                   activity sidebar has no TODO view, so hiding it there would
                   lose the information rather than de-duplicate it. */}
@@ -7494,6 +7630,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               {!(activityOpen && !search.isOpen && tabsCtl.tabs.find(t => t.id === tabsCtl.activeId)?.kind === 'workflows') && <WorkflowProgressBar slot={activeSlot} />}
               <SubagentDeliveryProgress count={systemDeliveryCount} />
               <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} onReorder={handleReorderQueued} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
+              </div>
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={() => setFlyingQuote(null)} />}
               <div ref={inputAreaRef} className="relative z-10">
               {/* The refused-press answer sits directly above the composer,
@@ -7827,19 +7964,20 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 // text so it no longer matches, leave text alone — the chip
                 // still un-highlights for consistency).
                 if (followUpPickedRef.current.has(o)) {
+                  const pickedSuffix = Array.from(followUpPickedRef.current).join(', ')
                   const next = new Set(followUpPickedRef.current); next.delete(o)
+                  const remainingSuffix = Array.from(next).join(', ')
                   followUpPickedRef.current = next
                   setInput(prev => {
-                    // Order matters: try leading ", o" first so "opt, opt" + remove
-                    // last "opt" doesn't match "opt, " and splice the wrong one.
-                    const leading = ', ' + o
-                    let idx = prev.indexOf(leading)
-                    if (idx >= 0) return prev.slice(0, idx) + prev.slice(idx + leading.length)
-                    const trailing = o + ', '
-                    idx = prev.indexOf(trailing)
-                    if (idx >= 0) return prev.slice(0, idx) + prev.slice(idx + trailing.length)
-                    if (prev === o) return ''
-                    return prev  // user edited — leave text, still unmark below
+                    // Options are appended as one ordered suffix. Remove only
+                    // from that complete generated structure: searching for a
+                    // last occurrence still corrupts an earlier ", Go" if the
+                    // user has already deleted the appended ", Go" by hand.
+                    if (prev === pickedSuffix) return remainingSuffix
+                    const delimitedSuffix = ', ' + pickedSuffix
+                    if (!prev.endsWith(delimitedSuffix)) return prev
+                    const draft = prev.slice(0, -delimitedSuffix.length)
+                    return remainingSuffix ? draft + ', ' + remainingSuffix : draft
                   })
                   setFollowUpPicked(next)
                 } else {
@@ -8053,4 +8191,3 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     </RowDisclosureProvider>
   )
 }
-

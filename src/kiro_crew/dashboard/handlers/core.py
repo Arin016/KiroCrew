@@ -649,9 +649,22 @@ async def api_stt_config(request: web.Request) -> web.Response:
             stt_section = data.setdefault("stt", {})
             if "enabled" in body:
                 stt_section["enabled"] = bool(body["enabled"])
-            if "provider" in body and body["provider"] in _stt_providers():
+            # Guard the type before either membership lookup.  The model catalog
+            # is a dict, so a JSON object or array would otherwise raise
+            # ``TypeError: unhashable type`` and turn this partial update into a
+            # 500.  Wrong-typed fields follow the existing config contract: skip
+            # that field while still applying valid siblings.
+            if (
+                "provider" in body
+                and isinstance(body["provider"], str)
+                and body["provider"] in _stt_providers()
+            ):
                 stt_section["provider"] = body["provider"]
-            if "model" in body and body["model"] in _STT_MODEL_SIZES:
+            if (
+                "model" in body
+                and isinstance(body["model"], str)
+                and body["model"] in _STT_MODEL_SIZES
+            ):
                 stt_section["model"] = body["model"]
             if "transcribe_region" in body and isinstance(body["transcribe_region"], str):
                 stt_section["transcribe_region"] = body["transcribe_region"]
@@ -917,7 +930,7 @@ def _transcribe_extra_importable() -> bool:
 
 
 def _ffmpeg_install_commands() -> list[str]:
-    """Platform command(s) that put ffmpeg on PATH, or ``[]`` when it already is."""
+    """System-decoder fallback for source installs without the ``voice`` extra."""
     ensure_ffmpeg_in_path()
     if _find_ffmpeg():
         return []
@@ -944,12 +957,14 @@ def _ffmpeg_install_commands() -> list[str]:
 def _stt_prereq_commands(provider: str = "local") -> list[str]:
     """Shell commands the user has to run themselves (they need sudo, a GUI, or a shell).
 
-    Deliberately short, and there is no install button behind it any more: the
-    only thing a provider can need beyond an already-installed Kiro Crew is the
-    optional ``voice`` extra in this interpreter, plus ffmpeg for the batch upload
-    path (the browser records WebM, which has to be decoded before recognition).
-    ``local`` fetches its own model, and ``apple`` compiles its own helper on
-    demand, so neither has anything else to install.
+    Deliberately short, and there is no install button behind it any more. Desktop
+    releases already include both runtime pieces. A source install may need the
+    optional ``voice`` extra plus system ffmpeg for batch WebM/voice-memo input,
+    while ``local`` fetches its own model.
+
+    Desktop builds bundle the extra and must never suggest installing a system
+    dependency. A source install using Apple's OS recogniser can still use a
+    system ffmpeg as a fallback when it did not install the voice extra.
 
     An empty list means "nothing to do", which is the steady state.
     """
@@ -968,7 +983,8 @@ def _stt_prereq_commands(provider: str = "local") -> list[str]:
     # an unsupported notice there instead of a command that cannot succeed.
     if needs_extra and _pip_install_channel_available():
         cmds.append(pip_extra_install_command("voice"))
-    cmds.extend(_ffmpeg_install_commands())
+    if not platform_compat.is_bundled_interpreter():
+        cmds.extend(_ffmpeg_install_commands())
     return cmds
 
 
