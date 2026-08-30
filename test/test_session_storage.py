@@ -1706,6 +1706,44 @@ class TestCotenantCache:
 
         assert calls["n"] == 2, "the reclaim gate must re-enumerate the pod root on every call"
 
+    def test_reclaim_block_reason_reuses_cache_when_cached_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Display callers passing cached=True reuse the primed co-tenant pass."""
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(tmp_path / "pods"))
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIRO_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", paths._default_home())
+        monkeypatch.setattr(paths, "_config_dir_memo", None)
+
+        session_storage.cotenant_sids(cached=True)  # prime
+        calls = self._count_pod_scans(monkeypatch)
+        session_storage.reclaim_block_reason(cached=True)
+        session_storage.reclaim_block_reason(cached=True)
+
+        assert calls["n"] == 0, "cached=True must reuse the primed co-tenant cache"
+
+    def test_measure_reuses_primed_cotenant_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """measure() opts into cached=True to avoid an extra co-tenant scan."""
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(tmp_path / "pods"))
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.delenv("KIRO_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", paths._default_home())
+        monkeypatch.setattr(paths, "_config_dir_memo", None)
+
+        session_storage.cotenant_sids(cached=True)  # prime
+        calls = self._count_pod_scans(monkeypatch)
+        report = session_storage.measure(
+            session_storage.SessionIndex(),
+            units=[],
+            batches=[],
+        )
+
+        assert calls["n"] == 0, "measure() must reuse the primed co-tenant cache"
+        assert isinstance(report.reclaim_blocked_reason, str)
+
 
 class TestSharedStoreRefusal:
     """An isolated data home over a shared replay store cannot see who is live."""

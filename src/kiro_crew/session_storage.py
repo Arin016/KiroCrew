@@ -717,7 +717,7 @@ def measure(
         trash_bytes=sum(b.bytes for b in batches),
         trash_batches=len(batches),
         trash_same_filesystem=_same_filesystem(kiro_sessions_dir(), trash_root()),
-        reclaim_blocked_reason=reclaim_block_reason(),
+        reclaim_blocked_reason=reclaim_block_reason(cached=True),
     )
     # The per-store split stays out of the report but is the first thing worth
     # knowing when a total looks wrong.
@@ -872,11 +872,12 @@ def cotenant_sids(*, cached: bool = False) -> tuple[frozenset[str], tuple[tuple[
 
     *cached* permits a recent pass over the pod maps to be reused, mirroring
     :func:`_scan_raw`'s flag: opt-in per call site, never global. It exists for
-    the read paths behind :func:`_scan_units`. The refusal derivation in
-    :func:`reclaim_block_reason` and the pre-move re-read in
-    :func:`move_to_trash` must never opt in — a stale answer there could let a
-    reclaim proceed against a store another instance still holds, which is the
-    exact staleness the pre-move re-read exists to close.
+    the read paths behind :func:`_scan_units` and display callers of
+    :func:`reclaim_block_reason`. The pre-move re-read in
+    :func:`move_to_trash` (and :func:`reclaim_block_reason`'s default) must
+    never opt in — a stale answer there could let a reclaim proceed against a
+    store another instance still holds, which is the exact staleness the
+    pre-move re-read exists to close.
     """
     global _cotenant_cache
     if cached:
@@ -968,7 +969,7 @@ def _has_own_replay_store(pod_home: Path) -> bool:
     return (pod_home / KIRO_BASE_DIR_NAME.lstrip(".")).is_dir() or (pod_home / "kiro").is_dir()
 
 
-def reclaim_block_reason() -> str:
+def reclaim_block_reason(*, cached: bool = False) -> str:
     """Why this instance must not reclaim, or ``""`` when it may.
 
     The exclusion set is built from THIS instance's session map, but the kiro-cli
@@ -995,6 +996,14 @@ def reclaim_block_reason() -> str:
     Pods are handled per session rather than per instance, because their mappings
     ARE discoverable: see :func:`cotenant_sids`. Only a pod whose map cannot be
     read still costs the whole instance its ability to reclaim.
+
+    *cached* permits reusing a recent pass over co-tenant pod mappings,
+    mirroring :func:`cotenant_sids`'s flag: opt-in per call site, never global.
+    It is passed by display aggregators like :func:`measure` to avoid paying an
+    extra uncached scan on top of :func:`list_units`. Mutation paths
+    (like :func:`_move_to_trash_locked`) keep the default ``cached=False`` so the
+    destructive operation always re-evaluates the authoritative state in real
+    time.
     """
 
     def _norm(path: Path) -> Path:
@@ -1017,7 +1026,7 @@ def reclaim_block_reason() -> str:
         # retired from here. Only checked when the store is the default one, since
         # that is the only store a pod reads.
         if _norm(kiro_home()) == home / KIRO_BASE_DIR_NAME:
-            _protected, refusals = cotenant_sids()
+            _protected, refusals = cotenant_sids(cached=cached)
             if refusals:
                 # !r, not plain interpolation: the directory name is
                 # agent-influenced and passes no identifier gate, so a newline
