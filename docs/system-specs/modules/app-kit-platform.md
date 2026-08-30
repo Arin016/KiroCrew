@@ -1349,6 +1349,14 @@ state that is no longer on disk, so nothing retries. **The scrub also re-materia
   survives an unexpected fault in any single sweep, because the failure MODE is the bug
   itself: a dead watch thread freezes `healthy` at its last value and silently restores
   the write-once behaviour, with the proxy still routing to a port nothing serves.
+- **Every health verdict uses the same loopback-only probe boundary.** Adoption,
+  startup polling, and the standing watch pass the manifest's app-authored
+  `healthCheck` through `_health_probe_url`: the port must be valid and the value must
+  be an absolute path whose restricted character set cannot move the URL authority or
+  be silently normalized by the parser. Rejected paths fail closed as unhealthy and
+  warn once per distinct value. The shared `_health_probe` opens accepted URLs through
+  `loopback_urlopen`, which ignores HTTP proxy environment variables and rejects
+  redirects, so a probe cannot be redirected or proxied away from `127.0.0.1`.
 - **Every writer of an app's MCP and agent state shares one serialization.** Two
   independent families write it: the lifecycle paths in `apps/bridges.py` (enable,
   update, boot reconcile) and the backend's health watch. Unserialized they interleave

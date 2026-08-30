@@ -1471,7 +1471,7 @@ class TestHealthGatedMcpRegistration:
         monkeypatch.setattr(bmod, "_gate_mcp_registration",
                             lambda name, port, *, healthy: calls.append((name, port, healthy)))
 
-        monkeypatch.setattr(bmod.urllib.request, "urlopen", lambda *a, **k: _FakeHealthResp())
+        monkeypatch.setattr(bmod, "loopback_urlopen", lambda *a, **k: _FakeHealthResp())
 
         with bmod._lock:
             bmod._processes["hg-app"] = AppProcess(app_name="hg-app", port=9150, healthy=False)
@@ -1498,7 +1498,7 @@ class TestHealthGatedMcpRegistration:
                             lambda name, port, *, healthy: calls.append((name, port, healthy)))
 
         # urlopen "succeeds" but the app is NOT in _processes (stopped mid-check).
-        monkeypatch.setattr(bmod.urllib.request, "urlopen", lambda *a, **k: _FakeHealthResp())
+        monkeypatch.setattr(bmod, "loopback_urlopen", lambda *a, **k: _FakeHealthResp())
         with bmod._lock:
             bmod._processes.clear()  # ensure absent
 
@@ -1519,7 +1519,7 @@ class TestHealthGatedMcpRegistration:
 
         def _boom(*a, **k):
             raise OSError("connection refused")
-        monkeypatch.setattr(bmod.urllib.request, "urlopen", _boom)
+        monkeypatch.setattr(bmod, "loopback_urlopen", _boom)
 
         with bmod._lock:
             bmod._processes["sick-app"] = AppProcess(app_name="sick-app", port=9152, healthy=False)
@@ -1810,7 +1810,7 @@ class TestBackendLivenessWatch:
 
         probes: list[bool] = []
 
-        def _scripted(_url):
+        def _scripted(_port, _path):
             if not probes:
                 # Script exhausted: untrack so the watch exits at its top-of-loop guard.
                 with bmod._lock:
@@ -2094,7 +2094,7 @@ class TestMcpReconcileHonoursRecordIdentity:
         monkeypatch.setattr(bmod, "_app_enabled_state", lambda name: True)
         monkeypatch.setattr(bmod, "_HEALTH_CHECK_INTERVAL", 0)
         monkeypatch.setattr(bmod, "_HEALTH_CHECK_RETRIES", 2)
-        monkeypatch.setattr(bmod.urllib.request, "urlopen", lambda *a, **k: _FakeHealthResp())
+        monkeypatch.setattr(bmod, "loopback_urlopen", lambda *a, **k: _FakeHealthResp())
         held: list[bool] = []
         monkeypatch.setattr(
             bmod, "_gate_mcp_registration",
@@ -2139,7 +2139,7 @@ class TestStartupProbeCannotPromoteAReplacement:
         original = AppProcess(app_name="app", port=9190, healthy=False)
         successor = AppProcess(app_name="app", port=9191, healthy=False)
 
-        def _probe_then_swap(_url):
+        def _probe_then_swap(_port, _path):
             # The stop/start lands while the probe is in flight.
             with bmod._lock:
                 bmod._processes["app"] = successor
@@ -2186,7 +2186,7 @@ class TestFailedMcpReconcileIsRetried:
             bmod._processes["w"] = ap
         probes: list[bool] = []
 
-        def _scripted(_url):
+        def _scripted(_port, _path):
             if not probes:
                 with bmod._lock:
                     bmod._processes.pop("w", None)
@@ -2297,7 +2297,7 @@ class TestStartupPollBelongsToOneGeneration:
 
         swapped = {"done": False}
 
-        def _never_answers(_url):
+        def _never_answers(_port, _path):
             if not swapped["done"]:  # the restart lands between attempts
                 swapped["done"] = True
                 with bmod._lock:
@@ -2319,7 +2319,7 @@ class TestStartupPollBelongsToOneGeneration:
 
         state = {"n": 0}
 
-        def _probe(_url):
+        def _probe(_port, _path):
             state["n"] += 1
             if state["n"] == 1:
                 with bmod._lock:
@@ -2356,7 +2356,7 @@ class TestTerminalScrubIsRetriedUntilItLands:
         with bmod._lock:
             bmod._processes.clear()
             bmod._processes["x"] = ap
-        monkeypatch.setattr(bmod, "_health_probe", lambda _u: False)
+        monkeypatch.setattr(bmod, "_health_probe", lambda *_a: False)
         try:
             yield bmod, ap
         finally:
@@ -2495,7 +2495,7 @@ class TestAdoptedRecoveryRebindsOwnership:
             bmod._processes["ad"] = ap
         probes: list[bool] = []
 
-        def _scripted(_url):
+        def _scripted(_port, _path):
             if not probes:
                 with bmod._lock:
                     bmod._processes.pop("ad", None)
@@ -2578,7 +2578,7 @@ class TestUnknownMcpStateStillGetsScrubbed:
             attempts.append(healthy)
             return len(attempts) >= 3  # the first two scrubs fail
         monkeypatch.setattr(bmod, "_gate_mcp_registration", _gate)
-        monkeypatch.setattr(bmod, "_health_probe", lambda _u: False)
+        monkeypatch.setattr(bmod, "_health_probe", lambda *_a: False)
 
         # The state a failed startup reconcile leaves: promoted, never confirmed written.
         ap = AppProcess(app_name="u", port=9250, pid=5,
@@ -2607,7 +2607,7 @@ class TestUnknownMcpStateStillGetsScrubbed:
             bmod, "_gate_mcp_registration",
             lambda name, port, *, healthy: (attempts.append(healthy), True)[1],
         )
-        monkeypatch.setattr(bmod, "_health_probe", lambda _u: False)
+        monkeypatch.setattr(bmod, "_health_probe", lambda *_a: False)
 
         ap = AppProcess(app_name="u", port=9251, pid=5,
                         proc=_FakeProc(returncode=0), healthy=False, mcp_healthy=False)
@@ -2620,6 +2620,138 @@ class TestUnknownMcpStateStillGetsScrubbed:
         finally:
             with bmod._lock:
                 bmod._processes.clear()
+
+
+class TestHealthProbeSecurity:
+    """App-authored health paths cannot redirect a loopback liveness probe."""
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/health", "/healthz?verbose=1", "/a/b_c-d.e~f", "/", "//example.com/x"],
+    )
+    def test_ordinary_paths_preserve_the_loopback_authority(self, path):
+        import urllib.parse
+
+        import kiro_crew.apps.backend as bmod
+
+        url = bmod._health_probe_url(9101, path)
+        assert url == f"http://127.0.0.1:9101{path}"
+        assert urllib.parse.urlsplit(url).hostname == "127.0.0.1"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "@example.com/", "health", "", "/a@b", "/x\ny", "/x\ty",
+            "/x\ry", "/x y", "http://example.com/", "/#frag", "/a\\b", "/[::1]",
+        ],
+    )
+    def test_authority_smuggling_and_ambiguous_paths_are_refused(self, path):
+        import kiro_crew.apps.backend as bmod
+
+        assert bmod._health_probe_url(9101, path) is None
+
+    @pytest.mark.parametrize("port", [0, -1, 65536, 99999])
+    def test_impossible_ports_are_refused(self, port):
+        import kiro_crew.apps.backend as bmod
+
+        assert bmod._health_probe_url(port, "/health") is None
+
+    def test_the_userinfo_payload_would_otherwise_leave_loopback(self):
+        import urllib.parse
+
+        import kiro_crew.apps.backend as bmod
+
+        naive = "http://127.0.0.1:9101@example.com/"
+        assert urllib.parse.urlsplit(naive).hostname == "example.com"
+        assert bmod._health_probe_url(9101, "@example.com/") is None
+
+    def test_an_invalid_path_never_reaches_http_and_warns_only_once(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        import kiro_crew.apps.backend as bmod
+
+        monkeypatch.setattr(bmod, "_warned_health_paths", set())
+        monkeypatch.setattr(
+            bmod,
+            "loopback_urlopen",
+            lambda *_a, **_k: pytest.fail("unsafe health path reached HTTP client"),
+        )
+        with caplog.at_level(logging.WARNING, logger=bmod.logger.name):
+            for _ in range(3):
+                assert bmod._health_probe(9101, "@example.com/") is False
+
+        warnings = [r.message for r in caplog.records if "health path" in r.message]
+        assert len(warnings) == 1
+        assert "@example.com/" in warnings[0]
+
+    def test_a_valid_path_uses_the_hardened_opener_with_the_exact_url(
+        self, monkeypatch
+    ):
+        import kiro_crew.apps.backend as bmod
+
+        seen = {}
+
+        def _open(req, *, timeout):
+            seen.update(url=req.full_url, timeout=timeout)
+            return _FakeHealthResp()
+
+        monkeypatch.setattr(bmod, "loopback_urlopen", _open)
+        monkeypatch.setattr(
+            bmod.urllib.request,
+            "urlopen",
+            lambda *_a, **_k: pytest.fail("bare urlopen bypassed loopback policy"),
+        )
+
+        assert bmod._health_probe(9101, "/health?q=1", timeout=1.5) is True
+        assert seen == {"url": "http://127.0.0.1:9101/health?q=1", "timeout": 1.5}
+
+    def test_adoption_startup_and_watch_share_the_same_probe_contract(self, monkeypatch):
+        import kiro_crew.apps.backend as bmod
+
+        calls = []
+
+        def _probe(port, path, **kwargs):
+            calls.append((port, path, kwargs))
+            return False
+
+        monkeypatch.setattr(bmod, "_health_probe", _probe)
+        assert bmod._probe_adoption_health(9101, "/adopt") is False
+
+        monkeypatch.setattr(bmod, "_HEALTH_CHECK_INTERVAL", 0)
+        monkeypatch.setattr(bmod, "_HEALTH_CHECK_RETRIES", 1)
+        monkeypatch.setattr(bmod, "_set_backend_health", lambda *_a, **_k: True)
+        startup = AppProcess(app_name="startup-contract", port=9102)
+        with bmod._lock:
+            bmod._processes[startup.app_name] = startup
+        try:
+            assert bmod._health_check_loop(startup, "/startup") is None
+        finally:
+            with bmod._lock:
+                bmod._processes.clear()
+
+        monkeypatch.setattr(bmod, "_HEALTH_WATCH_INTERVAL", 0)
+        watch = AppProcess(
+            app_name="watch-contract", port=9103, healthy=True, mcp_healthy=True
+        )
+
+        def _watch_probe(port, path, **kwargs):
+            calls.append((port, path, kwargs))
+            with bmod._lock:
+                bmod._processes.pop(watch.app_name, None)
+            return True
+
+        monkeypatch.setattr(bmod, "_health_probe", _watch_probe)
+        with bmod._lock:
+            bmod._processes[watch.app_name] = watch
+        bmod._watch_backend_health_sweeps(watch, "/watch")
+
+        assert calls == [
+            (9101, "/adopt", {"timeout": 3}),
+            (9102, "/startup", {}),
+            (9103, "/watch", {}),
+        ]
 
 
 class TestProbeSurvivesAMalformedHttpResponse:
@@ -2662,7 +2794,7 @@ class TestProbeSurvivesAMalformedHttpResponse:
         import kiro_crew.apps.backend as bmod
         port = self._serve_garbage(b"NOT-HTTP garbage\r\n\r\n")
 
-        assert bmod._health_probe(f"http://127.0.0.1:{port}/health") is False
+        assert bmod._health_probe(port, "/health") is False
 
     def test_the_adoption_probe_survives_it_too(self):
         # Same class of bug in the sibling probe — fixed together so one does not sit
@@ -2695,7 +2827,7 @@ class TestWatchSurvivesAnUnexpectedSweepFault:
 
         calls = {"n": 0}
 
-        def _probe(_url):
+        def _probe(_port, _path):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("something nobody anticipated")
@@ -2726,7 +2858,7 @@ class TestWatchSurvivesAnUnexpectedSweepFault:
 
         calls = {"n": 0}
 
-        def _probe(_url):
+        def _probe(_port, _path):
             calls["n"] += 1
             with bmod._lock:
                 bmod._processes.pop("w", None)
@@ -2871,7 +3003,7 @@ class TestSupervisorIsBoundAtSpawn:
             bmod, "_gate_mcp_registration",
             lambda name, port, *, healthy: (gate.append((name, port, healthy)), True)[1],
         )
-        monkeypatch.setattr(bmod, "_health_probe", lambda _u: True)
+        monkeypatch.setattr(bmod, "_health_probe", lambda *_a: True)
 
         original = AppProcess(app_name="s", port=9291, healthy=False)
         successor = AppProcess(app_name="s", port=9292, healthy=False)
