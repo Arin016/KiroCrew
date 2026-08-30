@@ -279,6 +279,7 @@ export const APP_MANIFEST_KEY: Record<string, ManifestKeys> = {
       'apps.meetings.manifest.highlight_3',
       'apps.meetings.manifest.highlight_4',
       'apps.meetings.manifest.highlight_5',
+      'apps.meetings.manifest.highlight_6',
     ],
     useCases: ['apps.meetings.manifest.use_case_1'],
     configuration: ['apps.meetings.manifest.configuration_1'],

@@ -2915,6 +2915,7 @@
         "highlight_3": "Korrigiere wiederkehrende Fehler der Spracherkennung einmal mit einem Fachwörterbuch, und jede spätere Besprechung macht es richtig",
         "highlight_4": "Prüfe die extrahierten Aufgaben, bevor etwas angelegt wird — archiviere das Rauschen, lege den Rest an",
         "highlight_5": "Austauschbare Anbieter für Aufgaben und Kalender: enthalten sind ein lokales Aufgabenregister und ein iCalendar-Leser (.ics), und eine Organisation kann eigene registrieren",
+        "highlight_6": "Lies das Transkript während des Meetings Zeile für Zeile in einer anderen Sprache mit",
         "page_label": "Besprechungen",
         "use_case_1": "Erfasse eine Live-Besprechung, während parallele Agenten Transkript, strukturierte Notizen, Diagramm und die Prüfung der Aufgaben erstellen.",
         "configuration_1": "Erlaube dem Browser für die Live-Erfassung den Mikrofonzugriff; konfiguriere optional in den Einstellungen einen iCalendar-Pfad oder eine URL, das lokale Aufgaben-Ledger, Agentenrollen und Begriffe zur Spracherkennungskorrektur."
@@ -2927,6 +2928,7 @@
         "ended": "Beendet",
         "live": "Live",
         "loadFailed": "Diese Besprechung konnte nicht geöffnet werden",
+        "moreActions": "Weitere Aktionen",
         "noAgents": "Keine Agenten aktiv",
         "noAgentsHint": "Aktiviere oben einen Agenten oder wähle eine Voreinstellung.",
         "pause": "Pausieren",
@@ -2936,6 +2938,7 @@
         "retryAgents": "Erneut versuchen",
         "start": "Starten",
         "toggleTasks": "Aufgaben",
+        "toggleTranslation": "Übersetzung",
         "unpause": "Fortsetzen"
       },
       "pillBar": {
@@ -2959,17 +2962,6 @@
         "high": "Hoch",
         "low": "Niedrig",
         "medium": "Mittel"
-      },
-      "transcript": {
-        "empty": "Noch kein Transkript",
-        "emptyHintLive": "Final erkannte Sprache erscheint hier im Verlauf der Besprechung.",
-        "emptyHintRecorded": "Für diese Besprechung wurde kein Transkript aufgezeichnet.",
-        "full": "Das Transkript ist voll. Neue Sprache und Mitteilungen werden nicht mehr aufgezeichnet oder an Agenten gesendet.",
-        "jumpToLatest": "Zum neuesten Eintrag",
-        "live": "Live",
-        "regionLabel": "Besprechungstranskript",
-        "title": "Transkript",
-        "typed": "Eingegeben"
       },
       "review": {
         "allDone": "Alles geprüft",
@@ -3049,7 +3041,10 @@
         "taskProviderTitle": "Aufgabenanbieter",
         "termFailed": "Diese Korrektur konnte nicht hinzugefügt werden.",
         "termIncomplete": "Gib ein, was gehört wurde und was es heißen soll.",
-        "title": "Besprechungseinstellungen"
+        "title": "Besprechungseinstellungen",
+        "translationHelp": "Übersetzt jede gesprochene Zeile in eine andere Sprache und zeigt sie während des Meetings in einem Seitenbereich an. Kostet einen Modellaufruf pro Zeile und ist daher standardmäßig deaktiviert.",
+        "translationOff": "Aus",
+        "translationTitle": "Live-Übersetzung"
       },
       "taskSidebar": {
         "add": "Hinzufügen",
@@ -3065,6 +3060,27 @@
         "quickAddPlaceholder": "Aufgabe hinzufügen…",
         "title": "Aufgaben",
         "unassigned": "Nicht zugewiesen"
+      },
+      "transcript": {
+        "empty": "Noch kein Transkript",
+        "emptyHintLive": "Final erkannte Sprache erscheint hier im Verlauf der Besprechung.",
+        "emptyHintRecorded": "Für diese Besprechung wurde kein Transkript aufgezeichnet.",
+        "full": "Das Transkript ist voll. Neue Sprache und Mitteilungen werden nicht mehr aufgezeichnet oder an Agenten gesendet.",
+        "jumpToLatest": "Zum neuesten Eintrag",
+        "live": "Live",
+        "regionLabel": "Besprechungstranskript",
+        "title": "Transkript",
+        "typed": "Eingegeben"
+      },
+      "translation": {
+        "title": "Übersetzung",
+        "close": "Übersetzung schließen",
+        "empty": "Noch nichts übersetzt",
+        "emptyHint": "Zeilen erscheinen hier, sobald gesprochen wird.",
+        "loading": "Wird geladen…",
+        "lineFailed": "Diese Zeile konnte nicht übersetzt werden.",
+        "pending": "Wird aufgeholt…",
+        "dropped": "Einige Zeilen wurden übersprungen, um mitzuhalten."
       },
       "widgetType": {
         "chat": "Chat",

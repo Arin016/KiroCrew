@@ -2816,6 +2816,7 @@
         "highlight_3": "用领域词典把反复出现的语音转文字错误纠正一次，之后每场会议都能认对",
         "highlight_4": "在提交任何内容之前先审阅提取出的行动项 — 噪音归档，其余提交",
         "highlight_5": "任务和日历提供方可插拔：内置本地任务账本和 iCalendar（.ics）读取器，组织也可以注册自己的实现",
+        "highlight_6": "会议进行时，逐行用另一种语言读回转录内容",
         "page_label": "会议"
       },
       "meeting": {
@@ -2826,6 +2827,7 @@
         "ended": "已结束",
         "live": "进行中",
         "loadFailed": "无法打开这场会议",
+        "moreActions": "更多操作",
         "noAgents": "没有启用任何代理",
         "noAgentsHint": "在上方栏中启用一个，或选择一个预设。",
         "pause": "暂停",
@@ -2835,6 +2837,7 @@
         "retryAgents": "重试",
         "start": "开始",
         "toggleTasks": "行动项",
+        "toggleTranslation": "翻译",
         "unpause": "继续"
       },
       "pillBar": {
@@ -2858,17 +2861,6 @@
         "high": "高",
         "low": "低",
         "medium": "中"
-      },
-      "transcript": {
-        "empty": "暂无转录",
-        "emptyHintLive": "随着会议进行，最终确认的语音内容会显示在这里。",
-        "emptyHintRecorded": "这场会议没有记录转录。",
-        "full": "转录已满。新的语音和广播将不再被记录或发送给代理。",
-        "jumpToLatest": "跳到最新内容",
-        "live": "实时",
-        "regionLabel": "会议转录",
-        "title": "转录",
-        "typed": "文字输入"
       },
       "review": {
         "allDone": "全部已复核",
@@ -2946,7 +2938,10 @@
         "taskProviderTitle": "任务提供方",
         "termFailed": "无法添加该纠正条目。",
         "termIncomplete": "请填写听到的内容和应该写成什么。",
-        "title": "会议设置"
+        "title": "会议设置",
+        "translationHelp": "将每句发言翻译成另一种语言，并在会议期间显示在侧边栏中。每句会消耗一次模型调用，因此默认关闭。",
+        "translationOff": "关闭",
+        "translationTitle": "实时翻译"
       },
       "taskSidebar": {
         "add": "添加",
@@ -2961,6 +2956,27 @@
         "quickAddPlaceholder": "添加行动项……",
         "title": "行动项",
         "unassigned": "未指派"
+      },
+      "transcript": {
+        "empty": "暂无转录",
+        "emptyHintLive": "随着会议进行，最终确认的语音内容会显示在这里。",
+        "emptyHintRecorded": "这场会议没有记录转录。",
+        "full": "转录已满。新的语音和广播将不再被记录或发送给代理。",
+        "jumpToLatest": "跳到最新内容",
+        "live": "实时",
+        "regionLabel": "会议转录",
+        "title": "转录",
+        "typed": "文字输入"
+      },
+      "translation": {
+        "title": "翻译",
+        "close": "关闭翻译",
+        "empty": "尚无翻译内容",
+        "emptyHint": "发言时，译文会出现在这里。",
+        "loading": "加载中…",
+        "lineFailed": "无法翻译这一行。",
+        "pending": "正在追赶…",
+        "dropped": "为了跟上进度，已跳过部分内容。"
       },
       "widgetType": {
         "chat": "对话",

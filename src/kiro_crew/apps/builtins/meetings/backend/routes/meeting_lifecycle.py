@@ -24,6 +24,7 @@ from aiohttp import web
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import store
 from kiro_crew.apps.builtins.meetings.backend.domain import session as sess
+from kiro_crew.apps.builtins.meetings.backend.domain import translate
 from kiro_crew.apps.builtins.meetings.backend.routes import tasks as task_routes
 from kiro_crew.apps.builtins.meetings.backend.routes._common import (
     ACTIVE,
@@ -308,6 +309,9 @@ async def handle_start_meeting(request: web.Request) -> web.Response:
             hooks=hooks_of(request),
             agents_enabled=agents_enabled,
             config=config,
+            # Threaded through for the translation worker's writes, which are the
+            # only ones a live session makes on its own rather than via a handler.
+            root=root,
         )
         session.muted_agents = set(muted)
         # Drain the OUTGOING session before this one replaces it. `set()` cancels the
@@ -563,6 +567,48 @@ async def handle_get_outputs(request: web.Request) -> web.Response:
     root = data_root(request)
     outputs, tasks = await asyncio.to_thread(_collect_outputs, meeting_id, root)
     return web.json_response({"outputs": outputs, "tasks": tasks})
+
+
+def _read_translations_since(meeting_id: str, since: int, root: Any) -> dict[str, Any]:
+    """Translated lines with ``n >= since``, plus the cursor to ask for next. BLOCKING."""
+    doc = store.read_translations(meeting_id, root)
+    lines = [
+        line
+        for line in doc.get("lines", [])
+        if isinstance(line, dict) and int(line.get("n", -1)) >= since
+    ]
+    language = str(doc.get("language", "") or "")
+    return {
+        "language": language,
+        # Resolved here rather than in the frontend: the accepted languages and
+        # their endonyms are published by the backend (see GET /config), so a
+        # second copy in the client would be the thing that drifts.
+        "language_label": translate.language_label(language) if language else "",
+        "lines": lines,
+        "next_n": int(doc.get("next_n", 0)),
+    }
+
+
+async def handle_get_translations(request: web.Request) -> web.Response:
+    """Live-translation lines for a meeting, newer than a client cursor.
+
+    A cursor rather than the whole document: a long meeting accumulates hundreds
+    of lines and the panel polls while it is open, so resending everything each
+    time would grow linearly for no benefit. ``next_n`` is what the client sends
+    back as ``since``.
+
+    Separate from ``…/outputs`` on purpose. Outputs is polled for every meeting;
+    this is polled only while the panel is open, and translation is off by default.
+    """
+    meeting_id = _meeting_id(request)
+    root = data_root(request)
+    since = query_int(request, "since", default=0, low=0, high=10_000_000)
+    payload = await asyncio.to_thread(_read_translations_since, meeting_id, since, root)
+    live = ACTIVE.get(meeting_id)
+    queue = live.translations if live is not None else None
+    payload["pending"] = queue.pending if queue is not None else 0
+    payload["dropped"] = queue.dropped if queue is not None else 0
+    return web.json_response(payload)
 
 
 def _apply_attachments(

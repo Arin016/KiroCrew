@@ -2928,6 +2928,7 @@
         "highlight_3": "Corrige una vez los errores recurrentes de voz a texto con un diccionario de tu dominio y todas las reuniones siguientes los transcriben bien",
         "highlight_4": "Revisa las tareas extraídas antes de registrar nada — archiva el ruido y registra el resto",
         "highlight_5": "Proveedores de tareas y de calendario conectables: incluye un registro local de tareas y un lector de iCalendar (.ics), y una organización puede registrar los suyos",
+        "highlight_6": "Lee la transcripción línea a línea en otro idioma mientras la reunión sigue en curso",
         "page_label": "Reuniones",
         "use_case_1": "Captura una reunión en directo mientras agentes paralelos crean la transcripción, las notas estructuradas, el diagrama y la revisión de tareas.",
         "configuration_1": "Permite que el navegador acceda al micrófono para la captura en directo; configura de forma opcional en Ajustes una ruta o URL de iCalendar, el registro local de tareas, los roles de agente y los términos de corrección de voz."
@@ -2940,6 +2941,7 @@
         "ended": "Terminada",
         "live": "En directo",
         "loadFailed": "No se pudo abrir esta reunión",
+        "moreActions": "Más acciones",
         "noAgents": "Ningún agente activo",
         "noAgentsHint": "Activa uno en la barra de arriba, o elige un preajuste.",
         "pause": "Pausar",
@@ -2949,6 +2951,7 @@
         "retryAgents": "Reintentar",
         "start": "Empezar",
         "toggleTasks": "Tareas",
+        "toggleTranslation": "Traducción",
         "unpause": "Reanudar"
       },
       "pillBar": {
@@ -2972,17 +2975,6 @@
         "high": "Alta",
         "low": "Baja",
         "medium": "Media"
-      },
-      "transcript": {
-        "empty": "Aún no hay transcripción",
-        "emptyHintLive": "La voz final aparecerá aquí a medida que avance la reunión.",
-        "emptyHintRecorded": "No se grabó ninguna transcripción para esta reunión.",
-        "full": "La transcripción está llena. El audio y los mensajes nuevos ya no se grabarán ni se enviarán a los agentes.",
-        "jumpToLatest": "Ir a lo más reciente",
-        "live": "En vivo",
-        "regionLabel": "Transcripción de la reunión",
-        "title": "Transcripción",
-        "typed": "Escrito"
       },
       "review": {
         "allDone": "Todo revisado",
@@ -3064,7 +3056,10 @@
         "taskProviderTitle": "Proveedor de tareas",
         "termFailed": "No se pudo añadir esa corrección.",
         "termIncomplete": "Escribe lo que se oyó y lo que debería decir.",
-        "title": "Ajustes de Reuniones"
+        "title": "Ajustes de Reuniones",
+        "translationHelp": "Traduce cada línea hablada a otro idioma y la muestra en un panel lateral durante la reunión. Consume una llamada al modelo por línea, así que está desactivada de forma predeterminada.",
+        "translationOff": "Desactivada",
+        "translationTitle": "Traducción en vivo"
       },
       "taskSidebar": {
         "add": "Añadir",
@@ -3081,6 +3076,27 @@
         "quickAddPlaceholder": "Añadir una tarea…",
         "title": "Tareas",
         "unassigned": "Sin asignar"
+      },
+      "transcript": {
+        "empty": "Aún no hay transcripción",
+        "emptyHintLive": "La voz final aparecerá aquí a medida que avance la reunión.",
+        "emptyHintRecorded": "No se grabó ninguna transcripción para esta reunión.",
+        "full": "La transcripción está llena. El audio y los mensajes nuevos ya no se grabarán ni se enviarán a los agentes.",
+        "jumpToLatest": "Ir a lo más reciente",
+        "live": "En vivo",
+        "regionLabel": "Transcripción de la reunión",
+        "title": "Transcripción",
+        "typed": "Escrito"
+      },
+      "translation": {
+        "title": "Traducción",
+        "close": "Cerrar la traducción",
+        "empty": "Aún no hay nada traducido",
+        "emptyHint": "Las líneas aparecen aquí a medida que se habla.",
+        "loading": "Cargando…",
+        "lineFailed": "No se pudo traducir esta línea.",
+        "pending": "Poniéndose al día…",
+        "dropped": "Se omitieron algunas líneas para no quedarse atrás."
       },
       "widgetType": {
         "chat": "Chat",

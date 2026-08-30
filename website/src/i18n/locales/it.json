@@ -2928,6 +2928,7 @@
         "highlight_3": "Correggi una volta sola gli errori ricorrenti del riconoscimento vocale con un dizionario di dominio e tutte le riunioni successive li scriveranno bene",
         "highlight_4": "Rivedi le azioni estratte prima che qualcosa venga registrato — archivia il rumore, registra il resto",
         "highlight_5": "Provider di attività e calendario collegabili: include un registro locale delle attività e un lettore iCalendar (.ics), e un’organizzazione può registrarne di propri",
+        "highlight_6": "Rileggi la trascrizione riga per riga in un'altra lingua mentre la riunione è in corso",
         "page_label": "Riunioni",
         "use_case_1": "Acquisisci una riunione dal vivo mentre agenti paralleli creano la trascrizione, le note strutturate, il diagramma e la revisione delle attività.",
         "configuration_1": "Consenti al browser di accedere al microfono per l'acquisizione dal vivo; configura facoltativamente nelle Impostazioni un percorso o URL iCalendar, il registro attività locale, i ruoli agente e i termini di correzione vocale."
@@ -2940,6 +2941,7 @@
         "ended": "Terminata",
         "live": "In corso",
         "loadFailed": "Non è stato possibile aprire questa riunione",
+        "moreActions": "Altre azioni",
         "noAgents": "Nessun agente attivo",
         "noAgentsHint": "Attivane uno nella barra qui sopra, oppure scegli un preset.",
         "pause": "Metti in pausa",
@@ -2949,6 +2951,7 @@
         "retryAgents": "Riprova",
         "start": "Avvia",
         "toggleTasks": "Azioni da fare",
+        "toggleTranslation": "Traduzione",
         "unpause": "Riprendi"
       },
       "pillBar": {
@@ -2972,17 +2975,6 @@
         "high": "Alta",
         "low": "Bassa",
         "medium": "Media"
-      },
-      "transcript": {
-        "empty": "Nessuna trascrizione per ora",
-        "emptyHintLive": "Il parlato definitivo apparirà qui durante la riunione.",
-        "emptyHintRecorded": "Non è stata registrata alcuna trascrizione per questa riunione.",
-        "full": "La trascrizione è piena. Nuovi interventi e messaggi non verranno più registrati né inviati agli agenti.",
-        "jumpToLatest": "Vai al contenuto più recente",
-        "live": "Live",
-        "regionLabel": "Trascrizione della riunione",
-        "title": "Trascrizione",
-        "typed": "Digitato"
       },
       "review": {
         "allDone": "Tutto rivisto",
@@ -3064,7 +3056,10 @@
         "taskProviderTitle": "Provider delle attività",
         "termFailed": "Non è stato possibile aggiungere quella correzione.",
         "termIncomplete": "Inserisci ciò che è stato sentito e come dovrebbe dire.",
-        "title": "Impostazioni di Riunioni"
+        "title": "Impostazioni di Riunioni",
+        "translationHelp": "Traduce ogni riga parlata in un'altra lingua, mostrata in un pannello laterale durante la riunione. Consuma una chiamata al modello per riga, quindi è disattivata per impostazione predefinita.",
+        "translationOff": "Disattivata",
+        "translationTitle": "Traduzione in tempo reale"
       },
       "taskSidebar": {
         "add": "Aggiungi",
@@ -3081,6 +3076,27 @@
         "quickAddPlaceholder": "Aggiungi un’azione…",
         "title": "Azioni da fare",
         "unassigned": "Non assegnata"
+      },
+      "transcript": {
+        "empty": "Nessuna trascrizione per ora",
+        "emptyHintLive": "Il parlato definitivo apparirà qui durante la riunione.",
+        "emptyHintRecorded": "Non è stata registrata alcuna trascrizione per questa riunione.",
+        "full": "La trascrizione è piena. Nuovi interventi e messaggi non verranno più registrati né inviati agli agenti.",
+        "jumpToLatest": "Vai al contenuto più recente",
+        "live": "Live",
+        "regionLabel": "Trascrizione della riunione",
+        "title": "Trascrizione",
+        "typed": "Digitato"
+      },
+      "translation": {
+        "title": "Traduzione",
+        "close": "Chiudi la traduzione",
+        "empty": "Ancora nulla di tradotto",
+        "emptyHint": "Le righe compaiono qui mentre si parla.",
+        "loading": "Caricamento…",
+        "lineFailed": "Non è stato possibile tradurre questa riga.",
+        "pending": "Recupero in corso…",
+        "dropped": "Alcune righe sono state saltate per stare al passo."
       },
       "widgetType": {
         "chat": "Chat",
