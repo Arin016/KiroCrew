@@ -72,7 +72,14 @@ from kiro_crew.env import (
     spec_path_key,
 )
 from kiro_crew.mcp_cleanup import purge_deleted_proxy_from_config
-from kiro_crew.mcp_provenance import without_marker
+from kiro_crew.mcp_provenance import (
+    DERIVED_KEY,
+    command_is_ours,
+    record_derived,
+    recorded_source,
+    source_view,
+    without_marker,
+)
 from kiro_crew.mcp_utils import kiro_oauth_wire_entry, mcp_server_alias
 from kiro_crew.platform import current_context
 from kiro_crew.platform import redact_via_context as redact
@@ -2352,10 +2359,20 @@ def _norm_mcp_spec(spec: Any) -> Any:
     collapse onto the canonical alias. An empty ``env``/``args`` is a launch
     no-op for kiro-cli (missing == empty), so this is also the cleaner spec to
     persist.
+
+    :data:`~kiro_crew.mcp_provenance.DERIVED_KEY` is excluded for the same reason,
+    and it is load-bearing: the record is our bookkeeping about which field this
+    rebuild computed, not part of how the server launches, so an entry carrying one
+    and an otherwise-identical re-merged copy without one ARE the same server.
+    Comparing it would make them differ and mint the ever-growing suffix this
+    function exists to prevent -- and it would do so asymmetrically, since only the
+    population with no other config source is ever recorded.
     """
     if not isinstance(spec, dict):
         return spec
-    return {k: v for k, v in spec.items() if not (k in ("env", "args") and not v)}
+    return {
+        k: v for k, v in spec.items() if k != DERIVED_KEY and not (k in ("env", "args") and not v)
+    }
 
 
 def _alias_family_base(key: str) -> str:
@@ -3622,9 +3639,106 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
         if isinstance(_s, dict):
             _store_by_alias.setdefault(mcp_server_alias(_n), []).append(_s)
     _cfg_servers: dict[str, Any] = config.get("mcpServers", {})
+    # One spelling of the scope chain, in priority order, for BOTH consumers below:
+    # the live-value probe that keeps a rebuild-authored field re-derivable, and the
+    # resolution candidate list. The probe's correctness is "this is the value the
+    # chain would have resolved", so two separate spellings could drift apart.
+    _scopes: tuple[tuple[str, dict], ...] = (
+        ("kirocrew", kirocrew_mcp),
+        ("kiro-global", shared_mcp),
+        ("provider-global", extra_shared_mcp),
+    )
     for name, spec in _cfg_servers.items():
         if not isinstance(spec, dict):
             continue
+        # This file is BOTH this function's output and, here, one of its inputs: the
+        # entry is read back so a field the user set and we never model survives. One
+        # field below is ours, not the user's -- the resolved absolute ``command`` --
+        # and reading our own computed value back as if it were authored is what made
+        # it permanent: ``_resolve_command`` takes an absolute path without searching,
+        # so no later change to how commands resolve could rebind one stored once.
+        #
+        # The record applies ONLY to a server no other source declares -- the one
+        # whose sole persisted home is this file, and which therefore has nothing to
+        # lose a conflict to. For a scope-owned server, choosing between the record
+        # and the live declaration correctly means selecting a per-field source AFTER
+        # resolution (the merge picks a winner by which command resolves, then adopts
+        # that winner's args/env as a unit), which is a merge-precedence change rather
+        # than a provenance one; it is tracked separately. Excluding that population
+        # leaves it behaving exactly as it does today.
+        #
+        # The test is deliberately CONSERVATIVE, and compares by alias rather than by
+        # raw key. A scope keys entries by their own raw name while ``name`` here is
+        # the config's, whose slash-containing spellings an earlier pass rewrote to
+        # aliases (see the ``_store_by_alias`` note above), so a raw-key probe would
+        # miss the owner of an aliased entry and wrongly read it as having no other
+        # home. Over-matching only declines to apply the record -- today's behavior,
+        # and safe. Under-matching would let the record shadow a live declaration.
+        #
+        # A scope owns the COMMAND only when it actually supplies one. A dict alone is
+        # not enough: a same-named URL-only entry, or an empty one, declares nothing
+        # about ``command``, so treating it as a competing source would strip the
+        # record off an agent-only stdio server and strand its stale path forever.
+        # A non-dict value supplies nothing either, and the candidate chain below
+        # skips it for the same reason (``isinstance(alt, dict)``).
+        #
+        # This stays a yes/no ownership question -- does any other source declare a
+        # command? -- and never a choice BETWEEN two declared values. Choosing would
+        # need the after-resolution ordering this PR is scoped out of.
+        _alias_here = mcp_server_alias(name)
+        _scope_owned = any(
+            any(
+                mcp_server_alias(k) == _alias_here
+                and isinstance(v, dict)
+                and isinstance(v.get("command"), str)
+                and v["command"]
+                for k, v in _scope.items()
+            )
+            for _label, _scope in _scopes
+        )
+        # Captured BEFORE the view rewrites anything: what the entry carried on the
+        # way in, and the record's own pair. Together they decide what may be
+        # recorded on the way out -- see the emit site below.
+        _owned_in = command_is_ours(spec) if not _scope_owned else False
+        _pre_cmd = spec.get("command")
+        _pair = recorded_source(spec)
+        # PRESERVED, never stripped. A scope-owned server's record is not acted on --
+        # no restoration, see above -- but destroying it would be a decision in its
+        # own right, and the wrong one: a scope command that does not resolve, or a
+        # scope entry that later goes away, would leave the server agent-only again
+        # with its only re-derivation source deleted, so a relocated binary could
+        # never rebind. Keeping it inert costs nothing, because the ownership guard
+        # re-checks the emitted value before anything is ever restored from it, so a
+        # record that has gone stale in the meantime is simply not used.
+        #
+        # Deciding this by which candidate WINS resolution would be the other way to
+        # rule out a non-resolving scope command, and that is the after-resolution
+        # per-field source selection this change is deliberately scoped out of; it
+        # belongs with the agent-config ownership work. Preserving is the part that
+        # needs no ordering at all.
+        _keep_record: tuple[str, str] | None = _pair if _scope_owned else None
+        if not _scope_owned:
+            _viewed = source_view(spec)
+            if not _owned_in or _pair is None:
+                # Nothing of ours to restore; the view only strips the key.
+                spec = _viewed
+            elif _resolve_command(_pair[0], _viewed.get("env"))[0]:
+                # The source still resolves, so re-derive from it: that is the whole
+                # point, and it is what rebinds a moved binary.
+                spec = _viewed
+            else:
+                # It does NOT resolve, and for this population the emitted config is
+                # the entry's only copy -- so re-deriving would drop the server from
+                # the map, the file would be rewritten without it, and the next
+                # rebuild would have nothing to read. A stale-but-working command
+                # beats a deleted server, so keep what we emitted.
+                #
+                # The record is re-recorded VERBATIM below rather than refreshed from
+                # the value we kept: re-deriving must stay possible once whatever
+                # broke the source clears, and recording the emitted path as its own
+                # source would retire the record's only useful fact.
+                _keep_record = _pair
+                spec = {k: v for k, v in spec.items() if k != DERIVED_KEY}
         # Remote Streamable HTTP servers — preserved as-is except for the OAuth
         # hints, which are renamed to the fields kiro-cli actually deserializes.
         # This is the one boundary where the internal spelling (``scopes`` /
@@ -3687,11 +3801,7 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
         # Build candidate specs in priority order: the merged winner first,
         # then the same server from each source as a resolution fallback.
         candidates: list[tuple[str, dict]] = [("winner", spec)]
-        for label, src in (
-            ("kirocrew", kirocrew_mcp),
-            ("kiro-global", shared_mcp),
-            ("provider-global", extra_shared_mcp),
-        ):
+        for label, src in _scopes:
             alt = src.get(name)
             if isinstance(alt, dict) and alt is not spec:
                 candidates.append((label, alt))
@@ -3739,7 +3849,31 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
             spec_env = merged.get("env")
             if isinstance(spec_env, dict):
                 merged["env"] = emit_env(spec_env)
-            valid_servers[name] = merged
+            # Record only for a server with no other source, and only a field this
+            # pass may honestly claim: one the record already proved ours on the way
+            # in, or one whose emitted value DIFFERS from what the entry carried, so
+            # we computed it.
+            #
+            # The excluded case is a value we merely passed through -- a hand edit,
+            # or an already-absolute declaration nothing was derived from. It survives
+            # this rebuild either way, but a record written over it would read as
+            # proof on the NEXT pass, which is how a claim we never earned turns into
+            # a value we overwrite. Unrecorded means it stays the user's.
+            #
+            # Read from the candidate that WON: on a fallback the command came from
+            # ``chosen``, so recording ``spec``'s would name a source this entry was
+            # not derived from. ``None`` records "the source carried no such field".
+            _derived: tuple[str, str] | None = _keep_record
+            if _keep_record is None and not _scope_owned and (_owned_in or resolved != _pre_cmd):
+                _cmd_source = chosen.get("command")
+                # Non-empty by construction -- ``resolved`` is truthy, and it came
+                # from resolving THIS candidate's command -- but assert it in the
+                # type rather than in a comment: a record whose source is blank is
+                # unreadable on the way back, so writing one would silently disable
+                # the fix instead of failing here.
+                if isinstance(_cmd_source, str) and _cmd_source:
+                    _derived = (_cmd_source, resolved)
+            valid_servers[name] = record_derived(merged, _derived)
         elif not had_any_command:
             # No candidate defined a command at all — distinct from a command
             # that was defined but couldn't be resolved.
