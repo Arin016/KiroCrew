@@ -473,12 +473,28 @@ jobs:
             echo "::warning::the scope step did not run (an earlier step failed closed); reporting the review as incomplete, not skipped."
             exit 0
           fi
-          # The contract is absent from the base commit -- the lane cannot review
-          # the change that introduces or moves it, and must not fall back to the
-          # head's copy.
-          if [ "${CONTRACT:-}" != "true" ]; then
+          # CONTRACT has the same three states as SURFACE above, and they must be
+          # told apart for the same reason. `false` means the contract step RAN and
+          # the contract genuinely is not on the base commit -- the lane cannot
+          # review the change that introduces or moves it, and must not fall back
+          # to the head's copy. An EMPTY value means the contract step never ran,
+          # because a step between the scope gate and it failed and the default
+          # `if: success()` skipped it. In THIS lane that is reachable: the intent
+          # fetch sits between them (the same-repo lane orders the contract step
+          # first, which is why it never showed this), so an intent-fetch failure
+          # used to surface as NO_CONTRACT -- a green check-run asserting "no
+          # contract on the base commit" when nothing ever looked for the contract,
+          # plus a comment asserting the revision ships no reviewable capability
+          # when the scope step had just found that it does. Two confident claims,
+          # neither checked. Empty resolves to UNKNOWN -> NEUTRAL, like SURFACE.
+          if [ "${CONTRACT:-}" = "false" ]; then
             echo "verdict=NO_CONTRACT" >> "$GITHUB_OUTPUT"
             echo "::warning::no trusted contract on the base commit; the review did not run. Not blocking."
+            exit 0
+          fi
+          if [ "${CONTRACT:-}" != "true" ]; then
+            echo "verdict=UNKNOWN" >> "$GITHUB_OUTPUT"
+            echo "::warning::the contract step did not run (an earlier step in this job failed); reporting the review as incomplete rather than as a missing contract."
             exit 0
           fi
           summary=""
@@ -542,6 +558,7 @@ jobs:
           HEAD: ${{ steps.pr.outputs.head_sha }}
           VERDICT: ${{ steps.verdict.outputs.verdict }}
           WITHHELD: ${{ steps.redact.outputs.withheld }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
         run: |
           set -uo pipefail
           [ -z "${PR:-}" ] && { echo "no PR resolved; skipping comment"; exit 0; }
@@ -570,14 +587,28 @@ jobs:
             fi
             exit 0
           fi
+          # SKIPPED and NO_CONTRACT are DIFFERENT facts and no longer share one
+          # message. SKIPPED is a statement about the contributor's diff (it adds
+          # no capability to inventory); NO_CONTRACT is a statement about this
+          # repository's base commit and says nothing about the diff at all.
+          # Reporting the second with the first's wording told contributors their
+          # change ships nothing when this lane had merely failed to find its own
+          # rubric. Same wording as first-principles-review.yml for both.
           if [ "${VERDICT:-UNKNOWN}" = "SKIPPED" ] || [ "${VERDICT:-UNKNOWN}" = "NO_CONTRACT" ]; then
+            if [ "${VERDICT:-UNKNOWN}" = "NO_CONTRACT" ]; then
+              heading="⏭️ no contract on the base commit"
+              body="_\`.github/review-prompts/first-principles.md\` does not exist on this PR's base commit, so there is no trusted contract to review \`$HEAD\` against. The contract is deliberately read from the base and never from the head, so a change cannot edit the reviewer that judges it — which also means this lane cannot review the pull request that introduces or moves the contract. Advisory — does not block merge._"
+            else
+              heading="⏭️ skipped"
+              body="_Revision \`$HEAD\` ships no reviewable capability (docs, tests or generated files only), so there is nothing to inventory. Advisory — does not block merge._"
+            fi
             existing="$(find_existing)"
             if [ -n "$existing" ] && [ "$existing" != "null" ]; then
               {
                 echo "$MARKER"
-                echo "## First Principles Review (Fable 5, fork) — ⏭️ skipped"
+                echo "## First Principles Review (Fable 5, fork) — $heading"
                 echo
-                echo "_Revision \`$HEAD\` ships no reviewable capability, so there is nothing to inventory. Advisory — does not block merge._"
+                echo "$body"
               } > "$RUNNER_TEMP/fp-comment.md"
               gh api --method PATCH "repos/$REPO/issues/comments/$existing" \
                 --field body="$(cat "$RUNNER_TEMP/fp-comment.md")" >/dev/null || true
@@ -604,11 +635,23 @@ jobs:
           else
             # No parseable verdict → the review errored or emitted no header. Do
             # NOT post raw model/error text; post a generic, leak-safe notice.
+            # Name the cause from the model step's OWN outcome instead of
+            # asserting one: this branch is reached both when the model ran and
+            # returned nothing usable and when the model was never called at all,
+            # and "the model call errored" sent contributors to debug a call that
+            # had not happened.
+            case "${REVIEW_OUTCOME:-}" in
+              skipped) why="the review step never ran, because an earlier step in this job failed — no model call was made" ;;
+              failure) why="the review step failed" ;;
+              cancelled) why="the review step was cancelled" ;;
+              success) why="the review step completed but returned no verdict header" ;;
+              *)       why="the review step reported no outcome" ;;
+            esac
             {
               echo "$MARKER"
               echo "## First Principles Review (Fable 5, fork) — ⚠️ could not complete"
               echo
-              echo "_The first-principles review did not produce a verdict for \`$HEAD\` (the model call errored or returned no verdict header). See the Fork First Principles Review job logs. Advisory — does not block merge._"
+              echo "_The first-principles review did not produce a verdict for \`$HEAD\` ($why). See the Fork First Principles Review job logs. Advisory — does not block merge._"
             } > "$RUNNER_TEMP/fp-comment.md"
           fi
           # Author-filtered per-page jq lookup so a PR commenter can't plant the

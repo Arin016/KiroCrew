@@ -64,7 +64,6 @@
 2 test/test_acp_backend_kas.py
 1 test/test_agent_home_isolation.py
 1 test/test_agent_import_hoist.py
-4 test/test_ai_review_workflows.py
 1 test/test_beacon.py
 1 test/test_bench_cli.py
 3 test/test_brand_name_gate.py

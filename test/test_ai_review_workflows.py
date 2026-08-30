@@ -1053,7 +1053,11 @@ class TestFirstPrinciplesShellSyntax:
             path = tmp_path / "step.sh"
             path.write_text(script, encoding="utf-8")
             result = subprocess.run(
-                [bash, "-n", str(path)], check=False, capture_output=True, text=True
+                [bash, "-n", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
             )
             assert result.returncode == 0, f"{lane} / {step_name}: {result.stderr.strip()}"
 
@@ -1112,10 +1116,249 @@ class TestFirstPrinciplesScopeGateBehavior:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             env={**os.environ, "TOUCHED": touched},
         )
         assert out.returncode == 0, out.stderr
         assert (out.stdout == "true") is want, f"{lane}: {touched!r} -> {out.stdout!r}"
+
+
+class TestFirstPrinciplesIntentCapSurvivesALongBody:
+    """Execute the ACTUAL PR-intent cap from both lanes against a body far past
+    the cap.
+
+    `printf '%s' "$stripped" | head -c 8000` reads as harmless and is not: `head`
+    closes the pipe the moment it has its bytes, the upstream `printf` then takes
+    EPIPE, and `pipefail` + the runner's default `bash -e` kill the whole step.
+    A long PR description therefore aborted the reviewer before it ran, and the
+    lane went on to report that as a fact about the contributor's diff. The `|| `
+    fallback could not rescue it because it was the same construct.
+
+    Only EXECUTING the block at a size past the pipe's capacity can see this --
+    every string-matching test in this file passed while it was broken.
+    """
+
+    def _cap_block(self, lane: str) -> str:
+        workflow = _workflow(lane)
+        step = (
+            "Fetch PR intent (untrusted data file)"
+            if lane.startswith("fork-")
+            else "Prefetch the change as data files"
+        )
+        script = _step_script(workflow, step)
+        start = script.index("# Cap at 8000 bytes")
+        end = script.index('rm -f "$full"', start) + len('rm -f "$full"')
+        return script[start:end]
+
+    @pytest.mark.parametrize("lane", FP_LANES)
+    # 100_000 is past the old construct's abort threshold (the cap plus a pipe
+    # buffer). Read the body from a tmp_path file: Windows caps the complete
+    # CreateProcess environment at 32,767 characters.
+    @pytest.mark.parametrize("body_bytes", (0, 100, 8000, 8001, 100_000))
+    def test_cap_never_aborts_the_step(
+        self, lane: str, body_bytes: int, tmp_path: Path
+    ) -> None:
+        bash = _bash()
+        if bash is None:
+            pytest.skip("the cap block is Bash; skip where Bash is absent")
+        intent = tmp_path / "pr-intent.txt"
+        body = tmp_path / "body.txt"
+        body.write_bytes(b"x" * body_bytes)
+        # Reproduce the step's own prologue: `pipefail` plus the runner's `bash -e`
+        # are exactly what turned an EPIPE into a dead step.
+        script = 'set -uo pipefail\nstripped="$(cat "$BODY_FILE")"\n' + self._cap_block(lane)
+        out = subprocess.run(
+            [bash, "-e", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "BODY_FILE": str(body),
+                "INTENT": str(intent),
+            },
+            cwd=tmp_path,
+        )
+        assert out.returncode == 0, (
+            f"{lane}: capping a {body_bytes}-byte body killed the step "
+            f"(rc={out.returncode}) {out.stderr.strip()}"
+        )
+        written = intent.read_text(encoding="utf-8")
+        prose = written.split("\n", 1)[0]
+        assert len(prose) == min(body_bytes, 8000), f"{lane}: capped to {len(prose)}"
+        marker = "[description TRUNCATED at 8000 bytes]"
+        assert (marker in written) is (body_bytes > 8000), f"{lane}: marker wrong"
+
+    @pytest.mark.parametrize("lane", FP_LANES)
+    def test_cap_still_does_not_split_multibyte_utf8(self, lane: str, tmp_path: Path) -> None:
+        bash = _bash()
+        if bash is None:
+            pytest.skip("the cap block is Bash; skip where Bash is absent")
+        # 7999 ASCII bytes + one 3-byte character: byte 8000 lands in the MIDDLE of
+        # it, so a bare byte cap would leave an invalid UTF-8 tail. The Perl cap
+        # must drop that partial character.
+        intent = tmp_path / "pr-intent.txt"
+        body = tmp_path / "body.txt"
+        body.write_text("x" * 7999 + "€", encoding="utf-8")
+        script = 'set -uo pipefail\nstripped="$(cat "$BODY_FILE")"\n' + self._cap_block(lane)
+        out = subprocess.run(
+            [bash, "-e", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "BODY_FILE": str(body),
+                "INTENT": str(intent),
+            },
+            cwd=tmp_path,
+        )
+        assert out.returncode == 0, out.stderr
+        raw = intent.read_bytes()  # bytes, so a split multibyte tail would survive
+        assert raw.decode("utf-8").split("\n", 1)[0] == "x" * 7999
+
+
+class TestForkFirstPrinciplesContractStateIsThreeValued:
+    """`steps.contract.outputs.available` has three states and two of them are
+    opposite facts.
+
+    `false` means the contract step RAN and the contract is genuinely not on the
+    base commit. EMPTY means the step never ran. Collapsing them made an
+    intent-fetch failure surface as a GREEN check-run asserting "no contract on
+    the base commit" when nothing had ever looked for the contract, alongside a
+    comment asserting the revision ships no reviewable capability when the scope
+    step had just found that it does: two confident claims, neither checked.
+
+    Reachable only in the fork lane, whose intent fetch sits BETWEEN the scope
+    gate and the contract step; the same-repo lane orders the contract step first.
+    """
+
+    def _verdict_script(self) -> str:
+        workflow = _workflow("fork-first-principles-review.yml")
+        return _step_script(workflow, "Capture first-principles verdict")
+
+    @pytest.mark.parametrize(
+        ("contract", "want"),
+        [
+            # The step ran and found no contract: an honest, green skip.
+            ("false", "NO_CONTRACT"),
+            # The step never ran: nobody looked, so this must NOT claim the
+            # contract is missing -- it is an incomplete review (-> NEUTRAL).
+            ("", "UNKNOWN"),
+        ],
+    )
+    def test_absent_contract_and_never_looked_are_different(
+        self, contract: str, want: str, tmp_path: Path
+    ) -> None:
+        bash = _bash()
+        if bash is None:
+            pytest.skip("the verdict block is Bash; skip where Bash is absent")
+        out_file = tmp_path / "gh-output"
+        out_file.touch()
+        proc = subprocess.run(
+            [bash, "-e", "-c", self._verdict_script()],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "SURFACE": "true",
+                "CONTRACT": contract,
+                "EXEC_FILE": "",
+                "HEAD_SHA": "0" * 40,
+                "GITHUB_OUTPUT": str(out_file),
+                "RUNNER_TEMP": str(tmp_path),
+            },
+            cwd=tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        emitted = out_file.read_text(encoding="utf-8")
+        assert f"verdict={want}" in emitted, (
+            f"contract={contract!r} -> {emitted.strip()!r}, wanted verdict={want}"
+        )
+
+    def test_no_contract_and_scope_skip_no_longer_share_one_message(self) -> None:
+        # The two are different facts: a scope skip is a statement about the
+        # contributor's diff, a missing contract is a statement about THIS repo's
+        # base commit and says nothing about the diff. The fork lane reported the
+        # second with the first's wording, and the same-repo lane never did --
+        # so this is drift back to the lane it says it mirrors.
+        workflow = _workflow("fork-first-principles-review.yml")
+        script = _step_script(workflow, "Post/update first-principles review comment")
+        assert 'heading="⏭️ no contract on the base commit"' in script
+        assert 'heading="⏭️ skipped"' in script
+        # The diff-level claim must be reachable ONLY from the scope skip.
+        ships_nothing = _line_containing(script, "ships no reviewable capability")
+        assert "docs, tests or generated files only" in ships_nothing
+
+
+CAUSE_LANES = (
+    "design-review.yml",
+    "ux-review.yml",
+    "first-principles-review.yml",
+    "fork-design-review.yml",
+    "fork-ux-review.yml",
+    "fork-first-principles-review.yml",
+)
+
+
+class TestIncompleteReviewNamesTheObservedCause:
+    """A fallback notice must report what was OBSERVED, not a plausible cause.
+
+    Every one of these lanes said "the model call errored or returned no verdict
+    header" whenever no verdict parsed -- including when the model was never
+    called at all, which is what happens when any earlier step in the job fails.
+    A wrong-but-plausible cause is worse than "could not complete, see logs": it
+    sends the contributor to debug their prompt or the model while the real
+    failure is upstream. The step's own `outcome` already distinguishes the
+    cases, so no new plumbing is needed to stop guessing.
+    """
+
+    @pytest.mark.parametrize("lane", CAUSE_LANES)
+    def test_cause_is_derived_from_the_review_step_outcome(self, lane: str) -> None:
+        workflow = _workflow(lane)
+        assert "the model call errored or returned no verdict header" not in workflow, (
+            f"{lane}: still asserts a cause it did not observe"
+        )
+        assert "REVIEW_OUTCOME: ${{ steps.review.outcome }}" in workflow, (
+            f"{lane}: the observed outcome is not wired into the comment step"
+        )
+
+    @pytest.mark.parametrize("lane", CAUSE_LANES)
+    def test_each_outcome_maps_to_a_distinct_honest_reason(self, lane: str) -> None:
+        bash = _bash()
+        if bash is None:
+            pytest.skip("the cause mapping is Bash; skip where Bash is absent")
+        workflow = _workflow(lane)
+        m = re.search(
+            r'(case "\$\{REVIEW_OUTCOME:-\}" in.*?esac)', workflow, re.S
+        )
+        assert m, f"{lane}: no REVIEW_OUTCOME case block"
+        block = "\n".join(line.strip() for line in m.group(1).splitlines())
+        seen = {}
+        for outcome in ("skipped", "failure", "cancelled", "success", ""):
+            out = subprocess.run(
+                [bash, "-e", "-c", block + '\nprintf "%s" "$why"'],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env={**os.environ, "REVIEW_OUTCOME": outcome},
+            )
+            assert out.returncode == 0, out.stderr
+            seen[outcome] = out.stdout
+        # The load-bearing distinction: a model that was never called must not be
+        # described as a model that errored.
+        assert "never ran" in seen["skipped"], f"{lane}: {seen['skipped']!r}"
+        assert "no model call was made" in seen["skipped"]
+        assert "review step failed" in seen["failure"]
+        assert "review step was cancelled" in seen["cancelled"]
+        assert "review step completed" in seen["success"]
+        assert seen["failure"] != seen["skipped"] != seen["success"]
+        assert len(set(seen.values())) == 5, f"{lane}: reasons collide: {seen}"
 
 
 FORK_FINALIZE_LANES = (
@@ -1928,6 +2171,7 @@ class TestGptMediaFilterBehavior:
             input=sample,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
         ).stdout
         # Every media form collapses to a placeholder...
@@ -1973,6 +2217,7 @@ class TestGptMediaFilterBehavior:
                 env={**os.environ, "INTENT": "x" * n},
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 check=True,
             ).stdout
             cap_len, trunc = out.split("|")
