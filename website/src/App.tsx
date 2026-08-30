@@ -2369,8 +2369,10 @@ export default function App() {
     ) : (
     /* h-dvh (100vh fallback) so the shell tracks the visible viewport on
        mobile: a 100vh shell extends under the browser's collapsible UI,
-       which hides the bottom row (the chat composer) on phones. */
-    <div className="h-screen supports-[height:100dvh]:h-dvh w-screen flex flex-col overflow-hidden bg-bg">
+       which hides the bottom row (the chat composer) on phones.
+       w-full, not w-screen: 100vw resolves independently of layout, so it can
+       disagree with the `(max-width: 767px)` query this shell branches on. */
+    <div className="h-screen supports-[height:100dvh]:h-dvh w-full flex flex-col overflow-hidden bg-bg">
       {/* Embedded remote panes receive their switcher model from the parent via
           this bridge (option B) — no-op in the top-level dashboard. */}
       <EmbeddedHostBridge />

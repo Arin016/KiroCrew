@@ -2199,8 +2199,8 @@ const SORT_LS_KEY = 'mc-session-sort'
 /** Flat view ("explode chats out of folders") persistence key. */
 const FLAT_VIEW_LS_KEY = 'mc-sidebar-flat-view'
 
-export const SIDEBAR_MIN = 180
-export const SIDEBAR_MAX = 1400
+import { SIDEBAR_MIN, SIDEBAR_MAX } from './chat/sidebarWidth'
+export { SIDEBAR_MIN, SIDEBAR_MAX } from './chat/sidebarWidth'
 const SIDEBAR_LS_KEY = 'mc-sidebar-width'
 /** The width the user had before a board auto-widen, so switching back to list
  *  view restores it instead of stranding the automatic value. */

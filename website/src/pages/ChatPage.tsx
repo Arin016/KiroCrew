@@ -196,7 +196,8 @@ import { createTurnGrouper, applyRunningState, hasReasoningContent, isReasoningR
 import { setSessionPreviewPending, normalizeUrl, PREVIEW_EXPAND_EVENT, PREVIEW_SNIP_EVENT } from '../components/WebPreviewPanel'
 import { detectPreviewUrl, previewFeedDecision } from '../utils/detectPreviewUrl'
 import { fileLandingSlot } from '../utils/uploadRouting'
-import ChatSidebar, { SIDEBAR_MIN, SIDEBAR_MAX } from './ChatSidebar'
+import ChatSidebar from './ChatSidebar'
+import { SIDEBAR_MIN, SIDEBAR_MAX, clampSidebarWidth } from './chat/sidebarWidth'
 import { toSlug, resolveMsgIndex } from '../utils/shareUrl'
 import { DRAFT_SAVE_DEBOUNCE_MS, loadDrafts, mergeIntoDraft, mergeRecoveredDraft, saveDrafts as persistDrafts, setDraft } from '../utils/chatDrafts'
 import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } from '../utils/chatFileDrafts'
@@ -5608,6 +5609,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
+  // Stored width is validated against SIDEBAR_MIN..SIDEBAR_MAX only, never the
+  // window; clamp for render but leave the preference for the wide viewport.
+  const effectiveSidebarWidth = clampSidebarWidth({ stored: sidebarWidth, winW, railW: railWidth })
   const toggleAct = useCallback(() => {
     // Opening with no tabs shows the empty-state launcher grid (no seeded
     // default view) -- the user picks what to open.
@@ -6860,7 +6864,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // plus a usable chat-pane minimum. On mobile the panel is full-screen (no
   // shared row), so no reserve applies.
   const CHAT_PANE_MIN = CHAT_PANE_MIN_W
-  const panelReserve = isMobile ? undefined : (sidebarOpen ? sidebarWidth : 0) + CHAT_PANE_MIN
+  const panelReserve = isMobile ? undefined : (sidebarOpen ? effectiveSidebarWidth : 0) + CHAT_PANE_MIN
   // The panel takes its maximum only while the session list is actually hidden.
   // That maximum is measured against the header's reserve, which knows nothing
   // about the session list's width — so keeping it while the user reopens the
@@ -6882,7 +6886,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const panelFillWidth = sidePanelFillWidth({
     winW,
     railW: railWidth,
-    sidebarW: !isMobile && sidebarOpen ? sidebarWidth : 0,
+    sidebarW: !isMobile && sidebarOpen ? effectiveSidebarWidth : 0,
     isMobile,
   })
 
@@ -6939,7 +6943,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             slots={filteredSlots}
             activeSlot={activeSlot}
             unreadSlots={surfaceUnreadSlots}
-            panelWidth={sidebarWidth}
+            panelWidth={effectiveSidebarWidth}
             // The panel's own height (OverlayDrawer carries pb-2), so the
             // flyout can never be taller than the thing it grows into.
             maxHeight={Math.max(0, containerH - 8)}
@@ -6973,7 +6977,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           />
         </div>
       ) : (
-      <OverlayDrawer open={isMobile ? drawerMounted : sidebarOpen} width={isMobile ? window.innerWidth : sidebarWidth} dragging={sidebarDragging} slideX={isMobile ? drawerX : undefined} morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? 'mobile-sessions-overlay fixed top-safe-offset-[42px] bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
+      <OverlayDrawer open={isMobile ? drawerMounted : sidebarOpen} width={isMobile ? winW : effectiveSidebarWidth} dragging={sidebarDragging} slideX={isMobile ? drawerX : undefined} morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? 'mobile-sessions-overlay fixed top-safe-offset-[42px] bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg max-w-[calc(100vw-2.5rem)] [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0' : ''}>
         <ChatSidebar
           slots={filteredSlots}
           activeSlot={activeSlot}
