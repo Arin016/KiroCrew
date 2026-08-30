@@ -291,6 +291,40 @@ which testpath asked for the workers.
   add a subsystem with a background worker, ask which directory its thread captured
   and whether anything deletes that directory underneath it.
 
+  Session scope alone is only per-**worker**, and that left a second, subtler hazard:
+  every test on a worker shared the one directory, hence one `_chain_lock_path()`
+  (`self._dir/trust/security_events.lock`) — the sidecar the cross-process chain lock
+  is taken on. So a concurrent SEL writer (another test's `sel-writer` daemon, or a
+  sibling instance mid-append) holding that shared lock made an *unrelated* test's
+  assertion depend on winning a lock race: the on-loop acquire is a single-shot that
+  correctly refuses to wait, `activate_scoped`'s fail-closed audit then raises, the
+  grant is refused, and a trust assertion reads False through no fault of the test
+  asserting it. MEASURED: that is #7029, the issue-radar trust assertion failing
+  nondeterministically on the `Backend Tests (3.10, 2)` shard. The **on-loop refusal
+  and the fail-closed grant refusal are correct and must not be loosened** — both are
+  pinned by `test_a_grant_whose_audit_fails_is_never_usable` — so the fix is
+  test-isolation, not product: `_isolate_sel_per_test` (function-scoped, in the same
+  conftest) layers **per-test** isolation on top of the per-worker session dir. It
+  repoints `_default_dir()` at a fresh per-test subdirectory (under the session
+  `_isolation_root`, so a late flush by a stale writer thread strands nothing outside
+  the managed tree) and resets the singleton, so each test's default `sel()` resolves
+  its own `_chain_lock_path()` and no foreign writer can contend for it. This is an
+  ACCEPTED tradeoff, not a free lunch: session scope existed so the `sel-writer`
+  daemon thread is "not churned per test," and resetting the singleton every test
+  reverses that for the non-critical async path — a test that emits a non-critical
+  async SEL event through the default `sel()` builds a fresh instance whose first
+  append starts a new `sel-writer` daemon and registers a new `atexit.flush`, so the
+  per-test reset changes the *count* of threads/handlers created over a run (they are
+  never joined or stopped, and accumulate for the worker's process lifetime). It is
+  safe because the threads are daemons and every per-test dir lives inside the managed
+  tmp tree, so a late recreate strands nothing; we do NOT stop/join the prior writer in
+  teardown because doing so from a fixture risks blocking or racing the drain and would
+  reintroduce flakiness. The #7029 audit path pays none of it: `activate_scoped` audits
+  `critical=True`, which flushes INLINE and spawns no thread, so the trust tests add no
+  `sel-writer` thread or `atexit` handler. A green run alone does not prove the race is
+  gone (the issue is a flake); `test_a_foreign_chain_lock_holder_cannot_deny_trust`
+  in `test/test_issue_radar_crew_runtime.py` is the differential pin.
+
 - **When you stub a lifecycle method, SPY and delegate — never replace.** A stub that
   only records the call leaves whatever that method was supposed to stop still running.
   The worked example cost 19 failures in files that contain no metrics code at all:

@@ -1973,6 +1973,145 @@ class TestDisablingTheAppRevokesInline(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(cr.install_app_disable_hook(self.state))
 
 
+class TestForeignChainLockCannotDenyTrust(unittest.IsolatedAsyncioTestCase):
+    """Differential regression pin for issue #7029: an SEL chain-lock race.
+
+    THE FLAKE. ``sync_trust`` -> ``activate_scoped`` audits fail-closed to the SEL
+    on the event loop BEFORE it commits the grant. That audit takes the SEL's
+    cross-process chain lock -- a real ``flock`` on ``self._dir/trust/
+    security_events.lock`` -- and on the loop thread the acquire is a SINGLE
+    nonblocking attempt that fails closed if the lock is held by a foreign writer
+    (``sel._acquire_chain_lock_on_loop``). That refusal is CORRECT and pinned by
+    ``test_a_grant_whose_audit_fails_is_never_usable``; it must not be loosened.
+
+    The defect #7029 records is test-isolation, not product: while the rootdir
+    conftest only isolated the SEL dir per *worker* (``_isolate_sel_default_dir``,
+    session-scoped), every test on a worker shared ONE ``_dir`` and therefore ONE
+    ``_chain_lock_path()``. So a concurrent SEL writer on the same worker (another
+    test's ``sel-writer`` daemon, or a sibling instance mid-append) could hold that
+    shared lock while an *unrelated* test ran ``sync_trust``, the on-loop acquire
+    refused, the audit failed, the grant was refused, and the trust assertion read
+    False -- every component behaving as specified, the shard nondeterministic.
+    ``_isolate_sel_per_test`` closes it by giving each test its own SEL dir and thus
+    its own chain-lock path.
+
+    This test pins the property that makes the race impossible. It is a REGRESSION
+    pin, and because the issue is recorded as a FLAKE, a green run alone is not
+    evidence: the two assertions that carry the pin are the structural one (the
+    default ``sel()`` this test's ``activate_scoped`` uses resolves a chain-lock
+    path unique to this test, not a shared one) and the behavioral one (a real
+    foreign ``flock`` on a DIFFERENT test's/worker's chain-lock path does NOT make
+    ``_effectively_trusted`` read False). The mechanism check that a foreign hold on
+    the SAME path still denies (fail-closed intact) guards the guardrail: the fix
+    isolates the path, it does not weaken the refusal.
+    """
+
+    def setUp(self) -> None:
+        # Scoped grants live in the process-wide singleton; reset so one test's
+        # grant cannot leak into the next (mirrors the other classes here).
+        reset_singleton()
+        self.addCleanup(reset_singleton)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    @staticmethod
+    def _chain_lock_path_for(base_dir: Path) -> Path:
+        """The sidecar ``_chain_lock_path()`` would take for a log rooted at *base_dir*.
+
+        Mirrors ``sel.SecurityEventLog._chain_lock_path`` for the normal
+        (non-legacy-key-fallback) case: ``<base>/trust/security_events.lock``.
+        """
+        from kiro_crew import sel as sel_mod
+
+        return base_dir / sel_mod._TRUST_SUBDIR / sel_mod._SEL_LOCK_FILE
+
+    @contextlib.contextmanager
+    def _foreign_hold(self, lock_path: Path):
+        """Hold *lock_path*'s advisory lock as a FOREIGN writer would.
+
+        A real ``flock`` taken through :mod:`platform_compat` on a fresh fd, NOT
+        registered in ``sel._CHAIN_HOLDS`` -- so the on-loop single-shot acquire in
+        the SEL under test reads it as a foreign process's hold and refuses it,
+        exactly like a concurrent xdist worker's ``sel-writer`` would. This is the
+        contender #7029 blamed for denying an unrelated test's audit.
+        """
+        import os
+
+        from kiro_crew import platform_compat
+
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        got = platform_compat.try_acquire_lock(fd, exclusive=True)
+        self.assertTrue(got, "could not simulate the foreign chain-lock holder")
+        try:
+            yield
+        finally:
+            platform_compat.release_lock(fd)
+            os.close(fd)
+
+    async def _grant_trust_on_loop(self, slot: Any) -> bool:
+        """Run the real ``sync_trust`` grant path on the event-loop thread.
+
+        ``IsolatedAsyncioTestCase`` runs this coroutine on the loop, so the SEL
+        audit inside ``activate_scoped`` takes the loop-side single-shot chain-lock
+        acquire -- the same path that failed in the issue. Returns whether the
+        shared approval path would then auto-approve the slot.
+        """
+        cr.sync_trust(slot, {"id": "c_7029", "unattended": True, "enabled": True})
+        return _effectively_trusted(slot)
+
+    async def test_a_foreign_chain_lock_holder_cannot_deny_trust(self) -> None:
+        from kiro_crew import sel as sel_mod
+
+        # The default SEL that activate_scoped audits through. Per-test isolation
+        # (_isolate_sel_per_test) binds this to a dir unique to THIS test.
+        default_lock = sel_mod.sel()._chain_lock_path()
+
+        # Structural pin: the default chain-lock path is this test's own, not a
+        # path shared with any other test. A second log rooted elsewhere resolves a
+        # DIFFERENT sidecar -- which pre-#7029 (one shared dir per worker) it did
+        # not, so a foreign hold could land on the very path this audit needs.
+        foreign_root = self.root / "foreign-worker"
+        foreign_lock = self._chain_lock_path_for(foreign_root)
+        self.assertNotEqual(
+            default_lock,
+            foreign_lock,
+            "the default SEL must not share a chain-lock path with another root",
+        )
+
+        # Behavioral pin: a foreign writer holding a DIFFERENT chain lock cannot
+        # deny this test's audit, because the audit takes ITS OWN lock. This is the
+        # assertion #7029 asks for: a concurrent holder of another test's chain lock
+        # can no longer make _effectively_trusted read False.
+        slot = _FakeSlot("crew-c_7029")
+        with self._foreign_hold(foreign_lock):
+            self.assertTrue(
+                await self._grant_trust_on_loop(slot),
+                "a foreign holder of a DIFFERENT chain lock denied trust -- the SEL "
+                "dir is not isolated per test (issue #7029)",
+            )
+
+    async def test_a_foreign_hold_on_the_same_path_still_fails_closed(self) -> None:
+        """The guardrail behind the guardrail: the fix isolates the path, it does
+        NOT loosen the on-loop refusal. A foreign writer holding the SEL's OWN
+        chain-lock path must still make the fail-closed audit refuse the grant --
+        that refusal is pinned by ``test_a_grant_whose_audit_fails_is_never_usable``
+        and this asserts the isolation change left it intact."""
+        from kiro_crew import sel as sel_mod
+
+        own_lock = sel_mod.sel()._chain_lock_path()
+        slot = _FakeSlot("crew-c_7029")
+        with self._foreign_hold(own_lock):
+            self.assertFalse(
+                await self._grant_trust_on_loop(slot),
+                "a foreign hold on the SEL's OWN chain lock must still fail closed",
+            )
+        # And with the contender gone the grant is usable again, so the refusal was
+        # the lock race, not a wedged control.
+        self.assertTrue(await self._grant_trust_on_loop(slot))
+
+
 class TestGrantRenewal(unittest.TestCase):
     """Renewal is a SLIDE, not a re-activation, and that is a security property.
 

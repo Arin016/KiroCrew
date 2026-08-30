@@ -1752,6 +1752,17 @@ def _isolate_sel_default_dir(tmp_path_factory):
     run and belongs to no individual test, so nothing deletes it underneath the
     writer, and the thread is not churned per test.
 
+    This provides per-WORKER isolation. ``_isolate_sel_per_test`` (function-scoped,
+    below) layers per-TEST isolation on top: it repoints ``_default_dir()`` at a
+    fresh per-test subdirectory under the session ``_isolation_root`` and resets the
+    singleton so each test's default ``sel()`` resolves its OWN
+    ``_chain_lock_path()``. That is what closes issue #7029 -- with distinct
+    chain-lock paths, no concurrent SEL writer contends for a given test's lock, so
+    a trust assertion no longer depends on winning a cross-process lock race. This
+    session fixture stays the stable fallback the daemon thread can safely re-create
+    against, and the per-test dirs live inside the managed tmp tree so a late flush
+    strands nothing.
+
     Patches the ``_default_dir()`` accessor rather than a captured constant, because
     the module resolves its default lazily so that importing ``kiro_crew.sel`` never
     triggers the one-time data-home migration as an import side effect. Tests that
@@ -1773,6 +1784,82 @@ def _isolate_sel_default_dir(tmp_path_factory):
     finally:
         _sel._default_dir = original_default
         _sel.SecurityEventLog._instance = original_instance
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sel_per_test(_isolation_dirs):
+    """Give each test its OWN SEL directory on top of the per-worker one above.
+
+    The session fixture makes the writer's directory stable and worker-local, but
+    every test on a worker still shares that ONE directory -- and therefore ONE
+    ``_chain_lock_path()`` (``self._dir/trust/security_events.lock``), the sidecar
+    the cross-process chain lock is taken on. That is a shared cross-process lock,
+    so a concurrent SEL writer (another test's daemon ``sel-writer`` thread, or a
+    sibling instance mid-append) holding it makes an unrelated test's assertion
+    depend on winning a lock race: when the on-loop single-shot acquire finds the
+    lock held it refuses to wait (by design -- it must not stall the event loop),
+    the fail-closed audit in ``activate_scoped`` raises, the grant is refused, and
+    a trust assertion reads False through no fault of the test asserting it. Issue
+    #7029 is exactly that flake.
+
+    This fixture removes the shared writer instead of coping with the race: it
+    points ``_default_dir()`` at a UNIQUE per-test subdirectory and resets the SEL
+    singleton so the default ``sel()`` this test builds binds ``self._dir`` -- and
+    thus resolves a ``_chain_lock_path()`` -- that no other test shares. With
+    distinct lock paths there is no cross-process contender for a given test's
+    chain lock, so the on-loop acquire cannot be denied by a foreign holder.
+
+    The per-test directory lives under the session ``_isolation_root`` tmp tree
+    (via ``_isolation_dirs``), NOT the operator's real home, which is what keeps
+    the daemon-thread-recreates-the-dir hazard the session fixture documents
+    harmless here: if a prior test's writer thread is still bound to its own
+    now-unused per-test dir and flushes late, ``_flush_batch`` re-creating that dir
+    only touches a path inside the managed isolation root, which the retention
+    policy already owns -- it cannot strand a directory outside it. The NEXT test's
+    reset hands out a brand-new instance and dir regardless.
+
+    TRADEOFF -- accepted cost, stated so the count is not surprising. The session
+    fixture chose session scope precisely so the daemon writer thread is "not
+    churned per test." Resetting the singleton every test reverses that for one
+    path only: any test that emits a NON-critical async SEL event through the
+    default ``sel()`` builds a fresh instance, so its first async append starts a
+    new ``sel-writer`` daemon thread (``_ensure_writer``) and registers a new
+    ``atexit.flush`` handler -- neither joined nor stopped, both accumulating for
+    the worker's process lifetime. We accept this deliberately as the cost of
+    per-test lock-path isolation, and it is safe rather than merely tolerated: the
+    threads are daemons (they die with the interpreter, joining nothing) and every
+    per-test dir lives inside the managed tmp tree (a late flush strands nothing).
+    We do NOT try to close the prior instance's writer in teardown -- stopping or
+    joining the daemon from a fixture teardown risks blocking or racing the drain,
+    which would trade this benign churn for real flakiness, the opposite of the
+    fix. Crucially, the #7029 flake path itself pays NONE of this: ``activate_scoped``
+    audits with ``critical=True``, which ``_flush_batch``-es INLINE and spawns no
+    thread, so the trust tests add no ``sel-writer`` thread and no ``atexit``
+    handler. So this fixture changes the COUNT of threads/handlers created over a
+    run for the non-critical async callers, not the lifecycle of any one of them,
+    and never for the audit path #7029 is about.
+
+    Patches ``_default_dir()`` directly (like the session fixture), so it wins over
+    ``KIROCREW_HOME`` regardless of ordering with ``_isolate_kirocrew_home``. Tests
+    that manage their own ``SecurityEventLog`` (passing ``base_dir`` and resetting
+    ``_instance``) are unaffected. Tolerates ``kiro_crew.sel`` not importing, the
+    same as the session fixture.
+    """
+    try:
+        from kiro_crew import sel as _sel
+    except ImportError:  # pragma: no cover - partial checkout
+        yield
+        return
+    prev_default = _sel._default_dir
+    prev_instance = _sel.SecurityEventLog._instance
+    per_test_dir = _isolation_dirs("sel")
+    _sel._default_dir = lambda: per_test_dir
+    _sel.SecurityEventLog._instance = None
+    try:
+        yield
+    finally:
+        _sel._default_dir = prev_default
+        _sel.SecurityEventLog._instance = prev_instance
 
 
 #: ``~/.kiro`` paths production binds at IMPORT time, which ``KIROCREW_HOME`` cannot
