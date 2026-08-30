@@ -5208,6 +5208,53 @@ _SENSITIVE_HOME_DIRS += [
     f"{prefix}/{leaf}" for prefix in _CREW_HOME_PREFIXES for leaf in _CREW_SECRET_LEAVES
 ]
 
+# ── Publish artifacts of a keystone leaf ──
+# Every leaf above is published through ``atomic_write``, which writes a
+# ``tempfile.mkstemp(dir=path.parent, suffix=".tmp")`` sibling and renames it over the
+# target; several stores also take a lock file beside the leaf they guard
+# (``.policy.lock`` for the ops autonomy ceiling, ``ops_mission_control_secrets.json.lock``,
+# ``.crons.lock``). Those siblings carry the SAME bytes as the leaf -- the temp holds the
+# full payload for the whole write -- but a leaf entry matches its exact name only, so
+# they sat outside the fence while the guarantee was stated as absolute.
+#
+# A DIRECTORY leaf never had this gap: its temps land INSIDE the fenced directory, where
+# the ``startswith(target + os.sep)`` rule already covers them. That is exactly why
+# ``webhooks``, ``routing``, ``.vault``, ``kas``, ``run``, ``cron-history`` and
+# ``apps/aws-control/data`` are written as directories, and their comments say so. The gap
+# is the leaves whose parent is NOT itself fenced -- in practice the crew data-home root,
+# which cannot simply be fenced wholesale because reading ``config.json`` and
+# ``sessions.db`` there is routine and intended (see ``_WRITE_PROTECTED_HOME_PATHS``).
+#
+# So the fence is DERIVED FROM the leaf declarations rather than restated per leaf: an
+# artifact-shaped name sitting in the parent directory of any keystone leaf is protected.
+# A leaf added later inherits the protection with no second entry to remember, which is
+# the only version of this that stays true -- the reason the gap existed at all is that
+# the exception was invisible at every call site.
+#
+# Derived from ``_CREW_SECRET_LEAVES``, deliberately NOT from ``_SENSITIVE_HOME_DIRS``:
+# that list also carries ``.aws``, ``.ssh`` and the kiro-cli identity stores, whose parent
+# is ``$HOME`` ITSELF, so deriving from it would fence ``~/*.tmp`` and ``~/*.lock`` across
+# the user's entire home directory.
+#
+# Keyed on the artifact SHAPE, not on ``<leaf>.tmp``: the real mkstemp name is
+# ``tmpXXXXXXXX.tmp`` and carries no leaf name at all, so a leaf-derived temp name would
+# fence a spelling no writer produces. ``<leaf>.lock`` IS a real shape
+# (``ops_mission_control_secrets.json.lock``), and the suffix rule covers both.
+#
+# Not included: ``deploy/pending-deploys.lock``. Its directory holds no keystone leaf, so
+# there is no keystone payload beside it for the fence to protect.
+_KEYSTONE_ARTIFACT_SUFFIXES: tuple[str, ...] = (".tmp", ".lock")
+_KEYSTONE_ARTIFACT_PARENTS: list[str] = sorted(
+    {
+        # Every entry is ``<crew-prefix>/<leaf>`` so it always contains a separator,
+        # making the rsplit safe: a bare leaf yields the crew home root, a path-shaped
+        # leaf yields its own directory (``workspace/md-notebook``).
+        f"{prefix}/{leaf}".rsplit("/", 1)[0]
+        for prefix in _CREW_HOME_PREFIXES
+        for leaf in _CREW_SECRET_LEAVES
+    }
+)
+
 # ── Write-protected paths (block modification, allow reads) ──
 # Runtime config files carry security-relevant resource ceilings (concurrent
 # subagents, per-agent turn budget, warm-pool size). A prompt-injected agent
@@ -5649,6 +5696,40 @@ def _build_sensitive_regex() -> re.Pattern[str]:
         # the exact-leaf forms.
         rf"{home_alts}/(?:{wp_prefixes})/(?:{wp_leaves}){path_end}"
     )
+    # Publish artifacts of a keystone leaf, mirroring the tool-path clause in
+    # ``_is_keystone_publish_artifact``. Required, not optional: "protected on one path
+    # only is not protected" is stated three times in this module, and the leaf's temp
+    # holds the leaf's own bytes.
+    #
+    # Why ``sensitive_path`` above does not already catch these: ``path_end`` is the class
+    # of characters a SHELL treats as the end of a word, and ``.`` is deliberately not in
+    # it, so the literal leaf name followed by ``.tmp`` never satisfies the terminator.
+    # Matched on the artifact SHAPE rather than a leaf-derived name because the real
+    # mkstemp form (``tmpXXXXXXXX.tmp``) contains no leaf name at all.
+    #
+    # The filename run excludes ``/`` so this stays exactly one level deep -- a direct
+    # child of a keystone leaf's own parent, matching the equality test the tool path
+    # makes on the parent directory.
+    #
+    # The tail is a name-character LOOKAHEAD, not one of the enumerated terminator
+    # classes, and the separator before the filename is the generalized ``gsep`` that
+    # absorbs canonical no-op chains (``/./``, ``/x/../``). Both follow the
+    # ``bare_protected_path`` branch further down, whose comment states the reasoning:
+    # excluding name characters after the match keeps a DIFFERENT file out
+    # (``tmpAB.tmpx`` stays allowed) while a trailing ``.``, ``$``, metacharacter or
+    # separator is still a match. An enumerated class has to name every spelling a shell
+    # or filesystem treats as equivalent, and review found three it had missed in
+    # succession -- a metacharacter, an expanded-away ``$var``, and a ``/./`` segment.
+    # The lookahead closes that whole family instead of the members discovered so far,
+    # which is why this branch does not reuse ``path_end`` / ``win_path_end``.
+    artifact_parents_pattern = "|".join(re.escape(d) for d in _KEYSTONE_ARTIFACT_PARENTS)
+    artifact_suffix_alt = "|".join(
+        re.escape(suffix.lstrip(".")) for suffix in _KEYSTONE_ARTIFACT_SUFFIXES
+    )
+    artifact_path = (
+        rf"{home_alts}/(?:{artifact_parents_pattern})"
+        rf"/[^/\s'\"]*\.(?:{artifact_suffix_alt})(?![\w-])"
+    )
     # Windows-native spellings of the same fenced dirs, matched in the RAW
     # command text. POSIX shlex consumes unquoted backslashes during
     # tokenization, and an embedded interpreter script
@@ -5672,6 +5753,37 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     # elsewhere — the safe direction for this gate, which blocks on naming
     # alone. The name run is length-capped to bound backtracking.
     win_gsep = rf"(?:{win_sep}(?:\.|[^\\/\s'\"]{{1,64}}{win_sep}\.\.))*{win_sep}"
+    # Shell word-end terminator for the Windows-native branches below. Mirrors the POSIX
+    # ``path_end`` above, INCLUDING the shell metacharacters, and for the reason stated
+    # there: the class is every character a shell itself treats as the end of a word, and
+    # widening a DENY boundary can only ever deny more, which is the safe direction for a
+    # gate that blocks on naming alone.
+    #
+    # Until this existed each Windows branch spelled its own ``(?:sep|space|$|quote)``,
+    # which a metacharacter walked straight through -- ``type <fenced path>&whoami`` named
+    # the file and was not matched, while the POSIX spelling of the same command was. Found
+    # by the GPT review lane on the artifact branch; applied to the whole family, because a
+    # fence that is tight on an atomic-write temp and loose on the keystone leaf beside it
+    # protects the transient copy and not the secret.
+    # ``$`` is a literal member of the class, not the regex end-anchor that appears
+    # earlier in the alternation: PowerShell (and cmd.exe with ``$env:``) EXPANDS a
+    # variable reference, so ``Get-Content <fenced path>$null`` removes the ``$null`` and
+    # reads the fenced file, while the matcher saw an unterminated path and allowed it.
+    # A literal ``$`` therefore ends a path for matching purposes. The POSIX side is
+    # already covered here by its own branches -- measured, not assumed -- so this is
+    # deliberately a Windows-only addition rather than a change to ``path_end``.
+    # ``.`` is deliberately NOT a member, though Windows does strip a trailing dot when
+    # opening a file. Adding it here refused ``ls -d ~/.kiro/crew/backup.tar``: these
+    # branches accept forward slashes too, so they also govern POSIX spellings, and
+    # ``backup`` is a fenced DIRECTORY leaf whose name prefixes unrelated filenames. A
+    # terminator sitting after a directory name cannot tell the alias ``backup.`` from the
+    # different file ``backup.tar``, and refusing the latter regressed the read-only
+    # listing that #6021 exists to allow. The artifact branches solve their own version of
+    # this with a name-character LOOKAHEAD instead, which is anchored at the end of a
+    # complete filename and so can make the distinction. The leaf branches' trailing-dot
+    # alias is therefore left open here rather than closed with a rule that costs a
+    # legitimate read.
+    win_path_end = rf"(?:{win_sep}|\s|$|['\"]|[;&|()<>,:`$])"
     win_dirs_pattern = "|".join(
         win_gsep.join(re.escape(part) for part in d.split("/"))
         for d in _SENSITIVE_HOME_DIRS
@@ -5705,7 +5817,19 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     # plain separator, so ``%APPDATA%\.\kiro-cli\data.sqlite3`` and
     # ``...\AppData\Roaming\..\Roaming\kiro-cli\...`` still name the store.
     win_sensitive_path = (
-        rf"{win_home_alts}{win_gsep}(?:{win_dirs_pattern})(?:{win_sep}|\s|$|['\"])"
+        rf"{win_home_alts}{win_gsep}(?:{win_dirs_pattern}){win_path_end}"
+    )
+    # Windows-native spelling of the publish artifacts above. The pairing invariant
+    # applies to this spelling too, not only to POSIX-versus-tool: a native path is the
+    # one form the tokenizing passes cannot see, so leaving it out would fence the temp
+    # everywhere except in an embedded-script literal.
+    win_artifact_parents_pattern = "|".join(
+        win_gsep.join(re.escape(part) for part in d.split("/"))
+        for d in _KEYSTONE_ARTIFACT_PARENTS
+    )
+    win_artifact_path = (
+        rf"{win_home_alts}{win_gsep}(?:{win_artifact_parents_pattern})"
+        rf"{win_gsep}[^\\/\s'\"]*\.(?:{artifact_suffix_alt})(?![\w-])"
     )
     # ``%APPDATA%`` already points INTO ``AppData\Roaming``, so a spelling like
     # ``%APPDATA%\kiro-cli\data.sqlite3`` names a fenced store WITHOUT the
@@ -5729,7 +5853,7 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     # right after it is a canonical no-op specific to this anchor.
     appdata_sensitive_path = (
         rf"{appdata_var}(?:{win_sep}\.\.{win_sep}Roaming)*"
-        rf"{win_gsep}(?:{appdata_remainders})(?:{win_sep}|\s|$|['\"])"
+        rf"{win_gsep}(?:{appdata_remainders}){win_path_end}"
     )
     # ``%LOCALAPPDATA%`` is the same shape one directory over: it points INTO
     # ``AppData\Local``, so ``%LOCALAPPDATA%\kiro-cli\data.sqlite3`` names a
@@ -5755,7 +5879,7 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     # right after it is this anchor's canonical no-op.
     localappdata_sensitive_path = (
         rf"{localappdata_var}(?:{win_sep}\.\.{win_sep}Local)*"
-        rf"{win_gsep}(?:{localappdata_remainders})(?:{win_sep}|\s|$|['\"])"
+        rf"{win_gsep}(?:{localappdata_remainders}){win_path_end}"
     )
     # Windows-native spelling of the write-protected leaves. The POSIX leaf
     # branch above anchors on ``/`` separators, so on Windows the resolved home
@@ -5775,7 +5899,7 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     )
     win_write_protected_path = (
         rf"{win_home_alts}{win_gsep}(?:{win_wp_prefixes}){win_gsep}"
-        rf"(?:{win_wp_leaves})(?:{win_sep}|\s|$|['\"])"
+        rf"(?:{win_wp_leaves}){win_path_end}"
     )
     # A native spelling whose LEAF is an expansion: ``%USERPROFILE%\.kiro\crew\%F%``
     # names the keystone without spelling any of its literal leaves, so no branch
@@ -5881,7 +6005,7 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     )
     win_agents_write_path = (
         rf"(?:{win_home_alts}{win_gsep}(?:{win_agents_dir_alt})"
-        rf"|{win_kiro_home_var}{win_gsep}(?:{agents_leaf_alt}))(?:{win_sep}|\s|$|['\"])"
+        rf"|{win_kiro_home_var}{win_gsep}(?:{agents_leaf_alt})){win_path_end}"
     )
     # Bare path-SEGMENT match for the globally distinctive leaves. Both branches
     # above require a home anchor and a crew prefix, so both are defeated by a
@@ -5923,6 +6047,11 @@ def _build_sensitive_regex() -> re.Pattern[str]:
         rf"{sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){write_protected_path}"
+        # (3b) publish artifacts of a keystone leaf -- the atomic-write temp and the lock
+        # sibling -- in both the POSIX and the Windows-native spelling. Verb-independent
+        # like (2)/(3): naming the artifact is the signal, so a redirect, a ``cp``, or an
+        # embedded ``open(...,'w')`` is caught without enumerating write verbs.
+        rf"|(?:^|.*[\s'\"=:,;]){artifact_path}"
         # (4) Windows-native spelling, verb-independent (same token anchor):
         # covers quoted backslash paths AND embedded-script literals that the
         # tokenizing passes cannot see. (5) the %APPDATA% / %LOCALAPPDATA%
@@ -5932,6 +6061,7 @@ def _build_sensitive_regex() -> re.Pattern[str]:
         # all, because branches (3) and (6) both fall to a ``cd`` plus a
         # relative name.
         rf"|(?:^|.*[\s'\"=:,;]){win_sensitive_path}"
+        rf"|(?:^|.*[\s'\"=:,;]){win_artifact_path}"
         rf"|(?:^|.*[\s'\"=:,;]){appdata_sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){localappdata_sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){win_write_protected_path}"
@@ -6265,6 +6395,42 @@ def _path_in_home_dirs(path_str: str, home_dirs: list[str], base_dir: str | None
     return False
 
 
+def _is_keystone_publish_artifact(path_str: str, base_dir: str | None = None) -> bool:
+    """Return True if *path_str* is the atomic-write temp or lock beside a keystone leaf.
+
+    Closes the gap between a keystone leaf's FINAL name, which
+    :data:`_SENSITIVE_HOME_DIRS` fences, and the intermediate inodes its publish
+    actually goes through -- see :data:`_KEYSTONE_ARTIFACT_PARENTS` for why the rule is
+    derived from the leaf list instead of restated per leaf.
+
+    Two properties are load-bearing:
+
+    - It reuses :func:`_candidate_forms` and :func:`_home_dir_targets`, so the
+      symlink-resolution, casefolding and ``KIROCREW_HOME`` re-anchoring cannot drift
+      from the main gate. A relocated crew home is covered because a
+      ``<crew-prefix>``-rooted entry hits the prefix-stripping arm in
+      :func:`_home_dir_targets_uncached`; a symlink aimed at a live temp is covered
+      because the resolved form is one of the candidates.
+    - The parent is compared for EQUALITY, not by prefix. An artifact is a direct child
+      of the leaf's own directory, and a prefix test would sweep every descendant of the
+      crew home whose name happens to end in ``.tmp`` -- far wider than this needs, in a
+      directory that must stay readable.
+    """
+    if not path_str:
+        return False
+    artifact_parents = _home_dir_targets(_KEYSTONE_ARTIFACT_PARENTS)
+    for cand in _candidate_forms(path_str, base_dir):
+        cand_cf = cand.casefold()
+        # Suffixes are authored lowercase and the candidate is casefolded, so this is
+        # the same case-insensitive comparison the rest of the gate makes -- on
+        # macOS/Windows ``FOO.TMP`` and ``foo.tmp`` are the same file.
+        if not cand_cf.endswith(_KEYSTONE_ARTIFACT_SUFFIXES):
+            continue
+        if os.path.dirname(cand_cf) in artifact_parents:
+            return True
+    return False
+
+
 def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
     """Return True if the path points to a read+write-sensitive location.
 
@@ -6273,8 +6439,16 @@ def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
     writes of credential files and the governance trust-root
     (:data:`_SENSITIVE_HOME_DIRS`). See :func:`_path_in_home_dirs` for the
     symlink/casefold matching contract.
+
+    Also covers a protected leaf's publish artifacts
+    (:func:`_is_keystone_publish_artifact`): the temp an ``atomic_write`` renames over
+    the leaf holds the leaf's full payload, so READ is blocked alongside write -- a
+    write-only fence there would still disclose ``.env`` or ``token_signing.key`` to a
+    reader that wins the race.
     """
-    return _path_in_home_dirs(path_str, _SENSITIVE_HOME_DIRS, base_dir)
+    return _path_in_home_dirs(
+        path_str, _SENSITIVE_HOME_DIRS, base_dir
+    ) or _is_keystone_publish_artifact(path_str, base_dir)
 
 
 def path_contains_sensitive(dir_str: str, base_dir: str | None = None) -> bool:
@@ -6324,10 +6498,16 @@ def is_sensitive_write_path(path_str: str, base_dir: str | None = None) -> bool:
     written by the agent. Enforced at the file-edit tool gate
     (``hooks.on_tool_call`` on the ACP ``edit`` kind) — see
     :data:`_WRITE_PROTECTED_HOME_PATHS` for the rationale.
+
+    The publish-artifact clause is repeated from :func:`is_sensitive_path` rather than
+    left to be inherited, because this gate is documented as a SUPERSET of it: omitting
+    it here would leave a keystone temp writable through the edit gate while the
+    read+write gate refused it, the same one-path-only hole the pairing notes above warn
+    about.
     """
     return _path_in_home_dirs(
         path_str, _SENSITIVE_HOME_DIRS + _WRITE_PROTECTED_HOME_PATHS, base_dir
-    )
+    ) or _is_keystone_publish_artifact(path_str, base_dir)
 
 
 def sensitive_home_dirs() -> tuple[str, ...]:
