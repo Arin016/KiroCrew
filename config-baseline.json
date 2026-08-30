@@ -3451,6 +3451,7 @@
         "command": "kirocrew",
         "forward_to_agent_callback": "",
         "trusted_bot_ids": [],
+        "trusted_bot_turn_limit": 5,
         "allowed_enterprise_ids": [],
         "reactions": {},
         "reactions_enabled": true,
@@ -3585,10 +3586,26 @@
         "slack"
       ],
       "label": "Trusted Bot IDs",
-      "help": "Bot IDs allowed to bypass the bot filter for multi-node mesh communication.",
+      "help": "Bot IDs allowed to bypass the bot filter for multi-node mesh communication. The gateway's own bot ID is never trusted, even if listed (it would reply to itself in a loop).",
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": []
+    },
+    {
+      "path": "slack.trusted_bot_turn_limit",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "slack"
+      ],
+      "label": "Trusted Bot Turn Limit",
+      "help": "Maximum consecutive turns a thread may run on trusted-bot messages before a human message is required (loop guard for mutually trusted gateways). A message from an allowed human resets the count. Minimum 1; values below 1 are treated as 1.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 5
     },
     {
       "path": "slack.allowed_enterprise_ids",

@@ -2793,7 +2793,20 @@ class SlackConfig:
         default_factory=set,
         metadata=_meta(
             "Trusted Bot IDs",
-            "Bot IDs allowed to bypass the bot filter for multi-node mesh communication.",
+            "Bot IDs allowed to bypass the bot filter for multi-node mesh communication. "
+            "The gateway's own bot ID is never trusted, even if listed "
+            "(it would reply to itself in a loop).",
+            tags=["slack"],
+        ),
+    )
+    trusted_bot_turn_limit: int = field(
+        default=5,
+        metadata=_meta(
+            "Trusted Bot Turn Limit",
+            "Maximum consecutive turns a thread may run on trusted-bot messages "
+            "before a human message is required (loop guard for mutually trusted "
+            "gateways). A message from an allowed human resets the count. "
+            "Minimum 1; values below 1 are treated as 1.",
             tags=["slack"],
         ),
     )
@@ -7892,6 +7905,9 @@ class KiroCrewConfig:
                 trusted_bot_ids={
                     b for b in _safe_list(slack_data.get("trusted_bot_ids")) if isinstance(b, str)
                 },
+                trusted_bot_turn_limit=_safe_int(
+                    slack_data.get("trusted_bot_turn_limit", 5), 5, lo=1
+                ),
                 allowed_enterprise_ids=[
                     e
                     for e in slack_data.get("allowed_enterprise_ids", [])
