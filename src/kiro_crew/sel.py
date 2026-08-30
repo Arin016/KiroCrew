@@ -1150,14 +1150,19 @@ class SecurityEventLog:
             written = os.fstat(f.fileno())
         # Ensure permissions are correct even if file pre-existed with
         # wrong mode (e.g. created by an older version). POSIX repair only,
-        # deliberately NOT ``platform_compat.restrict_to_owner``: that helper
-        # spawns ``icacls`` on Windows (a blocking subprocess), and this
-        # append path can run inline on a caller's thread that may be the
-        # asyncio event loop — the ``critical=True`` audit-or-deny write, and
-        # the fallback taken when the writer thread cannot start (see
-        # ``_may_rotate``) — where a blocking call freezes every gateway task.
+        # deliberately still NOT ``platform_compat.restrict_to_owner``: on POSIX
+        # that helper IS this exact call, so a swap would add only the Windows
+        # owner-only DACL — and this append path can run inline on a caller's
+        # thread that may be the asyncio event loop (the ``critical=True``
+        # audit-or-deny write, and the fallback taken when the writer thread
+        # cannot start, see ``_may_rotate``), where a DACL write to a UNC or
+        # mapped-drive path costs an unbounded SMB round-trip. Adopting the
+        # helper here therefore means first deciding what a non-local volume
+        # gets, the way ``write_config_atomically`` gates its own lockdown on
+        # ``windows_acl.volume_is_local``; until that is settled the log keeps
+        # whatever DACL it inherits on Windows. Tracked in #6359.
         try:
-            os.chmod(self._path, 0o600)  # lockdown-ok: #5228 -- icacls would block the event loop
+            os.chmod(self._path, 0o600)  # lockdown-ok: #5228 -- unbounded SMB round-trip on the loop
         except OSError:
             logger.warning("Failed to enforce 0o600 permissions on SEL audit log %s", self._path, exc_info=True)
         self._live_seen = (written.st_dev, written.st_ino, written.st_size)

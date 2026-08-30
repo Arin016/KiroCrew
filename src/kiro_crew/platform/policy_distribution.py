@@ -1182,9 +1182,9 @@ def _ensure_cache_dir() -> Optional[Path]:
 
     Created and tightened at most once per process.  The tighten is what matters and
     it matters at CREATION: re-applying it on every write costs a ``chmod`` on POSIX
-    and, on Windows, an ``icacls`` SUBPROCESS — which, with a 304 being the common
-    poll outcome, would be a process spawn per refresh interval to re-assert a DACL
-    that has not changed.
+    and, on Windows, a DACL write — which, with a 304 being the common poll outcome,
+    would be filesystem work per refresh interval (and an unbounded SMB round-trip on
+    a network-homed data home) to re-assert a DACL that has not changed.
     """
     global _cache_dir_ready
     directory = cache_dir()
