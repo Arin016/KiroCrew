@@ -6618,16 +6618,53 @@ class TestProxyHandlerPolicy:
         assert _proxy_canonical_path("api/chat") == ("api/chat", "")
         assert _proxy_canonical_path("/api/chat/") == ("api/chat", "")
 
+    def test_event_stream_prefix_is_forwarded(self):
+        """`GET /api/stream` is the out-of-turn half of the chat view: the peer's
+        own SSE broadcast, carrying session-list and slot-state changes while the
+        per-turn reply streams back from `api/chat`. It is a leaf endpoint, so
+        the bare prefix is the whole surface this row grants."""
+        from kiro_crew.dashboard.handlers_instances import _proxy_canonical_path
+
+        assert _proxy_canonical_path("api/stream") == ("api/stream", "")
+        assert _proxy_canonical_path("/api/stream/") == ("api/stream", "")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "api/ws",  # the SSE sibling: an upgrade cannot cross this proxy
+            "api/ws/stt",
+            "api/streaming",  # whole-segment match, not a string prefix
+            "api/stream-x",
+            "api/file-stream",  # a DIFFERENT endpoint that merely ends in stream
+        ],
+    )
+    def test_stream_row_does_not_admit_its_neighbours(self, raw):
+        """The row is `("api", "stream")` — whole segments, nothing adjacent.
+
+        `api/ws` is the one to keep refused on purpose: it is the same event bus
+        over WebSocket, and admitting it would require a `101 Switching
+        Protocols` to pass the reply content-type gate that exists to stop a peer
+        serving active content onto the authenticated hub origin.
+        """
+        from kiro_crew.dashboard.handlers_instances import (
+            _PROXY_PATH_DENIED_REASON,
+            _proxy_canonical_path,
+        )
+
+        path, reason = _proxy_canonical_path(raw)
+        assert path == ""
+        assert reason == _PROXY_PATH_DENIED_REASON
+
     def test_allowlist_constant_is_pinned_exactly(self):
         """Widening the proxied surface must be a REVIEWED act: this pins the
-        constant's exact value, so adding a row (e.g. the deferred api/ws)
-        fails here until the test is updated alongside it. The shape floor
-        (every row >= 2 segments, rooted at `api`) guards the fail-open edits
-        an exact pin alone would also catch — kept separate so the failure
-        message names the broken invariant."""
+        constant's exact value, so adding a row fails here until the test is
+        updated alongside it. The shape floor (every row >= 2 segments, rooted
+        at `api`) guards the fail-open edits an exact pin alone would also
+        catch — kept separate so the failure message names the broken
+        invariant."""
         from kiro_crew.dashboard.handlers_instances import _PROXY_ALLOWED_PREFIXES
 
-        assert _PROXY_ALLOWED_PREFIXES == (("api", "chat"),)
+        assert _PROXY_ALLOWED_PREFIXES == (("api", "chat"), ("api", "stream"))
         for prefix in _PROXY_ALLOWED_PREFIXES:
             # An empty row prefix-matches EVERYTHING and a one-segment row
             # restores the whole peer /api/ surface; both must be impossible.
