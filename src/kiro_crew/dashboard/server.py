@@ -166,8 +166,10 @@ from kiro_crew.platform import (
 from kiro_crew.power import SleepInhibitor
 from kiro_crew.safety_override import (
     apply_config_duration,
+    describe_dropped_grant,
     grant_declared_yolo,
     safety_override,
+    take_dropped_grant,
 )
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -1840,6 +1842,23 @@ def _claimed_dashboard_slots(state: DashboardState) -> frozenset[str]:
     except Exception:
         logger.debug("could not read claimed dashboard slots", exc_info=True)
         return frozenset()
+
+
+def _take_prior_dropped_grant() -> Any:
+    """Consume the PREVIOUS process's safety-override record, if any.
+
+    Run off the event loop (the caller wraps it in ``asyncio.to_thread``): it is a
+    file open on a filesystem that may be slow, and nothing about boot should wait
+    on it. Ordering against ``_apply_startup_yolo`` does not matter, because the
+    record carries the writing pid and this process's own record is never read as
+    a dropped one. Never raises: the gateway must not fail to boot over a
+    notification, and the grant is off either way.
+    """
+    try:
+        return take_dropped_grant()
+    except Exception:
+        logger.debug("Could not read the prior safety-override record", exc_info=True)
+        return None
 
 
 def _apply_startup_yolo(state: DashboardState, cfg: Any) -> None:
@@ -3772,6 +3791,40 @@ async def start_dashboard(
         _notify_unattended_expiry(state, source)
 
     safety_override().on_expired = _on_override_expired
+
+    # A grant that was live when the process went down is GONE -- grants are
+    # in-memory by design and this does not change that. What it changes is that
+    # the operator now hears about it. Without this, someone who granted six
+    # hours of auto-approval and restarted an hour later got no signal at all:
+    # the next unattended run just stopped on a prompt nobody was waiting for.
+    #
+    # Read OFF the loop and off the boot path: it is a file open on a filesystem
+    # that may be slow, and nothing about boot should wait on it (found in
+    # review). Safe to run after the startup grant because the record carries the
+    # writing pid, so this process's own record is never read as a dropped one.
+    #
+    # Notice only, never a restored grant, and withheld when auto-approve is live
+    # RIGHT NOW: a declared grant that the enterprise ceiling clamps to a timed
+    # one is re-established by _apply_startup_yolo above, and telling the operator
+    # it is "OFF" while it is on would be worse than saying nothing. A lapsed
+    # grant, a config-declared one and an ``until_shutdown`` one are all silent
+    # too -- see ``take_dropped_grant``.
+    try:
+        _dropped_grant = await asyncio.to_thread(_take_prior_dropped_grant)
+        if _dropped_grant is not None and not safety_override().is_active():
+            state.notify(
+                "safety",
+                "Auto-approve was dropped by a restart",
+                describe_dropped_grant(_dropped_grant),
+                meta={
+                    "source": _dropped_grant.source,
+                    "remaining_secs": _dropped_grant.remaining_secs,
+                },
+            )
+    except Exception:
+        # Startup must not fail over a notification. The grant is off either
+        # way; the worst case is the operator not being told.
+        logger.debug("Could not report a restart-dropped safety override", exc_info=True)
 
     # Restore exactly the tabs the user had open at last shutdown — these
     # come back regardless of mtime, so long-running tabs don't silently
