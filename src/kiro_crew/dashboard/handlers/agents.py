@@ -63,6 +63,7 @@ from kiro_crew.dashboard.handlers._shared import (
     agent_skill_keys,
     agent_skill_views,
     apply_skill_mapping,
+    read_bounded_json,
 )
 from kiro_crew.dashboard.handlers.discover import _redact_external
 from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
@@ -308,10 +309,10 @@ async def api_agent_config(request: web.Request) -> web.Response:
         denied = await _require_owner(request, "agent_config.write")
         if denied is not None:
             return denied
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
+        body, body_err = await read_bounded_json(request, max_bytes=None)
+        if body_err is not None:
+            return body_err
+        assert body is not None  # read_bounded_json returns (dict, None) on success
         config = body.get("config")
         if not isinstance(config, dict):
             return web.json_response({"error": "config must be an object"}, status=400)
@@ -520,10 +521,10 @@ async def api_default_agent(request: web.Request) -> web.Response:
         denied = await _require_owner(request, "default_agent.write")
         if denied is not None:
             return denied
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
+        body, body_err = await read_bounded_json(request, max_bytes=None)
+        if body_err is not None:
+            return body_err
+        assert body is not None  # read_bounded_json returns (dict, None) on success
         name = body.get("agent", "")
         # Reject non-strings before any use: a JSON list/object here would make
         # the membership check below raise (unhashable) into a 500, and a
@@ -713,10 +714,10 @@ async def api_capability_mcp_install(request: web.Request) -> web.Response:
     denied = await _require_owner(request, "capability_mcp_install")
     if denied is not None:
         return denied
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+    body, body_err = await read_bounded_json(request, max_bytes=None)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
     server_id = body.get("server_id", "").strip()
     if not server_id:
         return web.json_response({"error": "server_id required"}, status=400)
@@ -749,10 +750,10 @@ async def api_capability_mcp_uninstall(request: web.Request) -> web.Response:
     denied = await _require_owner(request, "capability_mcp_uninstall")
     if denied is not None:
         return denied
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+    body, body_err = await read_bounded_json(request, max_bytes=None)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
     server_id = body.get("server_id", "").strip()
     if not server_id:
         return web.json_response({"error": "server_id required"}, status=400)
@@ -801,10 +802,10 @@ async def api_capability_skills_install(request: web.Request) -> web.Response:
     denied = await _require_owner(request, "capability_skills_install")
     if denied is not None:
         return denied
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+    body, body_err = await read_bounded_json(request, max_bytes=None)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
     package = body.get("package", "").strip()
     if not package:
         return web.json_response({"error": "package required"}, status=400)
@@ -831,10 +832,10 @@ async def api_capability_skills_uninstall(request: web.Request) -> web.Response:
     denied = await _require_owner(request, "capability_skills_uninstall")
     if denied is not None:
         return denied
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+    body, body_err = await read_bounded_json(request, max_bytes=None)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
     package = body.get("package", "").strip()
     if not package:
         return web.json_response({"error": "package required"}, status=400)
