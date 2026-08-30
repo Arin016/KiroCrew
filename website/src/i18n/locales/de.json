@@ -11893,7 +11893,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Mit welchem Modell neue Sitzungen starten, wenn ihr Agent keines festlegt. Lege pro Agent unter Agenten-Fähigkeiten → Agenten ein Modell fest oder wähle innerhalb einer Sitzung eines, um es dort zu übersteuern.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Welcher Teil des Streams eines Subagenten beim Einfügen seines Abschlussereignisses in die übergeordnete Sitzung erhalten bleibt. „Kopf“ bewahrt den Anfang (Standard, entspricht dem Legacy-Verhalten). „Ende“ bewahrt die abschließende Zusammenfassung. „Beides“ behält einen Abschnitt von jedem Ende mit einer Markierung dazwischen.",
         "widget_density": "Widget-Dichte",
-        "your_role": "Ihre Rolle"
+        "your_role": "Ihre Rolle",
+        "session_card_source_links": "PR- und Issue-Chips auf Sitzungskarten",
+        "session_card_source_links_desc": "Zeigt auf der Seitenleistenkarte jeder Sitzung einen Chip für jeden Pull Request, jeden Merge Request und jedes Issue, das in dieser Sitzung erwähnt wird. Ausgeschaltet entfallen auch die regelmäßigen Anbieteraufrufe, die diese Chips aktuell halten."
       },
       "computerUsePanel": {
         "accessibility": "Bedienungshilfen",

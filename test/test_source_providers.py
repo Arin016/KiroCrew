@@ -3667,11 +3667,11 @@ async def test_gitlab_allowlist_never_reads_config_on_the_event_loop(monkeypatch
     in a worker thread; the sync accessor every URL parse uses is cache-only."""
     calls: list[str] = []
 
-    def fake_load() -> tuple[frozenset[str], frozenset[str]]:
+    def fake_load() -> tuple[frozenset[str], frozenset[str], bool]:
         calls.append("load")
-        return frozenset({"gitlab.acme.internal"}), frozenset()
+        return frozenset({"gitlab.acme.internal"}), frozenset(), True
 
-    monkeypatch.setattr(source, "_load_provider_hosts", fake_load)
+    monkeypatch.setattr(source, "_load_source_link_settings", fake_load)
     monkeypatch.setattr(source, "_gitlab_hosts_snapshot", frozenset())
     monkeypatch.setattr(source, "_gitlab_hosts_loaded_at", 0.0)
     to_thread_calls: list[object] = []
@@ -3970,20 +3970,20 @@ async def test_concurrent_allowlist_refresh_cannot_restore_a_revoked_host(monkey
     release = source.asyncio.Event()
     loads = {"n": 0}
 
-    def slow_stale_load() -> tuple[frozenset[str], frozenset[str]]:
+    def slow_stale_load() -> tuple[frozenset[str], frozenset[str], bool]:
         loads["n"] += 1
         # asyncio.Event is not thread-safe: this runs in a worker thread, so the
         # set() must be marshalled back onto the loop.
         loop.call_soon_threadsafe(started.set)
         # Block inside the worker thread so a second waiter queues on the lock.
         source.asyncio.run_coroutine_threadsafe(_noop(), loop).result(timeout=5)
-        return frozenset({"gitlab.acme.internal"}), frozenset()
+        return frozenset({"gitlab.acme.internal"}), frozenset(), True
 
     async def _noop() -> None:
         await release.wait()
 
     loop = source.asyncio.get_running_loop()
-    monkeypatch.setattr(source, "_load_provider_hosts", slow_stale_load)
+    monkeypatch.setattr(source, "_load_source_link_settings", slow_stale_load)
     monkeypatch.setattr(source, "_gitlab_hosts_snapshot", frozenset())
     monkeypatch.setattr(source, "_gitlab_hosts_loaded_at", 0.0)
     monkeypatch.setattr(source, "_gitlab_hosts_lock", source.asyncio.Lock())

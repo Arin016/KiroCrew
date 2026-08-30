@@ -991,6 +991,13 @@ async def api_chat_slot_source_links(request: web.Request) -> web.Response:
     # schedule_check_refresh here: that pushes a `slots` update, which by
     # definition cannot carry links outside the budget, so the provider work
     # would produce a result this response can never show.
+    #
+    # Deliberately NOT gated on `dashboard.session_card_source_links`: the only
+    # caller is the sidebar's "+N" pill, which exists only while the strip
+    # renders, and the config write pushes fresh slots so the pill goes at once.
+    # An app token that owns the slot could ask directly, but it can already read
+    # the slot's messages -- these URLs are extracted FROM those messages, so
+    # gating here would withhold nothing it does not already have.
     return web.json_response(
         slot.source_links_payload(include_check_status=is_owner_dashboard_request(request))
     )

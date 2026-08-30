@@ -12062,7 +12062,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Le modèle avec lequel démarrent les nouvelles sessions quand leur agent n’en fixe aucun. Définis un modèle pour chaque agent dans Capacités de l’agent → Agents, ou choisis-en un dans une session pour le remplacer localement.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Quelle partie du flux d'un sous-agent conserver lors de l'injection de son événement de fin dans la session parente. Début conserve le commencement (par défaut, correspond au comportement historique). Fin conserve le résumé final. Les deux conserve une tranche à chaque extrémité, avec un marqueur entre elles.",
         "widget_density": "Densité des widgets",
-        "your_role": "Votre rôle"
+        "your_role": "Votre rôle",
+        "session_card_source_links": "Puces PR et issues sur les cartes de session",
+        "session_card_source_links_desc": "Affiche sur la carte de chaque session, dans la barre latérale, une puce pour chaque pull request, merge request ou issue mentionnée dans cette session. Désactivé, cela arrête aussi les appels périodiques au fournisseur qui tiennent ces puces à jour."
       },
       "computerUsePanel": {
         "accessibility": "Accessibilité",
