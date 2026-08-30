@@ -107,13 +107,21 @@ def _write_all(fd: int, data: bytes, path: Path) -> None:
         view = view[written:]
 
 
-def _on_event_loop() -> bool:
+def on_event_loop() -> bool:
     """Whether this thread is currently running an asyncio event loop.
 
     Mirrors the probe guarding ``CronService``'s store lock: a worker started by
     ``asyncio.to_thread`` or ``run_in_executor`` has no running loop of its own,
     so a caller that offloads its write keeps the retry while the loop thread
     itself never sleeps.
+
+    Public because it decides more than this module's own retries.
+    ``config/loader.py``'s ``write_config_atomically`` asks it before applying the
+    Windows owner-only DACL, whose cost on a network-homed data home is bounded
+    only by SMB. Both uses turn on the same property: the answer is about the
+    CALLING THREAD, so it holds no matter how many synchronous helpers sit between
+    a coroutine and the call, and a caller earns the stronger behavior by
+    offloading rather than by declaring anything.
     """
     try:
         asyncio.get_running_loop()
@@ -159,7 +167,7 @@ def replace_with_retry(src: Path | str, dst: Path | str) -> None:
         except PermissionError:
             if not platform_compat.IS_WINDOWS:
                 raise
-            if _on_event_loop():
+            if on_event_loop():
                 logger.debug(
                     "atomic rename contended at %s on the event loop; "
                     "re-raising instead of sleeping (offload the write to retry)",
@@ -215,7 +223,7 @@ def read_bytes_with_retry(path: Path | str) -> bytes:
         except PermissionError:
             if not platform_compat.IS_WINDOWS:
                 raise
-            if _on_event_loop():
+            if on_event_loop():
                 logger.debug(
                     "read contended at %s on the event loop; re-raising instead "
                     "of sleeping (offload the read to retry)",
