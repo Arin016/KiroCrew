@@ -947,7 +947,6 @@ make this tool possible:
 <a href="https://github.com/pierrms" title="pierrms"><img src="https://github.com/pierrms.png?size=64" width="64" height="64" alt="pierrms" /></a>
 <a href="https://github.com/pilami" title="Sai Chaitanya Manchikatla"><img src="https://github.com/pilami.png?size=64" width="64" height="64" alt="Sai Chaitanya Manchikatla" /></a>
 <a href="https://github.com/piyushrajyadav" title="Piyush Yadav"><img src="https://github.com/piyushrajyadav.png?size=64" width="64" height="64" alt="Piyush Yadav" /></a>
-<a href="https://github.com/pkot1980" title="PK98121"><img src="https://github.com/pkot1980.png?size=64" width="64" height="64" alt="PK98121" /></a>
 <a href="https://github.com/pkot98121" title="PK98121"><img src="https://github.com/pkot98121.png?size=64" width="64" height="64" alt="PK98121" /></a>
 <a href="https://github.com/PNg-HA" title="PNg HA"><img src="https://github.com/PNg-HA.png?size=64" width="64" height="64" alt="PNg HA" /></a>
 <a href="https://github.com/popematt" title="Matthew Pope"><img src="https://github.com/popematt.png?size=64" width="64" height="64" alt="Matthew Pope" /></a>
