@@ -8522,7 +8522,6 @@
       "failed_to_clear_context_error": "Cancellazione del contesto non riuscita: {{error}}",
       "failed_to_create_channel": "Creazione del canale non riuscita",
       "is_working": "sta lavorando…",
-      "limit_reached": "Limite raggiunto",
       "listen_all": "tutti",
       "listen_mention": "menzione",
       "listen_mode": "Modalità di ascolto",

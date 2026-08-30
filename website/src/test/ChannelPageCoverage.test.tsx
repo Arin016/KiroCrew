@@ -452,7 +452,7 @@ describe('ChannelPage — Add Agent form', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '+ Add Agent' })).toBeInTheDocument())
   })
 
-  it('surfaces a structured api error in the limit modal', async () => {
+  it('labels a structured api error with the failed add-agent action', async () => {
     vi.mocked(api).channelAddAgent = vi.fn()
       .mockRejectedValue(new Error(JSON.stringify({ error: 'agent cap reached' })))
     await renderPage()
@@ -460,8 +460,10 @@ describe('ChannelPage — Add Agent form', () => {
     await userEvent.click(screen.getByRole('button', { name: '+ Add Agent' }))
     fireEvent.change(await screen.findByLabelText('Role'), { target: { value: 'Extra' } })
     await userEvent.click(screen.getByRole('button', { name: 'Add' }))
-    expect(await screen.findByText('Limit Reached')).toBeInTheDocument()
-    expect(screen.getByText('agent cap reached')).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Failed to add agent' })
+    expect(within(dialog).getByText('agent cap reached')).toBeInTheDocument()
+    expect(screen.queryByText('Limit Reached')).not.toBeInTheDocument()
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Close' })).toHaveFocus())
   })
 
   it('falls back to the raw message when the api error is not JSON', async () => {
@@ -471,7 +473,9 @@ describe('ChannelPage — Add Agent form', () => {
     await userEvent.click(screen.getByRole('button', { name: '+ Add Agent' }))
     fireEvent.change(await screen.findByLabelText('Role'), { target: { value: 'Extra' } })
     await userEvent.click(screen.getByRole('button', { name: 'Add' }))
-    expect(await screen.findByText('gateway timeout')).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Failed to add agent' })
+    expect(within(dialog).getByText('gateway timeout')).toBeInTheDocument()
+    expect(screen.queryByText('Limit Reached')).not.toBeInTheDocument()
   })
 
   it('falls back to the generic copy when the rejection is not an Error', async () => {
@@ -604,7 +608,7 @@ describe('ChannelPage — New Channel dialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New channel' })).not.toBeInTheDocument())
   })
 
-  it('reports a create failure in the limit modal and dismisses it with OK', async () => {
+  it('labels a create failure with its action and dismisses the shared modal with OK', async () => {
     vi.mocked(api).channelCreate = vi.fn()
       .mockRejectedValue(new Error(JSON.stringify({ error: 'channel cap reached' })))
     await renderPage()
@@ -612,9 +616,11 @@ describe('ChannelPage — New Channel dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'New channel' })
     fireEvent.change(within(dialog).getByLabelText('Topic'), { target: { value: 'One too many' } })
     await userEvent.click(within(dialog).getByRole('button', { name: 'Create' }))
-    expect(await screen.findByText('channel cap reached')).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'OK' }))
-    await waitFor(() => expect(screen.queryByText('Limit Reached')).not.toBeInTheDocument())
+    const errorDialog = await screen.findByRole('dialog', { name: 'Failed to create channel' })
+    expect(within(errorDialog).getByText('channel cap reached')).toBeInTheDocument()
+    expect(screen.queryByText('Limit Reached')).not.toBeInTheDocument()
+    await userEvent.click(within(errorDialog).getByRole('button', { name: 'OK' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Failed to create channel' })).not.toBeInTheDocument())
   })
 
   it('ignores a create response that carries no channel', async () => {

@@ -13,6 +13,7 @@ import { useImeGuard } from '../hooks/useImeGuard'
 import { useMenuKeyboard, menuItemsOf } from '../hooks/useMenuKeyboard'
 import { AnimatePresence } from 'framer-motion'
 import DetailPanel from '../components/DetailPanel'
+import Modal from '../components/Modal'
 
 import { i18nT } from '../i18n/t'
 import { useListDetailView } from '../hooks/useListDetailView'
@@ -48,6 +49,11 @@ interface Channel {
   topic: string
   agents: ChannelAgent[]
   messages: ChannelMessage[]
+}
+
+interface ChannelPageError {
+  title: string
+  message: string
 }
 
 /* Map snake_case backend → camelCase frontend */
@@ -522,7 +528,7 @@ export default function ChannelPage() {
   const { isMobile, showList, showDetail, openDetail, closeDetail } = useListDetailView()
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<ChannelPageError | null>(null)
   const [threadId, setThreadId] = useState<string | null>(null)
   // Which thread the unsent reply belongs to, so it is neither discarded on
   // navigation nor inherited by a different thread.
@@ -659,7 +665,8 @@ export default function ChannelPage() {
         openDetail()
       }
     } catch (err) {
-      setError(apiError(err, i18nT('pages.channelPage.failed_to_create_channel')))
+      const title = i18nT('pages.channelPage.failed_to_create_channel')
+      setError({ title, message: apiError(err, title) })
     }
   }
 
@@ -670,17 +677,20 @@ export default function ChannelPage() {
     <div className={`flex h-full relative ${isMobile ? '-mx-4 -mb-8' : ''}`}>
       {showNew && <NewChannelDialog onClose={() => setShowNew(false)} presets={presets} onCreate={handleCreateChannel} />}
 
-      {/* Error modal */}
-      {error && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border)] rounded-xl p-5 w-80 shadow-xl text-center">
-            <div className="text-3xl mb-2"><AlertTriangle className="lucide-inline" /></div>
-            <div className="text-sm font-semibold text-[var(--text-strong)] mb-2">{i18nT('pages.channelPage.limit_reached')}</div>
-            <div className="text-sm text-[var(--text)] mb-4">{error}</div>
-            <Btn onClick={() => setError(null)} primary>{i18nT('pages.channelPage.ok')}</Btn>
+      <Modal
+        open={!!error}
+        onClose={() => setError(null)}
+        title={error?.title ?? ''}
+        maxWidth={360}
+        footer={<Btn onClick={() => setError(null)} primary>{i18nT('pages.channelPage.ok')}</Btn>}
+      >
+        {error && error.message !== error.title ? (
+          <div className="flex items-start gap-3 text-sm text-text">
+            <AlertTriangle className="shrink-0 text-warn" />
+            <span>{error.message}</span>
           </div>
-        </div>
-      )}
+        ) : null}
+      </Modal>
 
       {/* Channel list sidebar */}
       <div className={`flex flex-col ${showList ? '' : 'hidden'} ${isMobile ? 'w-full' : 'w-64 shrink-0 border-r border-border'}`}>
@@ -813,7 +823,10 @@ export default function ChannelPage() {
                     <AddAgentForm onCancel={() => setShowAddAgent(false)} onAdd={async (role, task, agent) => {
                       if (!channel) return
                       setShowAddAgent(false)
-                      try { await api.channelAddAgent(channel.id, { role, task: task || channel.topic, agent }) } catch (err) { setError(apiError(err, i18nT('pages.channelPage.failed_to_add_agent'))) }
+                      try { await api.channelAddAgent(channel.id, { role, task: task || channel.topic, agent }) } catch (err) {
+                        const title = i18nT('pages.channelPage.failed_to_add_agent')
+                        setError({ title, message: apiError(err, title) })
+                      }
                     }} />
                   ) : (
                     <Btn onClick={() => setShowAddAgent(true)} primary className="w-full">{i18nT('pages.channelPage.add_agent')}</Btn>

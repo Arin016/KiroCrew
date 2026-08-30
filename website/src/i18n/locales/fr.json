@@ -8522,7 +8522,6 @@
       "failed_to_clear_context_error": "Échec de l’effacement du contexte : {{error}}",
       "failed_to_create_channel": "Échec de la création du canal",
       "is_working": "travaille…",
-      "limit_reached": "Limite atteinte",
       "listen_all": "tout",
       "listen_mention": "mentions",
       "listen_mode": "Mode d'écoute",

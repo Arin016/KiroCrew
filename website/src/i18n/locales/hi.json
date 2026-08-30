@@ -8397,7 +8397,6 @@
       "failed_to_clear_context_error": "संदर्भ साफ़ नहीं हो सका: {{error}}",
       "failed_to_create_channel": "चैनल नहीं बन सका",
       "is_working": "काम कर रहा है…",
-      "limit_reached": "सीमा पूरी हुई",
       "listen_all": "सभी",
       "listen_mention": "मेंशन",
       "listen_mode": "सुनने का मोड",

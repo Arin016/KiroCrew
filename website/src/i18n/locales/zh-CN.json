@@ -8272,7 +8272,6 @@
       "failed_to_clear_context_error": "清除上下文失败：{{error}}",
       "failed_to_create_channel": "创建频道失败",
       "is_working": "正在工作…",
-      "limit_reached": "已达上限",
       "listen_all": "全部",
       "listen_mention": "提及",
       "listen_mode": "收听模式",
