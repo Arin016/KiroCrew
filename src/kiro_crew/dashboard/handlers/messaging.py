@@ -86,7 +86,9 @@ from kiro_crew.subagent_persistence import _agent_dir, read_state
 from kiro_crew.validation import (
     _EMOJI_NAME_RE,
     CHANNEL_ID_RE,
+    CHANNEL_MAX_LEN,
     CRON_SESSION_RE,
+    SLACK_THREAD_TS_RE,
     SPAWN_RUN_SCHEMA,
     ValidationError,
     validate_tool_args,
@@ -94,6 +96,28 @@ from kiro_crew.validation import (
 
 #: Seconds to wait for Slack when verifying a pasted token at save time.
 _TOKEN_VERIFY_TIMEOUT = 8
+
+#: A Slack message timestamp is `<10-digit epoch>.<6-digit sequence>` -- 17
+#: characters. The cap is what BOUNDS the value: these routes forward `ts` to
+#: Slack and write it into a SEL audit line, and the allowlist check that
+#: rejects an untracked channel runs AFTER that line is written.
+_SLACK_TS_MAX_LEN = 30
+
+
+def _is_slack_ts(value: object) -> bool:
+    """True for a Slack message timestamp that is safe to forward.
+
+    Uses the shared ``SLACK_THREAD_TS_RE`` rather than an inline
+    ``^\\d+\\.\\d+$``: ``\\d`` is Unicode-aware, so a string of Arabic-Indic
+    numerals satisfied the old check and was forwarded verbatim. The shared
+    pattern spells the class ``[0-9]`` to avoid precisely that.
+    """
+    return (
+        isinstance(value, str)
+        and len(value) <= _SLACK_TS_MAX_LEN
+        and bool(SLACK_THREAD_TS_RE.match(value))
+    )
+
 
 #: Public field name -> .env credential key for the two Slack secrets.
 _SLACK_SECRET_FIELDS = {
@@ -1839,7 +1863,7 @@ async def api_send_message(request: web.Request) -> web.Response:
 
     thread_ts = body.get("thread_ts")
     if thread_ts is not None:
-        if not isinstance(thread_ts, str) or not re.match(r"^\d+\.\d+$", thread_ts):
+        if not _is_slack_ts(thread_ts):
             return web.json_response(
                 {"error": "thread_ts must be a Slack timestamp string like '1712793600.123456'"},
                 status=400,
@@ -2445,12 +2469,12 @@ async def api_slack_pins(request: web.Request) -> web.Response:
     if not isinstance(channel, str):
         return web.json_response({"error": "invalid channel ID format"}, status=400)
     channel = channel.strip()
-    if not channel or not CHANNEL_ID_RE.match(channel):
+    if not channel or len(channel) > CHANNEL_MAX_LEN or not CHANNEL_ID_RE.match(channel):
         return web.json_response({"error": "invalid channel ID format"}, status=400)
 
     ts = body.get("ts", "")
     if action in ("add", "remove"):
-        if not isinstance(ts, str) or not re.match(r"^\d+\.\d+$", ts):
+        if not _is_slack_ts(ts):
             return web.json_response(
                 {"error": "ts must be a Slack timestamp string like '1712793600.123456'"},
                 status=400,
@@ -2540,10 +2564,10 @@ async def api_slack_reactions(request: web.Request) -> web.Response:
     if not isinstance(channel, str):
         return web.json_response({"error": "invalid channel ID format"}, status=400)
     channel = channel.strip()
-    if not channel or not CHANNEL_ID_RE.match(channel):
+    if not channel or len(channel) > CHANNEL_MAX_LEN or not CHANNEL_ID_RE.match(channel):
         return web.json_response({"error": "invalid channel ID format"}, status=400)
     ts = body.get("ts", "")
-    if not isinstance(ts, str) or not re.match(r"^\d+\.\d+$", ts):
+    if not _is_slack_ts(ts):
         return web.json_response(
             {"error": "ts must be a Slack timestamp string like '1712793600.123456'"},
             status=400,
