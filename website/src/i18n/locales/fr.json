@@ -10024,7 +10024,11 @@
       "workspace": "espace de travail",
       "workspace_2": "Espace de travail",
       "workspace_name_is_required": "Le nom de l’espace de travail est obligatoire",
-      "yes_delete_it": "Oui, supprimer"
+      "yes_delete_it": "Oui, supprimer",
+      "session_color": "Couleur de session",
+      "session_color_hint": "Les sessions lancées par cet agent utilisent cette couleur, sauf si la session a sa propre couleur. La modifier recolore ces sessions. Laisser vide pour aucune couleur d’agent.",
+      "session_color_hex": "Valeur hexadécimale de la couleur de session",
+      "session_color_clear": "Effacer"
     },
     "knowledge": {
       "detailView": {

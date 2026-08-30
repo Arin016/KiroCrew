@@ -38,6 +38,7 @@ from kiro_crew.config.loader import (
     ConfigReadError,
     KiroCrewAgentConfig,
     KiroCrewConfig,
+    _safe_color,
     normalize_agent_model,
     read_config_for_update,
     resolve_agent_bindings,
@@ -2158,6 +2159,10 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"error": "body must be an object", "code": "body_not_object"}, status=400
+        )
     name = body.get("name", "").strip()
     if not name:
         return web.json_response({"error": "Agent name is required"}, status=400)
@@ -2218,6 +2223,13 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
     # {"model": 123} into the literal "123", which normalizes to a string the
     # backend then rejects as an unknown model id.
     model = normalize_agent_model(body.get("model"))
+    _raw_color = body.get("session_color", "")
+    session_color = _safe_color(_raw_color)
+    if _raw_color not in ("", None) and not session_color:
+        return web.json_response(
+            {"error": "session_color must be #rrggbb or empty", "code": "invalid_color_hex"},
+            status=400,
+        )
     async with _get_config_lock():
         cfg = KiroCrewConfig.load()
         if name in cfg.agents:
@@ -2233,6 +2245,7 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
             description=body.get("description", ""),
             triggers=body.get("triggers", ""),
             source=body.get("source", "kirocrew"),
+            session_color=session_color,
         )
         cfg.save()
     _sel().log_api_access(
@@ -2256,6 +2269,10 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"error": "body must be an object", "code": "body_not_object"}, status=400
+        )
     if "model" in body:
         pending_model = normalize_agent_model(body["model"])
     async with _get_config_lock():
@@ -2293,6 +2310,19 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
         if "triggers" in body:
             agent.triggers = body["triggers"]
             changed.append("triggers")
+        if "session_color" in body:
+            _sc = body["session_color"]
+            _norm = _safe_color(_sc)
+            if _sc not in ("", None) and not _norm:
+                return web.json_response(
+                    {
+                        "error": "session_color must be #rrggbb or empty",
+                        "code": "invalid_color_hex",
+                    },
+                    status=400,
+                )
+            agent.session_color = _norm
+            changed.append("session_color")
         if "source" in body:
             agent.source = body["source"]
             changed.append("source")
