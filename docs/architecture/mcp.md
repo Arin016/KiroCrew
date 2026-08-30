@@ -910,11 +910,14 @@ parent's tree. `mcp_core.py` offers two resolvers:
 - `_resolve_session_key()` (lenient, still walks ancestors) is only for read-only
   and telemetry callers where misattribution is harmless.
 
-An unresolved key is not automatically a refusal. `mcp_computer.py` forwards an
-empty key and lets the call proceed, because neither strict source exists for a
+An unresolved key is not automatically a refusal. `mcp_computer.py` forwards a
+namespace-only key (`unresolved:<shim pid>`, plus the gateway's per-connection
+nonce when there is one) and lets the call proceed, because neither strict source
+exists for a
 GUI-launched kiro-cli on macOS, so gating on identity would make the feature
 unusable on its only supported platform. What is lost there is audit
-*attribution*, not a control: the trail records an empty key, which is honest,
+*attribution*, not a control: the trail records a key the prefix marks as
+unresolved, which is honest,
 where the lenient walk would have recorded a forgeable one.
 
 **2. State belongs in the gateway.** The tool should be a thin forwarder: resolve

@@ -976,16 +976,28 @@ _MANAGED_SERVERS_CALLER_AWARE: frozenset[str] = frozenset(
 #: not-session-bound classification but not sufficient. ``kirocrew-computer``
 #: consumes the injected caller block (its pooled attribution is correct for
 #: every caller the gateway can name), but a caller the gateway CANNOT name
-#: proceeds under ``unresolved:<pid>`` by product decision — and on a pooled
-#: backend that pid is the shared process, so two unnamed co-tenants collapse
-#: onto one ``SnapshotIndex`` namespace and can act on each other's element
-#: indices (#5322). Unnamed is the NORMAL case on macOS, the only platform
-#: with a computer-use driver, so recommending co-tenancy would recommend the
-#: collision. Contrast ``kirocrew-dashboard``, which refuses an unidentified
-#: caller and is therefore safe to classify shareable. Remove this exception
-#: when #5322 gives unnamed callers isolated namespaces;
-#: ``test_mcp_managed_caller_identity.py`` pins it so it cannot silently
-#: persist or silently widen.
+#: proceeds under ``unresolved:<pid>`` by product decision — and unnamed is the
+#: NORMAL case on macOS, the only platform with a computer-use driver.
+#:
+#: #5322 gave those unnamed callers a per-CONNECTION nonce, so on a CURRENT
+#: gateway they no longer collapse onto one ``SnapshotIndex`` namespace. The
+#: entry stays because that is not the whole precondition. This set feeds
+#: ``managed_server_is_session_bound``, which feeds the shareability verdict,
+#: which ``mcp_gateway/seed.py`` turns into a CONFIG WRITE (``recommend_share``
+#: -> ``apply_seed``): promoting a name here can switch sharing ON for an
+#: operator who never chose it. And the daemon that would then serve those
+#: shared frames is not necessarily the one this code shipped with —
+#: ``mcp_gateway/manager.py`` ADOPTS whatever healthy daemon already holds the
+#: socket, so a gatewayd that outlived a package upgrade keeps running and
+#: injects no nonce (which is exactly why ``REGISTERED_CAPABILITIES`` exists).
+#: Promotion therefore has to wait until a nonce-blind gateway cannot serve a
+#: POOLED computer backend at all — negotiated, not assumed. Tracked as the
+#: #5322 follow-up.
+#:
+#: Contrast ``kirocrew-dashboard``, which refuses an unidentified caller and is
+#: therefore safe to classify shareable regardless of the daemon's generation.
+#: ``test_mcp_managed_caller_identity.py`` pins this so the entry can neither
+#: silently persist past its reason nor silently widen.
 _MANAGED_SERVERS_ADVERTISING_BUT_WITHHELD: frozenset[str] = frozenset(
     {"kirocrew-computer"}
 )
