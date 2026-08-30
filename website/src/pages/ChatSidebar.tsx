@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, Eye, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, MessagesSquare, Folder, ChevronRight, ChevronDown, ChevronUp, Clock, Pencil, BrushCleaning, Link2, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Copy, ListFilter, List, Loader, Loader2, Settings, RotateCcw, Bot, ExternalLink, Cpu, GitMerge, Workflow, CircleDot, Users, TriangleAlert, Goal, MessageCircleQuestionMark, ShieldCheck, Repeat } from 'lucide-react'
+import { Plus, X, Pin, Monitor, Eye, EyeOff, VenetianMask, Ghost, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, MessagesSquare, Folder, ChevronRight, ChevronDown, ChevronUp, Clock, Pencil, BrushCleaning, Link2, Circle, MoreVertical, Tag as TagIcon, Columns3, GripVertical, Zap, Check, Copy, ListFilter, List, Loader, Loader2, Settings, RotateCcw, Bot, ExternalLink, Cpu, GitMerge, Workflow, CircleDot, Users, TriangleAlert, Goal, MessageCircleQuestionMark, ShieldCheck, Repeat } from 'lucide-react'
 import GithubLogo from '../components/icons/GithubLogo'
 import GitlabLogo from '../components/icons/GitlabLogo'
 import JiraLogo from '../components/icons/JiraLogo'
@@ -4433,6 +4433,16 @@ function ChatSidebar({
     onSuccess: focusComposer,
   })
 
+  // Create an ephemeral chat — incognito (memory reads, no writes) or temporary
+  // (neither). The mode is pinned plain for the same reason the plain entry
+  // above pins it: these entries name the MEMORY mode, so routing them through
+  // the `defaultAutopilot` preference would hand an autopilot session to
+  // someone who came to this submenu to choose something else.
+  const createEphemeralChatMutation = useMutation({
+    mutationFn: (memoryMode: 'incognito' | 'temporary') => dispatch(createSlot({ agent: defaultAgent || undefined, mode: mode || '', memory_mode: memoryMode })).unwrap(),
+    onSuccess: focusComposer,
+  })
+
   // Session colors
   const { paletteColors, boost, boostFor, colorMode } = useSessionPalette()
 
@@ -5135,6 +5145,35 @@ function ChatSidebar({
                     <span className="whitespace-normal text-[11px] leading-snug text-muted">{i18nT('pages.chatSidebar.crew_desc')}</span>
                   </span>
                 </DropdownMenuItem>
+                {/* Ephemeral session types are grouped one level down: they are two
+                 *  spellings of one choice (a session that leaves no lasting memory),
+                 *  so listing both at the top level would double the session-type rows
+                 *  a user reads before picking an ordinary chat. max-w bounds the
+                 *  submenu for the same reason the parent content is bounded — the
+                 *  glosses are full sentences and would otherwise stretch it across
+                 *  the session list instead of wrapping. */}
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <Ghost size={14} className="text-muted" /> {i18nT('pages.chatSidebar.new_ephemeral_chat')}
+                    <ChevronRight size={13} className="ml-auto text-muted" />
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="max-w-[264px]">
+                    <DropdownMenuItem className="items-start" data-testid="new-incognito-chat" disabled={creatingSlot} onClick={() => { createEphemeralChatMutation.mutate('incognito') }}>
+                      <EyeOff size={14} className="text-muted mt-[3px] shrink-0" />
+                      <span className="flex min-w-0 flex-col gap-px">
+                        <span>{i18nT('components.welcomeView.incognito')}</span>
+                        <span className="whitespace-normal text-[11px] leading-snug text-muted">{i18nT('components.welcomeView.incognito_desc')}</span>
+                      </span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem className="items-start" data-testid="new-temporary-chat" disabled={creatingSlot} onClick={() => { createEphemeralChatMutation.mutate('temporary') }}>
+                      <VenetianMask size={14} className="text-muted mt-[3px] shrink-0" />
+                      <span className="flex min-w-0 flex-col gap-px">
+                        <span>{i18nT('components.welcomeView.temporary')}</span>
+                        <span className="whitespace-normal text-[11px] leading-snug text-muted">{i18nT('components.welcomeView.temporary_desc')}</span>
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => { setFolderModal({ mode: 'create', parentId: '' }) }}>
                   <FolderPlus size={14} className="text-muted" /> {i18nT('pages.chatSidebar.new_folder')}

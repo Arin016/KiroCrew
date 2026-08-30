@@ -6145,6 +6145,7 @@
       "needs_your_answer": "Needs your answer",
       "new_autopilot_chat": "New autopilot chat",
       "new_crew_chat": "New Crew Mode chat",
+      "new_ephemeral_chat": "New ephemeral chat",
       "new_chat_in_folder": "New chat in folder",
       "new_chat_in_name": "New chat in {{name}}",
       "new_chat_session": "New chat session",
