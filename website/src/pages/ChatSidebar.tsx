@@ -1038,6 +1038,31 @@ function readStoredRecentWindow(): number {
   }
 }
 
+/**
+ * A pill for one duration choice, shared by the Recent window presets and — on a
+ * phone, where those options render inline rather than in a flyout — the
+ * dormant-collapse thresholds. One component so the two lists cannot drift, and
+ * so the duplicated class/style pair does not read as copy-paste.
+ */
+function DurationChip({ label, selected, onSelect }: { label: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      className="px-2 py-0.5 rounded-full text-[11px] cursor-pointer border transition-colors"
+      style={selected
+        ? { background: 'color-mix(in srgb, var(--ok) 12%, transparent)', color: 'var(--ok)', borderColor: 'color-mix(in srgb, var(--ok) 35%, transparent)' }
+        : { background: 'transparent', color: 'var(--muted)', borderColor: 'var(--border)' }}
+      // A plain button is not a menu item, so clicking it leaves the host menu
+      // open on its own — Radix dismisses on an item select or an outside
+      // pointer-down, neither of which this is (verified in a browser).
+      onClick={onSelect}
+    >
+      {label}
+    </button>
+  )
+}
+
 /** Folders excluded from the flat lane (see `filterHiddenFolders`). Stored as a JSON
  *  array of folder ids under this key. */
 const HIDDEN_FOLDERS_LS_KEY = 'mc-flat-hidden-folders'
@@ -5194,28 +5219,44 @@ function ChatSidebar({
                 <DropdownMenuItem onClick={() => { setFolderModal({ mode: 'create', parentId: '' }) }}>
                   <FolderPlus size={14} className="text-muted" /> {i18nT('pages.chatSidebar.new_folder')}
                 </DropdownMenuItem>
-                {folders.length > 0 && (
+                {folders.length > 0 && (() => {
+                  const folderRows = (() => {
+                    const roots = folders.filter(f => !f.parent_id)
+                    const childrenOf = (pid: string) => folders.filter(f => f.parent_id === pid)
+                    const items: { f: ChatFolder; depth: number }[] = []
+                    const walk = (list: ChatFolder[], depth: number) => { for (const f of list) { items.push({ f, depth }); walk(childrenOf(f.id), depth + 1) } }
+                    walk(roots, 0)
+                    return items.map(({ f, depth }) => (
+                      <DropdownMenuItem key={f.id} style={{ paddingLeft: `${12 + depth * 16}px` }} onClick={() => createChatInFolder(f.id, { focus: true })}>
+                        <Folder size={14} className={depth === 0 ? 'text-muted' : 'text-muted/60'} /> {f.name}
+                      </DropdownMenuItem>
+                    ))
+                  })()
+                  // A flyout has nowhere to open at phone width (Radix pins a
+                  // submenu to the trigger's side and only shifts it vertically),
+                  // so on a phone the folders are listed inline under a caption.
+                  if (isMobile) {
+                    return (
+                      <>
+                        <DropdownMenuLabel className="text-[11px] uppercase tracking-[.04em] flex items-center gap-2">
+                          <Folder size={13} className="text-muted" /> {i18nT('pages.chatSidebar.new_chat_in_folder')}
+                        </DropdownMenuLabel>
+                        <div className="max-h-[240px] overflow-y-auto">{folderRows}</div>
+                      </>
+                    )
+                  }
+                  return (
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger className="data-[disabled]:pointer-events-none data-[disabled]:opacity-50">
                       <Folder size={14} className="text-muted" /> {i18nT('pages.chatSidebar.new_chat_in_folder')}
                       <ChevronRight size={13} className="ml-auto text-muted" />
                     </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent className="max-h-[300px] overflow-y-auto">
-                      {(() => {
-                        const roots = folders.filter(f => !f.parent_id)
-                        const childrenOf = (pid: string) => folders.filter(f => f.parent_id === pid)
-                        const items: { f: ChatFolder; depth: number }[] = []
-                        const walk = (list: ChatFolder[], depth: number) => { for (const f of list) { items.push({ f, depth }); walk(childrenOf(f.id), depth + 1) } }
-                        walk(roots, 0)
-                        return items.map(({ f, depth }) => (
-                          <DropdownMenuItem key={f.id} style={{ paddingLeft: `${12 + depth * 16}px` }} onClick={() => createChatInFolder(f.id, { focus: true })}>
-                            <Folder size={14} className={depth === 0 ? 'text-muted' : 'text-muted/60'} /> {f.name}
-                          </DropdownMenuItem>
-                        ))
-                      })()}
+                      {folderRows}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
-                )}
+                  )
+                })()}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -5361,20 +5402,120 @@ function ChatSidebar({
                   )}
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[180px] max-h-[70vh] overflow-y-auto">
+              {/* max-w keeps the menu inside a phone viewport. Radix sizes the
+                  popper wrapper to `max-content`, so the inline pickers' caption
+                  sentences (a phone renders them here instead of in a flyout)
+                  would otherwise stretch the menu past the screen edge. */}
+              <DropdownMenuContent align="end" className="min-w-[180px] max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto">
                 <DropdownMenuLabel className="text-[11px] uppercase tracking-[.04em]">{i18nT('pages.chatSidebar.filter')}</DropdownMenuLabel>
                 {SESSION_FILTERS.map(filterDef => {
                   const active = activeFilters.has(filterDef.key)
                   const slotCount = filterCounts[filterDef.key] ?? 0
                   const isRecent = filterDef.key === 'recent'
                   if (isRecent) {
-                    // Recent gets a nested submenu (flyout) for choosing the
-                    // window. The whole row is a single SubTrigger (one focusable
+                    // The window picker is a NESTED FLYOUT on a wide viewport and
+                    // renders INLINE on a phone. Radix hardcodes a submenu to
+                    // side="right" and only lets its popper shift on the cross
+                    // axis, so at phone width neither side fits: the flyout lands
+                    // on whichever side overflows less and is cut off by the
+                    // viewport (measured at 390px: 249px wide, 192px of it past
+                    // the right edge, --radix-popper-available-width: 57px). No
+                    // width or padding tuning can recover that — the flyout has
+                    // nowhere to go beside a menu that already spans most of the
+                    // screen, so on a phone the options come inline instead.
+                    const picker = (
+                      // Non-menu-item controls: stop click/keydown from reaching
+                      // Radix so choosing a window doesn't dismiss the menu
+                      // (mirrors the folder-rename input pattern).
+                      <div
+                        onClick={e => e.stopPropagation()}
+                        onMouseDown={e => e.stopPropagation()}
+                        onKeyDown={e => e.stopPropagation()}
+                      >
+                        <div className="px-1 pb-1 text-[11px] text-muted">{i18nT('pages.chatSidebar.within')}</div>
+                        <div className="flex flex-wrap gap-1 px-1 mb-2">
+                          {RECENT_WINDOW_PRESETS.map(preset => (
+                            <DurationChip
+                              key={preset.ms}
+                              label={preset.label}
+                              selected={recentWindowMs === preset.ms}
+                              onSelect={() => selectRecentPreset(preset.ms)}
+                            />
+                          ))}
+                        </div>
+                        <div className="px-1 text-[12px] text-muted">
+                          <div className="mb-1">{i18nT('pages.chatSidebar.custom')}</div>
+                          <div className="flex items-center gap-1.5">
+                            {/* Draft-string value so the field can be cleared
+                                / partially typed; commit + clamp on blur or
+                                Enter. Unit changes commit immediately but keep
+                                the amount as-typed (no re-derivation flip). */}
+                            <input
+                              type="number"
+                              min={1}
+                              max={9999}
+                              value={recentAmountDraft}
+                              onChange={e => setRecentAmountDraft(e.target.value)}
+                              onBlur={commitRecentAmount}
+                              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitRecentAmount() } }}
+                              aria-label={i18nT('pages.chatSidebar.custom_recency_amount')}
+                              className="w-12 shrink-0 px-1.5 py-0.5 rounded border border-border bg-bg-elevated text-text text-[12px]"
+                            />
+                            <SimpleSelect
+                              value={recentUnitDraft}
+                              onChange={v => changeRecentUnit(v as RecentUnit)}
+                              className="px-1.5 py-0.5 text-[12px] rounded"
+                              options={['minutes', 'hours', 'days']}
+                              optionLabels={[i18nT('pages.chatSidebar.min'), i18nT('pages.chatSidebar.hours'), i18nT('pages.chatSidebar.days')]}
+                              aria-label={i18nT('pages.chatSidebar.custom_recency_unit')}
+                              // Was `flex-1 min-w-0` on the old <select>; the
+                              // trigger's chrome is fixed inside ui/select.tsx,
+                              // but the flex sizing has to survive on the
+                              // wrapper div that replaces it as the flex item.
+                              style={{ flex: '1 1 0%', minWidth: 0 }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )
+                    const rowBody = (
+                      <>
+                        {filterDef.icon(active)}
+                        <span className="flex-1 truncate">
+                          {i18nT(FILTER_LABEL_KEY[filterDef.key])}
+                          <span className="text-muted"> · {formatRecentWindow(recentWindowMs)}</span>
+                          {slotCount > 0 ? ` (${slotCount})` : ''}
+                        </span>
+                        {active && <Check size={14} className="text-accent shrink-0" />}
+                      </>
+                    )
+                    if (isMobile) {
+                      // Inline: the row keeps its only job (toggle the filter) and
+                      // the window options sit under it, one tap each. No chevron
+                      // — there is nothing left to open.
+                      //
+                      // The picker shows only while the filter is ON. Picking a
+                      // window does not enable it, so an always-visible picker on
+                      // an inactive filter turns a chip green and changes nothing
+                      // in the list — a control that reports an effect it is not
+                      // having. Tapping the row enables the filter and reveals it.
+                      return (
+                        <Fragment key={filterDef.key}>
+                          <DropdownMenuItem
+                            title={i18nT(FILTER_DESCRIPTION_KEY[filterDef.key])}
+                            onSelect={e => { e.preventDefault(); toggleFilter('recent') }}
+                          >
+                            {rowBody}
+                          </DropdownMenuItem>
+                          {active && <div className="px-2 pb-1">{picker}</div>}
+                        </Fragment>
+                      )
+                    }
+                    // Flyout. The whole row is a single SubTrigger (one focusable
                     // menu item with correct roving-tabindex). Toggling the
                     // filter must be reachable by every input modality:
-                    //  - pointer/touch: onClick toggles; we deliberately do NOT
-                    //    preventDefault so Radix's own click-to-open still fires
-                    //    (touch/coarse pointers have no hover path to the picker).
+                    //  - pointer: onClick toggles; we deliberately do NOT
+                    //    preventDefault so Radix's own click-to-open still fires.
                     //  - keyboard: Radix routes Enter/Space/ArrowRight to open the
                     //    submenu and the SubTrigger is a div (no synthetic click),
                     //    so onClick never fires for keys. onKeyDown toggles on
@@ -5392,75 +5533,11 @@ function ChatSidebar({
                             }
                           }}
                         >
-                          {filterDef.icon(active)}
-                          <span className="flex-1 truncate">
-                            {i18nT(FILTER_LABEL_KEY[filterDef.key])}
-                            <span className="text-muted"> · {formatRecentWindow(recentWindowMs)}</span>
-                            {slotCount > 0 ? ` (${slotCount})` : ''}
-                          </span>
-                          {active && <Check size={14} className="text-accent shrink-0" />}
+                          {rowBody}
                           <ChevronRight size={13} className="text-muted shrink-0" />
                         </DropdownMenuSubTrigger>
                         <DropdownMenuSubContent className="min-w-[190px] p-2">
-                          {/* Non-menu-item controls: stop click/keydown from
-                              reaching Radix so choosing a window doesn't dismiss
-                              the menu (mirrors the folder-rename input pattern). */}
-                          <div
-                            onClick={e => e.stopPropagation()}
-                            onMouseDown={e => e.stopPropagation()}
-                            onKeyDown={e => e.stopPropagation()}
-                          >
-                            <div className="px-1 pb-1 text-[11px] text-muted">{i18nT('pages.chatSidebar.within')}</div>
-                            <div className="flex flex-wrap gap-1 px-1 mb-2">
-                              {RECENT_WINDOW_PRESETS.map(preset => (
-                                <button
-                                  key={preset.ms}
-                                  type="button"
-                                  aria-pressed={recentWindowMs === preset.ms}
-                                  className="px-2 py-0.5 rounded-full text-[11px] cursor-pointer border transition-colors"
-                                  style={recentWindowMs === preset.ms
-                                    ? { background: 'color-mix(in srgb, var(--ok) 12%, transparent)', color: 'var(--ok)', borderColor: 'color-mix(in srgb, var(--ok) 35%, transparent)' }
-                                    : { background: 'transparent', color: 'var(--muted)', borderColor: 'var(--border)' }}
-                                  onClick={() => selectRecentPreset(preset.ms)}
-                                >
-                                  {preset.label}
-                                </button>
-                              ))}
-                            </div>
-                            <div className="px-1 text-[12px] text-muted">
-                              <div className="mb-1">{i18nT('pages.chatSidebar.custom')}</div>
-                              <div className="flex items-center gap-1.5">
-                                {/* Draft-string value so the field can be cleared
-                                    / partially typed; commit + clamp on blur or
-                                    Enter. Unit changes commit immediately but keep
-                                    the amount as-typed (no re-derivation flip). */}
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={9999}
-                                  value={recentAmountDraft}
-                                  onChange={e => setRecentAmountDraft(e.target.value)}
-                                  onBlur={commitRecentAmount}
-                                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitRecentAmount() } }}
-                                  aria-label={i18nT('pages.chatSidebar.custom_recency_amount')}
-                                  className="w-12 shrink-0 px-1.5 py-0.5 rounded border border-border bg-bg-elevated text-text text-[12px]"
-                                />
-                                <SimpleSelect
-                                  value={recentUnitDraft}
-                                  onChange={v => changeRecentUnit(v as RecentUnit)}
-                                  className="px-1.5 py-0.5 text-[12px] rounded"
-                                  options={['minutes', 'hours', 'days']}
-                                  optionLabels={[i18nT('pages.chatSidebar.min'), i18nT('pages.chatSidebar.hours'), i18nT('pages.chatSidebar.days')]}
-                                  aria-label={i18nT('pages.chatSidebar.custom_recency_unit')}
-                                  // Was `flex-1 min-w-0` on the old <select>; the
-                                  // trigger's chrome is fixed inside ui/select.tsx,
-                                  // but the flex sizing has to survive on the
-                                  // wrapper div that replaces it as the flex item.
-                                  style={{ flex: '1 1 0%', minWidth: 0 }}
-                                />
-                              </div>
-                            </div>
-                          </div>
+                          {picker}
                         </DropdownMenuSubContent>
                       </DropdownMenuSub>
                     )
@@ -5502,37 +5579,79 @@ function ChatSidebar({
                   // is inert (narrowed list / non-date sort): a control that
                   // displays an active setting while doing nothing is a lie.
                   const stalePaused = staleCollapseMs > 0 && (listNarrowed || sortKey !== 'date-desc')
+                  const staleRowBody = (
+                    <>
+                      <Clock size={14} className="text-muted shrink-0" />
+                      <span className="flex-1 truncate">
+                        {i18nT('pages.chatSidebar.stale_collapse_menu')}
+                        <span className="text-muted"> · {staleCollapseMs > 0
+                          ? (stalePaused
+                            ? i18nT('pages.chatSidebar.stale_collapse_paused')
+                            : formatRecentWindow(staleCollapseMs))
+                          : i18nT('pages.chatSidebar.stale_collapse_off')}</span>
+                      </span>
+                    </>
+                  )
+                  const staleLabel = (ms: number) => (ms > 0 ? formatRecentWindow(ms) : i18nT('pages.chatSidebar.stale_collapse_off'))
+                  // Caption saying what the durations mean, mirroring the Recent
+                  // submenu's "Within" caption above its presets. While paused the
+                  // WHY must be readable without hover — the trigger's title
+                  // tooltip is invisible to keyboard and touch users, so the hint
+                  // renders in the picker too.
+                  const staleCaption = (
+                    <>
+                      <div className="px-2 pt-1 pb-1 text-[11px] text-muted whitespace-normal">{i18nT('pages.chatSidebar.stale_collapse_caption')}</div>
+                      {stalePaused && (
+                        <div className="px-2 pb-1.5 text-[11px] text-muted italic whitespace-normal">{i18nT('pages.chatSidebar.stale_collapse_paused_hint')}</div>
+                      )}
+                    </>
+                  )
+                  if (isMobile) {
+                    // Same reason as the Recent picker above: a flyout cannot fit
+                    // beside a phone-width menu. The thresholds render inline as
+                    // chips rather than as seven more menu rows, so the menu stays
+                    // scannable and every option is one tap away.
+                    return (
+                      <>
+                        {/* A section caption, NOT a menu row: inline, there is
+                            nothing to tap here (the chips below carry the action),
+                            so styling it like the tappable rows above would invite
+                            a tap that does nothing. Matches FILTER / SORT BY. */}
+                        <DropdownMenuLabel
+                          className="text-[11px] uppercase tracking-[.04em] flex items-center gap-2"
+                          data-testid="stale-collapse-menu"
+                        >
+                          {staleRowBody}
+                        </DropdownMenuLabel>
+                        {staleCaption}
+                        <div className="flex flex-wrap gap-1 px-2 pb-1.5">
+                          {STALE_COLLAPSE_PRESETS_MS.map(ms => (
+                            <DurationChip
+                              key={ms}
+                              label={staleLabel(ms)}
+                              selected={staleCollapseMs === ms}
+                              onSelect={() => setStaleCollapseMs(ms)}
+                            />
+                          ))}
+                        </div>
+                      </>
+                    )
+                  }
                   return (
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger data-testid="stale-collapse-menu"
                     title={stalePaused ? i18nT('pages.chatSidebar.stale_collapse_paused_hint') : undefined}>
-                    <Clock size={14} className="text-muted shrink-0" />
-                    <span className="flex-1 truncate">
-                      {i18nT('pages.chatSidebar.stale_collapse_menu')}
-                      <span className="text-muted"> · {staleCollapseMs > 0
-                        ? (stalePaused
-                          ? i18nT('pages.chatSidebar.stale_collapse_paused')
-                          : formatRecentWindow(staleCollapseMs))
-                        : i18nT('pages.chatSidebar.stale_collapse_off')}</span>
-                    </span>
+                    {staleRowBody}
                     <ChevronRight size={13} className="text-muted shrink-0" />
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent className="min-w-[150px] max-w-[240px]">
-                    {/* Caption saying what the durations mean, mirroring the
-                        Recent submenu's "Within" caption above its presets. */}
-                    <div className="px-2 pt-1 pb-1 text-[11px] text-muted">{i18nT('pages.chatSidebar.stale_collapse_caption')}</div>
-                    {/* While paused the WHY must be readable without hover —
-                        the trigger's title tooltip is invisible to keyboard
-                        and touch users, so the hint renders here too. */}
-                    {stalePaused && (
-                      <div className="px-2 pb-1.5 text-[11px] text-muted italic">{i18nT('pages.chatSidebar.stale_collapse_paused_hint')}</div>
-                    )}
+                    {staleCaption}
                     {STALE_COLLAPSE_PRESETS_MS.map(ms => (
                       <DropdownMenuItem
                         key={ms}
                         onSelect={() => setStaleCollapseMs(ms)}
                       >
-                        <span className="flex-1">{ms > 0 ? formatRecentWindow(ms) : i18nT('pages.chatSidebar.stale_collapse_off')}</span>
+                        <span className="flex-1">{staleLabel(ms)}</span>
                         {staleCollapseMs === ms && <Check size={14} className="text-accent shrink-0" />}
                       </DropdownMenuItem>
                     ))}
