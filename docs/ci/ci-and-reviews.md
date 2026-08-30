@@ -565,6 +565,33 @@ commit status plus one `readiness:` label**.
   passed for it.
 - **Labels:** `readiness: checking` (pending), `readiness: action required` (a
   blocker), `readiness: passed`. Exactly one is ever present.
+- **It also enforces the disposition rule.** Besides scoring lanes, readiness runs
+  `pr_status.py --disposition-gate` (checked out from the default branch, never
+  from the PR head — this workflow is `pull_request_target` and holds write
+  tokens) and folds each violation of the one-lane / one-rationale-per-finding
+  rule into its blocking list. That is the only enforcement point that binds a
+  writer who never runs the prepare-pr loop, which is what a blanket
+  single-rationale record used to escape through (#6658). The rule keeps ONE
+  implementation: the readiness step calls the same script the local gate does
+  rather than re-reading the marker grammar in shell. A record set it cannot read
+  is `pending`, never red — a transient comments-API failure must not fail the
+  required status — and a record whose author the collaborators permission API
+  does not confirm as a writer is ignored, exactly as `codex-review.yml`'s
+  adjudication ledger ignores it, so the gate never blocks on a record that holds
+  no downgrade power. One consequence to know: readiness has **no
+  `issue_comment` trigger**, so correcting the offending comment fires nothing by
+  itself. `pr-readiness-sweep.yml` mode 5 covers that — it treats a disposition
+  record whose `updated_at` is newer than the verdict as evidence the verdict is
+  stale, and re-fires the recompute within ~15 minutes. Deleting the record with
+  no replacement leaves nothing observable and waits for a push or a manual
+  dispatch. The comparison is not race-free and is not claimed to be: the gate
+  reads the comments early in the readiness job while the status is published at
+  the end, so a record created in between is missed by that run and also looks
+  older than the verdict to the sweep. What bounds that residual is the harm
+  model, not the detection -- a violating record's only power is letting the
+  adjudication ledger downgrade a REPEATED finding on a later review round, and a
+  later review round takes a push, which recomputes readiness and catches the
+  violation.
 - **Unapproved fork runs remain blocking but are attributed separately.** GitHub
   reports a fork workflow held behind *Approve and run* as `action_required`
   even though it has not executed. Readiness keeps the failure status and
