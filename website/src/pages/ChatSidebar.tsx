@@ -5433,6 +5433,12 @@ function ChatSidebar({
                       // Inline: the row keeps its only job (toggle the filter) and
                       // the window options sit under it, one tap each. No chevron
                       // — there is nothing left to open.
+                      //
+                      // The picker shows only while the filter is ON. Picking a
+                      // window does not enable it, so an always-visible picker on
+                      // an inactive filter turns a chip green and changes nothing
+                      // in the list — a control that reports an effect it is not
+                      // having. Tapping the row enables the filter and reveals it.
                       return (
                         <Fragment key={filterDef.key}>
                           <DropdownMenuItem
@@ -5441,7 +5447,7 @@ function ChatSidebar({
                           >
                             {rowBody}
                           </DropdownMenuItem>
-                          <div className="px-2 pb-1">{picker}</div>
+                          {active && <div className="px-2 pb-1">{picker}</div>}
                         </Fragment>
                       )
                     }
@@ -5547,9 +5553,16 @@ function ChatSidebar({
                     // scannable and every option is one tap away.
                     return (
                       <>
-                        <div className="px-1 py-1.5 flex items-center gap-2 text-[13px]" data-testid="stale-collapse-menu">
+                        {/* A section caption, NOT a menu row: inline, there is
+                            nothing to tap here (the chips below carry the action),
+                            so styling it like the tappable rows above would invite
+                            a tap that does nothing. Matches FILTER / SORT BY. */}
+                        <DropdownMenuLabel
+                          className="text-[11px] uppercase tracking-[.04em] flex items-center gap-2"
+                          data-testid="stale-collapse-menu"
+                        >
                           {staleRowBody}
-                        </div>
+                        </DropdownMenuLabel>
                         {staleCaption}
                         <div className="flex flex-wrap gap-1 px-2 pb-1.5">
                           {STALE_COLLAPSE_PRESETS_MS.map(ms => (

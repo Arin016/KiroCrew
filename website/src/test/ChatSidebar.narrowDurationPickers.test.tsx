@@ -131,6 +131,16 @@ async function openFilterMenu() {
   return screen.findByRole('menuitem', { name: /Recent/ })
 }
 
+/** Open the menu and turn the Recent filter ON, which is what reveals its
+ *  inline picker (a picker on an inactive filter would report an effect it is
+ *  not having). Returns the Recent row. */
+async function openFilterMenuWithRecentOn() {
+  const row = await openFilterMenu()
+  fireEvent.click(row)
+  await screen.findByText('Within')
+  return row
+}
+
 /** The filter menu is still mounted (its label row survives). */
 const filterMenuOpen = () => screen.queryAllByText('Filter').length > 0
 
@@ -140,7 +150,7 @@ afterEach(() => vi.clearAllMocks())
 describe('sessions filter menu — duration pickers at phone width', () => {
   it('renders the Recent window picker inline, not behind a submenu trigger', async () => {
     renderSidebar()
-    const recentRow = await openFilterMenu()
+    const recentRow = await openFilterMenuWithRecentOn()
 
     // Inline: no flyout to open, so the row must not advertise one.
     expect(recentRow.getAttribute('aria-haspopup')).toBeNull()
@@ -155,9 +165,19 @@ describe('sessions filter menu — duration pickers at phone width', () => {
     }
   })
 
-  it('commits a preset from the inline chip without dismissing the menu', async () => {
+  it('hides the window picker while the Recent filter is off', async () => {
     renderSidebar()
     await openFilterMenu()
+
+    // Picking a window does not enable the filter, so an always-visible picker
+    // would turn a chip green and change nothing in the list.
+    expect(screen.queryByText('Within')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '1 week' })).not.toBeInTheDocument()
+  })
+
+  it('commits a preset from the inline chip without dismissing the menu', async () => {
+    renderSidebar()
+    await openFilterMenuWithRecentOn()
 
     fireEvent.click(screen.getByRole('button', { name: '1 week' }))
 
@@ -174,6 +194,9 @@ describe('sessions filter menu — duration pickers at phone width', () => {
 
     const row = screen.getByTestId('stale-collapse-menu')
     expect(row.getAttribute('aria-haspopup')).toBeNull()
+    // A caption, not a menu row: nothing here is tappable (the chips carry the
+    // action), so it must not be styled or exposed as an item people can press.
+    expect(row.getAttribute('role')).not.toBe('menuitem')
     // "Off" plus the day presets, as chips rather than seven more menu rows.
     for (const label of ['Off', '1d', '2d', '7d']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
