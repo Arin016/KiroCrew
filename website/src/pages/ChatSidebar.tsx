@@ -4990,7 +4990,12 @@ function ChatSidebar({
         style={{ touchAction: 'none' }}
         {...sidebarResize}
       >
-        <div className="w-[2px] h-full bg-transparent group-hover/drag:bg-accent group-active/drag:bg-accent-hover transition-colors duration-200" />
+        {/* Visual bar only — the 5px parent stays full-height as the hit
+            area. The bar's ends are inset by the card's border radius
+            (rounded-xl = 12px, so 24px total) so its accent state spans
+            exactly the straight segment of the card's right border instead
+            of overshooting past the rounded corners. */}
+        <div className="w-[2px] h-[calc(100%-24px)] rounded-full bg-transparent group-hover/drag:bg-accent group-active/drag:bg-accent-hover transition-colors duration-200" />
       </div>
 
       {/* Header — all elements ("Sessions" title, kebab, New button) centered
