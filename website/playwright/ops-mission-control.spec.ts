@@ -247,23 +247,43 @@ test.describe('Ops Mission Control — existence', () => {
   })
 
   /**
-   * The storefront's Discover catalog is built from builtins that are DISABLED
-   * and not hidden (AppsPage.tsx `browseApps`); an ENABLED one correctly moves to
-   * the Library tab. Both halves are asserted, and each sets the enabled flag it
-   * needs rather than inheriting whatever ran before it — see the file-level
-   * serial note above for why inheritance is not safe here.
+   * Discover renders the registry response; it does not synthesize catalog rows
+   * from the wheel's installed builtins. The official catalog currently publishes
+   * this app, while the bundled offline seed does not, so both are valid gateway
+   * states. Read the exact response this page consumed and require the Discover
+   * row when that source contains it. In either state, the locally installed app
+   * must remain manageable from Library while disabled.
    */
-  test('appears in the Discover catalog while disabled', async ({ page, request }) => {
+  test('uses its catalog row when published and stays in Library while disabled', async ({
+    page,
+    request,
+  }) => {
     await ensureDisabled(request)
+
+    const registryLoaded = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return url.pathname === '/api/apps/registry' && response.request().method() === 'GET'
+    })
     await page.goto('/apps', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByText('Ops Mission Control').first()).toBeVisible({ timeout: 20000 })
+    const registryResponse = await registryLoaded
+    expect(registryResponse.ok(), 'the Discover registry request must succeed').toBeTruthy()
+    const registryBody = await registryResponse.json()
+    const registryApps: Array<{ name?: string }> = Array.isArray(registryBody)
+      ? registryBody
+      : (registryBody.apps ?? [])
+
+    if (registryApps.some((app) => app.name === APP)) {
+      await expect(page.getByText('Ops Mission Control', { exact: true }).first()).toBeVisible()
+    }
+
+    await page.goto('/apps/library', { waitUntil: 'domcontentloaded' })
+    await expect(page.getByText('Ops Mission Control', { exact: true }).first()).toBeVisible()
   })
 
-  test('moves to the Library tab once enabled', async ({ page, request }) => {
+  test('remains in Library once enabled', async ({ page, request }) => {
     await ensureEnabled(request)
-    await page.goto('/apps', { waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: /Library/i }).first().click()
-    await expect(page.getByText('Ops Mission Control').first()).toBeVisible({ timeout: 20000 })
+    await page.goto('/apps/library', { waitUntil: 'domcontentloaded' })
+    await expect(page.getByText('Ops Mission Control', { exact: true }).first()).toBeVisible()
   })
 })
 
