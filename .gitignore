@@ -54,6 +54,12 @@ pyrightconfig.json
 # worktree node_modules is often a SYMLINK to a sibling checkout's, and a slash
 # matches a directory only.
 node_modules
+# A dependency tree stashed mid-install by the node_modules transaction (this
+# module's `.kirocrew-frontend-backup`, or the Dev Fleet sync runner's
+# `.kirocrew-sync-backup`). Left behind only when a run was killed or its cleanup
+# failed, and an untracked leftover makes the checkout read as dirty, which
+# fail-closes Dev Fleet's "Prune merged".
+node_modules.kirocrew-*-backup
 frontend/package-lock.json
 frontend/dist/
 tui/dist/
@@ -66,6 +72,8 @@ src/kiro_crew/static/dist
 # fail-closes Dev Fleet's "Prune merged".
 src/kiro_crew/static/.dist.staging.*
 src/kiro_crew/static/.dist.previous.*
+# Lock serializing one node_modules install transaction (node_modules_tx).
+src/kiro_crew/static/.node-modules.install.*
 
 # Build-time provenance stamp (scripts/stamp-distribution.sh). Generated per
 # packaging path; a committed copy would mislabel every other build's beacon.

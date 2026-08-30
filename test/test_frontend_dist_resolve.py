@@ -288,6 +288,10 @@ def test_resolver_produces_a_symlink_the_pwa_guard_accepts(fake_pkg, tmp_path, m
 def test_build_frontend_sync_spawns_resolved_npm_path(tmp_path, monkeypatch):
     """Regression: on Windows npm is ``npm.CMD``; CreateProcess cannot spawn the
     bare name "npm". build_frontend_sync must spawn the RESOLVED path.
+
+    Patches ``Popen``, which is the seam BOTH spawns go through: the install
+    moved onto it so a timed-out `npm ci` can have its whole worker tree reaped
+    before the node_modules transaction restores the stashed tree.
     """
     website = tmp_path / "website"
     website.mkdir()
@@ -299,14 +303,17 @@ def test_build_frontend_sync_spawns_resolved_npm_path(tmp_path, monkeypatch):
 
     calls: list[list[str]] = []
 
-    class _Result:
+    class _Proc:
         returncode = 0
 
-    def _fake_run(cmd, **kw):
-        calls.append(cmd)
-        return _Result()
+        def wait(self, timeout=None):
+            return 0
 
-    monkeypatch.setattr(frontend.subprocess, "run", _fake_run)
+    def _fake_popen(cmd, **kw):
+        calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(frontend.subprocess, "Popen", _fake_popen)
     frontend.build_frontend_sync(tmp_path, log=lambda *a: None)
 
     assert calls, "no subprocess was spawned"
