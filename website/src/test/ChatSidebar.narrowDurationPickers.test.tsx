@@ -191,8 +191,8 @@ describe('sessions filter menu — duration pickers at phone width', () => {
     // A caption, not a menu row: nothing here is tappable (the chips carry the
     // action), so it must not be styled or exposed as an item people can press.
     expect(row.getAttribute('role')).not.toBe('menuitem')
-    // "Off" plus the day presets, as chips rather than seven more menu rows.
-    for (const label of ['Off', '1d', '2d', '7d']) {
+    // "Off" plus the day presets, as chips rather than more menu rows.
+    for (const label of ['Off', '1d', '2d', '7d', '14d']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
 
