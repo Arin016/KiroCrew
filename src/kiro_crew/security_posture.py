@@ -532,6 +532,24 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "and replayed into later context.",
     ),
     (
+        "Auto-skill update merge prompt",
+        "history_consolidation.py",
+        "The existing live skill body is redacted before it enters the model prompt "
+        "that merges a proposed update, and the model's merged output is scanned again.",
+    ),
+    (
+        "Auto-skill pending candidate staging",
+        "history_consolidation.py",
+        "LLM-authored descriptions, triggers, procedures, and generated scripts are "
+        "redacted before SkillsLoader writes a pending create or update candidate.",
+    ),
+    (
+        "Auto-skill direct publication",
+        "history_consolidation.py",
+        "LLM-authored descriptions, triggers, and procedures are redacted before "
+        "immediate live skill creation or direct refinement through SkillsLoader.",
+    ),
+    (
         "Side-panel stream",
         "dashboard/handlers/side.py",
         "StreamRedactor mirroring the main chat for the side-question stream.",

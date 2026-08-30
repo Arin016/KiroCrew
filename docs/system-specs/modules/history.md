@@ -4,7 +4,37 @@
 
 Persistent conversation history with provenance tracking and LLM-driven consolidation. Conversations survive session expiry and gateway restarts.
 
-## ConversationLog (`history.py`)
+### Composition and source ownership
+
+`kiro_crew.history` remains the compatibility facade and defines the real
+`ConversationLog` type. It owns transcript paths and sidecars, the shared
+in-process and cross-process lock registries, append/atomic-turn persistence,
+cache generation registries, and consolidation-progress writes. The facade
+re-exports the established module API and keeps thin, explicit delegates for
+the extracted behavior:
+
+- `history_cache.py` owns the bounded cache containers and the invalidation /
+  guarded-publish coordinator. Cache objects and generation state remain on
+  the facade owner.
+- `history_search.py` owns query parsing plus the list/search/snippet catalog
+  projection.
+- `history_projection.py` owns bounded transcript reads, tab-chain/index
+  projection, metadata reads and updates, permanent deletion, and previews.
+- `history_rewrite.py` owns locked compaction rewrites and size-based rotation.
+- `history_consolidation.py` owns `HistoryConsolidator` and auto-skill
+  eligibility/extraction helpers; `history.py` re-exports the class unchanged.
+
+Every `ConversationLog` component is constructed with only the same owner; there
+is no helper-callback dependency bundle and no duplicate mutable history state.
+Calls that are established instance patch/diagnostic seams route back through
+the owner. The few module bindings with demonstrated post-construction facade
+rebinds are read through narrow call-time lookups (the search scan window, read
+lock/preview settings, and rewrite rotation/archive settings). Stable clocks,
+parsers, formatters, logging, and atomic I/O remain ordinary module dependencies;
+stable helpers still owned by the core facade are resolved lazily rather than
+injected into every component.
+
+## ConversationLog (`history.py` facade)
 
 Per-thread JSONL files at `~/.kiro/crew/sessions/{safe_key}.jsonl`. First line is metadata, subsequent lines are messages with `role`, `content`, `ts`, `tools`, `source_thread`, `source_user`. A writer can also supply `cls` (presentation class) and `mid` — persisted as `meta.mid`, the same field shape the dashboard slot save writes, so a dual-write injector's durable copy carries the SAME delivery identity as its in-memory window copy and a bounded slot-detail read reconciles the two as one message instead of re-appending the injection. A row appended without an id carries no `meta` at all (the pre-id shape readers keep an id-less fallback for; existing transcripts are never migrated).
 
@@ -469,7 +499,7 @@ no longer destroy older turns.
   generation. Reconsolidating a few already-processed messages is harmless and
   idempotent; dropping unprocessed ones is a persisted data-integrity failure.
 
-## Session Archive (`history.py`)
+## Session Archive (`history.py`, `history_rewrite.py`)
 
 Lines that ARE intentionally dropped (rotation, compaction, history edits) are
 archived instead of being permanently deleted:
@@ -527,7 +557,7 @@ a gate, so a temporary session could already be titled and persisted on demand.
 Do not reintroduce a `memory_mode` condition here without first changing what
 `_save_slot_to_history` writes.
 
-## HistoryConsolidator (`history.py`)
+## HistoryConsolidator (`history_consolidation.py`, re-exported by `history.py`)
 
 Background task that fires when unconsolidated count ≥ 10 messages. Uses the
 persistent background ACP session (kiro-cli long-running session, same as
