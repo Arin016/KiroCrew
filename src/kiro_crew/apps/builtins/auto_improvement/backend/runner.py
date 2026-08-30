@@ -412,11 +412,24 @@ class RunSupervisor:
         clone_dir = str(config.get("clone") or "").strip()
         branch = str(config.get("branch") or "").strip() or "main"
         if clone_dir:
+            clone_path = Path(clone_dir)
+            # These preconditions precede checkout because checkout itself touches refs and
+            # the worktree. Preserve the established PermissionError contract for a live
+            # push URL instead of surfacing it later as a wrong-revision RuntimeError.
+            if not clone_setup._repository_is_safe(clone_path):
+                raise PermissionError(
+                    "refusing to start: repository metadata failed safety verification — "
+                    "re-run repository setup"
+                )
+            if not clone_setup._push_disabled(clone_path):
+                raise PermissionError(
+                    "refusing to start: the clone's push is not disabled — re-run repository setup"
+                )
             # Best-effort: log a failure but still start, EXCEPT when a diff scope was
             # requested — there, a failed checkout would compute the scope against the
             # wrong HEAD, and silently running unscoped is the outcome the operator was
             # trying to avoid by setting it.
-            ok, note = clone_setup.checkout_branch(Path(clone_dir), branch)
+            ok, note = clone_setup.checkout_branch(clone_path, branch)
             if not ok:
                 # RAISE on any failed checkout, not only when scopeDiffBase is set.
                 # `checkout_branch` already tries the remote-tracking ref AND a local ref

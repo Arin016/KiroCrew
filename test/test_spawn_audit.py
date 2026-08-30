@@ -346,8 +346,9 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # worktree of a push-disabled clone, which is where its blast radius is
         # contained; these calls are the harness around it, not the agent's hands.
         "apps/builtins/auto_improvement/backend/clone_setup.py::_disable_push",
+        "apps/builtins/auto_improvement/backend/clone_setup.py::_origin_urls",
+        "apps/builtins/auto_improvement/backend/clone_setup.py::_repository_is_safe",
         "apps/builtins/auto_improvement/backend/clone_setup.py::_gh_prefers_ssh",
-        "apps/builtins/auto_improvement/backend/clone_setup.py::_ok",
         "apps/builtins/auto_improvement/backend/clone_setup.py::_run",
         "apps/builtins/auto_improvement/backend/clone_setup.py::list_clone_branches",
         "apps/builtins/auto_improvement/backend/clone_setup.py::setup_safe_clone",
@@ -361,6 +362,13 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "::test_approval_is_logged_then_granted",
         "apps/builtins/auto_improvement/tests/test_dogfood_learnings.py"
         "::test_audit_failure_denies_instead_of_approving",
+        # Offline clone-setup regressions use only fixed Git argv against pytest
+        # tmp_path repositories; no agent/model input reaches command or cwd.
+        "apps/builtins/auto_improvement/tests/test_clone_setup_idempotent.py::_seeded_bare",
+        "apps/builtins/auto_improvement/tests/test_clone_setup_idempotent.py"
+        "::test_extra_origin_value_refuses_reuse",
+        "apps/builtins/auto_improvement/tests/test_clone_setup_idempotent.py"
+        "::test_disable_push_replaces_every_url_value",
         # A FIXED argv of `[sys.executable, "-c", <literal>]` — the interpreter running the
         # test plus a constant source string with no interpolation, so neither the command
         # nor its args are agent-influenced. The child only imports a module and prints
@@ -453,6 +461,10 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "::test_a_recipe_holding_the_config_url_can_still_push",
         "apps/builtins/auto_improvement/tests/test_pr_recipe.py"
         "::test_without_the_config_url_the_neutralized_clone_degrades_to_the_queue",
+        # Same basis: fixed `git init/config` argv against a tmp_path repo, proving an
+        # agent-planted external diff helper is refused before any publisher Git call.
+        "apps/builtins/auto_improvement/tests/test_pr_recipe.py"
+        "::test_push_refuses_before_git_when_repository_safety_changed",
         # Same basis: a fixed `git init/add/commit` against a tmp_path, asserting a diff
         # that cannot apply is refused BEFORE the pipeline drafts.
         "apps/builtins/auto_improvement/tests/test_dogfood_learnings.py"

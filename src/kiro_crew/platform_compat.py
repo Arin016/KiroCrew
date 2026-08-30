@@ -3282,15 +3282,23 @@ def rmtree_force(path: str | os.PathLike) -> bool:
     # `onexc` replaced `onerror` in 3.12 and the old name warns; this project
     # still supports 3.9+, so pick by capability rather than by version number.
     kwarg = "onexc" if sys.version_info >= (3, 12) else "onerror"
-    if kwarg == "onerror":  # pragma: no cover - exercised on Python < 3.12
+    try:
+        if kwarg == "onerror":  # pragma: no cover - exercised on Python < 3.12
 
-        def _legacy(func: Any, target: str, exc_info: Any) -> None:
-            _clear_readonly_and_retry(func, target, exc_info[1])
+            def _legacy(func: Any, target: str, exc_info: Any) -> None:
+                _clear_readonly_and_retry(func, target, exc_info[1])
 
-        shutil.rmtree(path, onerror=_legacy)
-    else:
-        shutil.rmtree(path, onexc=_clear_readonly_and_retry)  # type: ignore[call-arg]
-    return not os.path.exists(path)
+            shutil.rmtree(path, onerror=_legacy)
+        else:
+            shutil.rmtree(path, onexc=_clear_readonly_and_retry)  # type: ignore[call-arg]
+    except FileNotFoundError:
+        # A missing ROOT is success. A nested entry can disappear during rmtree while
+        # the root survives, especially through the Python <3.12 onerror path.
+        return not os.path.lexists(path)
+    except OSError:
+        logger.warning("Cannot remove %s", path)
+        return False
+    return not os.path.lexists(path)
 
 
 def symlink_or_junction(target: str | os.PathLike, link: str | os.PathLike) -> None:

@@ -341,7 +341,7 @@ async def _handle_setup_clone(request: web.Request) -> web.StreamResponse:
         return busy
 
     def _clone() -> tuple[dict, str]:
-        return clone_setup.setup_safe_clone(url, store.scratch_dir())
+        return clone_setup.setup_safe_clone(url, store.scratch_path())
 
     # `result` is a PARAMETER, not a closure read. It used to be a free variable of this
     # handler, which broke the moment clone+persist moved inside `_clone_and_persist` to take
@@ -782,6 +782,8 @@ async def _handle_draft_pr(request: web.Request) -> web.StreamResponse:
         clone = str(config.get("clone") or "").strip()
         if not clone:
             return {"ok": False, "error": "no repository configured"}
+        if not clone_setup._repository_is_isolated(Path(clone)):
+            return {"ok": False, "error": "repository isolation check failed — re-run setup"}
 
         body = body_path.read_text(encoding="utf-8")
         # The queued body leads with the summary as an H1; the recipe wants the
