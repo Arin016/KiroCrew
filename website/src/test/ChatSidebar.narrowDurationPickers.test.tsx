@@ -89,6 +89,7 @@ Object.defineProperty(window, 'matchMedia', {
 import ChatSidebar from '../pages/ChatSidebar'
 
 const RECENT_WINDOW_LS_KEY = 'mc-session-recent-window-ms'
+const RECENT_FILTER_LS_KEY = 'mc-session-recent-only'
 const STALE_COLLAPSE_LS_KEY = 'mc-session-stale-collapse-ms'
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -228,5 +229,49 @@ describe('sessions filter menu — duration pickers at phone width', () => {
     expect(screen.queryByText('Within')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Custom recency amount')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '1 week' })).not.toBeInTheDocument()
+  })
+
+  it('turns the Recent filter on when a window is chosen, on BOTH viewports', async () => {
+    // The mobile branch hides the picker while the filter is off, but the wide
+    // viewport reaches the same picker through the flyout — so the "chip goes
+    // green, list does not change" defect has to be fixed where the window is
+    // committed, not per-modality.
+    for (const isMobile of [true, false]) {
+      localStorage.clear()
+      mobile.value = isMobile
+      const view = renderSidebar()
+      const row = await openFilterMenu()
+      expect(localStorage.getItem(RECENT_FILTER_LS_KEY)).toBeNull()
+
+      if (isMobile) {
+        fireEvent.click(row)
+        await screen.findByText('Within')
+      } else {
+        // ArrowRight is the one key ChatSidebar lets fall through to Radix's
+        // submenu-open handler (Enter/Space toggle the filter instead).
+        fireEvent.keyDown(row, { key: 'ArrowRight' })
+        await screen.findByText('Within')
+        // Opening the flyout must not have enabled anything by itself.
+        expect(localStorage.getItem(RECENT_FILTER_LS_KEY)).toBeNull()
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: '1 week' }))
+      await waitFor(() => expect(localStorage.getItem(RECENT_FILTER_LS_KEY)).toBe('1'))
+      view.unmount()
+    }
+  })
+
+  it('does not toggle the filter when a commit re-writes the same window', async () => {
+    mobile.value = false
+    renderSidebar()
+    const row = await openFilterMenu()
+    fireEvent.keyDown(row, { key: 'ArrowRight' })
+    const amount = await screen.findByLabelText('Custom recency amount')
+
+    // Default is 1 hour and the draft already reads "1", so a bare blur commits
+    // the identical window. That must not read as "the user chose recency".
+    fireEvent.blur(amount)
+    await waitFor(() => expect(localStorage.getItem(RECENT_WINDOW_LS_KEY)).toBe(String(60 * 60 * 1000)))
+    expect(localStorage.getItem(RECENT_FILTER_LS_KEY)).toBeNull()
   })
 })

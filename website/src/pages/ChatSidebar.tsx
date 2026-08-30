@@ -2592,6 +2592,16 @@ function ChatSidebar({
       return next
     })
   }, [])
+  const enableFilter = useCallback((key: SessionFilterKey) => {
+    setActiveFilters(prev => {
+      if (prev.has(key)) return prev
+      const next = new Set(prev)
+      next.add(key)
+      const filterDef = SESSION_FILTERS.find(sf => sf.key === key)!
+      safeSetItem(filterDef.storageKey, '1')
+      return next
+    })
+  }, [])
   // Signal from the SSE/data-fetch layer indicating the initial slot list
   // has arrived. Used by the auto-drain effect to distinguish "data not yet
   // loaded" from "data loaded and genuinely empty".
@@ -2631,7 +2641,15 @@ function ChatSidebar({
   const setRecentWindow = useCallback((ms: number) => {
     setRecentWindowMs(ms)
     safeSetItem(RECENT_WINDOW_LS_KEY, String(ms))
-  }, [])
+    // Choosing a window is a statement of intent to filter by recency, so it
+    // turns the filter on. Without this the picker reports an effect it is not
+    // having — the chip goes green and the session list does not change — and it
+    // has to live HERE rather than on the mobile branch, because the wide
+    // viewport reaches the same picker through the flyout and would otherwise
+    // keep the defect per-modality. Gated on a real change so a blur that
+    // re-commits the identical value is not a hidden toggle.
+    if (ms !== recentWindowMs) enableFilter('recent')
+  }, [recentWindowMs, enableFilter])
   // Custom-picker draft state. The amount is a raw string (not derived from the
   // committed window) so the field can be cleared / partially edited without
   // snapping to 1 on every keystroke, and the unit stays exactly as the user
