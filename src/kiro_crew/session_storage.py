@@ -248,6 +248,12 @@ class TrashBatch:
     reason: str
     sessions: int
     bytes: int
+    #: Sessions that were selected, passed every authority check, and were then
+    #: found to have been written to while the batch was being staged — so they
+    #: were left in place. Empty for a batch read back off disk
+    #: (:func:`list_trash`), which describes what a batch CONTAINS; this field is
+    #: about what one move DECLINED, which only the move itself knows.
+    revived: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1166,29 +1172,40 @@ def _move_file(src: Path, dst: Path) -> None:
         shutil.move(str(src), str(dst))
 
 
-def _file_size(path: Path) -> int:
-    """The size recorded for a staged file. Raises ``OSError`` when unreadable.
+def _file_stamp(path: Path) -> tuple[int, float]:
+    """The size and last-modified time of a file about to be staged.
 
-    A named operation rather than an inline ``stat`` because its failure is
-    load-bearing: a file whose size cannot be read cannot be recorded, and an
-    unrecorded file is one restore cannot put back.
+    Raises ``OSError`` when unreadable. A named operation rather than an inline
+    ``stat`` because both readings are load-bearing and both come from ONE call:
+    a file whose size cannot be read cannot be recorded, and an unrecorded file
+    is one restore cannot put back; the mtime is what tells the move loop the
+    file has been touched since this batch was validated (see
+    :func:`_move_to_trash_locked`). Reading them separately would be two stats
+    describing two instants, which is the class of bug the caller is guarding
+    against.
     """
-    return path.stat().st_size
+    info = path.stat()
+    return info.st_size, info.st_mtime
 
 
-def _rollback(moved: list[tuple[Path, Path]]) -> None:
-    """Undo a partial session move, best effort.
+def _rollback(moved: list[tuple[Path, Path]]) -> bool:
+    """Undo a partial session move, best effort. True if everything went back.
 
     Each pair is (where it landed, where it came from). A rollback that itself
     fails is logged and nothing more: the alternative is raising over a caller
     already handling a failure, which would abandon the rest of the batch too.
+    The return value exists for the one caller that makes a POSITIVE claim about
+    the outcome — "this session was left in place" is only true if every file
+    actually went back — and callers that merely omit a session can ignore it.
 
     The move is EXCLUSIVE. A rollback runs after something already went wrong, so
     the origin may have been recreated in the meantime — and a plain rename would
     replace that newer session data with the copy being put back, turning a handled
     failure into data loss. An occupied origin leaves the file where it is staged,
-    which keeps it recoverable.
+    which keeps it recoverable, and is reported here as an incomplete rollback
+    because the staged copy is then in the batch without being in its manifest.
     """
+    complete = True
     for landed, origin in reversed(moved):
         try:
             if not _move_file_exclusive(landed, origin):
@@ -1197,8 +1214,11 @@ def _rollback(moved: list[tuple[Path, Path]]) -> None:
                     landed,
                     origin,
                 )
+                complete = False
         except OSError:
             logger.warning("could not roll %s back to %s", landed, origin, exc_info=True)
+            complete = False
+    return complete
 
 
 def _staged_path(batch: Path, rel: str) -> Path | None:
@@ -1584,6 +1604,13 @@ def move_to_trash(
     would then treat it as retired. The two active sets are UNIONED, never
     replaced, so a re-read can only ever add protection.
 
+    That re-read still describes one instant, and the move loop after it is not
+    instant. A session resumed anywhere in that stretch is caught in the loop
+    instead: each file is already stat'd for the manifest, so a source modified
+    since the reclaim began marks its session as revived and leaves it in place.
+    The returned batch names those sessions in ``revived`` — they were asked for
+    and not taken.
+
     Serialized against other mutations, because two interleaved reclaims can put
     one half of a session in each batch and leave neither able to restore it.
     """
@@ -1615,11 +1642,35 @@ def _move_to_trash_locked(
     and moving its files out from under a live slot breaks it with no error a user
     would connect to this action.
 
+    Every such check runs before the move loop, so each describes the instant it
+    ran. The loop closes the remaining window itself, against an instant taken
+    before any of them: a source file whose mtime is newer than that has been
+    written to since the reads that certified it, which an idle session's file
+    cannot be, so the whole session is left in place and named in
+    ``TrashBatch.revived``.
+
     Each session is recorded as it lands, so an interruption leaves a manifest
     describing exactly what moved — a partial batch stays restorable instead of
     becoming orphaned files nothing points at.
     """
     clock = time.time() if now is None else now
+    # Anchor for the move loop's revival check, taken BEFORE the scan and before
+    # every authority check below — not after them. Everything this function is
+    # about to reason over is read after this instant, so a source file written
+    # later than it may have been written after the read that certified it, and
+    # the loop must not trust that file. Stamping after the checks would leave
+    # exactly that gap: a session resumed during the scan, or between the index
+    # re-read and the loop, would carry an mtime older than the stamp and be
+    # staged.
+    #
+    # Taking it this early costs nothing in false positives. A candidate has to be
+    # untouched for MIN_RECLAIM_AGE_DAYS to qualify at all, so a legitimate one's
+    # mtime is days older than this stamp however early it is taken.
+    #
+    # Deliberately real wall-clock rather than *clock*: a caller may inject
+    # ``now`` (tests do), and this is compared against an mtime the kernel writes,
+    # so it has to measure elapsed reality.
+    validated_at = time.time()
     blocked_reason = reclaim_block_reason()
     if blocked_reason:
         raise SessionStorageError(blocked_reason)
@@ -1708,6 +1759,7 @@ def _move_to_trash_locked(
 
     moved_bytes = 0
     moved_sessions = 0
+    revived: list[str] = []
     staged_dirs: set[Path] = set()
     cli_files = _cli_index()
     with (target / MANIFEST_NAME).open("w", encoding="utf-8") as manifest:
@@ -1719,9 +1771,10 @@ def _move_to_trash_locked(
             files: list[dict[str, Any]] = []
             done: list[tuple[Path, Path]] = []
             failed = False
+            woke = False
             for src, rel in _unit_paths(unit.sid, unit.stems, archives, cli_files):
                 try:
-                    size = _file_size(src)
+                    size, mtime = _file_stamp(src)
                 except OSError:
                     # A file that cannot be sized cannot be recorded, and a file
                     # the manifest does not record is one restore cannot put back.
@@ -1729,6 +1782,22 @@ def _move_to_trash_locked(
                     # this loop's rollback exists to prevent, so it is a failure.
                     logger.warning("could not stat %s for staging", src, exc_info=True)
                     failed = True
+                    break
+                if mtime > validated_at:
+                    # Every authority check ran before the loop, and moving a
+                    # six-figure store is not instant, so a session can be resumed
+                    # between being certified retired and being reached here. Its
+                    # replay log is then written to, and this is the one signal of
+                    # that which costs nothing: the stat is already being taken for
+                    # the manifest.
+                    #
+                    # A candidate qualified by being untouched for
+                    # MIN_RECLAIM_AGE_DAYS, so an mtime newer than the instant we
+                    # certified it cannot be the same idle file — something has it
+                    # open. Leave the whole session alone rather than any part of
+                    # it: staging half is the split the rollback below exists to
+                    # prevent, and the half left behind would be the live half.
+                    woke = True
                     break
                 dst = target / rel
                 if dst.parent not in staged_dirs:
@@ -1742,6 +1811,46 @@ def _move_to_trash_locked(
                     break
                 done.append((dst, src))
                 files.append({"rel": rel, "origin": str(src), "bytes": size})
+            if woke:
+                # Put back whatever already moved for this session: the point of
+                # leaving it alone is that it stays resumable, and half a session
+                # is not.
+                if not _rollback(done):
+                    # The rollback could not finish — most plausibly because the
+                    # resume that triggered this recreated an origin, and putting a
+                    # file back is deliberately non-overwriting. Two things then
+                    # have to be true before this returns.
+                    #
+                    # First, whatever is still staged must be IN the manifest.
+                    # Unlisted files in a batch are reachable by nothing: restore
+                    # enumerates the manifest, and so does empty. Recording them is
+                    # safe because restore moves exclusively too, so a later restore
+                    # declines the origin the resume recreated rather than
+                    # overwriting the live session with this stale copy.
+                    stranded = [
+                        record for record, (landed, _origin) in zip(files, done) if landed.exists()
+                    ]
+                    if stranded:
+                        try:
+                            _append_entry(manifest, {"uid": uid, "files": stranded})
+                        except OSError:
+                            logger.warning(
+                                "could not record the stranded half of %r; it is in %s",
+                                uid,
+                                target,
+                                exc_info=True,
+                            )
+                    # Second, this must not be reported as a revival. "Left in
+                    # place" would be false, so raise instead — matching how this
+                    # module already treats a file it could not put back — and name
+                    # the batch so the fragment can be found.
+                    raise SessionStorageError(
+                        f"session {uid!r} was resumed while being staged and could "
+                        f"not be fully put back; what is still staged is recorded in "
+                        f"{target} and can be restored"
+                    )
+                revived.append(uid)
+                continue
             if failed:
                 # A session that moved only partly is the broken state this module
                 # exists to prevent, and it would be invisible: the manifest would
@@ -1771,6 +1880,17 @@ def _move_to_trash_locked(
                 moved_sessions += 1
                 moved_bytes += sum(int(record["bytes"]) for record in files)
 
+    if revived:
+        # Reported, not just skipped: the endpoint's own rule is that doing less
+        # than the user asked without saying so is a defect. uid!r because a unit
+        # id reaching here has passed _validate_unit_id, but the log line is read
+        # by people who also read agent-influenced names, so keep it quoted.
+        logger.warning(
+            "left %d session(s) in place: resumed while staging (first: %r)",
+            len(revived),
+            revived[0],
+        )
+
     if not moved_sessions:
         # Leave no empty batch behind — but a rollback that itself failed can have
         # left staged files here, and those are the only copy.
@@ -1779,6 +1899,14 @@ def _move_to_trash_locked(
                 "no sessions were staged, and some files could not be put back; " f"see {target}"
             )
         shutil.rmtree(target, ignore_errors=True)
+        if revived:
+            # A distinct message from "not found": every selected session is still
+            # exactly where the caller left it, and it is still resumable. Saying
+            # "none were found" here would send someone looking for lost files.
+            raise SessionStorageError(
+                f"all {len(revived)} selected session(s) were resumed while being "
+                "staged; nothing was moved"
+            )
         raise SessionStorageError("none of the selected sessions were found on disk")
 
     return TrashBatch(
@@ -1787,6 +1915,7 @@ def _move_to_trash_locked(
         reason=reason,
         sessions=moved_sessions,
         bytes=moved_bytes,
+        revived=tuple(revived),
     )
 
 
