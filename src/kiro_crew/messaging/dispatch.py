@@ -47,6 +47,12 @@ from kiro_crew.messaging.renderer import SilentRenderer
 from kiro_crew.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 
+# Imported from the leaf that DEFINES it rather than through kiro_crew.session:
+# this module deliberately types ``sessions`` as ``Any`` to stay off the session
+# package's import graph, and session_allocation imports nothing from messaging,
+# so this direction cannot cycle.
+from kiro_crew.session_allocation import SessionClosingError
+
 logger = logging.getLogger(__name__)
 
 
@@ -630,6 +636,7 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
             directive_consumer=turn.directive_consumer,
             audit_session_key=session_key,
             audit_agent=turn.agent or "kirocrew",
+            closing_gate=lambda: sessions.begin_turn(session_key),
         )
         accumulated = await driver.run(full_message)
 
@@ -707,6 +714,22 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
             )
         except Exception:
             logger.debug("%s: success audit failed", turn.channel_type, exc_info=True)
+    except SessionClosingError:
+        # The gateway began shutting down between the claim and the dispatch, so
+        # this turn never opened. Terminal for the message, but NOT a fault of
+        # the session — which is why it is caught ahead of the generic handler
+        # below and deliberately skips `record_failure`: charging a restart to
+        # the circuit breaker would count toward tripping a reset on a session
+        # that never misbehaved, and `logger.exception` would file a routine
+        # shutdown as an error with a full traceback.
+        #
+        # The `finally` still runs, so the renderer is finalized (the user gets
+        # this channel's notice rather than silence) and the lease is released.
+        logger.info(
+            "%s: aborting dispatch for %s — gateway is shutting down",
+            turn.channel_type,
+            session_key,
+        )
     except Exception:
         logger.exception("%s transport_dispatch: error handling message", turn.channel_type)
         if _acquired:
