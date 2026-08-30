@@ -342,7 +342,6 @@ src/kiro_crew/mcp_tools/knowledge.py
 src/kiro_crew/mcp_tools/skills.py
 src/kiro_crew/mcp_tools/spawn.py
 src/kiro_crew/mcp_utils.py
-src/kiro_crew/messaging/link.py
 src/kiro_crew/metrics/http_metrics.py
 src/kiro_crew/metrics/provider.py
 src/kiro_crew/metrics/recorder.py
@@ -407,7 +406,6 @@ test/metrics/test_provider_bucket_views.py
 test/metrics/test_schema.py
 test/metrics/test_startup_channel_attrs.py
 test/metrics/test_telemetry_titles.py
-test/metrics/test_turn_metric.py
 test/metrics/test_watchdog_metrics.py
 test/test_acp_backend_kas.py
 test/test_acp_dynamic_config.py

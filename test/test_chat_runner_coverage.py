@@ -45,6 +45,7 @@ from kiro_crew.acp.types import (
 from kiro_crew.dashboard import chat_runner
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot
 from kiro_crew.history import ConversationLog
+from kiro_crew.metrics import turns as turns_mod
 from kiro_crew.providers.base import LLMEvent
 from kiro_crew.security import oauth_url_contains_credential
 from kiro_crew.trust_patterns import canonical_non_shell_trust_key, exact_trust_pattern
@@ -307,9 +308,14 @@ class TestTurnMetric:
 
     def test_session_source_attribute_is_attached(self):
         recorder = MagicMock()
+        # The emit and its source derivation moved to ``metrics/turns.py`` so
+        # every dispatch surface could reach them (they used to sit in
+        # chat_runner, which only the dashboard turn loop runs). The source now
+        # comes from ``telemetry_channel_of``, which — unlike infer_use_case —
+        # knows the background surfaces this metric was widened to cover.
         with (
-            patch.object(chat_runner, "infer_use_case", return_value="cron"),
-            patch.object(chat_runner, "get_recorder", return_value=recorder),
+            patch.object(turns_mod, "telemetry_channel_of", return_value="cron"),
+            patch.object(turns_mod, "get_recorder", return_value=recorder),
         ):
             chat_runner._emit_turn_metric(0, "end_turn", "cron:job", elapsed_ms=12)
 
@@ -321,8 +327,8 @@ class TestTurnMetric:
         """A broken source lookup must still leave the histogram emitted."""
         recorder = MagicMock()
         with (
-            patch.object(chat_runner, "infer_use_case", side_effect=RuntimeError("boom")),
-            patch.object(chat_runner, "get_recorder", return_value=recorder),
+            patch.object(turns_mod, "telemetry_channel_of", side_effect=RuntimeError("boom")),
+            patch.object(turns_mod, "get_recorder", return_value=recorder),
         ):
             chat_runner._emit_turn_metric(50, "end_turn", "dashboard:x")
 
