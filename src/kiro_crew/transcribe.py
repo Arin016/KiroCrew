@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import gzip
 import hashlib
 import logging
 import os
@@ -44,7 +43,6 @@ import sys
 import tempfile
 import threading
 import wave
-import zlib
 from typing import TYPE_CHECKING, Any, Iterator
 
 from kiro_crew import aws_consent, platform_compat, stt
@@ -127,9 +125,9 @@ _FFMPEG_CANDIDATE_DIRS = _ffmpeg_candidate_dirs()
 # matrix installs. The filename selects the platform artifact; size makes a
 # truncated payload fail cheaply; SHA-256 is the trust anchor. Desktop build
 # staging is intentionally writable, so path placement or a removable `.git`
-# marker cannot establish provenance. Only these exact upstream bytes may run.
+# marker cannot establish provenance. These are the bytes the WHEEL publishes.
 _PACKAGED_FFMPEG_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "ffmpeg-macos-aarch64-v7.1.gz": (
+    "ffmpeg-macos-aarch64-v7.1": (
         49_368_728,
         "6d175a4743ca50256e89a8cdd731100f9cee33bd79aeea46894d209410dc6617",
     ),
@@ -146,6 +144,72 @@ _PACKAGED_FFMPEG_ARTIFACTS: dict[str, tuple[int, str]] = {
         "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
     ),
 }
+
+# Artifacts the macOS app signer REWRITES on its way into a release, so the
+# upstream digest above cannot be the only anchor. Signing replaces the wheel's
+# ad-hoc LC_CODE_SIGNATURE with a Developer ID one (plus hardened runtime and a
+# secure timestamp), which changes both size and SHA-256, and it is not optional:
+# Apple notarization rejects the whole submission over an unsigned nested
+# executable -- including one hidden inside a compressed member, which the notary
+# service decompresses and scans (submission 3dbd3c7d). A digest that could
+# survive signing does not exist, because it is not known until after the signing
+# service has run.
+#
+# So these artifacts are authenticated by EITHER anchor, both cryptographic:
+#   - the pinned upstream digest -- a local/unsigned build, and the desktop build
+#     gate, which executes the decoder BEFORE the bundle is signed; or
+#   - a valid Developer ID signature from our own team on the exact bytes staged
+#     for execution, which is what a released app carries.
+# Neither anchor is a path or a filesystem-permission claim.
+_SIGNER_REWRITTEN_FFMPEG_ARTIFACTS: frozenset[str] = frozenset({"ffmpeg-macos-aarch64-v7.1"})
+
+# Upper bound on a signer-rewritten payload, whose exact size is unknowable in
+# source. Signing appends a code-signature superblob to a ~50 MB executable, so
+# this is a safety ceiling that keeps the copy below bounded, not a pin.
+_MAX_SIGNED_FFMPEG_BYTES = 192 * 1024 * 1024
+
+# Apple team identifier of the Developer ID certificate that signs Kiro Crew
+# releases (see packaging/signing/manifest-template.json). `anchor apple generic`
+# ties the chain to Apple's root, so only a certificate Apple issued to THIS team
+# satisfies the requirement -- a self-signed or ad-hoc replacement does not.
+_MACOS_SIGNING_TEAM_ID = "94KV3E626L"
+_MACOS_FFMPEG_REQUIREMENT = (
+    f"anchor apple generic and certificate leaf[subject.OU] = {_MACOS_SIGNING_TEAM_ID}"
+)
+
+
+def _macos_developer_id_authentic(path: str) -> bool:
+    """True when *path* carries an intact Developer ID signature from our team.
+
+    /usr/bin/codesign is the only supported authenticity oracle for a signed
+    Mach-O: it validates the code-directory hashes over the file's own bytes AND
+    evaluates the certificate chain, so a tampered or foreign-signed payload
+    fails. The absolute path is deliberate -- an ambient `codesign` on PATH must
+    never be able to answer this question.
+    """
+    if not platform_compat.IS_MACOS:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/codesign",
+                "--verify",
+                "--strict",
+                # A leading "=" marks the argument as requirement SOURCE TEXT;
+                # without it codesign reads it as a path to a requirement file.
+                "-R",
+                f"={_MACOS_FFMPEG_REQUIREMENT}",
+                "--",
+                path,
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _trusted_site_package_roots() -> tuple[str, ...]:
@@ -250,26 +314,13 @@ def _write_all(descriptor: int, chunk: bytes) -> None:
         view = view[written:]
 
 
-def _ffmpeg_payload_chunks(descriptor: int, *, compressed: bool) -> Iterator[bytes]:
-    """Yield original executable bytes from a raw or gzip package resource."""
-    if not compressed:
-        while True:
-            chunk = os.read(descriptor, 1 << 20)
-            if not chunk:
-                return
-            yield chunk
-
-    # Apple Silicon stores the already ad-hoc-signed upstream executable as
-    # inert gzip data so app signing cannot replace its Mach-O signature and
-    # invalidate the pinned digest. Duplicate the descriptor because GzipFile
-    # owns its file object.
-    with os.fdopen(os.dup(descriptor), "rb") as encoded:
-        with gzip.GzipFile(fileobj=encoded, mode="rb") as payload:
-            while True:
-                chunk = payload.read(1 << 20)
-                if not chunk:
-                    return
-                yield chunk
+def _ffmpeg_payload_chunks(descriptor: int) -> Iterator[bytes]:
+    """Yield the executable bytes of a package resource."""
+    while True:
+        chunk = os.read(descriptor, 1 << 20)
+        if not chunk:
+            return
+        yield chunk
 
 
 def _remove_named_snapshot(path: str) -> None:
@@ -422,7 +473,7 @@ def _authenticated_ffmpeg(
     expected_size: int,
     expected_sha256: str,
     *,
-    compressed: bool = False,
+    signature_anchored: bool = False,
 ) -> _AuthenticatedFfmpeg | None:
     """Copy/hash exact bytes and keep an immutable execution identity open.
 
@@ -433,6 +484,12 @@ def _authenticated_ffmpeg(
     spawn. Windows instead holds a ``CreateFileW`` handle
     that denies both write and delete sharing until ``CreateProcess`` has opened
     the image. In every case the bytes hashed are the bytes staged for execution.
+
+    ``signature_anchored`` marks an artifact the macOS app signer rewrites (see
+    ``_SIGNER_REWRITTEN_FFMPEG_ARTIFACTS``): the upstream digest still authenticates
+    an unsigned build, and a Developer ID signature from our own team authenticates
+    the released one. One of the two must hold; a payload that satisfies neither is
+    refused exactly as before.
     """
     source = -1
     snapshot_writer = -1
@@ -447,11 +504,16 @@ def _authenticated_ffmpeg(
         opened = os.fstat(source)
         if not stat.S_ISREG(opened.st_mode):
             return None
-        if compressed:
-            if opened.st_size <= 0:
+        if signature_anchored:
+            # The signed size is unknowable in source, so bound the copy by the
+            # file's own length under a safety ceiling instead of by the pin.
+            if opened.st_size <= 0 or opened.st_size > _MAX_SIGNED_FFMPEG_BYTES:
                 return None
+            size_limit = opened.st_size
         elif opened.st_size != expected_size:
             return None
+        else:
+            size_limit = expected_size
 
         seal_snapshot = False
         if not platform_compat.IS_WINDOWS:
@@ -459,17 +521,21 @@ def _authenticated_ffmpeg(
 
         digest = hashlib.sha256()
         total = 0
-        for chunk in _ffmpeg_payload_chunks(source, compressed=compressed):
+        for chunk in _ffmpeg_payload_chunks(source):
             total += len(chunk)
-            if total > expected_size:
+            if total > size_limit:
                 return None
             digest.update(chunk)
             if snapshot_writer >= 0:
                 _write_all(snapshot_writer, chunk)
-        if total != expected_size or digest.hexdigest() != expected_sha256:
+        source_digest = digest.hexdigest()
+        upstream_bytes = total == expected_size and source_digest == expected_sha256
+        if not upstream_bytes and not signature_anchored:
             return None
 
         if platform_compat.IS_WINDOWS:
+            # Windows artifacts are never signer-rewritten, so reaching here means
+            # the pinned digest matched.
             result = _AuthenticatedFfmpeg(candidate, source, candidate)
             source = -1  # ownership transferred to result
             return result
@@ -483,7 +549,9 @@ def _authenticated_ffmpeg(
             os.chmod(os.path.dirname(snapshot_path), 0o500)
 
         # Authenticate the descriptor that will actually be inherited, after
-        # the last writer owned by this process has closed.
+        # the last writer owned by this process has closed. Compared against the
+        # digest of what was READ, so the snapshot is proven identical to the
+        # verified source whether the anchor was the pin or the signature.
         snapshot_digest = hashlib.sha256()
         snapshot_total = 0
         while True:
@@ -492,13 +560,17 @@ def _authenticated_ffmpeg(
                 break
             snapshot_total += len(chunk)
             snapshot_digest.update(chunk)
-        if snapshot_total != expected_size or snapshot_digest.hexdigest() != expected_sha256:
+        if snapshot_total != total or snapshot_digest.hexdigest() != source_digest:
             return None
         os.lseek(snapshot, 0, os.SEEK_SET)
         if snapshot_path is None:
             execution_path = f"/proc/self/fd/{snapshot}"
         else:
             execution_path = snapshot_path
+        # Bytes that are not the pinned upstream payload are only executed when
+        # macOS itself vouches for their signature, on the snapshot about to run.
+        if not upstream_bytes and not _macos_developer_id_authentic(execution_path):
+            return None
         result = _AuthenticatedFfmpeg(
             candidate,
             snapshot,
@@ -508,7 +580,7 @@ def _authenticated_ffmpeg(
         snapshot = -1  # ownership transferred to result
         snapshot_path = None  # ownership transferred to result
         return result
-    except (EOFError, OSError, zlib.error):
+    except OSError:
         return None
     finally:
         if source >= 0:
@@ -548,14 +620,13 @@ def _open_packaged_ffmpeg_resource() -> _AuthenticatedFfmpeg | None:
                 or not os.path.isfile(candidate)
             ):
                 continue
-            compressed = filename.endswith(".gz")
-            if (
-                not compressed
-                and not platform_compat.IS_WINDOWS
-                and not os.access(candidate, os.X_OK)
-            ):
+            if not platform_compat.IS_WINDOWS and not os.access(candidate, os.X_OK):
                 continue
-            authenticated = _authenticated_ffmpeg(candidate, *artifact, compressed=compressed)
+            authenticated = _authenticated_ffmpeg(
+                candidate,
+                *artifact,
+                signature_anchored=filename in _SIGNER_REWRITTEN_FFMPEG_ARTIFACTS,
+            )
             if authenticated is not None:
                 candidates.append(authenticated)
     if len(candidates) == 1:

@@ -30,6 +30,21 @@ dependency metadata or an ambient PATH copy satisfying the check. Source
 environments use the fixed system-decoder search instead, because a project venv
 is agent-writable executable storage.
 
+That executable ships **uncompressed** inside the macOS bundle, and must keep
+doing so: the Apple notary service decompresses archive members and scans what is
+inside them, so a decoder sealed as a compressed payload is rejected as an
+unsigned nested executable and fails the entire macOS release. Shipping it plain
+means the app signer rewrites its Mach-O signature, so its released bytes cannot
+match the pinned upstream digest. The runtime therefore accepts the macOS decoder
+on **either** cryptographic anchor: the pinned upstream digest (a local or
+unsigned build, and the pre-signing release gate above) or a valid Developer ID
+signature from the release team, evaluated by `codesign` against the exact
+private snapshot staged for execution. Neither anchor is a path or a
+filesystem-permission claim, and a payload satisfying neither is refused.
+`packaging/signing/generate-manifest.py` additionally fails the sign when any
+compressed member of the bundle contains a Mach-O, so this class of defect
+surfaces at sign time rather than as an opaque notarization `Invalid`.
+
 Legacy provider values and the loader behavior for persisted values are in
 [Legacy provider values](#legacy-provider-values).
 

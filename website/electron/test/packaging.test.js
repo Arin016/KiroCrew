@@ -341,8 +341,13 @@ describe("first-download installer design contract", () => {
     assert.match(buildScript, /from kiro_crew\.stt\.engine import probe/);
     assert.match(buildScript, /from kiro_crew\.transcribe import _packaged_ffmpeg_version_probe/);
     assert.match(buildScript, /if not _packaged_ffmpeg_version_probe\(\)/);
-    assert.match(buildScript, /source\.with_name\(source\.name \+ "\.gz"\)/);
-    assert.match(buildScript, /seal_macos_ffmpeg_payload "\$out\/bin\/python3\.12"/);
+    // The Apple-Silicon decoder must ship as a PLAIN Mach-O so the app signer
+    // signs it. Sealing it as a compressed payload (#6746) made Apple's notary
+    // service decompress the member, find an unsigned executable inside, and
+    // fail the whole macOS release.
+    assert.doesNotMatch(buildScript, /seal_macos_ffmpeg_payload/);
+    assert.doesNotMatch(buildScript, /source\.with_name\(source\.name \+ "\.gz"\)/);
+    assert.match(buildScript, /do NOT re-introduce a compressed payload/);
     assert.match(buildScript, /local_voice_runtime_gate "\$out\/bin\/python3\.12"/);
     assert.match(windowsBuilder, /local_voice_runtime_gate "\$out\/python\.exe"/);
 
