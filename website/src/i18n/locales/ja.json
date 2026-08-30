@@ -11885,6 +11885,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "常に割り込み — ミュートまたは低下させることはできません",
         "app": "アプリ",
+        "category_agent": "エージェントからの自発的なメッセージ",
+        "category_agent_description": "エージェントがチャット外で自発的にメッセージを送信したとき",
         "category_all": "デフォルト(すべてのカテゴリ)",
         "category_all_description": "カテゴリ固有のオーバーライドが設定されていない場合のフォールバックサウンド",
         "category_approval": "承認",
@@ -11895,6 +11897,8 @@
         "category_heartbeat_description": "ハートビートタスクの結果",
         "category_hook": "Webhook",
         "category_hook_description": "外部フックのトリガー",
+        "category_skills": "スキル",
+        "category_skills_description": "承認待ちの新しいスキル候補",
         "category_subagent": "サブエージェント",
         "category_subagent_description": "バックグラウンドサブエージェントの完了",
         "category_taskrunner": "タスク",

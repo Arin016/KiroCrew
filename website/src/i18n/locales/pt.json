@@ -12221,6 +12221,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "Sempre interrompe — não é possível silenciar nem reduzir a prioridade",
         "app": "app",
+        "category_agent": "Mensagens proativas do agente",
+        "category_agent_description": "Quando o agente envia uma mensagem proativa fora de uma conversa",
         "category_all": "Padrão (todas as categorias)",
         "category_all_description": "Som de reserva quando nenhuma substituição por categoria está definida",
         "category_approval": "Aprovação",
@@ -12231,6 +12233,8 @@
         "category_heartbeat_description": "Resultados de tarefas de heartbeat",
         "category_hook": "Webhook",
         "category_hook_description": "Acionamentos de hooks externos",
+        "category_skills": "Habilidades",
+        "category_skills_description": "Novas habilidades candidatas aguardando sua aprovação",
         "category_subagent": "Subagente",
         "category_subagent_description": "Conclusões de subagentes em segundo plano",
         "category_taskrunner": "Tarefas",

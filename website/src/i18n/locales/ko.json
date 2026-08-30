@@ -11896,6 +11896,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "항상 알림을 표시합니다 — 음소거하거나 낮출 수 없습니다",
         "app": "앱",
+        "category_agent": "에이전트의 능동적 메시지",
+        "category_agent_description": "에이전트가 채팅 밖에서 능동적으로 메시지를 보낼 때",
         "category_all": "기본값(모든 카테고리)",
         "category_all_description": "카테고리별 재정의가 없을 때 사용하는 대체 소리",
         "category_approval": "승인",
@@ -11906,6 +11908,8 @@
         "category_heartbeat_description": "하트비트 작업 결과",
         "category_hook": "Webhook",
         "category_hook_description": "외부 훅 트리거",
+        "category_skills": "스킬",
+        "category_skills_description": "승인을 기다리는 새로운 스킬 후보",
         "category_subagent": "서브에이전트",
         "category_subagent_description": "백그라운드 서브에이전트 완료",
         "category_taskrunner": "작업",

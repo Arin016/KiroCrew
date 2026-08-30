@@ -1425,6 +1425,24 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "notifications.sound-category-agent",
+    "labelKey": "pages.settings.notificationsPanel.category_agent",
+    "tab": "notifications",
+    "type": "select",
+    "occurrence": 1,
+    "label": "Proactive agent messages",
+    "description": "When the agent proactively messages you outside a chat"
+  },
+  {
+    "id": "notifications.sound-category-skills",
+    "labelKey": "pages.settings.notificationsPanel.category_skills",
+    "tab": "notifications",
+    "type": "select",
+    "occurrence": 1,
+    "label": "Skills",
+    "description": "New skill candidates awaiting your approval"
+  },
+  {
     "id": "notifications.sources",
     "labelKey": "pages.settings.notificationsPanel.sources",
     "tab": "notifications",

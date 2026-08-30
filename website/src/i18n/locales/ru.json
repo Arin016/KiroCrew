@@ -12390,6 +12390,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "Всегда прерывает — нельзя отключить или понизить",
         "app": "приложение",
+        "category_agent": "Проактивные сообщения агента",
+        "category_agent_description": "Когда агент проактивно отправляет вам сообщение вне чата",
         "category_all": "По умолчанию (все категории)",
         "category_all_description": "Резервный звук, когда для категории нет отдельной настройки",
         "category_approval": "Подтверждение",
@@ -12400,6 +12402,8 @@
         "category_heartbeat_description": "Результаты задач heartbeat",
         "category_hook": "Вебхук",
         "category_hook_description": "Срабатывания внешних хуков",
+        "category_skills": "Навыки",
+        "category_skills_description": "Новые навыки-кандидаты, ожидающие вашего одобрения",
         "category_subagent": "Субагент",
         "category_subagent_description": "Завершение фоновых субагентов",
         "category_taskrunner": "Задачи",

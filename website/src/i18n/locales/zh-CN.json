@@ -11885,6 +11885,8 @@
       "notificationsPanel": {
         "always_interrupts_cannot_be_muted_or_lowered": "始终打断 — 无法静音或降低优先级",
         "app": "应用",
+        "category_agent": "代理主动发送的消息",
+        "category_agent_description": "代理在聊天之外主动向你发送消息时",
         "category_all": "默认（所有类别）",
         "category_all_description": "未设置类别专属提示音时使用的后备音",
         "category_approval": "审批",
@@ -11895,6 +11897,8 @@
         "category_heartbeat_description": "心跳任务结果",
         "category_hook": "Webhook",
         "category_hook_description": "外部钩子触发",
+        "category_skills": "技能",
+        "category_skills_description": "等待你批准的新技能候选",
         "category_subagent": "子代理",
         "category_subagent_description": "后台子代理完成",
         "category_taskrunner": "任务",
