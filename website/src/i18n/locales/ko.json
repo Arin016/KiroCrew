@@ -8281,7 +8281,6 @@
       "failed_to_clear_context_error": "컨텍스트를 지우지 못했습니다: {{error}}",
       "failed_to_create_channel": "채널을 만들지 못했습니다",
       "is_working": "작업 중…",
-      "limit_reached": "한도 도달",
       "listen_all": "전체",
       "listen_mention": "멘션",
       "listen_mode": "수신 모드",

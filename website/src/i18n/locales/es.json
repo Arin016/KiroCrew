@@ -8531,7 +8531,6 @@
       "failed_to_clear_context_error": "No se pudo borrar el contexto: {{error}}",
       "failed_to_create_channel": "No se pudo crear el canal",
       "is_working": "está trabajando…",
-      "limit_reached": "Límite alcanzado",
       "listen_all": "todos",
       "listen_mention": "menciones",
       "listen_mode": "Modo de escucha",

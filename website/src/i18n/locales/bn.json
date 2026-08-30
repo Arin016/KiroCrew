@@ -8406,7 +8406,6 @@
       "failed_to_clear_context_error": "কনটেক্সট সাফ করা যায়নি: {{error}}",
       "failed_to_create_channel": "চ্যানেল তৈরি করা যায়নি",
       "is_working": "কাজ করছে…",
-      "limit_reached": "সীমায় পৌঁছেছে",
       "listen_all": "সব",
       "listen_mention": "মেনশন",
       "listen_mode": "শোনার মোড",

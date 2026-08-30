@@ -8406,7 +8406,6 @@
       "failed_to_clear_context_error": "Kontext konnte nicht geleert werden: {{error}}",
       "failed_to_create_channel": "Kanal konnte nicht erstellt werden",
       "is_working": "arbeitet…",
-      "limit_reached": "Grenze erreicht",
       "listen_all": "alle",
       "listen_mention": "Erwähnung",
       "listen_mode": "Zuhörmodus",
