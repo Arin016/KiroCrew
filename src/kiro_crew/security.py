@@ -4348,7 +4348,53 @@ def _operands_lead_with(operands: "list[str]", spec: "tuple[object, ...]") -> bo
     return True
 
 
-def _self_module_name_index(tokens: "list[str]", i: int) -> "int | None":
+class _SelfModuleScan(NamedTuple):
+    """One token list's normalized forms plus its module-flag stop index.
+
+    ``norm[j]`` is what :func:`_normalize_operand` makes of token *j*, and ``stops[j]``
+    is the first index at or after *j* where the module-flag scan in
+    :func:`_self_module_name_index` stops.  Both are computed once per token list so
+    the scan does not repeat them for every interpreter token in it.
+    """
+
+    norm: "list[str]"
+    stops: "list[int]"
+
+
+def _is_self_module_flag(tok: str) -> bool:
+    """True where the module-flag scan in :func:`_self_module_name_index` stops.
+
+    The attached spelling only stops when the regex actually matches: ``-msomething``
+    that is not our module is an ordinary interpreter flag and the scan continues past
+    it, so the regex is part of the stop condition rather than a check made after it.
+    """
+    return tok == "-m" or (
+        tok.startswith("-m") and len(tok) > 2 and bool(_SELF_IMPORT_RE.search(tok[2:]))
+    )
+
+
+def _self_module_flag_scan(tokens: "list[str]") -> "_SelfModuleScan":
+    """Precompute one token list's normalized forms and module-flag stop indexes.
+
+    ``_self_module_name_index`` walked forward from each interpreter token to the first
+    module flag, normalizing every token it passed.  Called once per interpreter token
+    by ``_self_program_index``, that made the self-protection floor QUADRATIC in token
+    count: a command of interpreter words with no module flag among them re-walked and
+    re-normalized the whole tail every time.  Measured on the floor path, with one
+    product word present so its keyword gate opens: 0.03 s / 0.12 s / 0.49 s / 1.92 s
+    at 250 / 500 / 1000 / 2000 tokens -- about 4x per doubling, which reaches the
+    gateway's loop watchdog well inside a command an agent could emit.  Both passes
+    here are single and linear.
+    """
+    limit = len(tokens)
+    norm = [_normalize_operand(token).strip("\"'") for token in tokens]
+    stops = [limit] * (limit + 1)
+    for index in range(limit - 1, -1, -1):
+        stops[index] = index if _is_self_module_flag(norm[index]) else stops[index + 1]
+    return _SelfModuleScan(norm=norm, stops=stops)
+
+
+def _self_module_name_index(tokens: "list[str]", i: int, scan: "_SelfModuleScan") -> "int | None":
     """Index of the product module-name token in a ``python -m kiro_crew ...``
     invocation whose interpreter is at *i*, or None.
 
@@ -4356,26 +4402,35 @@ def _self_module_name_index(tokens: "list[str]", i: int) -> "int | None":
     scanning past other interpreter flags. The ``-c`` inline-program form has no
     positional subcommand token (the program builds its own argv), so it is left to
     the credential-mint import gate rather than matched here.
+
+    *scan* is REQUIRED, and must be :func:`_self_module_flag_scan` of the same *tokens*.
+    It is not optional-with-a-fallback on purpose: this function is called once per
+    token by a loop over those tokens, so a caller that could omit the scan could
+    silently reintroduce the quadratic this precompute exists to remove.  Requiring it
+    makes that a type error instead of a performance regression nobody notices.
     """
-    for j in range(i + 1, len(tokens)):
-        tok = _normalize_operand(tokens[j]).strip("\"'")
-        if tok == "-m":
-            nxt = _normalize_operand(tokens[j + 1]).strip("\"'") if j + 1 < len(tokens) else ""
-            return j + 1 if _SELF_IMPORT_RE.search(nxt) else None
-        if tok.startswith("-m") and len(tok) > 2 and _SELF_IMPORT_RE.search(tok[2:]):
-            return j  # attached -mkiro_crew
-    return None
+    limit = len(tokens)
+    j = scan.stops[i + 1]
+    if j >= limit:
+        return None
+    if scan.norm[j] == "-m":
+        nxt = scan.norm[j + 1] if j + 1 < limit else ""
+        return j + 1 if _SELF_IMPORT_RE.search(nxt) else None
+    return j  # attached -mkiro_crew
 
 
-def _self_program_index(tokens: "list[str]", i: int) -> "int | None":
+def _self_program_index(tokens: "list[str]", i: int, scan: "_SelfModuleScan") -> "int | None":
     """The argv index whose trailing operands the product CLI receives when the token
     at *i* launches it: *i* itself for the direct ``kirocrew`` form, or the module-name
     index for ``python -m kiro_crew``; else None.
+
+    *scan* is threaded through to :func:`_self_module_name_index` and is required for
+    the reason given there.
     """
     if _is_self_program(tokens[i]):
         return i
     if _PYTHON_PROGRAM_RE.match(_program_basename(tokens[i])):
-        return _self_module_name_index(tokens, i)
+        return _self_module_name_index(tokens, i, scan)
     return None
 
 
@@ -4391,8 +4446,11 @@ def _matches_self_subcommand(text_lower: str, spec: "tuple[object, ...]") -> boo
         return False
     for tokens in _self_token_frames(_shell_join_continuations(text_lower)):
         programs = _argv_programs(tokens)
+        # Once per FRAME, not once per token: this is the loop whose per-token scan
+        # made the floor quadratic.
+        scan = _self_module_flag_scan(tokens)
         for i in range(len(tokens)):
-            prog_idx = _self_program_index(tokens, i)
+            prog_idx = _self_program_index(tokens, i, scan)
             if prog_idx is None:
                 continue
             # ``echo kirocrew restart`` / ``echo python -m kiro_crew restart`` print words.
