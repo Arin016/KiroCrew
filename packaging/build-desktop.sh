@@ -129,46 +129,26 @@ is_macos_intel_backend() {
   }
 }
 
-# Keep the Apple-Silicon decoder byte-for-byte identical to the pinned upstream
-# wheel after packaging. electron-builder signs every Mach-O it finds, which
-# replaces the upstream linker/ad-hoc signature and necessarily changes both
-# size and SHA-256 after our pre-sign gate. The upstream arm64 executable already
-# carries the ad-hoc LC_CODE_SIGNATURE Apple Silicon requires. Store those exact
-# signed bytes as inert gzip data; runtime expands them beneath its agent-denied
-# runtime root, makes the private snapshot non-writable, verifies the ORIGINAL
-# wheel digest, and keeps its descriptor open through spawn. The app signer never
-# sees a Mach-O to rewrite, while the user still receives the complete offline
-# decoder payload.
-seal_macos_ffmpeg_payload() {
-  local python="$1" want_arch="$2"
-  [ "$OS" = "darwin" ] || return 0
-  is_macos_intel_backend "$want_arch" && return 0
-  "$python" -s -c '
-import gzip
-import os
-import shutil
-import sys
-from pathlib import Path
-
-binaries = (
-    Path(sys.prefix)
-    / "lib"
-    / "python3.12"
-    / "site-packages"
-    / "imageio_ffmpeg"
-    / "binaries"
-)
-source = binaries / "ffmpeg-macos-aarch64-v7.1"
-target = source.with_name(source.name + ".gz")
-staged = target.with_name(target.name + ".tmp")
-with source.open("rb") as incoming, staged.open("xb") as outgoing:
-    with gzip.GzipFile(filename="", fileobj=outgoing, mode="wb", mtime=0) as encoded:
-        shutil.copyfileobj(incoming, encoded, length=1 << 20)
-os.chmod(staged, 0o444)
-os.replace(staged, target)
-source.unlink()
-'
-}
+# NOTE ON THE APPLE-SILICON DECODER -- do NOT re-introduce a compressed payload.
+#
+# The arm64 imageio-ffmpeg executable ships as a PLAIN Mach-O under
+# Contents/Resources, exactly like its x86_64 sibling, so the app signer signs it
+# with Developer ID + hardened runtime + secure timestamp along with every other
+# nested binary (packaging/signing/generate-manifest.py enumerates it).
+#
+# #6746 instead stored it as inert gzip data, to keep the bytes byte-identical to
+# the pinned upstream wheel across signing. The Apple notary service DECOMPRESSES
+# archive members and scans what is inside them, so that made notarization fail
+# closed on the whole release (submission 3dbd3c7d, three `error` issues on
+# .../binaries/ffmpeg-macos-aarch64-v7.1.gz/ffmpeg-macos-aarch64-v7.1: not signed
+# with a valid Developer ID certificate / no secure timestamp / hardened runtime
+# not enabled). The x86_64 copy of the same wheel, shipped raw in the same
+# submission, drew no issue at all -- that is the working shape.
+#
+# The runtime consequence is handled in kiro_crew.transcribe: the packaged decoder
+# is accepted either at the pinned upstream digest (local builds and the build gate
+# below, which run BEFORE signing) or on a valid Developer ID signature from our
+# team (the released app, whose bytes signing necessarily rewrote).
 
 # Prove that the installed native wheel, audio decoder, and their transitive
 # libraries can actually run from the pruned bundle. A successful pip resolution
@@ -495,7 +475,6 @@ LAUNCH
     rm -rf lib/python3.12/test lib/python3.12/idlelib lib/python3.12/tkinter \
            lib/python3.12/turtledemo lib/python3.12/ensurepip lib/python3.12/lib2to3 2>/dev/null || true )
 
-  seal_macos_ffmpeg_payload "$out/bin/python3.12" "$want_arch"
   if ! is_macos_intel_backend "$want_arch"; then
     local_voice_runtime_gate "$out/bin/python3.12"
   fi

@@ -1197,6 +1197,16 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # this audit through the generic helper, so each caller remains independently
         # reviewed and a future caller fails the gate until it is classified.
         "transcribe.py::_create_ffmpeg_subprocess",
+        # The macOS authenticity oracle for the bundled ffmpeg: spawns the
+        # absolute /usr/bin/codesign (never PATH) with constant flags and a
+        # requirement string built from a module-level team-ID constant. The
+        # only variable argument is the path of the process-private snapshot
+        # (`/proc/self/fd/N`-style descriptor or the 0o500 snapshot dir this
+        # module itself just wrote and digest-verified) — no agent influence
+        # over command, args, cwd, or env. It cannot route through
+        # sandboxed_spawn_argv: codesign must read the system trust store and
+        # evaluate the Apple certificate chain, which the OS sandbox denies.
+        "transcribe.py::_macos_developer_id_authentic",
         "transcribe.py::_pcm_via_ffmpeg",
         "transcribe.py::_transcribe_aws",
         # The build probe executes the same authenticated image with the single
