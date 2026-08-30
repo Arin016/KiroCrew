@@ -1713,6 +1713,7 @@
         "agentSessionButton": {
           "already_finished_its_session_was_closed": "すでに完了。記録は「以前のセッション」にあります。",
           "couldn_t_start": "開始できませんでした",
+          "open_older_sessions": "「以前のセッション」を開く",
           "resume": "再開",
           "start_over": "やり直す"
         },

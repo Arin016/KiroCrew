@@ -1705,6 +1705,7 @@
         "agentSessionButton": {
           "already_finished_its_session_was_closed": "ইতিমধ্যে সম্পন্ন — প্রতিলিপি পুরোনো সেশনে।",
           "couldn_t_start": "শুরু করা যায়নি",
+          "open_older_sessions": "পুরোনো সেশন খুলুন",
           "resume": "আবার শুরু করো",
           "start_over": "আবার শুরু করুন"
         },

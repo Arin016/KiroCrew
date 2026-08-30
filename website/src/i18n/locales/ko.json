@@ -1713,6 +1713,7 @@
         "agentSessionButton": {
           "already_finished_its_session_was_closed": "이미 완료됨 — 기록은 '이전 세션'에 있습니다.",
           "couldn_t_start": "시작하지 못했습니다",
+          "open_older_sessions": "'이전 세션' 열기",
           "resume": "재개",
           "start_over": "다시 시작"
         },

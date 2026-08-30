@@ -1667,8 +1667,9 @@
       },
       "components": {
         "agentSessionButton": {
-          "already_finished_its_session_was_closed": "已经完成 — 记录在“以前的会话”中。",
+          "already_finished_its_session_was_closed": "已经完成 — 记录在“较早的会话”中。",
           "couldn_t_start": "无法启动",
+          "open_older_sessions": "打开“较早的会话”",
           "resume": "恢复",
           "start_over": "重新开始"
         },

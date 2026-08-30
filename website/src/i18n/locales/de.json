@@ -1749,6 +1749,7 @@
         "agentSessionButton": {
           "already_finished_its_session_was_closed": "Bereits abgeschlossen — Protokoll unter Ältere Sitzungen.",
           "couldn_t_start": "konnte nicht starten",
+          "open_older_sessions": "Ältere Sitzungen öffnen",
           "resume": "Fortsetzen",
           "start_over": "Neu starten"
         },

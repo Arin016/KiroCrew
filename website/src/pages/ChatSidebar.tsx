@@ -2796,7 +2796,29 @@ function ChatSidebar({
     if (action === 'disable') disableFilter('unread')
     prevUnreadCount.current = unreadSlots.length
   }, [unreadSlots.length, slotsLoaded, disableFilter])
-  const [historyOpen, setHistoryOpen] = useState(false)
+  // Opened on arrival when the URL asks for it (`/chat?history=1`), so a surface
+  // that can only POINT at an archived transcript — Issue Radar's declined
+  // re-investigate notice — can land the user on the pane holding it instead of
+  // naming a pane they then have to find.
+  //
+  // Read from `window.location` rather than `useSearchParams` deliberately: this
+  // component is rendered bare (no router) by a large number of its own tests, and
+  // a router hook here would make every one of them a provider error. Read once,
+  // in the initializer, because it is an ARRIVAL intent — re-reading it would
+  // re-open a pane the user has since collapsed, and every route that carries the
+  // param mounts this component fresh.
+  const [historyOpen, setHistoryOpen] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get('history') === '1' }
+    catch { return false }
+  })
+  // The toggle below fetches when it OPENS the pane, so a pane that starts open
+  // has never fetched and would render its empty state over real history.
+  useEffect(() => {
+    if (historyOpen) dispatch(fetchHistory(false))
+    // Arrival only — deliberately not re-run when the user toggles the pane, which
+    // does its own fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // History pane height (persisted). Drag handle adjusts this while open.
   const HISTORY_HEIGHT_LS_KEY = 'mc-history-height'
   const HISTORY_MIN_HEIGHT = 120
