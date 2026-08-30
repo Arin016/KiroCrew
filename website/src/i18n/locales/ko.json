@@ -6921,6 +6921,15 @@
       "use_this_folder": "이 폴더 사용"
     },
     "terminalKeyBar": {
+      "select": "선택",
+      "select_line_short": "줄 · 탭하면 전체",
+      "select_all_short": "전체 · 줄 선택",
+      "copy": "복사",
+      "copy_failed": "복사 실패",
+      "copy_needs_https": "복사하려면 보안(HTTPS) 연결이 필요합니다",
+      "copy_no_selection": "선택을 누른 다음 복사하세요",
+      "copy_done": "복사됨",
+      "copy_permission_needed": "클립보드 액세스를 허용하세요",
       "paste": "붙여넣기",
       "paste_clipboard_empty": "클립보드가 비어 있습니다",
       "paste_failed": "붙여넣기 실패",

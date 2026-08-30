@@ -6921,6 +6921,15 @@
       "use_this_folder": "使用此文件夹"
     },
     "terminalKeyBar": {
+      "select": "选择",
+      "select_line_short": "行 · 点按全部",
+      "select_all_short": "全部 · 选择行",
+      "copy": "复制",
+      "copy_failed": "复制失败",
+      "copy_needs_https": "复制需要安全 (HTTPS) 连接",
+      "copy_no_selection": "点按“选择”，然后“复制”",
+      "copy_done": "已复制",
+      "copy_permission_needed": "允许访问剪贴板",
       "paste": "粘贴",
       "paste_clipboard_empty": "剪贴板为空",
       "paste_failed": "粘贴失败",

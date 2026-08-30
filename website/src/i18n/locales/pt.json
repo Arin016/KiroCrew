@@ -7139,6 +7139,15 @@
       "use_this_folder": "usar esta pasta"
     },
     "terminalKeyBar": {
+      "select": "Selecionar",
+      "select_line_short": "Linha · toque tudo",
+      "select_all_short": "Tudo · para a linha",
+      "copy": "Copiar",
+      "copy_failed": "Falha ao copiar",
+      "copy_needs_https": "Copiar requer uma conexão segura (HTTPS)",
+      "copy_no_selection": "Toque em Selecionar e depois em Copiar",
+      "copy_done": "Copiado",
+      "copy_permission_needed": "Permitir acesso à área de transferência",
       "paste": "Colar",
       "paste_clipboard_empty": "A área de transferência está vazia",
       "paste_failed": "Falha ao colar",

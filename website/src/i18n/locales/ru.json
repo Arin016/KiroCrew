@@ -7248,6 +7248,15 @@
       "use_this_folder": "использовать эту папку"
     },
     "terminalKeyBar": {
+      "select": "Выделить",
+      "select_line_short": "Строка · нажмите для всего",
+      "select_all_short": "Всё · нажмите для строки",
+      "copy": "Копировать",
+      "copy_failed": "Не удалось скопировать",
+      "copy_needs_https": "Для копирования требуется безопасное (HTTPS) соединение",
+      "copy_no_selection": "Нажмите «Выделить», затем «Копировать»",
+      "copy_done": "Скопировано",
+      "copy_permission_needed": "Разрешите доступ к буферу обмена",
       "paste": "Вставить",
       "paste_clipboard_empty": "Буфер обмена пуст",
       "paste_failed": "Не удалось вставить",

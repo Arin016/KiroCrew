@@ -7030,6 +7030,15 @@
       "use_this_folder": "এই ফোল্ডার ব্যবহার করো"
     },
     "terminalKeyBar": {
+      "select": "নির্বাচন করুন",
+      "select_line_short": "লাইন · সব ট্যাপ",
+      "select_all_short": "সব · লাইন বাছুন",
+      "copy": "কপি করুন",
+      "copy_failed": "কপি ব্যর্থ হয়েছে",
+      "copy_needs_https": "কপি করার জন্য একটি নিরাপদ (HTTPS) সংযোগ প্রয়োজন",
+      "copy_no_selection": "নির্বাচন করুন-এ ট্যাপ করে তারপর কপি করুন",
+      "copy_done": "কপি হয়েছে",
+      "copy_permission_needed": "ক্লিপবোর্ড অ্যাক্সেসের অনুমতি দিন",
       "paste": "পেস্ট করুন",
       "paste_clipboard_empty": "ক্লিপবোর্ড খালি",
       "paste_failed": "পেস্ট ব্যর্থ হয়েছে",
