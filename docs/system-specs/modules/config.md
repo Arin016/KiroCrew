@@ -944,6 +944,52 @@ could exhaust host memory/CPU/the process table (DoS). The dashboard write gate
 constants**, so write-gate / load-clamp / runtime-cap cannot drift apart —
 closing the direct-config-edit DoS gap.
 
+### `resource_limits`: one block, three mechanisms, two meanings of `0`
+
+`ResourceLimitsConfig` (`config/loader.py`) carries the kernel confinement
+ceilings for spawned agent processes. It is the one config block whose keys are
+read by more than one enforcement mechanism, and two of those keys mean
+**different things** to two of them:
+
+| Key | POSIX rlimit (`security.apply_resource_limits`) | cgroup v2 scope (`sandbox.cgroup_scope_argv`) | xdist (`resource_status`) |
+|---|---|---|---|
+| `max_open_files` | `RLIMIT_NOFILE`; `0` = leave inherited | — | — |
+| `max_processes` | `RLIMIT_NPROC`; `0` = leave inherited | `TasksMax` (counts THREADS); `0` = use default | — |
+| `max_memory_mb` | `RLIMIT_AS`; `0` = leave inherited | `MemoryMax`; `0` = use default | — |
+| `max_cpu_seconds` | `RLIMIT_CPU`; `0` = leave inherited | — | — |
+| `cpu_weight` | — | `CPUWeight`, 1..10000 | — |
+| `max_cpu_percent` | — | `CPUQuota`, opt-in: unset emits no property | — |
+| `max_total_memory_mb` | — | slice `MemoryMax` (all trees together) | — |
+| `max_total_processes` | — | slice `TasksMax` | — |
+| `xdist_auto_cap` | — | — | `-1` auto, `0` off, `N` fixed |
+
+`0` cannot be normalised away in either direction. On the rlimit path it is a
+documented request ("leave the inherited limit unchanged") with existing configs
+behind it; on the cgroup path systemd **rejects** a zero property and the scope
+never starts, so `0` there has to mean "use the module default" and the ceiling
+is never left unset. Every field is therefore `int | None`, and `None` ("not
+configured") stays distinct from `0`.
+
+Defaults deliberately do NOT live in the dataclass. Each mechanism keeps its own
+(`security._RLIMIT_DEFAULTS`, `sandbox._CGROUP_DEFAULT_*` /
+`_default_max_memory_mb()`), because a copy here would be a third default set
+that could drift from both.
+
+**Single parse site.** `ResourceLimitsConfig.from_raw()` is the only code that
+coerces these keys; `_limit_int` is its rule. Before #3474 six readers each had
+their own, which is how the two meanings of `0` drifted apart with nothing
+recording it. The rule: bools are not numbers (`True` would become a 1-task
+ceiling); a non-integral float truncates toward zero (`512.5` -> `512`, so a
+stricter parse can never loosen a ceiling); a value in `(0, 1)` is REFUSED
+because `int()` would turn it into the `0` that already means something else;
+NaN and `±Infinity` (both producible by `json.loads`) are refused before `int()`
+can raise on them; and an out-of-range value is refused rather than clamped, so
+a confinement ceiling is never silently moved away from the number in the
+operator's file. Every refusal is logged once per key per process.
+
+`test_resource_limits_schema.py::TestSingleParseSite` fails if a seventh reader
+appears.
+
 ### Dashboard theme persistence
 
 `DashboardConfig.theme_mode` / `theme_color` / `onboarded` are workspace-persistent
