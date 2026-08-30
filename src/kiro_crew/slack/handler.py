@@ -70,6 +70,7 @@ from kiro_crew.hooks import (
     HOOK_REPLY,
     TOOL_AUTO_APPROVE,
     TOOL_DENY,
+    event_is_spawn_run,
     safe_read_file_bytes,
     validate_file_path,
 )
@@ -163,13 +164,18 @@ APPROVAL_AUTO = "auto"
 APPROVAL_INTERACTIVE = "interactive"
 
 
-def _should_auto_approve_spawn(context_builder, event_title: str) -> bool:
-    """Check if a spawn_run tool call should be auto-approved."""
+def _should_auto_approve_spawn(context_builder, event) -> bool:
+    """Check if a spawn_run tool call should be auto-approved.
+
+    Takes the PERMISSION EVENT, not the title: the title is model-authored
+    (a shell command's title can be forged to ``spawn_run``), so the check
+    keys on ``event_is_spawn_run``'s canonical identity.
+    """
     return bool(
         context_builder
         and context_builder.hooks
         and context_builder.hooks.auto_approve_subagent_spawn
-        and event_title == "spawn_run"
+        and event_is_spawn_run(event)
     )
 
 
@@ -3530,7 +3536,7 @@ async def handle_message(
                         continue
 
                 # auto_approve_subagent_spawn → auto-approve spawn_run tool calls
-                if _should_auto_approve_spawn(context_builder, event.title or ""):
+                if _should_auto_approve_spawn(context_builder, event):
                     await client.approve_tool(event.request_id)
                     Stats().inc_tool_auto_approved()
                     sel().log_tool_invocation(

@@ -51,7 +51,11 @@ from kiro_crew.messaging.commands import (
     stop_running_turn,
     task_arg_reply,
 )
-from kiro_crew.messaging.dispatch import build_directive_consumer, delivery_is_muted
+from kiro_crew.messaging.dispatch import (
+    build_auto_approve,
+    build_directive_consumer,
+    delivery_is_muted,
+)
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
 from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn_identity
 from kiro_crew.messaging.link import (
@@ -779,14 +783,10 @@ class TelegramDispatcher:
                 out_renderer,
                 approval_mode=self.approval_mode,
                 decider=decider,
-                # Preserve the auto_approve_subagent_spawn hook for spawn_run
-                # (replicated inline to avoid a telegram -> slack import).
-                auto_approve_tool=lambda title: bool(
-                    self.ctx_builder
-                    and self.ctx_builder.hooks
-                    and self.ctx_builder.hooks.auto_approve_subagent_spawn
-                    and title == "spawn_run"
-                ),
+                # Preserve the auto_approve_subagent_spawn hook for spawn_run.
+                # The shared builder keys on canonical event identity
+                # (tool_name/is_shell), never the model-authored title.
+                auto_approve_tool=build_auto_approve(self.ctx_builder),
                 # /yolo: read the grant per request, not once at boot, so turning
                 # it on (or letting it expire) takes effect on the very next tool
                 # instead of after a gateway restart. TurnDriver runs the

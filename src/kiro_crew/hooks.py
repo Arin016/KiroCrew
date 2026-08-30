@@ -39,6 +39,7 @@ from kiro_crew.security import (
     is_sensitive_write_path,
 )
 from kiro_crew.sel import sel
+from kiro_crew.session_directive import CORE_MCP_SERVER
 from kiro_crew.validation import _bounded_pattern_search
 
 logger = logging.getLogger(__name__)
@@ -379,6 +380,48 @@ class HooksConfig:
             "disable_all": self.denied_commands_disable_all,
             "user_added": [p.to_dict() for p in self.denied_commands_user_added],
         }
+
+
+# ── Spawn auto-approve identity ──
+
+
+def event_is_spawn_run(event: object) -> bool:
+    """True when a permission event is genuinely the ``spawn_run`` MCP tool.
+
+    The ``auto_approve_subagent_spawn`` rung must key on canonical,
+    NON-model-authored identity: ``event.title`` is LLM-authored prose (for
+    shell tools ``select_tool_title`` even prefers the model's description),
+    so ANY event whose title is forged to ``spawn_run`` — a shell command, a
+    re-titled ``send_file``, anything — must never satisfy this rung.
+
+    Canonical identity only, deny-by-default: ``event.tool_name`` (from
+    ``_meta.kiro``, never model-authored) must be ``spawn_run``, carry the
+    ``mcp_identity_trusted`` provenance flag (non-emptiness alone is not
+    proof of provenance; a future inline population path must fail closed),
+    and be served by the crew's own MCP server (``CORE_MCP_SERVER``), so a
+    foreign server or a built-in that merely NAMES a tool ``spawn_run``
+    cannot ride the rung.
+
+    The title must ALSO read ``spawn_run``. Not as identity — the title is
+    forgeable and never sufficient — but because the channel PreToolUse gate
+    (``build_tool_gate``) keys deny rules on the title: a genuine spawn whose
+    display title was rephrased must fall to the approval ladder rather than
+    let this rung approve past a title-keyed deny that would otherwise have
+    fired. This exactly preserves the rung's pre-fix approval surface (title
+    ``spawn_run``), minus the forgeries.
+
+    There is deliberately NO title fallback: on a backend that does not emit
+    ``_meta.kiro`` (or on the correlated provenance-cache miss) the rung
+    simply does not fire and the request falls to the channel's normal
+    approval ladder (session trust / YOLO / interactive) — a downgrade,
+    never a hard block.
+    """
+    return (
+        (getattr(event, "title", "") or "") == "spawn_run"
+        and (getattr(event, "tool_name", "") or "") == "spawn_run"
+        and bool(getattr(event, "mcp_identity_trusted", False))
+        and (getattr(event, "mcp_server_name", "") or "") == CORE_MCP_SERVER
+    )
 
 
 # ── HookManager ──
