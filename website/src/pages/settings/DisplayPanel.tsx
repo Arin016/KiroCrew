@@ -1,4 +1,4 @@
-import { X, Loader2 } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { useState, useMemo } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useZoomCtx } from '../../hooks/ZoomProvider'
@@ -10,7 +10,7 @@ import { SettingsSection, SettingsCard, SettingsSelect, SettingsStepper, Setting
 import SimpleSelect from '../../components/SimpleSelect'
 import { Input } from '../../components/ui'
 import { useThemeEditor, ThemeEditorPanel } from '../../components/themeEditor'
-import Clickable from '../../components/Clickable'
+import Modal from '../../components/Modal'
 import { useAppSelector, useAppDispatch } from '../../store'
 import { setSessionDefaultColor, setSessionColorsMode, setSessionColorsPalette, setSessionColorsIntensity } from '../../store/dashboardSlice'
 import { useSessionPalette } from '../../hooks/useSessionPalette'
@@ -477,17 +477,29 @@ export function DisplayPanel() {
         </SettingsCard>
       </SettingsSection>
 
-      {editor.editorOpen && (
-        <Clickable className="fixed inset-0 z-[49] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={e => { if (!e || e.target === e.currentTarget) editor.closeEditor() }}>
-          <div role="dialog" aria-modal="true" aria-label={editor.isEditing ? i18nT('pages.settings.displayPanel.edit_theme') : i18nT('pages.settings.displayPanel.create_theme')} className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto mx-4 bg-card border border-border rounded-xl p-6 shadow-xl animate-rise">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-bold text-text-strong">{editor.isEditing ? i18nT('pages.settings.displayPanel.edit_theme') : i18nT('pages.settings.displayPanel.create_theme')}</h3>
-              <button className="text-muted text-[13px] cursor-pointer hover:text-text bg-transparent border-none" onClick={editor.closeEditor}><X className="lucide-inline" /></button>
-            </div>
-            <ThemeEditorPanel editor={editor} />
-          </div>
-        </Clickable>
-      )}
+      {/* The shared Modal owns the backdrop, Escape dismissal, the focus
+          trap/restore, the scroll lock and the keyboard isolation the
+          hand-rolled overlay lacked, and it portals to document.body so the
+          editor still escapes the SettingsCard's card-glow stacking context.
+          The panel rises from z-[49] to Modal's own z-[100]/[101] layer, which
+          is what puts it above the floating theme-experience toggle instead of
+          under it. The dialog keeps its accessible name from its own title.
+
+          `guardAccidentalDismiss` is gated on the editor being dirty, because
+          Escape dismissal is a path this conversion ADDS and `closeEditor`
+          discards the draft unconditionally: on an untouched form both
+          accidental exits still work (Escape is the capability the issue asks
+          for), and once a name or a colour has been entered only the explicit
+          exits — the header close button and the panel's own Cancel — close it. */}
+      <Modal
+        open={editor.editorOpen}
+        onClose={editor.closeEditor}
+        title={editor.isEditing ? i18nT('pages.settings.displayPanel.edit_theme') : i18nT('pages.settings.displayPanel.create_theme')}
+        maxWidth={672}
+        guardAccidentalDismiss={editor.isDirty}
+      >
+        <ThemeEditorPanel editor={editor} />
+      </Modal>
 
       {/* Sidebar Colors */}
       <SettingsSection title={i18nT('pages.settings.displayPanel.sidebar_colors')}>
