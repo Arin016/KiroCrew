@@ -2722,7 +2722,7 @@ def _read_spec_capped(path: Path) -> dict | None:
     A thin wrapper rather than a direct call at each site, so the reason the
     capped reader is used lives in one place.
     """
-    return _read_agent_spec(path)
+    return _read_agent_spec(path, operation="agent_spec_lookup", source="unknown")
 
 
 def _spec_path_is_safe(path: Path, agents_dir: Path) -> bool:

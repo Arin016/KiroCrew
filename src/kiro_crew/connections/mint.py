@@ -373,7 +373,11 @@ def _write_mint_agent_spec(slug: str) -> tuple[str, str]:
     # lands in the mint flow's failure path (retryable ``failed`` row, holdings
     # disposed, no child spawned). The fallback below stays reserved for what it
     # always meant: the file or the alias entry being genuinely absent.
-    spec = _read_agent_spec(agents_dir / AGENT_FILENAME)
+    spec = _read_agent_spec(
+        agents_dir / AGENT_FILENAME,
+        operation="connections_mint",
+        source="dashboard",
+    )
     if spec is None:
         if (agents_dir / AGENT_FILENAME).exists():
             logger.warning("Main agent spec unusable; refusing to mint for %r", alias)
@@ -826,7 +830,14 @@ def _agent_spec_entry_missing(slug: str) -> bool:
     agents_dir = _agent.kiro_agents_dir_path()
     # Hardened reader (#6736): a refused main spec reads as absent, so the entry
     # counts as missing -- the same degrade-as-absent direction as before.
-    spec = _read_agent_spec(agents_dir / AGENT_FILENAME) or {}
+    spec = (
+        _read_agent_spec(
+            agents_dir / AGENT_FILENAME,
+            operation="connections_mint",
+            source="dashboard",
+        )
+        or {}
+    )
     servers = spec.get("mcpServers") or {}
     return mcp_server_alias(slug) not in servers
 

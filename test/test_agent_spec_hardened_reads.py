@@ -26,6 +26,7 @@ the ``oversized`` and symlink cases are differential against the old path
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -33,6 +34,7 @@ from unittest.mock import MagicMock
 import pytest
 from aiohttp import web
 
+from conftest import requires_symlinks
 from kiro_crew.agent import _install_heartbeat_agent, migrate_agent_specs
 from kiro_crew.agent_files import AGENT_FILENAME, HEARTBEAT_AGENT_FILENAME
 from kiro_crew.connections import mint
@@ -287,6 +289,7 @@ class TestSensitiveSymlinkGuard:
     migrated caller actually consults it (same shape as #5423's test).
     """
 
+    @requires_symlinks
     def test_link_to_a_sensitive_target_is_refused(self, tmp_path, monkeypatch):
         from kiro_crew import agent_discovery
 
@@ -362,6 +365,7 @@ class TestAgentSpecEntryMissing:
 
         assert mint._agent_spec_entry_missing("probe") is False
 
+    @requires_symlinks
     def test_link_to_a_sensitive_target_reads_as_entry_missing(self, tmp_path, monkeypatch):
         """The sensitive-symlink guard flows through a migrated mint caller."""
         from kiro_crew import agent_discovery
@@ -419,3 +423,157 @@ class TestInstallHeartbeatAgent:
         written = json.loads((agents_dir / HEARTBEAT_AGENT_FILENAME).read_text(encoding="utf-8"))
         assert written["mcpServers"]["kirocrew-core"]["args"] == []
         assert written["tools"] == ["@kirocrew-core"]
+
+
+class TestDenialAttribution:
+    """Sensitive-path denials name the surface that triggered the read."""
+
+    @staticmethod
+    def _denial_events(tmp_path, monkeypatch):
+        """Return a sensitive spec and a spy collecting SEL denial fields.
+
+        Symlink resolution itself is covered separately. This attribution test
+        uses a regular file so it exercises the SEL event on hosts that cannot
+        create symlinks (notably unelevated Windows shells).
+        """
+        from types import SimpleNamespace
+
+        from kiro_crew import agent_discovery
+
+        path = tmp_path / "protected.json"
+        path.write_text(json.dumps({"name": "linked"}), encoding="utf-8")
+        monkeypatch.setattr(agent_discovery, "is_sensitive_path", lambda p: str(path) in str(p))
+        events: list[dict] = []
+        monkeypatch.setattr(
+            agent_discovery,
+            "_sel",
+            lambda: SimpleNamespace(log_api_access=lambda **kw: events.append(kw)),
+        )
+        return path, events
+
+    def test_default_call_shape_emits_exactly_the_historical_event(self, tmp_path, monkeypatch):
+        """The compatibility defaults preserve the pre-attribution event."""
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        link, events = self._denial_events(tmp_path, monkeypatch)
+
+        assert _read_agent_spec(link) is None
+        assert events == [
+            {
+                "caller": "agent_discovery",
+                "operation": "list_agents",
+                "outcome": "denied",
+                "source": "list_agents",
+                "resources": str(link.resolve()),
+                "error": "sensitive path rejected",
+            }
+        ]
+
+    def test_labelled_call_attributes_the_denial_to_that_surface(self, tmp_path, monkeypatch):
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        link, events = self._denial_events(tmp_path, monkeypatch)
+
+        assert _read_agent_spec(link, operation="doctor", source="cli") is None
+        assert len(events) == 1
+        assert events[0]["operation"] == "doctor"
+        assert events[0]["source"] == "cli"
+        assert events[0]["caller"] == "agent_discovery"
+        assert events[0]["outcome"] == "denied"
+
+    def test_source_defaults_independently_of_operation(self, tmp_path, monkeypatch):
+        """Supplying an operation must not corrupt the source vocabulary."""
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        link, events = self._denial_events(tmp_path, monkeypatch)
+
+        assert _read_agent_spec(link, operation="doctor") is None
+        assert events[0]["operation"] == "doctor"
+        assert events[0]["source"] == "list_agents"
+
+
+# Exact direct-call inventory. A new caller must name its user-facing operation
+# and interface channel (or ``unknown`` for a helper shared across interfaces).
+# Forwarding helpers are pinned as forwarding rather than forced to use a fixed
+# literal that would erase the caller's attribution.
+_EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
+    "kiro_crew/agent.py": [
+        ("agent_spec_lookup", "unknown"),
+        ("migrate_agent_specs", "unknown"),
+    ],
+    "kiro_crew/agent_discovery.py": [
+        ("agent_skill_globs", "unknown"),
+        ("forward:operation", "forward:source"),
+        ("list_agents", "unknown"),
+        ("list_agents", "unknown"),
+        ("resolve_project_agent_name", "unknown"),
+    ],
+    "kiro_crew/cli_doctor.py": [("doctor", "cli"), ("doctor", "cli")],
+    "kiro_crew/config/loader.py": [("load_config", "unknown")],
+    "kiro_crew/connections/mint.py": [
+        ("connections_mint", "dashboard"),
+        ("connections_mint", "dashboard"),
+    ],
+    "kiro_crew/dashboard/handlers/agents.py": [
+        ("api_agent_detail", "dashboard"),
+        ("api_agent_detail", "dashboard"),
+        ("api_agents_sync", "dashboard"),
+    ],
+    "kiro_crew/dashboard/handlers/mcp.py": [
+        ("api_mcp_active", "dashboard"),
+        ("mcp_server_rows", "dashboard"),
+        ("mcp_stub_eligibility", "dashboard"),
+    ],
+    "kiro_crew/session.py": [("resolve_agent_model", "unknown")],
+}
+
+
+def _read_agent_spec_call_sites() -> dict[str, list[tuple[str | None, str | None]]]:
+    """Return every direct ``_read_agent_spec`` call and its label pair."""
+    src = Path(__file__).resolve().parent.parent / "src"
+    sites: dict[str, list[tuple[str | None, str | None]]] = {}
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else ""
+            )
+            if name != "_read_agent_spec":
+                continue
+            labels: dict[str, str | None] = {"operation": None, "source": None}
+            for kw in node.keywords:
+                if kw.arg not in labels:
+                    continue
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    labels[kw.arg] = kw.value.value
+                elif isinstance(kw.value, ast.Name) and kw.value.id == kw.arg:
+                    labels[kw.arg] = f"forward:{kw.value.id}"
+            sites.setdefault(path.relative_to(src).as_posix(), []).append(
+                (labels["operation"], labels["source"])
+            )
+    return {
+        path: sorted(pairs, key=lambda pair: tuple((item is not None, item or "") for item in pair))
+        for path, pairs in sites.items()
+    }
+
+
+class TestCallSiteLabelRatchet:
+    """Every direct reader call is enumerated and explicitly attributed."""
+
+    def test_every_call_site_carries_the_expected_label(self):
+        assert _read_agent_spec_call_sites() == _EXPECTED_CALL_SITE_LABELS
+
+    def test_no_call_site_is_silently_unlabelled(self):
+        for path, pairs in _read_agent_spec_call_sites().items():
+            for operation, source in pairs:
+                assert (
+                    operation is not None
+                ), f"{path} calls _read_agent_spec without an explicit operation label"
+                assert (
+                    source is not None
+                ), f"{path} calls _read_agent_spec without an explicit source label"
