@@ -226,6 +226,9 @@ export const EXEMPT_CONFIRM_PLACEHOLDER_NAMES = new Set([
   'resources',
   'bucket',
   'distribution',
+  // Set once by the edition's composition root (i18next defaultVariables),
+  // never user-supplied, so it cannot smuggle prose into a confirm sentence.
+  'productName',
 ])
 
 /**
