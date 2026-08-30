@@ -5040,6 +5040,59 @@ class TestSsmTunnelProcessGroup:
         assert seen["start_new_session"] is False
         assert seen["creationflags"] == 0
 
+    @pytest.mark.asyncio
+    async def test_ssm_child_gets_plugin_search_path_and_ssh_inherits(self, monkeypatch, tmp_path):
+        """The SSM child needs a PATH that can find session-manager-plugin.
+
+        The argv head is resolved absolutely, but the aws CLI then looks the
+        plugin up BY NAME on this child's own PATH — under a GUI-launched gateway
+        the minimal launchd one — so the tunnel died inside a correctly resolved
+        ``aws`` (#5392). SSH keeps ``env=None`` (inherit): its binary lives in
+        the system bin dir and widening a tunnel child's PATH without a reason to
+        is the opposite of what this fix argues for.
+        """
+        import kiro_crew.instances.ssh_tunnel_manager as mod
+        from kiro_crew.deploy import engine
+
+        seen = {}
+
+        async def fake_exec(*argv, **kw):
+            seen.update(kw)
+            raise OSError("stop here — we only care about the spawn kwargs")
+
+        # tmp_path stand-ins: a host path literal would flake and is unrunnable
+        # on Windows, which this class deliberately also exercises. `aws` sits on
+        # the inherited PATH so the head resolves absolutely (a PATH hit needs no
+        # provenance check), which is what makes the widening applicable. Windows
+        # resolves executables by PATHEXT rather than the exec bit, so the planted
+        # file differs there — otherwise the head falls back to the bare name and
+        # the widening is (correctly) withheld.
+        inherited = tmp_path / "sysbin"
+        inherited.mkdir()
+        if os.name == "nt":
+            fake_aws = inherited / "aws.cmd"
+            fake_aws.write_text("@echo off\n")
+            monkeypatch.setenv("PATHEXT", ".cmd")
+        else:
+            fake_aws = inherited / "aws"
+            fake_aws.write_text("#!/bin/sh\n")
+            fake_aws.chmod(0o755)
+        install_dir = tmp_path / "install"
+        monkeypatch.setenv("PATH", str(inherited))
+        monkeypatch.setattr(engine, "_AWS_BIN_DIRS", (str(install_dir),))
+        monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(mod.platform_compat, "IS_POSIX", True)
+
+        await self._tunnel("ssm").start()
+        child_path = seen["env"]["PATH"].split(os.pathsep)
+        assert str(install_dir) in child_path
+        # Appended: the inherited PATH still wins every name it can resolve.
+        assert child_path.index(str(inherited)) < child_path.index(str(install_dir))
+
+        seen.clear()
+        await self._tunnel("ssh").start()
+        assert seen["env"] is None
+
     def test_teardown_routes_through_the_platform_shim(self, monkeypatch):
         """Not raw os.killpg — that leaves the plugin alive on Windows."""
         import kiro_crew.instances.ssh_tunnel_manager as mod
@@ -5266,6 +5319,44 @@ class TestSsmTransportSelection:
         await mgr2.connect("ec2b")
         assert seen["timeout_secs"] == 45.0
         await mgr2.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_plugin_probe_runs_off_the_event_loop(self, tmp_path, monkeypatch):
+        """#5392: the prerequisite probe must not block the gateway event loop.
+
+        The probe resolves the plugin through the deploy engine's shared resolver
+        — PATH scan, then the well-known install dirs, then executable-provenance
+        validation — so a stalled network mount on any of those would freeze every
+        request and heartbeat. Pinned by the THREAD it actually runs on rather
+        than by source inspection, so an edit that drops the offload fails here
+        even if it keeps the wording.
+        """
+        import threading
+
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        loop_thread = threading.get_ident()
+        ran_on: dict = {}
+
+        def _probe():
+            ran_on["thread"] = threading.get_ident()
+            return False  # short-circuit: no tunnel spawn, error status asserted
+
+        monkeypatch.setattr("kiro_crew.cloud.ssm.session_manager_plugin_installed", _probe)
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(
+            name="EC2",
+            connection_method="ssm",
+            ssm_target="i-0123456789abcdef0",
+            instance_id="ec2",
+            remote_port=53514,
+        )
+
+        st = await mgr.connect("ec2")
+
+        assert st.state == TunnelState.ERROR
+        assert ran_on["thread"] != loop_thread
+        await mgr.shutdown()
 
     @pytest.mark.asyncio
     async def test_ssm_connect_fails_clean_without_plugin(self, tmp_path, monkeypatch):

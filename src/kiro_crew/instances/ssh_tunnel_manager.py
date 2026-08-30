@@ -66,6 +66,7 @@ from kiro_crew.cloud import ssm as cloud_ssm
 # be framed by this desktop app on whatever KIROCREW_PORT it runs on (no
 # hardcoded port, no wildcard). See server._extra_frame_ancestors.
 from kiro_crew.config.loader import DASHBOARD_PORT as _LOCAL_DASHBOARD_PORT
+from kiro_crew.deploy.engine import aws_spawn_env
 from kiro_crew.instances.constants import (
     DEFAULT_CONNECT_TIMEOUT_SECS as _DEFAULT_CONNECT_TIMEOUT_SECS,
 )
@@ -504,6 +505,17 @@ class _SshTunnel:
                 # CREATE_NEW_PROCESS_GROUP is what makes the tree taskkill /T-reapable.
                 start_new_session=(ssm and platform_compat.IS_POSIX),
                 creationflags=(platform_compat.CREATE_NEW_PROCESS_GROUP if ssm else 0),
+                # SSM only: the argv head is resolved absolutely, but the aws CLI
+                # then looks session-manager-plugin up BY NAME on this child's own
+                # PATH, which a GUI-launched gateway hands down as the minimal
+                # launchd one — so the tunnel dies inside a correctly-resolved aws
+                # unless the child's env carries the install dirs (#5392). argv[0]
+                # is handed over so the widening is withheld for a bare head: that
+                # bare name IS a provenance refusal, and widening would put the
+                # refused binary back within execvp's reach. None means inherit,
+                # which is what the ssh transport wants: its binary lives in the
+                # system bin dir and needs no widening.
+                env=(aws_spawn_env(argv[0]) if ssm else None),
             )
         except OSError as e:
             self.status.state = TunnelState.ERROR
@@ -1403,8 +1415,17 @@ class SshTunnelManager:
 
             # SSM needs the local session-manager-plugin; fail with an actionable
             # message rather than letting the child exit with a cryptic error.
+            #
+            # Probed in a worker thread: the probe resolves the plugin through the
+            # deploy engine's shared resolver (#5392), which scans PATH, then the
+            # well-known install dirs, then routes a fallback-dir hit through
+            # executable-provenance validation — filesystem work that must not run
+            # on the gateway event loop, where a stalled network mount would freeze
+            # every request and heartbeat. Same reason _build_argv is offloaded
+            # below, and the same thing the dashboard's own cloud handler does with
+            # this exact call.
             if params.method == "ssm":
-                if not cloud_ssm.session_manager_plugin_installed():
+                if not await asyncio.to_thread(cloud_ssm.session_manager_plugin_installed):
                     return self._error_status(inst, cloud_ssm.session_manager_plugin_install_hint())
 
             # Reclaim our own forwarder if a prior gateway hard-kill leaked it
