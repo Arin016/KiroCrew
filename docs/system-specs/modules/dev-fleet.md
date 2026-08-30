@@ -659,6 +659,45 @@ stdlib-only, so the copy needs no package context. Both halves matter: `-I` drop
 the cwd from `sys.path`, and the snapshot means an editable install cannot make
 the tree being synced supply the code doing the verifying.
 
+**The install is skipped when the answer is already on disk.** Most syncs are
+backend-only and change nothing under `website/`, so paying a full scratch install
+to re-derive "is this lockfile installable" on every Pull + Build is cost without
+information. `_install_already_proven` skips it, and only when BOTH hold: `git
+diff --name-only <ref> -- website` is empty, meaning the incoming ref changes no
+path under the frontend half at all, AND `website/node_modules` is populated (not
+merely present — an interrupted `npm ci` leaves an empty directory, which proves
+nothing). Without a tree there is no evidence, so a fresh checkout's first sync
+still probes. Anything the comparison cannot answer — a failing or missing `git`,
+a timeout — probes as well: the unknown case costs an install rather than a
+guarantee.
+
+A populated tree is evidence, not a verified install, and the bound is worth
+stating: a prior frontend sync whose post-merge `npm ci` died partway can leave a
+partial tree beside the merged lockfile, and later backend-only syncs will skip on
+it, since from there on the subtree is unchanged and nothing re-examines it. The
+consequence is the same class as the dead-registry residual — the skip decides only
+whether this sync pays for a rehearsal, so a refusal lands one step later rather
+than never, and the transaction keeps the checkout consistent either way. Issue
+[#7132](https://github.com/kirodotdev/KiroCrew/issues/7132) tracks the stronger
+evidence check that would close it.
+
+The condition is the whole subtree rather than just `package-lock.json` /
+`package.json` / `.npmrc`, and the difference is load-bearing. With those three
+identical but frontend SOURCE changed, a skipped probe lets the merge land, and a
+failing `npm ci` afterwards leaves the checkout with new source and the
+previously-built bundle — the stale-bundle half of the very defect this section
+exists to prevent. Requiring the entire subtree to be unchanged makes that
+unreachable: with no frontend change there is no new bundle owed, so a failed sync
+leaves the frontend byte-for-byte as it was.
+
+What makes the skip safe rather than merely cheap is where a failure lands. Under
+this condition the transaction above restores the tree on any non-zero step, the
+lockfile it matches did not change, and neither did the source the bundle was
+built from. A skipped probe can only leave a state a later `npm ci` fixes, never
+one no revision produced. A skip is reported on the run's `preflight:` detail line
+rather than the generic pass line, so it is visible in the log instead of
+inferable from a missing pause.
+
 **Failure causes reach the dashboard as an exit code, not as text.** The probe
 exits with a reserved code (41-45) and the runner owns two more (46 ambiguous
 tree, 47 restore failed); `npm_preflight.explain_exit` maps each to one
