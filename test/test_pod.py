@@ -517,6 +517,215 @@ class TestWaitHealthyFailsFast:
         ):
             assert pod_cli._wait_healthy(cfg, "x", 7999, tries=3) == 403
 
+    def test_a_foreign_port_holder_outranks_the_generic_crash_verdict(self, cfg: PodConfig) -> None:
+        """A taken port is WHY the gateway crash-loops, so say that instead.
+
+        Both signals are present in this scenario -- the port answers from
+        somebody else AND the unit is restarting behind it -- and only one of them
+        tells the operator what to do about it.
+        """
+        with (
+            patch.object(rt, "health", return_value=rt.HEALTH_FOREIGN),
+            patch.object(rt, "unit_state", return_value=("activating", 1)),
+        ):
+            assert pod_cli._wait_healthy(cfg, "x", 7999, tries=45) == rt.HEALTH_FOREIGN
+
+    def test_a_foreign_holder_seen_mid_wait_is_remembered_at_the_deadline(
+        self, cfg: PodConfig
+    ) -> None:
+        """The verdict survives a later poll that merely fails to connect."""
+        codes = iter([rt.HEALTH_FOREIGN, 0, 0])
+
+        def _health(*a: object, **k: object) -> int:
+            return next(codes, 0)
+
+        with (
+            patch.object(rt, "health", _health),
+            patch.object(rt, "unit_state", return_value=("active", 0)),
+        ):
+            assert pod_cli._wait_healthy(cfg, "x", 7999, tries=2) == rt.HEALTH_FOREIGN
+
+    def test_a_pod_that_wins_its_port_back_still_reports_healthy(self, cfg: PodConfig) -> None:
+        """Seeing a squatter first must not condemn a pod that then comes up.
+
+        A predecessor releasing the port mid-wait is an ordinary sequence, so the
+        foreign observation is attribution for a FAILURE, never a verdict of its
+        own.
+        """
+        codes = iter([rt.HEALTH_FOREIGN, 200])
+
+        def _health(*a: object, **k: object) -> int:
+            return next(codes, 200)
+
+        with (
+            patch.object(rt, "health", _health),
+            patch.object(rt, "unit_state", return_value=("active", 0)),
+        ):
+            assert pod_cli._wait_healthy(cfg, "x", 7999, tries=5) == 200
+
+
+class TestPortOwner:
+    """Identity, not reachability: WHO holds the pod's derived port.
+
+    A derived port maps 199 slots across every pod name and can be pinned by
+    hand, so a collision with another pod or with the live gateway is ordinary.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _posix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pin the POSIX branch, for the same reason the module pins ``IS_MACOS``.
+
+        ``port_owner`` returns ``OWNER_UNPROVEN`` on a non-POSIX host before it
+        consults any of the helpers these tests patch, so on Windows the decision
+        cases FAILED (`'unproven' == 'pod'`) while the four that expect
+        ``OWNER_UNPROVEN`` passed VACUOUSLY -- they would have passed whatever the
+        logic did. Pinning it makes the branch under test explicit and asserts the
+        same contract on every platform. ``test_non_posix_is_unproven`` sets it
+        False itself, which still wins: this fixture runs first.
+        """
+        monkeypatch.setattr(rt, "IS_POSIX", True)
+
+    @staticmethod
+    def _listener(pid: int, address: str = "127.0.0.1", family: str = "4"):
+        return platform_compat.PortListener(pid=pid, address=address, family=family)
+
+    def test_the_pods_own_main_pid_holding_the_port_is_proof_it_is_ours(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(rt, "find_port_listeners", lambda port: [self._listener(4242)])
+        monkeypatch.setattr(rt, "main_pid", lambda c, n: 4242)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_POD
+
+    def test_a_wildcard_bind_by_the_pod_still_counts_as_ours(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """0.0.0.0 receives a 127.0.0.1 connect, so a wildcard pod owns the probe."""
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(
+            rt, "find_port_listeners", lambda port: [self._listener(4242, "0.0.0.0")]
+        )
+        monkeypatch.setattr(rt, "main_pid", lambda c, n: 4242)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_POD
+
+    def test_ownership_is_scoped_to_the_address_the_probe_reached(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pod existing elsewhere on the port must not vouch for a squatter.
+
+        A port NUMBER can carry several LISTEN sockets on different local
+        addresses. Here the pod holds one specific non-loopback address while a
+        foreign process holds 127.0.0.1 -- the address the probe dialled -- so the
+        foreign pid is the responder. Taking every pid on the port number instead
+        would find the pod's own and trust the squatter BECAUSE the real pod
+        exists.
+        """
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(
+            rt,
+            "find_port_listeners",
+            lambda port: [
+                self._listener(4242, "10.0.0.5"),  # the pod, on another address
+                self._listener(9999, "127.0.0.1"),  # the squatter, on the probed one
+            ],
+        )
+        monkeypatch.setattr(rt, "main_pid", lambda c, n: 4242)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_FOREIGN
+
+    def test_a_different_pid_holding_the_port_is_foreign(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(rt, "find_port_listeners", lambda port: [self._listener(9999)])
+        monkeypatch.setattr(rt, "main_pid", lambda c, n: 4242)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_FOREIGN
+
+    def test_a_pod_with_no_process_on_a_held_port_is_foreign_not_unproven(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reported bug, at its root.
+
+        A pod that lost the bind race has no process at all. If "no pid of ours"
+        read as undecidable, the squatter's 200 would still be reported as this
+        pod's health -- which is the whole defect. A held port plus a pod that
+        authoritatively has no pid IS proof the responder is someone else.
+        """
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(rt, "find_port_listeners", lambda port: [self._listener(9999)])
+        monkeypatch.setattr(rt, "main_pid", lambda c, n: None)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_FOREIGN
+
+    def test_no_listener_lookup_tool_is_unproven(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: False)
+        monkeypatch.setattr(
+            rt, "find_port_listeners", lambda port: pytest.fail("must not be reached")
+        )
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_UNPROVEN
+
+    def test_non_posix_is_unproven(self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(rt, "IS_POSIX", False)
+        monkeypatch.setattr(
+            rt, "listening_pid_tool_available", lambda: pytest.fail("must not be reached")
+        )
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_UNPROVEN
+
+    def test_an_unaskable_service_manager_is_unproven(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "Could not ask" must never be rendered as "not ours"."""
+
+        def _boom(c: object, n: object) -> int:
+            raise rt.PodError("systemctl unavailable")
+
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(rt, "find_port_listeners", lambda port: [self._listener(9999)])
+        monkeypatch.setattr(rt, "main_pid", _boom)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_UNPROVEN
+
+    def test_a_throwing_listener_lookup_is_unproven(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(port: int) -> list:
+            raise OSError("lsof exploded")
+
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(rt, "find_port_listeners", _boom)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_UNPROVEN
+
+    def test_no_visible_listener_is_unproven(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HTTP answered but no LISTEN socket covering loopback is visible."""
+        monkeypatch.setattr(rt, "listening_pid_tool_available", lambda: True)
+        monkeypatch.setattr(rt, "find_port_listeners", lambda port: [])
+        monkeypatch.setattr(rt, "main_pid", lambda c, n: 4242)
+        assert rt.port_owner(cfg, "demo", 7999) == rt.OWNER_UNPROVEN
+
+
+class TestMainPid:
+    def test_reads_systemd_main_pid(self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(stdout="MainPID=4242\n"))
+        assert rt.main_pid(cfg, "demo") == 4242
+
+    def test_main_pid_zero_means_not_running(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """systemd prints MainPID=0 for a dead or unknown unit, and exits 0."""
+        monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(stdout="MainPID=0\n"))
+        assert rt.main_pid(cfg, "demo") is None
+
+    def test_a_missing_main_pid_line_refuses_rather_than_guessing(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No MainPID key at all means the QUERY failed, not that the pod is dead."""
+        monkeypatch.setattr(
+            rt, "systemctl", lambda *a, **k: _cp(stdout="", returncode=1, stderr="boom")
+        )
+        with pytest.raises(rt.PodError):
+            rt.main_pid(cfg, "demo")
+
 
 class TestProvision:
     def test_detectors(self, tmp_path: Path) -> None:
@@ -1294,7 +1503,7 @@ class TestOrphanHomes:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
         c = self._plane(tmp_path, monkeypatch)
-        monkeypatch.setattr(rt, "health", lambda port, timeout=3: 200)
+        monkeypatch.setattr(rt, "health", lambda cfg, name, port, timeout=3: 200)
         pod_cli._ls(c, argparse.Namespace(json=False))
         out = capsys.readouterr().out
         assert "1 orphaned pod HOME(s)" in out
@@ -1305,7 +1514,7 @@ class TestOrphanHomes:
     ) -> None:
         """Three callers parse this array; orphans are human-output only."""
         c = self._plane(tmp_path, monkeypatch)
-        monkeypatch.setattr(rt, "health", lambda port, timeout=3: 200)
+        monkeypatch.setattr(rt, "health", lambda cfg, name, port, timeout=3: 200)
         pod_cli._ls(c, argparse.Namespace(json=True))
         assert [r["name"] for r in json.loads(capsys.readouterr().out)] == ["running"]
 
@@ -1315,7 +1524,7 @@ class TestOrphanHomes:
         """An orphan left 5 minutes ago and one left 3 weeks ago need different
         handling; the HOME's mtime is the signal the report was missing."""
         c = self._plane(tmp_path, monkeypatch)
-        monkeypatch.setattr(rt, "health", lambda port, timeout=3: 200)
+        monkeypatch.setattr(rt, "health", lambda cfg, name, port, timeout=3: 200)
         three_days = time.time() - 3 * 86400
         os.utime(c.pod_root / "orphan", (three_days, three_days))
         pod_cli._ls(c, argparse.Namespace(json=False))
@@ -1980,7 +2189,7 @@ class TestRuntimeHelpers:
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(stdout="garbage\n"))
         assert rt.unit_state(cfg, "x") == ("unknown", 0)
 
-    def test_health_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_health_codes(self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch) -> None:
         import urllib.error
 
         class _Resp:
@@ -1992,20 +2201,96 @@ class TestRuntimeHelpers:
             def __exit__(self, *a: object) -> bool:
                 return False
 
+        # Ownership is proven separately (see TestPortOwner); here the pod owns
+        # its port so health reports the raw code.
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_POD)
         monkeypatch.setattr(rt, "loopback_urlopen", lambda *a, **k: _Resp())
-        assert rt.health(7999) == 200
+        assert rt.health(cfg, "demo", 7999) == 200
 
         def _raise_http(*a: object, **k: object) -> None:
             raise urllib.error.HTTPError("u", 403, "f", {}, None)  # type: ignore[arg-type]
 
         monkeypatch.setattr(rt, "loopback_urlopen", _raise_http)
-        assert rt.health(7999) == 403
+        assert rt.health(cfg, "demo", 7999) == 403
 
         def _raise_url(*a: object, **k: object) -> None:
             raise urllib.error.URLError("down")
 
         monkeypatch.setattr(rt, "loopback_urlopen", _raise_url)
-        assert rt.health(7999) == 0
+        assert rt.health(cfg, "demo", 7999) == 0
+
+    def test_health_treats_a_non_http_listener_as_unreachable(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A process holding the port that does not speak HTTP is not "serving".
+
+        ``BadStatusLine`` is neither ``OSError`` nor ``URLError``, so without an
+        explicit catch it escapes as a traceback out of ``pod status`` — and a
+        foreign listener on a derived port is exactly when it happens.
+        """
+        import http.client
+
+        def _raise_bad_status(*a: object, **k: object) -> None:
+            raise http.client.BadStatusLine("garbage")
+
+        monkeypatch.setattr(rt, "loopback_urlopen", _raise_bad_status)
+        assert rt.health(cfg, "demo", 7999) == 0
+
+    def test_health_reports_a_foreign_responder_as_not_up(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bug: a 200 from somebody else's gateway must not read as up."""
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self) -> "_Resp":
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+        monkeypatch.setattr(rt, "loopback_urlopen", lambda *a, **k: _Resp())
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_FOREIGN)
+        assert rt.health(cfg, "demo", 7999) == rt.HEALTH_FOREIGN
+
+    def test_health_keeps_the_code_when_ownership_is_unprovable(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No listener-lookup tool must not turn every pod into an unhealthy one."""
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self) -> "_Resp":
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+        monkeypatch.setattr(rt, "loopback_urlopen", lambda *a, **k: _Resp())
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_UNPROVEN)
+        assert rt.health(cfg, "demo", 7999) == 200
+
+    def test_health_skips_the_ownership_check_when_nothing_answers(
+        self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stopped pod costs one refused connection and no process lookup."""
+        import urllib.error
+
+        def _raise_url(*a: object, **k: object) -> None:
+            raise urllib.error.URLError("down")
+
+        calls: list[object] = []
+
+        def _owner(*a: object, **k: object) -> str:
+            calls.append(a)
+            return rt.OWNER_FOREIGN
+
+        monkeypatch.setattr(rt, "loopback_urlopen", _raise_url)
+        monkeypatch.setattr(rt, "port_owner", _owner)
+        assert rt.health(cfg, "demo", 7999) == 0
+        assert calls == []
 
     def test_mint_token_reads_secret_and_posts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2026,8 +2311,68 @@ class TestRuntimeHelpers:
             def read(self) -> bytes:
                 return b'{"token":"tok-xyz"}'
 
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_POD)
         monkeypatch.setattr(rt, "loopback_urlopen", lambda *a, **k: _Resp())
         assert rt.mint_token(c, "demo", "1h") == "tok-xyz"
+
+    def test_mint_token_refuses_a_foreign_port_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Never hand this pod's secret to whatever happens to answer.
+
+        Sharper than the health misreport: mint sends the pod's own
+        ``.local_secret`` and returns a dashboard token for the responder, so
+        against a squatter it prints a URL that drives the wrong instance.
+        """
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(tmp_path))
+        c = PodConfig.load()
+        home = c.home_dir("demo")
+        home.mkdir(parents=True)
+        (home / ".local_secret").write_text("s3cret")
+
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_FOREIGN)
+        monkeypatch.setattr(
+            rt, "loopback_urlopen", lambda *a, **k: pytest.fail("must not dial a foreign listener")
+        )
+        with pytest.raises(rt.PodError, match="another process"):
+            rt.mint_token(c, "demo", "1h")
+
+    def test_mint_token_refuses_when_ownership_is_merely_unproven(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The credential path needs POSITIVE proof, unlike the health readout.
+
+        The two ways of being wrong are not symmetrical. Refusing a live pod costs
+        an error message; proceeding on an unproven port hands a different local
+        user -- who can bind 127.0.0.1 but cannot read this 0600 secret -- a
+        credential for this pod. ``_gateway_owns_port`` fails closed on the same
+        path for the same reason, including when the listener lookup is missing.
+        """
+        monkeypatch.setenv("KIROCREW_POD_ROOT", str(tmp_path))
+        c = PodConfig.load()
+        home = c.home_dir("demo")
+        home.mkdir(parents=True)
+        (home / ".local_secret").write_text("s3cret")
+
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_UNPROVEN)
+        monkeypatch.setattr(
+            rt,
+            "loopback_urlopen",
+            lambda *a, **k: pytest.fail("must not dial an unproven listener"),
+        )
+        with pytest.raises(rt.PodOwnershipUnproven, match="could not prove"):
+            rt.mint_token(c, "demo", "1h")
+
+    def test_the_unprovable_refusal_is_a_distinguishable_type(self) -> None:
+        """`pod up` treats the two refusals differently, so they must be tellable.
+
+        FOREIGN is positive knowledge that the port is somebody else's; UNPROVEN is
+        the absence of knowledge. Both withhold the secret, but only the first
+        means there is nothing truthful left for `pod up` to print.
+        """
+        assert issubclass(rt.PodOwnershipUnproven, rt.PodError)
+        # A FOREIGN refusal must NOT be catchable as the unprovable one.
+        assert not issubclass(rt.PodError, rt.PodOwnershipUnproven)
 
     def test_mint_token_no_secret_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2089,7 +2434,7 @@ class TestCliVerbs:
     ) -> None:
         monkeypatch.setattr(rt, "active_names", lambda c: {"alpha"})
         monkeypatch.setattr(rt, "derive_port", lambda c, n: 7811)
-        monkeypatch.setattr(rt, "health", lambda p: 403)
+        monkeypatch.setattr(rt, "health", lambda cfg, name, p: 403)
         pod_cli._ls(cfg, argparse.Namespace(json=False))
         assert "alpha" in capsys.readouterr().out
         pod_cli._ls(cfg, argparse.Namespace(json=True))
@@ -2099,7 +2444,7 @@ class TestCliVerbs:
     def test_status(self, cfg: PodConfig, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(rt, "derive_port", lambda c, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda c, n: True)
-        monkeypatch.setattr(rt, "health", lambda p: 403)
+        monkeypatch.setattr(rt, "health", lambda cfg, name, p: 403)
         pod_cli._status(cfg, argparse.Namespace(name="alpha", json=True))
         out = capsys.readouterr().out
         assert '"status": "up"' in out and '"health": 403' in out
@@ -2184,6 +2529,63 @@ class TestUpVerb:
         assert '"port": 7811' in out and '"token": "tok-9"' in out
         # _up must pin the resolved checkout for the systemd boot.
         assert rt.read_env_file(c, "demo").get("CHECKOUT", "").endswith("wts/demo")
+
+    def test_up_still_succeeds_when_ownership_cannot_be_proven(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """An lsof-less host must not boot the pod and then fail the command.
+
+        The credential is the last step of `up`, not its point. Dying here would
+        make `pod up` impossible on a POSIX host with no listener-lookup tool,
+        where ownership can never be proven -- a self-inflicted outage in place of
+        a hardened credential path. The secret still never reaches the wire: the
+        guard is inside mint_token, which raised before dialling.
+        """
+        c = self._prep(tmp_path, monkeypatch)
+        monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
+        monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
+        monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+
+        def _unprovable(cfg: object, n: object, ttl: object) -> str:
+            raise rt.PodOwnershipUnproven("could not prove which process holds :7811")
+
+        monkeypatch.setattr(rt, "mint_token", _unprovable)
+        monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
+        pod_cli._up(
+            c, argparse.Namespace(name="demo", json=True, seed="", ttl="2h", provision=False)
+        )
+        cap = capsys.readouterr()
+        out = cap.out
+        # Reports what it knows, withholds only the credential.
+        assert '"status": "up"' in out and '"port": 7811' in out
+        assert '"base_url": "http://127.0.0.1:7811"' in out
+        # The empty token IS the machine signal; the JSON shape gains no field for
+        # it, so the reason travels on stderr where a caller and a human both see
+        # it. A payload key with no consumer would be schema committed forever.
+        assert '"token": ""' in out
+        assert "token_withheld" not in out
+        assert "could not prove" in cap.err
+
+    def test_up_still_dies_on_a_foreign_port_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FOREIGN is positive knowledge, so there is nothing truthful left to print."""
+        c = self._prep(tmp_path, monkeypatch)
+        monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
+        monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
+        monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+
+        def _foreign(cfg: object, n: object, ttl: object) -> str:
+            raise rt.PodError("held by another process")
+
+        monkeypatch.setattr(rt, "mint_token", _foreign)
+        monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
+        with pytest.raises(SystemExit):
+            pod_cli._up(
+                c, argparse.Namespace(name="demo", json=True, seed="", ttl="2h", provision=False)
+            )
 
     def test_up_refuses_live_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         c = self._prep(tmp_path, monkeypatch)
@@ -2332,6 +2734,9 @@ class TestReviewRound1Fixes:
             captured["url"] = req.full_url  # type: ignore[attr-defined]
             return _Resp()
 
+        # Mint now requires positive ownership proof; this test is about the URL
+        # it builds, so grant the proof rather than exercising the guard here.
+        monkeypatch.setattr(rt, "port_owner", lambda *a, **k: rt.OWNER_POD)
         monkeypatch.setattr(rt, "loopback_urlopen", _urlopen)
         rt.mint_token(c, "demo", "1 h")
         assert "ttl=1%20h" in captured["url"]

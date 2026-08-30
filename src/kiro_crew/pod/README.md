@@ -93,6 +93,16 @@ stop-drain-verify path `down` uses, with liveness re-checked per name).
 `PORT=` is pinned in `~/.kiro/crew/pods/<name>.env`. `pod up` refuses if a derived
 port ever resolves to the live port.
 
+199 slots means a **collision between two pod names is ordinary**, and a pinned
+`PORT=` can land on one deliberately. Whoever binds first wins; the loser's gateway
+exits "address already in use" and its unit crash-loops behind `Restart=on-failure`.
+So reachability on the derived port is never evidence that THIS pod is up: `health`
+and the credential mint both require the process a `127.0.0.1` connect reaches to be
+the pod's own `MainPID` (`port_owner`), and `pod status` / `pod ls` print
+`foreign (port held by another instance)` when it is not. `pod up` names the
+conflict and points at `PORT=` rather than blaming the worktree build. Give a
+colliding pod its own `PORT=` to clear it.
+
 ## Configuration (`PodConfig`, all `KIROCREW_POD_*`-overridable)
 
 | env | default | meaning |

@@ -224,8 +224,20 @@ Relies on `kiro_crew.pod` subpackage (optional import — degrades gracefully if
 
 - `runtime.active_names(cfg)` — systemctl list (blocking, offloaded via `run_in_executor`)
 - `runtime.derive_port(cfg, name)` — cksum-based port derivation (blocking, offloaded)
-- `runtime.health(port, timeout)` — HTTP probe (blocking, offloaded)
-- `runtime.mint_token(cfg, name, ttl)` — token minting (blocking, offloaded)
+- `runtime.health(cfg, name, port, timeout)` — identity-gated HTTP probe (blocking,
+  offloaded). Takes the pod's NAME, not just its port, because a derived port is
+  routinely held by another pod or by the live gateway: `port_owner` requires the
+  process a `127.0.0.1` connect reaches to be this pod's own `MainPID`, and a
+  responder that is provably somebody else's returns `HEALTH_FOREIGN` (`-2`)
+  instead of its HTTP status. The fleet row treats that as unhealthy, since the
+  frontend's `health >= 200` test already excludes a negative value. There is
+  deliberately no bare-port variant to call — see `instances/run_marker`, which
+  states the rule ("no caller can mistake reachability for identity")
+- `runtime.mint_token(cfg, name, ttl)` — credential minting (blocking, offloaded).
+  Requires POSITIVE ownership proof and refuses when ownership is merely
+  unprovable, unlike `health`, which keeps its reading: this call sends the pod's
+  own `.local_secret`, so failing open would hand a credential to whatever
+  answered
 - `runtime.recent_journal(cfg, name, n)` — journalctl tail (blocking, offloaded)
 - `provision.has_venv(path)` / `provision.has_dist(path)` — filesystem checks (offloaded)
 
