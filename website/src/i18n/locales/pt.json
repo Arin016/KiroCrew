@@ -506,6 +506,8 @@
         "step_heading_many": "{{step}} · {{count}} itens",
         "load_failed": "Não foi possível carregar estes dados",
         "retry": "Tentar novamente",
+        "queue_migration_pending": "Nesta instalação, a fila de despacho ainda não foi migrada para um arquivo por repositório. Execute novamente o instalador do pipeline para migrá-la; tentar novamente por si só não vai resolver.",
+        "queue_migration_retry": "Tentar novamente após executar o instalador",
         "col_slot": "Sessão",
         "col_model": "Modelo",
         "col_turns": "Turnos",

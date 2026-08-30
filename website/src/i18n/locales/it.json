@@ -506,6 +506,8 @@
         "step_heading_many": "{{step}} · {{count}} elementi",
         "load_failed": "Impossibile caricare questi dati",
         "retry": "Riprova",
+        "queue_migration_pending": "Su questa installazione la coda di distribuzione non è ancora stata migrata a un file per repository. Esegui di nuovo l'installer della pipeline per migrarla: riprovare da solo non risolverà il problema.",
+        "queue_migration_retry": "Riprova dopo aver eseguito l'installer",
         "col_slot": "Sessione",
         "col_model": "Modello",
         "col_turns": "Turni",

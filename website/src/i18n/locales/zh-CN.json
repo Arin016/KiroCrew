@@ -492,6 +492,8 @@
         "session_retired": "此会话已结束，无法再打开",
         "load_failed": "无法加载此数据",
         "retry": "重试",
+        "queue_migration_pending": "此安装的分发队列尚未迁移为按仓库分文件。请重新运行流水线安装程序以完成迁移——仅重试无法解决此问题。",
+        "queue_migration_retry": "运行安装程序后重试",
         "col_slot": "会话",
         "col_model": "模型",
         "col_turns": "轮次",

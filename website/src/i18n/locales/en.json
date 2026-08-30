@@ -378,6 +378,8 @@
         "session_retired": "This session has been retired -- it can no longer be opened",
         "load_failed": "Could not load this data",
         "retry": "Retry",
+        "queue_migration_pending": "The dispatch queue hasn't been migrated to one file per repository on this install. Re-run the pipeline installer to migrate it — retrying alone won't clear this.",
+        "queue_migration_retry": "Retry after running the installer",
         "col_slot": "Session",
         "col_model": "Model",
         "col_turns": "Turns",
