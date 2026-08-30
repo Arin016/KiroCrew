@@ -53,10 +53,24 @@ import PrivacyChapter from './components/PrivacyChapter'
 import { OnboardingShellHost } from './components/OnboardingChapterShell'
 import { PREVIEW_EXPAND_EVENT } from './components/WebPreviewPanel'
 import { motion, AnimatePresence, useMotionValue } from 'framer-motion'
-import { animateDrawer, registerDrawerTargets, takeOverDrawer } from './hooks/useDrawerSwipe'
+import { animateDrawer, registerDrawerTargets, takeOverDrawer, safeAreaLeft } from './hooks/useDrawerSwipe'
 
 /** Mobile nav drawer travel: its 220px width + the 8px mx-2 inset + border. */
-const MOBILE_NAV_TRAVEL = 240
+/** Mobile nav drawer width. Shared with its travel below so the two cannot drift
+ *  — a travel wider than the panel spends the settle's tail moving something
+ *  already off the screen. */
+const MOBILE_NAV_WIDTH = 220
+/** The `mx-2` inset the panel sits at, so its left edge starts here. */
+const MOBILE_NAV_INSET = 8
+/** What it takes for the nav drawer to clear the screen: its own width, the
+ *  `mx-2` inset it starts at, a hair for the 1px border and `shadow-sm`'s
+ *  spread, and the safe-area inset — the panel is pinned at `left-safe`, so on a
+ *  notched phone in landscape it starts that far in and has to cross it too.
+ *  Was a flat 240, which both overshot the width by 9px (parking the panel
+ *  offscreen at 96% of the slide, so the rest of the settle moved nothing) and
+ *  ignored the inset (parking it with a strip still visible in landscape). */
+const mobileNavTravel = () =>
+  MOBILE_NAV_WIDTH + MOBILE_NAV_INSET + 3 + safeAreaLeft()
 import { usePersistedBool } from './hooks/usePersistedBool'
 import { isMacElectron, isWinElectron, isLinuxFramelessElectron } from './lib/electron'
 import { DndContext, closestCenter, DragOverlay, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
@@ -1576,7 +1590,7 @@ export default function App() {
   const mobileNavMounted = mobileNavPhase !== 'closed'
   const mobileNavPhaseRef = useRef(mobileNavPhase)
   mobileNavPhaseRef.current = mobileNavPhase
-  /** Panel offset in px: -MOBILE_NAV_TRAVEL offscreen, 0 at rest. */
+  /** Panel offset in px: -mobileNavTravel() offscreen, 0 at rest. */
   const mobileNavX = useMotionValue(0)
   const mobileNavPanelRef = useRef<HTMLElement | null>(null)
   const mobileNavScrimRef = useRef<HTMLDivElement | null>(null)
@@ -1585,11 +1599,11 @@ export default function App() {
   useEffect(() => registerDrawerTargets(mobileNavX, {
     panel: () => mobileNavPanelRef.current,
     scrim: () => mobileNavScrimRef.current,
-    travel: () => MOBILE_NAV_TRAVEL,
+    travel: mobileNavTravel,
   }), [mobileNavX])
   const openMobileNav = useCallback(() => {
     if (mobileNavPhaseRef.current === 'open') return
-    if (mobileNavPhaseRef.current === 'closed') mobileNavX.set(-MOBILE_NAV_TRAVEL)
+    if (mobileNavPhaseRef.current === 'closed') mobileNavX.set(-mobileNavTravel())
     mobileNavPhaseRef.current = 'open'
     setMobileNavPhase('open')
     animateDrawer(mobileNavX, 0)
@@ -1599,7 +1613,7 @@ export default function App() {
     mobileNavPhaseRef.current = 'closing'
     setMobileNavPhase('closing')
     takeOverDrawer(mobileNavX)
-    animateDrawer(mobileNavX, -MOBILE_NAV_TRAVEL, () => {
+    animateDrawer(mobileNavX, -mobileNavTravel(), () => {
       mobileNavPhaseRef.current = 'closed'
       setMobileNavPhase('closed')
     })
@@ -3666,7 +3680,7 @@ export default function App() {
               <nav
                 key="mobile-nav-drawer"
                 ref={mobileNavPanelRef}
-                style={{ width: 220, transform: `translate3d(${mobileNavX.get()}px, 0, 0)` }}
+                style={{ width: MOBILE_NAV_WIDTH, transform: `translate3d(${mobileNavX.get()}px, 0, 0)` }}
                 className="bg-bg-elevated border border-border rounded-xl flex flex-col mx-2 mt-2 mb-2 shadow-sm z-50 overflow-hidden fixed top-safe left-safe bottom-safe"
                 role="navigation"
                 aria-label={i18nT('app.main_navigation')}

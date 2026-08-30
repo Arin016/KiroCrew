@@ -119,12 +119,16 @@ describe('streaming flushes vs the drawer slide', () => {
     expect(streamingFlushHoldMs()).toBe(0)
     const done = vi.fn()
     animateDrawer(motionValue(-390), -390, done) // zero distance: arrives immediately
-    // The hold opens with the animation…
-    expect(streamingFlushHoldMs()).toBeGreaterThan(300)
+    // The hold opens with the animation. Not asserted against a fixed number
+    // here: a settle's duration scales with the distance it has to cover, and
+    // this one has none, so it takes the floor — what matters is that the hold
+    // is open at all and that arrival closes it.
+    expect(streamingFlushHoldMs()).toBeGreaterThan(0)
     // …and completion releases it, so a finished slide leaves no latency behind.
     await vi.waitFor(() => expect(done).toHaveBeenCalled())
     expect(streamingFlushHoldMs()).toBe(0)
 
+    // A real distance gets a real duration, and the hold covers it.
     const stop = animateDrawer(motionValue(-390), 0)
     expect(streamingFlushHoldMs()).toBeGreaterThan(300)
     stop()
