@@ -2,7 +2,7 @@
  * Dev Fleet — worktree management page ported to KiroCrew SPA.
  * Manages git worktrees, pod instances, syncing, pruning, and rebasing.
  */
-import { useState, useRef, useCallback, useEffect, type CSSProperties, type ReactNode } from 'react'
+import { useState, useRef, useCallback, useEffect, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Card, CardTitle, Btn, Checkbox, StatCard, EmptyState, ContentSkeleton, PageHeader, SearchInput, Badge } from '../components/ui'
@@ -12,6 +12,7 @@ import Modal from '../components/Modal'
 import Clickable from '../components/Clickable'
 import { useNavigate } from 'react-router-dom'
 import { useDocumentImeLatch } from '../hooks/useImeGuard'
+import { useDialogFocusTrap } from '../hooks/useDialogFocusTrap'
 import { handleMenuKeydown } from '../hooks/useMenuKeyboard'
 import { useAppDispatch } from '../store'
 import { addNotification } from '../store/notificationsSlice'
@@ -371,11 +372,13 @@ function MenuBtn({ items }: { items: (MenuItemDef | null)[] }) {
   // reasoning about the gaps a filtered/disabled mix would otherwise leave.
   const itemRefs = useRef<(HTMLDivElement | null)[]>([])
   const visible = items.filter(Boolean) as MenuItemDef[]
-  // Composition latch shared with the sibling ConfirmBtn trap: a Tab or
-  // Escape the IME owns is choosing/cancelling a candidate, not navigating
-  // the menu (native-event contract in useImeGuard.ts). Menu items are
-  // non-editable today, so no composition can start on them — the latch pins
-  // that this stays safe if the menu ever grows a focusable text field.
+  // Composition latch for the Escape branch and the shared menu contract
+  // below: a Tab or Escape the IME owns is choosing/cancelling a candidate,
+  // not navigating the menu (native-event contract in useImeGuard.ts). Menu
+  // items are non-editable today, so no composition can start on them — the
+  // latch pins that this stays safe if the menu ever grows a focusable text
+  // field. (The sibling ConfirmBtn popover reaches the same guard through
+  // `useDialogFocusTrap`, which carries its own latch.)
   const imeLatch = useDocumentImeLatch(open)
 
   // Explicit dismissal (Escape, an item click) restores focus to the trigger.
@@ -410,7 +413,7 @@ function MenuBtn({ items }: { items: (MenuItemDef | null)[] }) {
       if (e.key === 'Escape') {
         // An Escape the IME owns is cancelling a candidate, not the menu —
         // and close() also yanks focus back to the trigger. Same claim, same
-        // reason as the sibling ConfirmBtn trap.
+        // reason as the dialog contract's own Escape branch.
         if (!imeLatch.claimKey(e)) return
         close()
         return
@@ -515,6 +518,57 @@ interface ConfirmBtnProps { title: string; desc: string; confirmLabel?: string; 
 // more lines than assumed here.
 const CONFIRM_W = 264
 const CONFIRM_EST_H = 180
+
+interface ConfirmPopoverProps {
+  popRef: RefObject<HTMLDivElement>
+  title: string
+  desc: string
+  confirmLabel?: string
+  posStyle: CSSProperties
+  openUp: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}
+/**
+ * The popover half of ConfirmBtn, split into a component of its own so it
+ * MOUNTS when the popover opens. That is what makes the shared dialog contract
+ * usable here: `useDialogFocusTrap`'s focus effects key on MOUNT, and
+ * ConfirmBtn itself is a persistent component — a hook call up there would run
+ * the focus effect once at page load against a null container.
+ *
+ * The trap owns Escape, the boundary-Tab ring, and the IME latch that guards
+ * both, so this surface no longer spells its own (#5542). Two pieces stay with
+ * the host because they are the host's own semantics: WHERE the popover sits
+ * (portal + flip geometry) and WHAT dismissal means (`onCancel` returns focus
+ * to the trigger).
+ */
+function ConfirmPopover({ popRef, title, desc, confirmLabel, posStyle, openUp, onCancel, onConfirm }: ConfirmPopoverProps) {
+  // `restoreFocus: false` — the host's `close()` already returns focus to the
+  // trigger, and for a trigger-anchored popover that is the more correct of the
+  // two: the hook captures `document.activeElement`, which on Safari is NOT the
+  // clicked trigger, and its restore is unconditional where dismissal by an
+  // outside click must leave focus where the click put it (#2533). The hook's
+  // own note carries the full reasoning.
+  useDialogFocusTrap(popRef, onCancel, { restoreFocus: false })
+  return (
+    <div
+      ref={popRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      data-placement={openUp ? 'up' : 'down'}
+      style={{ ...posStyle, zIndex: 4000, overflowY: 'auto', background: 'var(--card, #16161a)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', width: CONFIRM_W, boxShadow: '0 8px 24px rgba(0,0,0,0.45)', textAlign: 'left' as const } as CSSProperties}
+    >
+      <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>{title}</div>
+      <div style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 9 }}>{desc}</div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' } as CSSProperties}>
+        <Btn onClick={onCancel}>{i18nT('pages.devFleetPage.cancel')}</Btn>
+        <Btn primary onClick={onConfirm}>{confirmLabel || i18nT('pages.devFleetPage.start')}</Btn>
+      </div>
+    </div>
+  )
+}
+
 function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: ConfirmBtnProps) {
   const [open, setOpen] = useState(false)
   // Trigger rect captured on open; drives the portaled popover's fixed
@@ -524,12 +578,6 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
   const [rect, setRect] = useState<DOMRect | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
-  const cancelRef = useRef<HTMLButtonElement>(null)
-  const confirmRef = useRef<HTMLButtonElement>(null)
-  // Shared IME latch for the boundary-Tab trap below (see the comment on the
-  // Tab branches): the trap listens at document capture, so it receives
-  // NATIVE KeyboardEvents that the synthetic-only guard cannot consume.
-  const imeLatch = useDocumentImeLatch(open)
 
   const close = useCallback(() => {
     setOpen(false)
@@ -541,51 +589,25 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
     // Portaled to <body>, so the popover is not a DOM descendant of the
     // trigger — the outside-click guard must exclude BOTH, or every click
     // inside the popover (including Cancel/Start) would close it first.
+    // Closing this way deliberately does NOT move focus: the browser routes
+    // focus per the click target, so the user is already elsewhere by their
+    // own action (#2533).
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node
       if (!triggerRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        // An Escape the IME owns is cancelling a candidate, not the popover —
-        // and `close()` also yanks focus back to the trigger, the same harm
-        // as the Tab wrap below. Same claim, same reason.
-        if (!imeLatch.claimKey(e)) return
-        close()
-      } else if (e.key === 'Tab' && e.shiftKey && document.activeElement === cancelRef.current) {
-        // A boundary Tab the IME owns must not cycle focus — the user is
-        // choosing a candidate, not leaving the field. `claimKey` owns the
-        // whole decline (native-event contract in useImeGuard.ts) and must
-        // run before the preventDefault() and focus move. Both ring
-        // boundaries are buttons today, so no composition can start on them —
-        // the guard pins that this stays safe if the popover ever grows a
-        // text field. Mid-popover Tabs fall through: they are the browser's
-        // to move, so they are also not the trap's to claim.
-        if (!imeLatch.claimKey(e)) return
-        e.preventDefault()
-        confirmRef.current?.focus()
-      } else if (e.key === 'Tab' && !e.shiftKey && document.activeElement === confirmRef.current) {
-        if (!imeLatch.claimKey(e)) return
-        e.preventDefault()
-        cancelRef.current?.focus()
-      }
     }
     // position:fixed desyncs from any scrolling ancestor — close on scroll
     // (capture phase catches nested scrollers) and on resize.
     const onScrollOrResize = () => setOpen(false)
     document.addEventListener('mousedown', onDown)
-    // Keep the focus boundary intact even when an action button handles keys.
-    document.addEventListener('keydown', onKey, true)
     window.addEventListener('scroll', onScrollOrResize, true)
     window.addEventListener('resize', onScrollOrResize)
-    cancelRef.current?.focus()
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey, true)
       window.removeEventListener('scroll', onScrollOrResize, true)
       window.removeEventListener('resize', onScrollOrResize)
     }
-  }, [close, open, imeLatch])
+  }, [open])
 
   const toggle = () => {
     if (!open && triggerRef.current) setRect(triggerRef.current.getBoundingClientRect())
@@ -615,21 +637,16 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
     <span style={{ display: 'inline-flex' } as CSSProperties}>
       <Btn ref={triggerRef} {...(btn || {})} onClick={toggle} aria-haspopup="dialog" aria-expanded={open}>{children}</Btn>
       {open && rect && createPortal(
-        <div
-          ref={popRef}
-          role="dialog"
-          aria-modal="true"
-          aria-label={title}
-          data-placement={openUp ? 'up' : 'down'}
-          style={{ ...posStyle, zIndex: 4000, overflowY: 'auto', background: 'var(--card, #16161a)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', width: CONFIRM_W, boxShadow: '0 8px 24px rgba(0,0,0,0.45)', textAlign: 'left' as const } as CSSProperties}
-        >
-          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>{title}</div>
-          <div style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 9 }}>{desc}</div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' } as CSSProperties}>
-            <Btn ref={cancelRef} onClick={close}>{i18nT('pages.devFleetPage.cancel')}</Btn>
-            <Btn ref={confirmRef} primary onClick={() => { close(); onConfirm() }}>{confirmLabel || i18nT('pages.devFleetPage.start')}</Btn>
-          </div>
-        </div>,
+        <ConfirmPopover
+          popRef={popRef}
+          title={title}
+          desc={desc}
+          confirmLabel={confirmLabel}
+          posStyle={posStyle}
+          openUp={openUp}
+          onCancel={close}
+          onConfirm={() => { close(); onConfirm() }}
+        />,
         document.body,
       )}
     </span>

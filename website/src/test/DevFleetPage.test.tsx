@@ -1084,11 +1084,15 @@ describe('DevFleetPage', () => {
   // The confirm popover used to be position:absolute inside the row, so the
   // Worktrees Card's `.card-glow { overflow: hidden }` clipped it. It is now
   // portaled to <body> with fixed positioning, like the row-actions menu.
-  async function openPullBuildConfirm() {
+  async function openPullBuildConfirm({ focusTrigger = false } = {}) {
     mockFleet(FLEET_MENU)
     renderPage()
     await waitFor(() => expect(screen.getByText('feature-x')).toBeInTheDocument())
     const trigger = screen.getByText('Pull+Build').closest('button') as HTMLButtonElement
+    // A real browser focuses a clicked button; the test DOM does not. Only a
+    // test that depends on that (the focus-return policy below) needs it, so
+    // it stays opt-in rather than papering over the difference everywhere.
+    if (focusTrigger) trigger.focus()
     fireEvent.click(trigger)
     return { trigger, pop: await screen.findByRole('dialog') }
   }
@@ -1144,6 +1148,18 @@ describe('DevFleetPage', () => {
     fireEvent.click(cancel)
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(trigger).toHaveFocus()
+  })
+
+  it('outside-click dismissal leaves focus where the click put it, not back on the trigger', async () => {
+    // The popover now takes Escape, the Tab ring and the IME latch from the
+    // shared dialog contract, but NOT its focus-return half: that restores on
+    // unmount unconditionally, and an outside click must leave focus where the
+    // browser routed it (#2533). Turn `restoreFocus` back on and this goes red.
+    const { trigger, pop } = await openPullBuildConfirm({ focusTrigger: true })
+    expect(within(pop).getByText('Cancel')).toHaveFocus()
+    fireEvent.mouseDown(document.body)
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(trigger).not.toHaveFocus()
   })
 
   it('declines a boundary Tab that belongs to an IME composition', async () => {
