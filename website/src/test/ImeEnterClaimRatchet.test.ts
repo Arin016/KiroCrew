@@ -246,14 +246,27 @@ function scanUnguardedEnterBlurCommits(lines: string[]): number[] {
  */
 const TAB_BRANCH = /key === 'Tab'|key !== 'Tab'/
 const FOCUS_MOVE = /\.focus\(/
-const TAB_CLAIM = /\bclaimKey\(/
+// Either flavour of the claim clears the rule: `claimKey` for a native
+// document/window listener, `claimSyntheticKey` for a React handler that also
+// needs React's own propagation flag stopped. What the rule is about is that a
+// claim RUNS before the move, not which event world the branch lives in.
+const TAB_CLAIM = /\bclaim(?:Synthetic)?Key\(/
 const TRAP_WINDOW = 25
 
-function scanUnguardedTabFocusTraps(lines: string[]): number[] {
-  const code = lines.map(l => {
+/**
+ * Blank out comment lines so a rule cannot be laundered by mentioning its own
+ * remedy in prose — and so the prose that DOCUMENTS a defect shape (this file,
+ * the hook, the tests that pin the seam) is not itself an offender.
+ */
+function codeLines(lines: string[]): string[] {
+  return lines.map(l => {
     const t = l.trim()
     return t.startsWith('//') || t.startsWith('*') || t.startsWith('/*') ? '' : l
   })
+}
+
+function scanUnguardedTabFocusTraps(lines: string[]): number[] {
+  const code = codeLines(lines)
   const hits: number[] = []
   code.forEach((line, i) => {
     if (!TAB_BRANCH.test(line)) return
@@ -267,6 +280,36 @@ function scanUnguardedTabFocusTraps(lines: string[]): number[] {
     // and the move: one guarded branch must not clear an unguarded sibling.
     const span = code.slice(i, i + focusAt + 1)
     if (!span.some(l => TAB_CLAIM.test(l))) hits.push(i + 1)
+  })
+  return hits
+}
+
+/**
+ * The synthetic half of a claim, hand-spelled.
+ *
+ * `claimKey` takes a NATIVE event, so a React `onKeyDown` that claims through
+ * it has to reach into `.nativeEvent` — and then remember the second half
+ * itself, because the native `stopPropagation()` does not set React's own
+ * propagation flag and React walks that flag when dispatching to component
+ * ancestors. So the spelling is a PAIR, and a pair is exactly what the rest of
+ * this file exists to stop: four sites carried it (two fullscreen panels, a
+ * sidebar column popover, and Modal's key isolation), and any one of them
+ * could lose a half in a later edit with nothing to catch it.
+ *
+ * `claimSyntheticKey(e)` owns both halves, so the pair has one place to live.
+ * The rule is the reach itself — a `claimKey(` whose argument is a
+ * `.nativeEvent` — which is structural rather than a list of pardoned files:
+ * a NATIVE listener passes its event straight through and is out of scope by
+ * construction. The one sanctioned `.nativeEvent` claim is the implementation
+ * of `claimSyntheticKey` inside the hook, which the tree scan skips the same
+ * way the raw-flag rule above skips it.
+ */
+const HAND_SPELLED_SYNTHETIC_CLAIM = /\bclaimKey\([^)]*\.nativeEvent/
+
+function scanHandSpelledSyntheticClaims(lines: string[]): number[] {
+  const hits: number[] = []
+  codeLines(lines).forEach((line, i) => {
+    if (HAND_SPELLED_SYNTHETIC_CLAIM.test(line)) hits.push(i + 1)
   })
   return hits
 }
@@ -357,8 +400,9 @@ describe('IME Enter claim ratchet', () => {
     }
     // An entry here re-aims a Tab it never checked. Route the branch through
     // the shared latch: `useDocumentImeLatch(...).claimKey(e)` for native
-    // document/window listeners, `useImeGuard().claimKey(e)` for synthetic
-    // handlers — the claim runs BEFORE the preventDefault() and focus move.
+    // document/window listeners, `.claimSyntheticKey(e)` (or
+    // `useImeGuard().claimKey(e)`) for React handlers — the claim runs BEFORE
+    // the preventDefault() and focus move.
     expect(offenders).toEqual([])
   })
 
@@ -432,6 +476,25 @@ describe('IME Enter claim ratchet', () => {
     }
     // Read the flag through `ime.isComposing(e)` instead: the hook layers the tracked
     // latch over it, which is the half of the guard a raw read cannot have.
+    expect(offenders).toEqual([])
+  })
+
+  it('never hand-spells the synthetic half of a claim', () => {
+    // A React handler that claims through the native `claimKey` has to reach
+    // into `.nativeEvent` and then stop React's own propagation flag itself —
+    // two halves, one call site, the drift this file exists to prevent. Four
+    // sites carried the pair before `claimSyntheticKey` owned it (#5542).
+    const offenders: string[] = []
+    for (const rel of sourceFiles()) {
+      // The hook is where the pair legitimately lives: `claimSyntheticKey` IS
+      // the one `.nativeEvent` claim, the same exemption the raw-flag rule
+      // above takes for the same reason.
+      if (rel === 'hooks/useImeGuard.ts') continue
+      const hits = scanHandSpelledSyntheticClaims(readFileSync(join(SRC, rel), 'utf8').split('\n'))
+      offenders.push(...hits.map(n => `${rel}:${n}`))
+    }
+    // Claim with `latch.claimSyntheticKey(e)` instead — it consumes the native
+    // event AND stops the synthetic flag, so neither half can be forgotten.
     expect(offenders).toEqual([])
   })
 
@@ -716,6 +779,17 @@ describe('ratchet rule fixtures', () => {
           e.preventDefault(); onOpenChange(false); btnRef?.current?.focus()
         }
       }}`))).toHaveLength(0)
+    // A React handler on the dialog panel claims the same key through the
+    // latch's synthetic twin, which also stops React's propagation flag. Both
+    // spellings clear the rule — the point is a claim before the move.
+    expect(scanUnguardedTabFocusTraps(jsx(`
+      onKeyDown={e => {
+        if (e.key !== 'Tab') return
+        if (!wrapsBackward && !wrapsForward) return
+        if (!fsImeLatch.claimSyntheticKey(e)) return
+        e.preventDefault()
+        ;(wrapsBackward ? last : first).focus()
+      }}`))).toHaveLength(0)
     // Scoped to a FOCUS MOVE: a Tab branch that acts through state (accepting
     // a suggestion, indenting a list item) has no focus call to anchor on and
     // is out of scope by design — fail open rather than mis-flag.
@@ -739,5 +813,36 @@ describe('ratchet rule fixtures', () => {
           confirmRef.current?.focus()
         }
       }`))).toHaveLength(1)
+  })
+
+  it('flags a hand-spelled synthetic claim but not a native one or the unified call', () => {
+    // The exact pair the four sites shipped: a native claim reached through
+    // `.nativeEvent`, with the synthetic half remembered by the caller.
+    expect(scanHandSpelledSyntheticClaims(jsx(
+      '          if (!fsImeLatch.claimKey(e.nativeEvent)) { e.stopPropagation(); return }',
+    ))).toHaveLength(1)
+    // Dropping the caller-side half is the drift the rule is really about, and
+    // it must flag too — otherwise the rule would only catch the CORRECT
+    // spelling of a shape it wants gone.
+    expect(scanHandSpelledSyntheticClaims(jsx(
+      '      if (!imeLatch.claimKey(e.nativeEvent)) return',
+    ))).toHaveLength(1)
+    // Modal's shape: the pair split across a condition with no early return.
+    expect(scanHandSpelledSyntheticClaims(jsx(
+      '      if (!imeLatch.claimKey(e.nativeEvent)) e.stopPropagation()',
+    ))).toHaveLength(1)
+    // The remedy.
+    expect(scanHandSpelledSyntheticClaims(jsx(
+      '          if (!fsImeLatch.claimSyntheticKey(e)) return',
+    ))).toHaveLength(0)
+    // A NATIVE listener passes its own event straight through — the other
+    // flavour of the same latch, and out of scope by construction.
+    expect(scanHandSpelledSyntheticClaims(jsx(
+      '        if (!imeLatch.claimKey(e)) return',
+    ))).toHaveLength(0)
+    // Prose describing the defect is not the defect.
+    expect(scanHandSpelledSyntheticClaims(jsx(
+      '  // sites used to spell claimKey(e.nativeEvent) plus a caller-side stop',
+    ))).toHaveLength(0)
   })
 })

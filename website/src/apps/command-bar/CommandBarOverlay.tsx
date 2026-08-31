@@ -318,7 +318,7 @@ export default function CommandBarOverlay({
   // `aria-modal` is a promise that Tab cannot reach the page behind the dialog, so
   // the trap has to be real. Escape is left to the input's own handler, which needs
   // it to pop a scope before it closes the bar.
-  useDialogFocusTrap(dialogRef, onClose, true, false)
+  useDialogFocusTrap(dialogRef, onClose, { handleEscape: false })
   // Constructing the sessions engine is just memoized closures — it issues no
   // request until `search()` is called, and only the sessions VIEW calls it. That
   // call site, not the construction, is what the root must never reach.
