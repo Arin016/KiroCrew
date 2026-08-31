@@ -256,8 +256,10 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "Stop another session's in-flight turn — the same thing as pressing Stop "
                 "in that tab. Use it when a peer session is working on something you now "
                 "know is wrong or already done, and letting it finish would waste the run "
-                "or make a conflicting change. The first call cancels cooperatively; "
-                "calling again while that is still pending escalates to a hard kill. "
+                "or make a conflicting change. The stop is cooperative and safe to "
+                "re-send: a repeat within two minutes reports that the earlier stop is "
+                "still in progress instead of escalating to a hard kill, so retrying a "
+                "call that timed out cannot discard the target's queued messages. "
                 "A stop card appears in the "
                 "target's transcript so the person reading it sees what happened. Stopping "
                 "discards the turn's work, so read the session first when you are not sure "
@@ -884,8 +886,14 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         target = resp.get("target", args["target"])
         info = resp.get("info")
         if info:
-            # The target was not running (or a stop was already in flight) — say
-            # so rather than implying a turn was cancelled.
+            # Two different facts share this reply and must not read alike. A
+            # target that was never running has nothing to stop; one whose
+            # cooperative cancel is still in flight IS stopping, and after #5074 a
+            # re-sent stop lands there routinely — telling that caller "nothing to
+            # stop" would report the opposite of what happened and invite it to
+            # act as though the target were still free-running.
+            if resp.get("already_stopping"):
+                return f"\u2139\ufe0f `{target}`: {info} — the earlier stop still stands."
             return f"\u2139\ufe0f `{target}`: {info} — nothing to stop."
         return f"\U0001f6d1 Stop sent to `{target}`. Its transcript now shows the stop card."
 

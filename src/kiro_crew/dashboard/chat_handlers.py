@@ -2631,6 +2631,7 @@ async def stop_slot_turn(
     force: bool = False,
     source: str = "dashboard",
     cancel_key: str = "",
+    escalate: bool = True,
 ) -> dict[str, Any]:
     """Stop the slot's turn: cooperative cancel, hard kill on a second call.
 
@@ -2638,6 +2639,16 @@ async def stop_slot_turn(
     escalates to a hard kill, regardless of *force* — the caller's view of the
     stop state can lag the backend's, so the backend's own ``_stop_state`` is
     what decides.
+
+    *escalate* is how a caller says its second call may not be a second
+    DECISION. It defaults to True because that is true of the Stop button this
+    function was written for: a person pressing again has watched the cooperative
+    stop fail to take. It is not true of an RPC, where a client that timed out
+    re-sends the same request — so ``session_control.stop_target`` passes False
+    for a call it cannot distinguish from a retry, and the repeat falls through to
+    the no-op below instead of discarding the target's queue (issue #5074). It
+    withholds only the ESCALATION: a stop that finds the slot running still stops
+    it either way.
 
     Inserts a ``stop_event`` card into the slot transcript so whoever is
     watching the session sees the stop, and returns the JSON body the route
@@ -2659,7 +2670,12 @@ async def stop_slot_turn(
     # from the WS-echoed stop_state, which may lag behind the actual state on a
     # slow connection. The backend's own _stop_state is the authoritative
     # "already soft_pending" signal, so a second press always means "kill it".
-    if slot._stop_state == "soft_pending":
+    #
+    # Unless the caller told us this call may not be a second press at all
+    # (*escalate*): a re-sent RPC carries no new intent, and the caller is the
+    # only layer that can know whether its second call was a decision or a
+    # timeout retry. A withheld escalation falls into the no-op branch below.
+    if escalate and slot._stop_state == "soft_pending":
         slot._stop_state = "killing"
         # Survives turn teardown, which resets _stop_state to "idle". Without
         # it a cooperative ack from the first press could still land and label
@@ -2717,6 +2733,13 @@ async def stop_slot_turn(
             _info = "not running"
         else:
             _info = "stop already in progress"
+        _meta: dict[str, Any] = {"slot": name, "via": source, "reason": _info}
+        if not escalate and slot._stop_state == "soft_pending":
+            # The branch a de-duplicated retry lands on. Recorded so the audit
+            # shows an escalation was WITHHELD rather than never asked for --
+            # #5074's "no record that a retry rather than a decision caused it",
+            # read from the other side: the absorbed retry has to be visible too.
+            _meta["escalation_withheld"] = True
         sel().log_tool_invocation(
             session_key=_history_key_for(name),
             agent=getattr(slot, "agent", "") or "kirocrew",
@@ -2724,9 +2747,15 @@ async def stop_slot_turn(
             tool_name="dashboard_stop",
             tool_kind="command",
             outcome="noop",
-            metadata={"slot": name, "via": source, "reason": _info},
+            metadata=_meta,
         )
-        return {"ok": True, "info": _info}
+        # ``already_stopping`` separates the two facts this branch merges: a
+        # target that was never running has nothing to stop, while one whose
+        # cooperative cancel is still in flight IS stopping. Both answer
+        # ``info``, and a caller that renders them alike tells the second one the
+        # opposite of what happened — which the de-duplicated retry above now
+        # reaches routinely.
+        return {"ok": True, "info": _info, "already_stopping": bool(slot.running)}
 
     # First press: soft stop
     slot._stop_state = "soft_pending"
