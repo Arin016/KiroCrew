@@ -507,6 +507,8 @@
         "step_heading_many": "{{step}} · {{count}} éléments",
         "load_failed": "Impossible de charger ces données",
         "retry": "Réessayer",
+        "queue_migration_pending": "Sur cette installation, la file de répartition n'a pas encore été migrée vers un fichier par dépôt. Relancez l'installateur du pipeline pour la migrer ; réessayer seul ne suffira pas.",
+        "queue_migration_retry": "Réessayer après avoir lancé l'installateur",
         "col_slot": "Session",
         "col_model": "Modèle",
         "col_turns": "Tours",

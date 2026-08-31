@@ -500,6 +500,8 @@
         "session_retired": "Diese Sitzung wurde archiviert -- sie kann nicht mehr geöffnet werden",
         "load_failed": "Diese Daten konnten nicht geladen werden",
         "retry": "Erneut versuchen",
+        "queue_migration_pending": "Die Dispatch-Warteschlange wurde auf dieser Installation noch nicht auf eine Datei pro Repository umgestellt. Führen Sie den Pipeline-Installer erneut aus, um sie zu migrieren — erneutes Versuchen allein behebt dies nicht.",
+        "queue_migration_retry": "Nach Ausführen des Installers erneut versuchen",
         "col_slot": "Sitzung",
         "col_model": "Modell",
         "col_turns": "Züge",

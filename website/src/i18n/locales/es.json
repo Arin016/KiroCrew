@@ -507,6 +507,8 @@
         "step_heading_many": "{{step}} · {{count}} elementos",
         "load_failed": "No se pudieron cargar estos datos",
         "retry": "Reintentar",
+        "queue_migration_pending": "En esta instalación, la cola de despacho aún no se ha migrado a un archivo por repositorio. Vuelve a ejecutar el instalador de la canalización para migrarla; reintentar por sí solo no lo resolverá.",
+        "queue_migration_retry": "Reintentar tras ejecutar el instalador",
         "col_slot": "Sesión",
         "col_model": "Modelo",
         "col_turns": "Turnos",
