@@ -66,6 +66,7 @@ from kiro_crew.platform.update_layout import release_channel as _release_channel
 from kiro_crew.platform.update_layout import set_release_channel, wheel_update_command
 from kiro_crew.platform.update_provider import CommandProvider, resolve_provider
 from kiro_crew.platform_compat import reexec_python_module
+from kiro_crew.safety_override import flush_breadcrumb_writes
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -1442,6 +1443,16 @@ async def _restart_gateway(state: DashboardState) -> bool:
             logger.debug("Session cleanup before restart failed", exc_info=True)
         sys.stdout.flush()
         sys.stderr.flush()
+        # The safety-override record publishes on a worker thread (its callers sit
+        # on the event loop), and os.execv replaces this process image without
+        # draining that worker -- so a grant activated moments before a restart
+        # would lose the very notice this restart is what makes necessary (found
+        # in review). Offloaded so a stalled write cannot block the loop, and
+        # bounded, so a restart is never held up by it.
+        try:
+            await asyncio.to_thread(flush_breadcrumb_writes, 2.0)
+        except Exception:
+            logger.debug("Breadcrumb flush before restart failed", exc_info=True)
         await asyncio.sleep(0.5)
         reexec_python_module("kiro_crew", sys.argv[1:], executable=exe)
         return True

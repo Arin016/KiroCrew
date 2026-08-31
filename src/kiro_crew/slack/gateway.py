@@ -236,7 +236,7 @@ from kiro_crew.platform.update_governance import (
     update_blocked_reason,
 )
 from kiro_crew.providers.base import LLMEvent
-from kiro_crew.safety_override import safety_override
+from kiro_crew.safety_override import flush_breadcrumb_writes, safety_override
 from kiro_crew.sandbox import ensure_agents_slice_limits, warm_backend
 from kiro_crew.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -8776,6 +8776,15 @@ class GatewayOrchestrator:
                 )
         if self.sessions:
             await self.sessions.close_all()
+        # Same reason as the dashboard restart path: the safety-override record
+        # publishes on a worker thread, and os.execv does not drain it, so a
+        # grant activated just before a self-update would lose its notice
+        # (found in review). Offloaded and bounded so a stalled write can
+        # neither block the loop nor hold up the restart.
+        try:
+            await asyncio.to_thread(flush_breadcrumb_writes, 2.0)
+        except Exception:
+            logger.debug("Breadcrumb flush before update restart failed", exc_info=True)
         platform_compat.reexec_python_module("kiro_crew", sys.argv[1:])
 
     async def _check_for_updates_legacy(self) -> None:
@@ -9681,6 +9690,13 @@ class GatewayOrchestrator:
                     )
             if self.sessions:
                 await self.sessions.close_all()
+            # Drain the safety-override record before exec, for the same reason
+            # the other restart paths do: os.execv does not drain the publish
+            # worker, so a grant activated just before this would lose its notice.
+            try:
+                await asyncio.to_thread(flush_breadcrumb_writes, 2.0)
+            except Exception:
+                logger.debug("Breadcrumb flush before auto-update restart failed", exc_info=True)
             # Use -m kiro_crew rather than sys.argv[0] so the restart resolves
             # the freshly reinstalled entry point regardless of how the
             # original process was launched.
@@ -9902,6 +9918,12 @@ class GatewayOrchestrator:
                 )
         if self.sessions:
             await self.sessions.close_all()
+        # Same drain as the other restart paths: exec does not empty the publish
+        # worker, and a just-activated grant would otherwise lose its notice.
+        try:
+            await asyncio.to_thread(flush_breadcrumb_writes, 2.0)
+        except Exception:
+            logger.debug("Breadcrumb flush before install restart failed", exc_info=True)
         # Restart into the freshly-installed version.
         platform_compat.reexec_python_module("kiro_crew", sys.argv[1:])
 
