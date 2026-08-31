@@ -2822,15 +2822,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "{{name}}-এর আউটপুট এখানে দেখা যাবে।",
+        "cancel": "বাতিল",
         "chatEmpty": "{{name}}-কে এখনও কিছু পাঠানো হয়নি।",
         "diagramFrameTitle": "{{name}}-এর চিত্র",
+        "edit": "এই আউটপুট সম্পাদনা করুন",
+        "edited": "সম্পাদিত",
+        "editorLabel": "{{name}}-এর আউটপুট, সম্পাদনাযোগ্য",
         "listeningHint": "মিটিং শুনছে",
         "messagePlaceholder": "{{name}}-কে বার্তা…",
         "mute": "{{name}}-কে নিঃশব্দ করুন",
         "mutedHint": "মিটিং শুনছে না",
+        "revert": "আমার সম্পাদনা বাদ দিন",
+        "revertHint": "আমার সম্পাদনা বাদ দিয়ে {{name}} যা লিখেছে তা দেখান",
+        "save": "সংরক্ষণ করুন",
         "send": "পাঠান",
         "showChat": "চ্যাট দেখান",
         "showOutput": "আউটপুট দেখান",
+        "staleEdit": "আপনি এটি সম্পাদনা করার পর {{name}} আরও লিখেছে। আপনার সংস্করণ দেখানো হচ্ছে; ওর সংস্করণ দেখতে নিজের সম্পাদনা বাদ দিন।",
         "unmute": "{{name}}-এর নিঃশব্দ তুলে দিন"
       },
       "broadcastBar": {
@@ -2970,7 +2978,9 @@
         "taskAddFailed": "সেই করণীয়টি যোগ করা গেল না।",
         "taskFileFailed": "সেই করণীয়টি নথিবদ্ধ করা গেল না।",
         "taskFiled": "করণীয় নথিবদ্ধ হয়েছে।",
-        "untitled": "শিরোনামহীন মিটিং"
+        "untitled": "শিরোনামহীন মিটিং",
+        "minutesSaveFailed": "আপনার সম্পাদনা সংরক্ষণ করা গেল না।",
+        "minutesRevertFailed": "আপনার সম্পাদনা বাদ দেওয়া গেল না।"
       },
       "settings": {
         "addTerm": "যোগ করুন",

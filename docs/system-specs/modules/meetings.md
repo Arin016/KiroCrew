@@ -60,6 +60,8 @@ POST   /meetings/{id}/stop          flush agents, send the finalize notice, mark
 GET    /meetings/{id}/transcript    finalized speech + typed broadcasts; optional cursor
 GET    /meetings/{id}/outputs       batch-read every agent output + tasks
 GET    /meetings/{id}/translations[?since=N]   translated lines, cursor-paged
+PUT    /meetings/{id}/outputs       replace one agent's minutes  {agent_id, content}
+DELETE /meetings/{id}/outputs       discard the edit, serve the agent's own output {agent_id}
 POST   /meetings/{id}/attachments   {action: add|remove, attachments[]|index}
 POST   /meetings/{id}/agents        {agent_id, enable} — toggle mid-meeting
 POST   /meetings/{id}/mute          {agent_id, muted}
@@ -92,10 +94,30 @@ meetings/<safe_id>/transcript.jsonl finalized speech + typed broadcasts
 meetings/<safe_id>/<agent>.md    a markdown agent's output
 meetings/<safe_id>/<agent>.html  an HTML agent's output
 meetings/<safe_id>/translations.json  live translation, reset on language change
+edits/<safe_id>/<agent>.md        the user's edit of that agent's minutes (sidecar)
 ```
 
+`edits/` is an **app-owned sidecar root outside every agent-writable meeting
+directory**, never a rewrite of the agent's file. It is registered on the shared
+sensitive-path floor, so agent file tools cannot read an owner's unredacted text
+or overwrite it with `fs_write`; the backend opens it directly. A user edit takes
+precedence when outputs are read, so the agent's next rewrite cannot destroy the
+user's correction, the correction cannot destroy the agent's work, and reverting
+(`DELETE …/outputs`) is a file delete rather than a restore. The cost is that while
+an edit exists the user stops seeing what the agent writes, so the outputs response
+carries a `stale` flag per edit, derived by comparing the sidecar's mtime against
+the generated file's — no second piece of state to drift out of true. Only a
+markdown agent's output is editable
+(`constants.EDITABLE_WIDGET_TYPE`; an HTML agent answers `409`), and the same
+predicate gates the write **and** the read overlay, so a sidecar saved while an
+agent was markdown is not served once its `widget_type` becomes html — at which
+point the user's text would be handed to the iframe renderer. The sidecar's
+filename is derived from the agent's validated id, never from the request, and
+the directory passes through `store.contain` like every other derived path.
+
 Deleting a meeting removes its complete per-meeting directory (metadata,
-transcript, tasks, notes, and diagrams). The route refuses a meeting with a live
+transcript, tasks, notes, and diagrams) and its app-owned edit directory. The route
+refuses a meeting with a live
 in-process session with `409 meeting_active`; the dashboard keeps the row's delete
 affordance visible but disabled for active, paused, and reviewing states. Calendar
 events are owned by their provider, so deleting local meeting data does not delete
@@ -107,7 +129,10 @@ also removes the meeting-scoped query cache, so reopening a retained calendar ev
 runs initialization again rather than displaying deleted local data. Initialization
 and agent toggles share the lifecycle lock with deletion, so in-flight file creation
 completes before the delete removes the directory and cannot recreate partial state.
-Deletion also waits for task filing's provider-to-local-record transaction.
+Minutes edits share the metadata transaction with deletion as well: the meeting
+existence check and sidecar write/delete are one unit, so a stale PUT cannot recreate
+an orphan `edits/` directory. Deletion also waits for task filing's
+provider-to-local-record transaction.
 
 `ensure_data_dirs()` creates the subtree and seeds `dictionary.toml` +
 `config.json` at app startup (an `on_startup` hook, run on the executor). It
@@ -412,14 +437,30 @@ toast, and the user can still type into the broadcast bar to feed the agents.
   route while the app is disabled (routes are registered once at startup, so a
   default-disabled app would otherwise stay callable). `is_app_enabled` runs off
   the loop.
+* **Owner-edit isolation.** User-edited minutes live under the fixed
+  `<KIROCREW_HOME>/apps/meetings/data/edits/` sensitive root, outside the meeting
+  directories given to agents. The shared hook gate denies both reads and writes
+  from file tools (and shell equivalents), while the app's direct backend I/O
+  remains available. This is the enforcement boundary; flat agent filenames alone
+  are not treated as authorization.
 * **Redaction.** Transcripts, agent outputs, extracted tasks, and calendar fields
   are LLM/user content on the way to disk, the dashboard, or a task provider, so
   `security.redact` (exfiltration URLs + credentials) is applied at each
   boundary: before the transcript append/fan-out, the outputs response, task
   normalization, `TaskDraft.sanitized`, and `parse_ics`.
+  One deliberate asymmetry in `GET …/outputs`: the **generated** half is
+  redacted on every read, while a user's **edit** of an agent's minutes is
+  served as saved. The editor accepts arbitrary owner-authored text, including
+  pasted text that merely resembles a credential, so re-scrubbing would silently
+  modify the user's document. Redaction remains on the untrusted model-generated
+  half of the boundary.
+  Pinned both ways by `test_meetings_minutes.py::TestRedaction`.
 * **Strict field readers.** `_common.field_bool` refuses a non-boolean rather
   than coercing (`bool("false")` is `True`, which would invert a mute decision);
-  `field_str` treats a non-string as missing rather than stringifying it.
+  `field_str` treats a non-string as missing rather than stringifying it. The
+  minutes PUT has its own 3 MiB body cap: it covers the 200,000-character limit
+  even when a valid JSON client uses twelve-byte UTF-16 surrogate escapes, while
+  every ordinary short-field route keeps the shared 256 KiB cap.
 * **Narrow config writer.** `PUT /config` is an allow-list, not a merge: an
   unknown provider id collapses to the default, an agent id that is not a safe
   slug is dropped, and an agent-spec reference with `..` or a leading `/` becomes
@@ -484,9 +525,10 @@ internal-git update-check cron was deleted (a builtin versions with the package)
 `test_meetings_session.py` (dispatcher, breaker, lifecycle, prompts),
 `test_meetings_providers.py` (both registries, the `.ics` parser,
 scheme/address refusals), `test_meetings_routes.py` (the HTTP contract,
-validation, redaction, the enable gate), and `test_meetings_translation.py` (the
+validation, redaction, the enable gate), `test_meetings_minutes.py` (the
+editable minutes: sidecar ownership, the read overlay, staleness, the widget
+gate, redaction asymmetry, body caps), and `test_meetings_translation.py` (the
 injection guard, the bounded queue, off-by-default), with the shared fixtures and
-the fake session manager in `test/meetings_helpers.py`. Every dispatch goes through that
 fake session manager; no test spawns a process or opens a socket.
 
 These live in the repo-level `test/` tree, not an in-package `tests/`:

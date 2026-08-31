@@ -441,6 +441,14 @@ class TestMeetingLifecycleRoutes:
         async with client_for(app) as client:
             await client.post(f"{BASE}/meetings/standup/init", json={"title": "Standup"})
             store.write_tasks("standup", [{"id": "t1", "description": "Ship it"}], root)
+            store.write_agent_edit(
+                "standup",
+                {"id": "note-taker", "widget_type": "markdown"},
+                "# Mine\n",
+                root,
+            )
+            edit_dir = store.agent_edits_dir("standup", root)
+            assert edit_dir.is_dir()
 
             resp = await client.delete(f"{BASE}/meetings/standup")
             assert resp.status == 204
@@ -448,6 +456,7 @@ class TestMeetingLifecycleRoutes:
             assert (await (await client.get(f"{BASE}/meetings")).json())["meetings"] == []
 
         assert not store.meeting_dir("standup", root).exists()
+        assert not edit_dir.exists()
 
     @pytest.mark.asyncio
     async def test_delete_unknown_meeting_is_404_with_code(self, app):
@@ -2012,6 +2021,13 @@ class TestNoStoreCallRunsOnTheEventLoop:
             "ensure_agent_files",
             "read_agent_outputs",
             "write_agent_output",
+            "agent_edits_root",
+            "agent_edits_dir",
+            "agent_edit_path",
+            "read_agent_edit",
+            "read_agent_edits",
+            "write_agent_edit",
+            "revert_agent_edit",
             "read_calendar_cache",
             "write_calendar_cache",
         }

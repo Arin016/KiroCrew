@@ -87,6 +87,24 @@ export interface TranslationsResponse {
   dropped: number
 }
 
+/**
+ * Metadata about one agent output the user has EDITED — the editable minutes.
+ *
+ * The edited text itself is not here: it is already in `outputs[agentId]`, because
+ * an edit takes precedence server-side. Sending it twice would double the poll for
+ * this app's largest field.
+ */
+export interface OutputEdit {
+  /**
+   * The agent has rewritten its own output since this edit was saved, so there is
+   * newer generated text sitting behind what is on screen.
+   *
+   * The edit still wins — that is the point of the feature — so this is how the user
+   * is TOLD rather than left with a panel that silently stopped updating.
+   */
+  stale: boolean
+}
+
 export interface ProviderRow {
   id: string
   label: string
@@ -298,8 +316,29 @@ export const meetingsApi = {
   stop: (id: string) =>
     post<{ status: MeetingStatus; meta: MeetingMeta }>(`/meetings/${encodeURIComponent(id)}/stop`),
   outputs: (id: string) =>
-    request<{ outputs: Record<string, string>; tasks: Task[] }>(
+    request<{
+      /** Each agent's EFFECTIVE output: the user's edit when there is one, else the agent's. */
+      outputs: Record<string, string>
+      /** Present only for agents the user has edited. */
+      edits: Record<string, OutputEdit>
+      tasks: Task[]
+    }>(`/meetings/${encodeURIComponent(id)}/outputs`),
+  /**
+   * Save the user's edit of one agent's output.
+   *
+   * Stored as a sidecar, so the agent keeps writing its own file and `revertOutput`
+   * restores the generated text by deleting one file.
+   */
+  saveOutput: (id: string, agentId: string, content: string) =>
+    request<{ ok: boolean; agent_id: string }>(
       `/meetings/${encodeURIComponent(id)}/outputs`,
+      { method: 'PUT', body: JSON.stringify({ agent_id: agentId, content }) },
+    ),
+  /** Discard the user's edit, so the agent's own output is shown again. */
+  revertOutput: (id: string, agentId: string) =>
+    request<{ ok: boolean; agent_id: string; reverted: boolean }>(
+      `/meetings/${encodeURIComponent(id)}/outputs`,
+      { method: 'DELETE', body: JSON.stringify({ agent_id: agentId }) },
     ),
   transcript: (id: string, cursor = 0) =>
     request<TranscriptResponse>(

@@ -2822,15 +2822,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "{{name}} का आउटपुट यहाँ दिखेगा।",
+        "cancel": "रद्द करें",
         "chatEmpty": "{{name}} को अभी कुछ नहीं भेजा गया।",
         "diagramFrameTitle": "{{name}} का आरेख",
+        "edit": "यह आउटपुट संपादित करें",
+        "edited": "संपादित",
+        "editorLabel": "{{name}} का आउटपुट, संपादन योग्य",
         "listeningHint": "मीटिंग सुन रहा है",
         "messagePlaceholder": "{{name}} को संदेश…",
         "mute": "{{name}} को म्यूट करें",
         "mutedHint": "मीटिंग नहीं सुन रहा है",
+        "revert": "मेरे बदलाव छोड़ दें",
+        "revertHint": "मेरे बदलाव छोड़कर वह दिखाएँ जो {{name}} ने लिखा",
+        "save": "सहेजें",
         "send": "भेजें",
         "showChat": "चैट दिखाएँ",
         "showOutput": "आउटपुट दिखाएँ",
+        "staleEdit": "इसे संपादित करने के बाद {{name}} ने और लिखा है। तुम्हारा संस्करण दिख रहा है; उसका देखने के लिए अपने बदलाव छोड़ दें।",
         "unmute": "{{name}} को अनम्यूट करें"
       },
       "broadcastBar": {
@@ -2970,7 +2978,9 @@
         "taskAddFailed": "वह कार्य-बिंदु जोड़ा नहीं जा सका।",
         "taskFileFailed": "वह कार्य-बिंदु दर्ज नहीं हो सका।",
         "taskFiled": "कार्य-बिंदु दर्ज हुआ।",
-        "untitled": "बिना शीर्षक मीटिंग"
+        "untitled": "बिना शीर्षक मीटिंग",
+        "minutesSaveFailed": "तुम्हारे बदलाव सहेजे नहीं जा सके।",
+        "minutesRevertFailed": "तुम्हारे बदलाव छोड़े नहीं जा सके।"
       },
       "settings": {
         "addTerm": "जोड़ें",

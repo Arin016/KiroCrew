@@ -1791,15 +1791,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "{{name}} output will appear here.",
+        "cancel": "Cancel",
         "chatEmpty": "Nothing sent to {{name}} yet.",
         "diagramFrameTitle": "{{name}} diagram",
+        "edit": "Edit this output",
+        "edited": "Edited",
+        "editorLabel": "{{name}} output, editable",
         "listeningHint": "Listening to the meeting",
         "messagePlaceholder": "Message {{name}}…",
         "mute": "Mute {{name}}",
         "mutedHint": "Not listening to the meeting",
+        "revert": "Discard my edits",
+        "revertHint": "Discard my edits and show what {{name}} wrote",
+        "save": "Save",
         "send": "Send",
         "showChat": "Show chat",
         "showOutput": "Show output",
+        "staleEdit": "{{name}} has written more since you edited this. Your version is shown; discard your edits to see theirs.",
         "unmute": "Unmute {{name}}"
       },
       "broadcastBar": {
@@ -1939,7 +1947,9 @@
         "taskAddFailed": "Could not add that action item.",
         "taskFileFailed": "Could not file that action item.",
         "taskFiled": "Action item filed.",
-        "untitled": "Untitled meeting"
+        "untitled": "Untitled meeting",
+        "minutesSaveFailed": "Could not save your edits.",
+        "minutesRevertFailed": "Could not discard your edits."
       },
       "settings": {
         "addTerm": "Add",

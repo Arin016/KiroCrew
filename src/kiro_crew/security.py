@@ -4921,6 +4921,12 @@ _SENSITIVE_HOME_DIRS: list[str] = [
 _CREW_HOME_PREFIXES: tuple[str, ...] = (".kiro/crew", ".kirocrew")
 _CREW_SECRET_LEAVES: list[str] = [
     ".env",
+    # Owner-authored meetings edits are deliberately outside the meeting
+    # directories agents write. They are returned verbatim to the owner and may
+    # contain credential-shaped examples or private corrections, so an agent must
+    # neither read nor overwrite them through file tools. The Meetings backend
+    # opens this directory directly, so its save/overlay/revert flow is unaffected.
+    "apps/meetings/data/edits",
     # The Notes builtin stores a GitHub Personal Access Token here so it can
     # push a vault. Owner-only mode (0600) does not isolate another process
     # running as the same UID, and the token is a live bearer credential for the

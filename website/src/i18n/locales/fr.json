@@ -2922,15 +2922,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "Le résultat de {{name}} apparaîtra ici.",
+        "cancel": "Annuler",
         "chatEmpty": "Rien n’a encore été envoyé à {{name}}.",
         "diagramFrameTitle": "Schéma de {{name}}",
+        "edit": "Modifier cette sortie",
+        "edited": "Modifié",
+        "editorLabel": "Sortie de {{name}}, modifiable",
         "listeningHint": "Écoute la réunion",
         "messagePlaceholder": "Message à {{name}}…",
         "mute": "Couper {{name}}",
         "mutedHint": "N’écoute pas la réunion",
+        "revert": "Abandonner mes modifications",
+        "revertHint": "Abandonner mes modifications et afficher ce que {{name}} a écrit",
+        "save": "Enregistrer",
         "send": "Envoyer",
         "showChat": "Afficher la discussion",
         "showOutput": "Afficher le résultat",
+        "staleEdit": "{{name}} a continué à écrire depuis ta modification. C'est ta version qui est affichée ; abandonne tes modifications pour voir la sienne.",
         "unmute": "Réactiver {{name}}"
       },
       "broadcastBar": {
@@ -3073,7 +3081,9 @@
         "taskAddFailed": "Impossible d’ajouter cette action.",
         "taskFileFailed": "Impossible d’enregistrer cette action.",
         "taskFiled": "Action enregistrée.",
-        "untitled": "Réunion sans titre"
+        "untitled": "Réunion sans titre",
+        "minutesSaveFailed": "Impossible d'enregistrer tes modifications.",
+        "minutesRevertFailed": "Impossible d'abandonner tes modifications."
       },
       "settings": {
         "addTerm": "Ajouter",

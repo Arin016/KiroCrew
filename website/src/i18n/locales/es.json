@@ -2878,15 +2878,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "La salida de {{name}} aparecerá aquí.",
+        "cancel": "Cancelar",
         "chatEmpty": "Aún no se ha enviado nada a {{name}}.",
         "diagramFrameTitle": "Diagrama de {{name}}",
+        "edit": "Editar esta salida",
+        "edited": "Editado",
+        "editorLabel": "Salida de {{name}}, editable",
         "listeningHint": "Está escuchando la reunión",
         "messagePlaceholder": "Mensaje para {{name}}…",
         "mute": "Silenciar a {{name}}",
         "mutedHint": "No está escuchando la reunión",
+        "revert": "Descartar mis cambios",
+        "revertHint": "Descartar mis cambios y mostrar lo que escribió {{name}}",
+        "save": "Guardar",
         "send": "Enviar",
         "showChat": "Mostrar el chat",
         "showOutput": "Mostrar la salida",
+        "staleEdit": "{{name}} ha escrito más desde que editaste esto. Se muestra tu versión; descarta tus cambios para ver la suya.",
         "unmute": "Reactivar a {{name}}"
       },
       "broadcastBar": {
@@ -3029,7 +3037,9 @@
         "taskAddFailed": "No se pudo añadir esa tarea.",
         "taskFileFailed": "No se pudo registrar esa tarea.",
         "taskFiled": "Tarea registrada.",
-        "untitled": "Reunión sin título"
+        "untitled": "Reunión sin título",
+        "minutesSaveFailed": "No se pudieron guardar tus cambios.",
+        "minutesRevertFailed": "No se pudieron descartar tus cambios."
       },
       "settings": {
         "addTerm": "Añadir",

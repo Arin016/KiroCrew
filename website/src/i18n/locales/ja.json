@@ -2810,15 +2810,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "{{name}}の出力はここに表示されます。",
+        "cancel": "キャンセル",
         "chatEmpty": "{{name}}にはまだ何も送信されていません。",
         "diagramFrameTitle": "{{name}}ダイアグラム",
+        "edit": "この出力を編集",
+        "edited": "編集済み",
+        "editorLabel": "{{name}}の出力（編集可能）",
         "listeningHint": "会議をリッスン中",
         "messagePlaceholder": "{{name}}にメッセージを送信…",
         "mute": "{{name}}をミュート",
         "mutedHint": "会議をリッスンしていません",
+        "revert": "自分の編集を破棄",
+        "revertHint": "自分の編集を破棄して{{name}}が書いた内容を表示",
+        "save": "保存",
         "send": "送信",
         "showChat": "チャットを表示",
         "showOutput": "出力を表示",
+        "staleEdit": "編集後に{{name}}がさらに書き込みました。表示されているのはあなたの版です。エージェント側の版を見るには編集を破棄してください。",
         "unmute": "{{name}}のミュートを解除"
       },
       "broadcastBar": {
@@ -2941,6 +2949,8 @@
         "broadcastSent": "聞いているエージェントに送信されました。",
         "ended": "ミーティング終了。",
         "messageFailed": "そのメッセージを送信できませんでした。",
+        "minutesRevertFailed": "編集を破棄できませんでした。",
+        "minutesSaveFailed": "編集を保存できませんでした。",
         "startFailed": "ミーティングを開始できませんでした。",
         "started": "ミーティング開始。",
         "statusFailed": "ミーティングステータスを変更できませんでした。",

@@ -2810,15 +2810,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "{{name}}의 출력이 여기에 표시됩니다.",
+        "cancel": "취소",
         "chatEmpty": "{{name}}에 아직 보낸 내용이 없습니다.",
         "diagramFrameTitle": "{{name}} 다이어그램",
+        "edit": "이 출력 편집",
+        "edited": "편집됨",
+        "editorLabel": "{{name}} 출력, 편집 가능",
         "listeningHint": "회의를 듣고 있습니다",
         "messagePlaceholder": "{{name}}에 메시지 보내기…",
         "mute": "{{name}} 음소거",
         "mutedHint": "회의를 듣지 않습니다",
+        "revert": "내 편집 취소",
+        "revertHint": "내 편집을 취소하고 {{name}}이(가) 작성한 내용 표시",
+        "save": "저장",
         "send": "보내기",
         "showChat": "채팅 표시",
         "showOutput": "출력 표시",
+        "staleEdit": "편집한 뒤 {{name}}이(가) 내용을 더 작성했습니다. 표시된 것은 사용자의 버전입니다. 에이전트의 버전을 보려면 편집을 취소하세요.",
         "unmute": "{{name}} 음소거 해제"
       },
       "broadcastBar": {
@@ -2941,6 +2949,8 @@
         "broadcastSent": "듣고 있는 에이전트에게 보냈습니다.",
         "ended": "회의가 종료되었습니다.",
         "messageFailed": "해당 메시지를 보낼 수 없습니다.",
+        "minutesRevertFailed": "편집을 취소할 수 없습니다.",
+        "minutesSaveFailed": "편집을 저장할 수 없습니다.",
         "startFailed": "회의를 시작할 수 없습니다.",
         "started": "회의가 시작되었습니다.",
         "statusFailed": "회의 상태를 변경할 수 없습니다.",

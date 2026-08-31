@@ -65,6 +65,8 @@ export default function MeetingView({
     enabledIds,
     mutedAgents,
     outputs,
+    outputEdits,
+    editingOutput,
     tasks,
     transcript,
     partialTranscript,
@@ -304,11 +306,23 @@ export default function MeetingView({
                   output={outputs[agent.id] ?? ''}
                   listening={!mutedAgents.includes(agent.id)}
                   chatView={chatViewAgents.includes(agent.id)}
+                  edit={outputEdits[agent.id]}
+                  editSaving={editingOutput}
                   onToggleListening={() =>
                     actions.mute(agent.id, !mutedAgents.includes(agent.id))
                   }
                   onToggleChatView={() => session.toggleChatView(agent.id)}
                   onSendMessage={text => actions.messageAgent(agent.id, text)}
+                  // Passed only for a markdown agent, and the ABSENCE is what disables
+                  // the affordance in the panel. The server enforces the same rule
+                  // (`_editable_agent`); this keeps the button from appearing where
+                  // pressing it could only produce a 409.
+                  onSaveOutput={
+                    agent.widget_type === 'markdown' || agent.widget_type == null
+                      ? content => session.saveOutput(agent.id, content)
+                      : undefined
+                  }
+                  onRevertOutput={() => session.revertOutput(agent.id)}
                 />
               ))}
             </div>
