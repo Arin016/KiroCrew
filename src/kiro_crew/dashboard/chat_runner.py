@@ -199,6 +199,7 @@ from kiro_crew.messaging.link import (
 from kiro_crew.messaging.renderer import chunk_for_transport
 from kiro_crew.metrics.events import TURN_TIMEOUT_CAUSE, emit_counter
 from kiro_crew.metrics.provider import get_recorder
+from kiro_crew.metrics.turns import emit_turn_duration, turn_outcome
 from kiro_crew.name_grant import (
     Refusal,
     log_decline,
@@ -246,7 +247,7 @@ from kiro_crew.trust_patterns import matches_trusted_pattern as _matches_trusted
 from kiro_crew.trust_patterns import (  # noqa: F401 -- compatibility re-export
     split_command_segments as _split_command_segments,
 )
-from kiro_crew.validation import ValidationError, infer_use_case, validate_ask_user_question
+from kiro_crew.validation import ValidationError, validate_ask_user_question
 from kiro_crew.widget_artifacts import register_widgets_off_loop
 
 logger = logging.getLogger(__name__)
@@ -357,34 +358,13 @@ def drain_pending_context(slot: "_ChatSlot") -> str:
 def _turn_outcome(stop_reason: str | None, *, exhausted: bool = False) -> str:
     """Map an EVENT_COMPLETE stop_reason to a low-cardinality turn outcome.
 
-    Single source of truth shared by the ``kirocrew.turn.duration`` emit in
-    ``_run_chat`` and its unit test, so the mapping can't silently drift from
-    what the test asserts (tests must exercise real production logic).
-
-    The two watchdog stop reasons are distinct outcomes, not ``error``: a
-    stall-recovery turn is re-driven in place (its budget/outcome is tracked
-    by ``kirocrew.watchdog.recovery.outcome``), so folding it into ``error``
-    would make the fault rate count every recovered stall as a fault AND hide
-    the stall population the watchdog work exists to measure. Checked BEFORE
-    the ``timeout`` substring so a stall never misclassifies.
-
-    ``exhausted`` marks a stall turn whose recovery budget is already spent
-    (the caller reads the slot budgets the stop-reason branches maintain):
-    the slot dies with "start a new chat", so the turn labels
-    ``stall_exhausted`` — a terminal fault to the aggregator — keeping the
-    recovered-stall exclusion from hiding dead sessions while ``fault_rate``
-    stays a single-series computation.
+    Thin delegate to :func:`kiro_crew.metrics.turns.turn_outcome`, which is the
+    single source of truth shared by every dispatch surface. Kept as a name here
+    because this module's own tests and the stop-reason branches below read it,
+    and because the mapping is part of what ``_run_chat`` decides (it is the only
+    surface that can say ``exhausted``).
     """
-    s = stop_reason or ""
-    if s in ("", "end_turn", "stop", "completed"):
-        return "ok"
-    if s == STOP_REASON_TOOL_STALL or s == STOP_REASON_STALE_RECOVER:
-        if exhausted:
-            return "stall_exhausted"
-        return "tool_stall" if s == STOP_REASON_TOOL_STALL else "stale_recover"
-    if "timeout" in s:
-        return "timeout"
-    return "error"
+    return turn_outcome(stop_reason, exhausted=exhausted)
 
 
 def _emit_turn_metric(
@@ -397,44 +377,27 @@ def _emit_turn_metric(
 ) -> None:
     """Emit kirocrew.turn.duration (best-effort).
 
-    Single source of truth shared by the ``_run_chat`` turn-completion path and
-    its unit test, so the metric name, attrs, and outcome mapping live in
-    production and any drift fails the test (tests must drive real
-    production code). One histogram powers both turn latency and fault rate.
+    Thin delegate to :func:`kiro_crew.metrics.turns.emit_turn_duration`. The
+    metric is emitted for EVERY dispatch surface, and by two owners that between
+    them sample each turn exactly once — see :mod:`kiro_crew.metrics.turns`.
 
-    ``duration_ms`` is the provider-reported duration and ``elapsed_ms`` the
-    locally measured wall clock; the first non-zero wins. Both are needed
-    because the acp provider ALWAYS reports ``TurnUsage.duration_ms == 0``
-    (nothing in the codebase assigns it — only claude_code fills it in), so a
-    provider-only value silently skipped the emit for effectively all traffic
-    and left turn latency / fault rate / throughput reading a flat 0.
+    ``_run_chat`` DOES call this, and is the only production caller. Its persist
+    call passes ``emit_metric=False`` so the shared boundary does not also sample
+    the turn, because two things about this surface the boundary cannot serve:
+    that persist sits behind ``usage_has_billing`` (a turn that timed out having
+    billed nothing writes no row, and the sample must survive that), and only
+    here are the EFFECTIVE session key and the spent-recovery-budget
+    ``exhausted`` flag available.
 
-    A still-zero duration skips the emit deliberately: an absent sample reads
-    as "no data" on the Telemetry page, whereas a recorded 0 would render as a
-    plausible-looking 0ms p50 — the very symptom this guard's misuse caused.
-
-    Caveat on what the wall clock measures: ``elapsed_ms`` runs from the start
-    of the turn, so a turn parked on an interactive tool-approval prompt counts
-    the operator's thinking time as turn duration. There is no finer-grained
-    source on the acp path (the provider reports nothing at all), so this is
-    the honest maximum available — but it means the histogram is "turn
-    wall-clock", not pure model latency, and a high p90 can mean slow approvals
-    rather than a slow model.
+    Every other surface is sampled by ``persist_token_record_async`` itself,
+    which is what ended this metric being a dashboard-only reading.
     """
-    value = duration_ms or elapsed_ms
-    if not value:
-        return
-    attrs: dict = {"outcome": _turn_outcome(stop_reason, exhausted=exhausted)}
-    try:
-        source = infer_use_case(slot_key)
-        if source:
-            attrs["session_source"] = source
-    except Exception:
-        pass
-    try:
-        get_recorder().histogram("kirocrew.turn.duration", value, unit="ms", attrs=attrs)
-    except Exception:
-        logger.debug("turn metric emit failed", exc_info=True)
+    emit_turn_duration(
+        duration_ms,
+        session_key=slot_key,
+        outcome=turn_outcome(stop_reason, exhausted=exhausted),
+        elapsed_ms=elapsed_ms,
+    )
 
 
 def _emit_recovery_outcome(mechanism: str, outcome: str, attempts: int) -> None:
@@ -7953,6 +7916,26 @@ async def _run_chat(
                 # with a missing measurement. Still never guesses: an
                 # unattributable turn stays "" and the footer omits the field.
                 _turn_model = read_turn_model(client)
+                # ── Turn outcome for this turn's histogram sample ──
+                # ``exhausted`` mirrors the stop-reason branches below: the
+                # recovery-outcome exclusion from fault_rate is earned only by a
+                # turn that is actually re-driven in place, so a stall takes the
+                # terminal stall_exhausted label when its 3-attempt budget is
+                # already spent ("Session stuck") OR when it is a NESTED turn
+                # (depth > 0), which the branches below never re-queue — it dies
+                # with "please retry", a user-visible fault that must reach
+                # fault_rate. Only this surface maintains such a budget; every
+                # other surface's outcome comes from its stop reason alone.
+                #
+                # Computed ABOVE the billing gate deliberately: both the persist
+                # call inside it and the unconditional emit below read it, and a
+                # zero-billing timeout takes the second path only.
+                if event.stop_reason == STOP_REASON_STALE_RECOVER:
+                    _turn_exhausted = _prompt_depth > 0 or slot._stale_recovery_retries >= 3
+                elif event.stop_reason == STOP_REASON_TOOL_STALL:
+                    _turn_exhausted = _prompt_depth > 0 or slot._tool_stall_retries >= 3
+                else:
+                    _turn_exhausted = False
                 # One shared predicate across every persist gate (#6758): a
                 # claude-seam turn ending via a synthetic EVENT_COMPLETE
                 # (timeout, tool-stall, cancel-unacked) can carry cost or cache
@@ -8013,30 +7996,35 @@ async def _run_chat(
                         # disagree about one turn. acp reports 0 here.
                         elapsed_ms=_turn_elapsed_ms,
                         model_source=client,
+                        # This surface emits its own sample below, OUTSIDE the
+                        # usage_has_billing gate this call sits behind — which is
+                        # also where its exhausted-aware outcome reaches the
+                        # histogram.
+                        emit_metric=False,
                     )
                 # ── Turn-completion histogram (OTel M2) ──
                 # kirocrew.turn.duration → turn latency p50/p90 + fault rate.
-                # elapsed_ms carries the wall clock computed above because acp
-                # leaves usage.duration_ms at 0 — without it this histogram is
-                # never emitted for the default backend.
-                # ``exhausted`` mirrors the stop-reason branches below: the
-                # recovery-outcome exclusion from fault_rate is earned only by
-                # a turn that is actually re-driven in place, so a stall takes
-                # the terminal stall_exhausted label when its 3-attempt budget
-                # is already spent ("Session stuck") OR when it is a NESTED
-                # turn (depth > 0), which the branches below never re-queue —
-                # it dies with "please retry", a user-visible fault that must
-                # reach fault_rate.
-                if event.stop_reason == STOP_REASON_STALE_RECOVER:
-                    _turn_exhausted = _prompt_depth > 0 or slot._stale_recovery_retries >= 3
-                elif event.stop_reason == STOP_REASON_TOOL_STALL:
-                    _turn_exhausted = _prompt_depth > 0 or slot._tool_stall_retries >= 3
-                else:
-                    _turn_exhausted = False
+                # Every OTHER dispatch surface now gets its sample from
+                # persist_token_record_async, the one call they all make once per
+                # turn — which is what ended this metric being a dashboard-only
+                # reading. This surface still emits HERE, for two reasons its
+                # persist call cannot serve:
+                #
+                #   1. That call sits behind ``usage_has_billing``. A turn that
+                #      timed out having billed nothing writes no row, and letting
+                #      the row's absence swallow the sample would drop exactly
+                #      the faults fault_rate exists to count. This emit is
+                #      unconditional, as it was before the move.
+                #   2. ``session_key`` is the EFFECTIVE session, which for a
+                #      linked channel conversation is its channel key, while the
+                #      row stays keyed by ``slot.key`` for title and navigation
+                #      joins. Attributing the sample to the slot would file every
+                #      linked Slack or Telegram turn under ``dashboard`` — the
+                #      same blind spot in a new place.
                 _emit_turn_metric(
                     event.usage.duration_ms,
                     event.stop_reason,
-                    slot.key,
+                    session_key,
                     elapsed_ms=_turn_elapsed_ms,
                     exhausted=_turn_exhausted,
                 )

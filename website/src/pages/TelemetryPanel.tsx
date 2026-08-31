@@ -1622,14 +1622,29 @@ function StartupTab({ s, faults, total, days }: { s: Startup; faults: number; to
  */
 function HealthBar({ t, days }: { t: Turn | null; days: number }) {
   const turnFaults = t
-    ? // Count faults the way the API computes fault_rate: everything that is not
-      // "ok". Naming the failure outcomes explicitly (error + timeout) dropped
-      // any other value — including the "unknown" that shards predating the
-      // attribute aggregate under — so the tile could show a rate over one
-      // population beside a count over another, and a fault in a third outcome
-      // read as zero faults.
-      Object.entries(t.outcome).reduce((n, [k, v]) => (k === 'ok' ? n : n + v), 0)
+    ? // Count faults the way the API computes fault_rate: everything that is
+      // neither "ok" nor "unclassified". Naming the failure outcomes explicitly
+      // (error + timeout) dropped any other value — including the "unknown" that
+      // shards predating the attribute aggregate under — so the tile could show a
+      // rate over one population beside a count over another, and a fault in a
+      // third outcome read as zero faults. Hence a complement rule, not a list.
+      //
+      // "unclassified" joins "ok" in the exemption because it is not an outcome
+      // at all: it marks a turn whose surface had no stop reason to give (a
+      // helper call site passing a bare TurnUsage). The API excludes it from
+      // BOTH sides of fault_rate for that reason, so counting it here would put
+      // every clean cron/heartbeat/workflow turn in this tile's fault count
+      // while the percentage beside it excluded them — the two-populations bug
+      // this complement rule exists to prevent, in a new place.
+      Object.entries(t.outcome).reduce(
+        (n, [k, v]) => (k === 'ok' || k === 'unclassified' ? n : n + v),
+        0,
+      )
     : 0
+  // The population the API's fault_rate divides by: everything except the turns
+  // whose outcome could not be determined. Derived here so the tile's rate, its
+  // fault count and its printed denominator all describe the same set of turns.
+  const turnClassified = t ? t.count - (t.outcome.unclassified ?? 0) : 0
   const faultPct = t ? Math.round(t.fault_rate * 100) : null
   // A real failure must never render as a clean zero. One error in 499 turns is
   // 0.2%, which Math.round takes to 0 and the old `< 2 → --ok` branch painted
@@ -1671,7 +1686,15 @@ function HealthBar({ t, days }: { t: Turn | null; days: number }) {
               ? i18nT('pages.telemetryPanel.turn_faults', {
                   count: turnFaults,
                   n: fmtNumber(turnFaults),
-                  turns: fmtNumber(t.count),
+                  // The CLASSIFIED count, matching the denominator the API's
+                  // fault_rate divides by. `t.count` is the whole histogram
+                  // including `unclassified`, so printing it here put a rate over
+                  // one population directly above a count over another — the same
+                  // two-populations bug the fault count above exempts
+                  // `unclassified` to avoid, one line down. The divergence is not
+                  // static: it grows with background traffic, which is exactly
+                  // what this change starts sampling.
+                  turns: fmtNumber(turnClassified),
                 })
               : noTurns,
             note: t ? <GenNote shown={t.count} total={t.total_count} /> : undefined,
