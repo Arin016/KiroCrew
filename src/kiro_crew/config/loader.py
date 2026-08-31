@@ -4730,15 +4730,19 @@ def _config_fingerprint() -> tuple:
     return tuple(sig)
 
 
-def _cached_validated_data() -> dict | None:
+def _cached_validated_data(fp: tuple | None = None) -> dict | None:
     """Return a deep copy of the cached validated config dict, or None on miss.
 
-    Thin wrapper over the :class:`~kiro_crew.config.validation.ConfigCache`:
-    the fingerprint is computed here (``_config_fingerprint`` stays in this
-    module because it reads ``config_path()``/``config_local_path()``, which the
-    test suite patches as ``kiro_crew.config.loader.config_path``).
+    Thin wrapper over the :class:`~kiro_crew.config.validation.ConfigCache`.
+    ``_config_fingerprint`` stays in this module because it reads
+    ``config_path()``/``config_local_path()``, which the test suite patches as
+    ``kiro_crew.config.loader.config_path``.
+
+    Pass *fp* when the caller has already computed the fingerprint, so one load
+    costs a single stat pass instead of one per consumer of it. Omitting it
+    stats, which suits a caller that has no fingerprint in hand.
     """
-    return _CONFIG_CACHE.get(_config_fingerprint())
+    return _CONFIG_CACHE.get(fp if fp is not None else _config_fingerprint())
 
 
 def _store_validated_data(data: dict, fp: tuple) -> None:
@@ -7636,7 +7640,11 @@ class KiroCrewConfig:
         The overlay is applied at load time but NOT persisted back by
         ``save()`` — only the base config is written to ``config.json``.
         """
-        cfg = cls._load_resolved()
+        # The ordering ticket comes back from the resolve step, drawn BEFORE the
+        # read, so a concurrent newer load cannot be overwritten by this one
+        # finishing later (see publish_autocompact_pct) and this method adds no
+        # filesystem I/O of its own on the event loop.
+        cfg, _autocompact_ticket = cls._load_resolved()
         # Push the MCP search-path setting to its consumer. It is PUSHED rather
         # than read there because kiro_crew.env.mcp_search_path is reached from
         # the event loop by every MCP probe and by the agent-config resolver, so
@@ -7667,15 +7675,33 @@ class KiroCrewConfig:
             # A publish failure must never make the config unloadable; the
             # resolver simply keeps reporting no divergence.
             logger.warning("Publishing agent alias snapshot failed: %s", e)
+        # Same placement and same reason again: the compaction gate reads this
+        # after every turn on the event loop, and publishing on EVERY return path
+        # is what lets a CLI write reach a gateway that is already running.
+        try:
+            publish_autocompact_pct(cfg, _autocompact_ticket)
+        except Exception as e:  # pragma: no cover - defensive
+            # A publish failure must never make the config unloadable; the gate
+            # keeps using the threshold it already had.
+            logger.warning("Publishing autocompact threshold failed: %s", e)
         return cfg
 
     @classmethod
-    def _load_resolved(cls) -> KiroCrewConfig:
+    def _load_resolved(cls) -> tuple[KiroCrewConfig, int]:
         """Resolve the config from disk (or defaults). See :meth:`load`.
 
         Split out so :meth:`load` owns the post-resolution publication on every
         return path; this method may return from more than one place.
+
+        Returns the config PLUS the ordering ticket drawn before the read, which
+        is what lets :meth:`load` publish the compaction threshold in the correct
+        order relative to a concurrent load without any filesystem I/O of its own
+        on the event loop.
         """
+        # Drawn BEFORE any read below, so it records when this load began
+        # observing the files rather than when it finished. See
+        # next_config_load_ticket and publish_autocompact_pct.
+        ticket = next_config_load_ticket()
         path = config_path()
 
         # Hot-path cache: reuse the validated, merged dict when neither config
@@ -7683,16 +7709,22 @@ class KiroCrewConfig:
         # _deep_merge + the full jsonschema.validate. A deep copy is returned so
         # in-place mutation by callers (and the write-back migration below) can
         # never corrupt the cached original.
-        cached_data = _cached_validated_data()
+        #
+        # ONE stat pass serves both consumers of it below: the cache lookup and
+        # the pre-read TOCTOU fingerprint. load() runs on the event loop, so a
+        # second pass would be filesystem I/O there for information already in
+        # hand.
+        fp = _config_fingerprint()
+        cached_data = _cached_validated_data(fp)
         if cached_data is not None:
             data = cached_data
         else:
-            # Capture the fingerprint BEFORE reading so a write landing during
-            # the read is detected: we cache under this pre-read fp, which won't
-            # match the post-write on-disk stat, so the next load() re-reads
-            # instead of serving the content we read mid-write (read->store
-            # TOCTOU). _store_validated_data documents this contract.
-            pre_read_fp = _config_fingerprint()
+            # fp was captured BEFORE reading, so a write landing during the read
+            # is detected: we cache under it, it won't match the post-write
+            # on-disk stat, and the next load() re-reads instead of serving
+            # content read mid-write (read->store TOCTOU).
+            # _store_validated_data documents this contract.
+            pre_read_fp = fp
             data = {}
             loaded_base = False
             config_source_unreadable = False
@@ -7781,7 +7813,7 @@ class KiroCrewConfig:
                     memory_store="default",
                 )
                 cfg.default_agent = "default"
-                return cfg
+                return cfg, ticket
 
             # Preserve fail-closed security semantics before advisory schema
             # validation can replace malformed input with a missing-field default.
@@ -9015,7 +9047,7 @@ class KiroCrewConfig:
             # Migration write-back is best-effort; never block startup.
             logger.warning("Config write-back failed: %s", e)
 
-        return cfg
+        return cfg, ticket
 
     def to_dict(self) -> dict:
         """Serialize config to the JSON structure used by config.json."""
@@ -9837,6 +9869,117 @@ def publish_agent_alias_snapshot(config: "KiroCrewConfig") -> None:
 def agent_alias_snapshot() -> tuple[frozenset[str], str, bool]:
     """The published alias table as ``(aliases, default_alias, ready)``."""
     return _CONFIG_AGENT_ALIAS_SNAPSHOT
+
+
+# Snapshot of the auto-compaction threshold, refreshed by every successful
+# :meth:`KiroCrewConfig.load`, for the same reason as the two snapshots above:
+# the read path (``SessionManager._compaction_gate_decision``) runs on the event
+# loop after every turn, so it must never stat/read/validate config.json itself.
+#
+# What this specifically buys, beyond avoiding that I/O: a config write from ANY
+# writer reaches a running gateway. The dashboard PATCH handler and the CLI both
+# end at ``update_config_locked``, and only the handler could notify the manager
+# it had changed something -- so a ``kirocrew config set`` landed on disk while
+# the live threshold kept its startup value until a restart. Publishing on load
+# closes that without either writer having to know which live object holds it.
+#
+# Ordered by a monotonically increasing TICKET drawn before each load's read.
+# Loads run concurrently (prompt assembly, background threads), so without
+# ordering an older load finishing last would republish the value it read before
+# a newer write -- leaving live sessions compacting at an obsolete threshold
+# until something loaded again. The two snapshots above carry the same race; the
+# consequence there is a display marker, which is why only this one is ordered.
+#
+# A ticket rather than the files' newest ``st_mtime_ns``, because this ordering
+# must be monotonic and an mtime is not. Deleting the newer of the two config
+# files LOWERS that maximum, and so does restoring a backup with ``cp -p`` or any
+# other writer that preserves timestamps; each one makes the current state of the
+# filesystem look like an older read, so the publish that should win is dropped
+# and the live gate keeps a threshold the files no longer say. A ticket is
+# independent of the filesystem, so a deletion and a timestamp-preserving restore
+# both order as what they are: the newest read.
+_CONFIG_AUTOCOMPACT_PCT: float = DEFAULT_AUTOCOMPACT_PCT
+_CONFIG_AUTOCOMPACT_TICKET: int = 0
+
+#: Highest ticket handed out by :func:`next_config_load_ticket`. Distinct from the
+#: PUBLISHED ticket above: a load draws one and can still lose the comparison,
+#: which must not move the published mark.
+_CONFIG_AUTOCOMPACT_ISSUED: int = 0
+
+#: Serializes the ticket draw and the compare-and-set in
+#: :func:`publish_autocompact_pct`. Held ONLY on those two write paths, each of
+#: which runs inside ``load()`` and is therefore already doing file I/O and schema
+#: validation -- the lock is free by comparison. The READ path
+#: (:func:`published_autocompact_pct`) never takes it, which is what keeps the
+#: event loop lock-free; that is the objection the alias snapshot above avoids by
+#: publishing one immutable tuple, and it does not apply to a write-side lock.
+#:
+#: Needed because each path is a read followed by a write: without it two
+#: concurrent loads can draw the SAME ticket, or both pass the publish comparison
+#: and let whichever assigns LAST win, so an older read replaces a newer one and
+#: rolls the published ticket backwards with it.
+_CONFIG_AUTOCOMPACT_LOCK = threading.Lock()
+
+
+def next_config_load_ticket() -> int:
+    """Draw the next config-load ordering ticket.
+
+    Call this BEFORE the read whose result will be published, so the ticket
+    records when this load began observing the files. Two loads whose reads
+    interleave are then ordered by ticket rather than by anything on disk: the
+    loser's value is at most microseconds stale and the next load corrects it,
+    where an unordered publish can leave an obsolete threshold in force
+    indefinitely.
+
+    Never returns 0, so 0 means "nothing published yet".
+    """
+    global _CONFIG_AUTOCOMPACT_ISSUED
+    with _CONFIG_AUTOCOMPACT_LOCK:
+        _CONFIG_AUTOCOMPACT_ISSUED += 1
+        return _CONFIG_AUTOCOMPACT_ISSUED
+
+
+def publish_autocompact_pct(config: "KiroCrewConfig", ticket: int | None = None) -> None:
+    """Publish *config*'s compaction threshold for the filesystem-free read path.
+
+    Pure in-memory rebind -- safe from anywhere, including the event loop, and a
+    reader sees either the whole previous value or the whole new one. Called from
+    :meth:`KiroCrewConfig.load` so every successful load refreshes it, including
+    the degraded-defaults path, which must OVERWRITE a previous snapshot rather
+    than leave a stale threshold in force.
+
+    *ticket* orders this publish against concurrent ones. It must come from
+    :func:`next_config_load_ticket`, drawn BEFORE the read that produced *config*;
+    a ticket lower than the one already published is dropped. Omitting it draws a
+    fresh ticket, which therefore always wins -- correct for a caller that has
+    just built the config it is publishing (tests), and wrong for one replaying an
+    earlier read, which must pass the ticket it drew.
+
+    No ticket value is special-cased. "Neither config file exists" is the current
+    truth rather than an older read of the same file, and it arrives here on the
+    degraded-defaults path holding a freshly drawn ticket, so it wins by ordinary
+    comparison. Being able to state that without a carve-out is the reason the
+    ticket is independent of the files: an ordering read off their mtime drops to
+    a lower value when a file is removed, and so cannot express it.
+    """
+    global _CONFIG_AUTOCOMPACT_PCT, _CONFIG_AUTOCOMPACT_TICKET
+    # Drawn OUTSIDE the lock: next_config_load_ticket acquires the same
+    # non-reentrant lock, so drawing it inside the block below would deadlock.
+    if ticket is None:
+        ticket = next_config_load_ticket()
+    # Compare and BOTH assignments under one lock: they are a single
+    # compare-and-set, and splitting them lets two concurrent loads both pass the
+    # comparison and race the writes. See _CONFIG_AUTOCOMPACT_LOCK.
+    with _CONFIG_AUTOCOMPACT_LOCK:
+        if ticket < _CONFIG_AUTOCOMPACT_TICKET:
+            return
+        _CONFIG_AUTOCOMPACT_TICKET = ticket
+        _CONFIG_AUTOCOMPACT_PCT = config.session.autocompact_pct
+
+
+def published_autocompact_pct() -> float:
+    """The published compaction threshold."""
+    return _CONFIG_AUTOCOMPACT_PCT
 
 
 def resolve_effective_agent(agent_name: str | None, project_dir: str | None = None) -> str:

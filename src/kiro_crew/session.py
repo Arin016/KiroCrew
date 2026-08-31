@@ -109,6 +109,7 @@ from kiro_crew.config.loader import (
     build_provider_factory,
     default_project_dir,
     normalize_agent_model,
+    published_autocompact_pct,
 )
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
 from kiro_crew.executors import maintenance_executor, subprocess_executor
@@ -1496,6 +1497,12 @@ class SessionManager:
         provider_factory: ProviderFactory | None = None,
     ):
         self._cfg = cfg
+        # Baseline for adopt-on-change (see _sync_autocompact_pct). Captured here
+        # so a caller that hands in a config with its own threshold -- a test, or
+        # any embedder constructing a manager directly -- keeps that value until
+        # a LOAD publishes a different one, rather than having it replaced by
+        # whatever the last load in this process happened to publish.
+        self._adopted_autocompact_pct = published_autocompact_pct()
         self._provider_factory = provider_factory
         self._allocation_state = SessionRegistryState(
             start_sem=asyncio.Semaphore(_MAX_CONCURRENT_COLD_STARTS)
@@ -1591,6 +1598,31 @@ class SessionManager:
     async def refresh_defaults(self) -> None:
         """Adopt changed defaults for new sessions without touching live sessions."""
         await self._lifecycle_boundary().refresh_defaults()
+
+    def _sync_autocompact_pct(self) -> None:
+        """Adopt a newly published compaction threshold, if one arrived.
+
+        The threshold is captured on ``_cfg`` when the gateway starts, so a
+        config write used to reach disk and stop there. Every successful
+        ``KiroCrewConfig.load`` now publishes it, and prompt assembly loads
+        config once per turn, so a write from ANY writer -- the dashboard PATCH
+        handler or ``kirocrew config set`` -- is in force by the next context
+        reading without a restart.
+
+        Adopt-on-CHANGE rather than unconditional assignment: a manager
+        constructed with a config that carries its own threshold must keep it, so
+        only a value that differs from the last one this manager adopted wins.
+        That also makes the sync idempotent, which matters because the gate calls
+        it on every reading.
+
+        Reads a module-level snapshot, never config.json -- this runs on the
+        event loop, where a stat/read/validate is exactly what the publish idiom
+        exists to avoid.
+        """
+        published = published_autocompact_pct()
+        if published != self._adopted_autocompact_pct:
+            self._adopted_autocompact_pct = published
+            self._cfg.session.autocompact_pct = published
 
     async def reload_provider_factory(self) -> None:
         """Rebuild the provider factory and retire sessions created by the old one."""
@@ -1984,6 +2016,10 @@ class SessionManager:
 
     def _compaction_gate_decision(self, key: str, provider: LLMProvider, pct: float) -> str | None:
         """Delegate the ordered compaction gate ladder."""
+        # Adopt a newly published threshold before the ladder reads it: the
+        # coordinator resolves it through ``owner._cfg``, so syncing here is what
+        # makes a config write from any writer bind on the next reading.
+        self._sync_autocompact_pct()
         return self._compaction._compaction_gate_decision(key, provider, pct)
 
     def _trigger_compaction(
