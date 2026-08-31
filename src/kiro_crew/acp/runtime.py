@@ -40,13 +40,13 @@ from kiro_crew.acp._dispatch import (
     set_mode_params,
 )
 from kiro_crew.acp.client import (
-    _NOT_LOGGED_IN_RE,
     OversizeLineUnrecoverable,
     _drain_oversize_line,
     _get_start_time,
     _KiroExecutableTrustError,
     _resolve_kiro_bin_for_spawn,
     finish_suspended_spawn,
+    is_auth_failure_output,
 )
 from kiro_crew.acp.kas_agents import (
     KasAgentTranslationError,
@@ -796,6 +796,15 @@ class AcpRuntime:
         self._dead = False
         self._last_activity: float = 0.0
         self._stderr_lines: list[str] = []
+        # Latched auth-failure observation. ``_stderr_lines`` is a 20-line ring,
+        # so on a noisy startup the auth line can be evicted before anything asks
+        # about it — and the question is only ever asked LATER, once a request
+        # times out or the runtime dies. Re-scanning a buffer that no longer holds
+        # the evidence answers "no auth problem", which is indistinguishable from
+        # a real negative. Latch on arrival instead: an auth failure observed once
+        # stays observed for the life of this runtime, which is correct because
+        # nothing about a rejected credential un-rejects itself mid-process.
+        self._saw_auth_failure = False
         # Unroutable-frame drop accounting: (sessionId, method) → count since
         # the last flush, plus the monotonic timestamp of that flush (0.0 = no
         # window open yet; the first counted drop opens it). Written ONLY from
@@ -2283,13 +2292,23 @@ class AcpRuntime:
             pass
 
     def saw_not_logged_in(self) -> bool:
-        """True if kiro-cli's 'not logged in' auth-failure appeared on stderr.
+        """True if kiro-cli reported an auth failure on stderr.
 
         Lets callers translate a runtime death into AcpAuthRequired (an
         actionable login prompt) instead of a generic process-death error —
         parity with AcpClient, which inspects stderr the same way.
+
+        That parity is what this now actually delivers. The check used to be a
+        single regex for the literal banner ``not logged in``, while AcpClient's
+        error-frame path recognised the full auth vocabulary; a real expired
+        bearer token writes ``AccessDeniedException: "Invalid token"`` and ``the
+        bearer token included in the request is invalid`` and says ``not logged
+        in`` nowhere, so this returned False on exactly the state it exists to
+        detect, and the operator was shown a ``session/new`` timeout instead.
+
+        Reads the latch, not the ring buffer: see ``_saw_auth_failure``.
         """
-        return any(_NOT_LOGGED_IN_RE.search(line) for line in self._stderr_lines)
+        return self._saw_auth_failure
 
     def _mark_dead(self, reason: str, *, expected: bool = False) -> None:
         """Mark runtime dead, fail all pending requests, poison all session queues.
@@ -3207,6 +3226,18 @@ class AcpRuntime:
                     self._stderr_lines.append(text)
                     if len(self._stderr_lines) > 20:
                         self._stderr_lines = self._stderr_lines[-20:]
+                    # Latch here, at the sink, because this is the only point at
+                    # which every line is guaranteed to have been seen. The
+                    # trim above is what makes it necessary: nobody asks about
+                    # auth until a request has already timed out, by which time a
+                    # chatty startup can have pushed the auth line out of the ring.
+                    # Deliberately does not log: the line below already emits this
+                    # text at debug, so a second record here would add no content
+                    # and only raise arbitrary matched stderr to a default-visible
+                    # level, against this sink's own convention. The condition is
+                    # surfaced where it is actionable instead -- as AcpAuthRequired.
+                    if not self._saw_auth_failure and is_auth_failure_output(text):
+                        self._saw_auth_failure = True
                     logger.debug("stderr: %s", text[:200])
         except asyncio.CancelledError:
             raise
