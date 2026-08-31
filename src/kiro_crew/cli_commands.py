@@ -2337,7 +2337,23 @@ def _artifact(args: argparse.Namespace) -> None:
         if d.get("error"):
             print(f"Error: {d['error']}", file=sys.stderr)
             sys.exit(1)
-        print(f"Saved: slug={d.get('slug', '?')} version={d.get('version', 1)}")
+        slug = d.get("slug", "?")
+        print(f"Saved: slug={slug} version={d.get('version', 1)}")
+        # `save` has no --slug, so the slug is always derived from --name and a
+        # name collision can only ever be resolved by suffixing. That reads as
+        # success (exit 0, "version=1"), which is how a re-save of corrected
+        # content ends up published at a slug nobody looks at while the
+        # original keeps serving the old text. Name the slug that was taken and
+        # the verb that versions in place.
+        taken = d.get("slug_collided_with")
+        if taken:
+            print(
+                f"Warning: slug '{taken}' is already taken, so this created a NEW "
+                f"artifact at '{slug}' rather than a new version of '{taken}'. "
+                f"To version the existing artifact in place, use: "
+                f"kirocrew artifact update {taken}",
+                file=sys.stderr,
+            )
         return
 
     if action == "update":
