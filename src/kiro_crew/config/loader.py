@@ -22,7 +22,7 @@ import stat as _stat
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -203,6 +203,7 @@ _KNOWN_CONFIG_SECTIONS: frozenset = frozenset(
         "taskrunner",
         "orchestrator",
         "watchdog",
+        "resource_limits",
         "messaging",
         "cron_history",
         "knowledge",
@@ -5792,6 +5793,246 @@ class WatchdogConfig:
     )
 
 
+# Keys whose out-of-domain value has already been reported, so a knob read once
+# per spawn warns once per process instead of once per agent launch. Same shape
+# as ``_OBSERVED_DEGRADED_SECTIONS``; exposed for tests to reset.
+_WARNED_RESOURCE_LIMIT_KEYS: set[str] = set()
+
+
+def _limit_int(value: object, key: str, *, lo: int, hi: int | None = None) -> int | None:
+    """Coerce one ``resource_limits`` value, or ``None`` when it is out of domain.
+
+    ``None`` means "no usable value here" and is deliberately NOT a number: each
+    mechanism's fallback is its own documented default (``_RLIMIT_DEFAULTS`` for
+    the rlimit path, ``_CGROUP_DEFAULT_*`` for the cgroup paths), and those must
+    stay where they are rather than being copied into this dataclass as a third
+    default set.
+
+    The coercion rules, and why each one is what it is:
+
+    - ``bool`` is not a number here. ``True`` would otherwise coerce to ``1`` and
+      set a one-process / one-MB ceiling, which kills the child it limits.
+    - A non-integral float TRUNCATES toward zero (``512.5`` -> ``512``), matching
+      what every pre-existing reader did, so tightening the parse cannot loosen
+      an operator's ceiling.
+    - EXCEPT when it truncates to ``0``, either sign: ``0.5`` is not a request to
+      disable the limit, but ``int(0.5)`` is exactly the value that means
+      "disabled" on the rlimit path and "use the default" on the cgroup path.
+      That silent reinterpretation is the trap in #3474, so it is refused.
+    - NaN and +/-Infinity are refused before ``int()`` sees them. ``json.loads``
+      accepts both literals, and ``int(inf)`` raises ``OverflowError`` --
+      uncaught on the rlimit path, which turned a typo into a failure of every
+      spawn.
+    - Out of range REFUSES rather than clamps, and is checked on the value AS
+      WRITTEN rather than on the truncated result. A clamp would silently move a
+      confinement ceiling away from the number the operator can read in their own
+      file; checking after truncation would let a value below the floor land back
+      inside it (``int(-0.5) == 0`` passes a ``>= 0`` floor and then reads as
+      "leave inherited", removing the ceiling entirely).
+
+    Every refusal is logged once per key per process: the value is security
+    relevant, so an operator must not have to infer it was dropped.
+    """
+
+    def _refuse(reason: str) -> None:
+        if key in _WARNED_RESOURCE_LIMIT_KEYS:
+            return
+        _WARNED_RESOURCE_LIMIT_KEYS.add(key)
+        logger.warning(
+            "config: resource_limits.%s = %r %s — ignoring it and using the "
+            "documented default for that mechanism",
+            key,
+            value,
+            reason,
+        )
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _refuse("is not a number")
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        _refuse("is not a finite number")
+        return None
+    # Range-check the value AS WRITTEN, before any truncation. Checking the
+    # truncated result instead lets a value BELOW the floor land back inside it:
+    # ``int(-0.5) == 0`` satisfies a ``>= 0`` floor and then reads as this
+    # block's "leave inherited" sentinel, REMOVING the ceiling the operator was
+    # trying to set.
+    if value < lo or (hi is not None and value > hi):
+        _refuse(f"is outside the accepted range [{lo}, {hi if hi is not None else 'unbounded'}]")
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        # A fraction that truncates to zero is refused whatever its sign. Zero
+        # is meaningful to every consumer of this block -- "leave inherited",
+        # "use the default", "disabled" -- so truncating would silently swap the
+        # operator's request for one of those.
+        if int(value) == 0:
+            _refuse("is a fraction that would truncate to 0, which means something else")
+            return None
+        logger.debug("config: resource_limits.%s = %r truncated to %d", key, value, int(value))
+    return int(value)
+
+
+@dataclass
+class ResourceLimitsConfig:
+    """Kernel confinement ceilings for spawned agent processes.
+
+    THREE mechanisms read this one block, and a key shared between two of them
+    does NOT mean the same thing on both. That is the whole reason this section
+    has a schema (#3474): every consumer used to parse the raw dict itself, so
+    the incompatible domains were written down nowhere and drifted apart.
+
+    - ``POSIX rlimits`` (``security.apply_resource_limits``, via ``preexec_fn``
+      or the exec shim's ``--rlimits=``). Here ``0`` is a MEANINGFUL, documented
+      value: "leave the inherited limit unchanged". Absent falls back to
+      ``security._RLIMIT_DEFAULTS``.
+    - ``cgroup v2 scope`` (``sandbox.cgroup_scope_argv``, ``TasksMax`` /
+      ``MemoryMax`` / ``CPUWeight`` on a transient ``systemd-run --user
+      --scope``). Here ``0`` is ILLEGAL -- systemd rejects the property and the
+      scope never starts -- so ``0``, absent, or anything out of domain falls
+      back to the module default and the ceiling is never left unset. The one
+      exception is ``max_cpu_percent``, which is opt-in: unset emits no
+      ``CPUQuota`` property at all.
+    - ``pytest-xdist worker cap`` (``resource_status``), where ``xdist_auto_cap``
+      carries its own three-way sentinel.
+
+    Every field is ``int | None``, and ``None`` means "not configured" -- kept
+    distinct from ``0`` precisely because ``0`` is a real value on the rlimit
+    path. Values are coerced by :func:`_limit_int`, the ONLY parse site for this
+    block; a second one is a defect, and ``test_resource_limits_schema.py``
+    fails if one appears.
+    """
+
+    max_open_files: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max open files",
+            "RLIMIT_NOFILE: open file descriptors per spawned process. Caps fd "
+            "leaks. 0 leaves the inherited limit unchanged; unset uses the "
+            "built-in default (1024). Not used by the cgroup path.",
+            nullable=True,
+        ),
+    )
+    max_processes: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max processes",
+            "READ BY TWO MECHANISMS with different meanings for 0. As "
+            "RLIMIT_NPROC it caps processes for the child's real UID, and 0 "
+            "leaves the inherited limit unchanged (the default -- see the "
+            "per-UID caveat in security._RLIMIT_DEFAULTS). As the cgroup "
+            "TasksMax it counts TASKS (threads) in the scope, where 0 is "
+            "rejected by systemd, so 0 or unset means the module default.",
+            nullable=True,
+        ),
+    )
+    max_memory_mb: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max memory (MB)",
+            "READ BY TWO MECHANISMS with different meanings for 0. As RLIMIT_AS "
+            "it caps virtual address space, and 0 leaves the inherited limit "
+            "unchanged (the default -- Node/V8 reserve huge VSZ, see the caveat "
+            "in security._RLIMIT_DEFAULTS). As the cgroup MemoryMax it is the "
+            "per-scope resident ceiling, where 0 is rejected by systemd, so 0 "
+            "or unset means the host-proportional module default.",
+            nullable=True,
+        ),
+    )
+    max_cpu_seconds: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max CPU seconds",
+            "RLIMIT_CPU: CPU-seconds per spawned process. 0 leaves the "
+            "inherited limit unchanged (the default). Not used by the cgroup "
+            "path, which throttles with CPUWeight/CPUQuota instead of killing.",
+            nullable=True,
+        ),
+    )
+    cpu_weight: int | None = field(
+        default=None,
+        metadata=_meta(
+            "CPU weight",
+            "cgroup CPUWeight for the agent scope: relative CPU share under "
+            "contention, not a cap. Accepted range 1-10000; unset or out of "
+            "range uses the module default. Emitted only when the cpu "
+            "controller is delegated to the user manager.",
+            nullable=True,
+        ),
+    )
+    max_cpu_percent: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max CPU percent",
+            "cgroup CPUQuota: a HARD CPU cap, opt-in. Unset or 0 emits no "
+            "CPUQuota property at all, because a hard cap slows legitimate "
+            "builds. May exceed 100 on a multi-core host (150 = 1.5 cores).",
+            nullable=True,
+        ),
+    )
+    max_total_memory_mb: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max total memory (MB)",
+            "cgroup MemoryMax for the whole agents SLICE -- how much every "
+            "agent tree may claim together, independent of the per-scope "
+            "ceiling. 0 or unset uses the host-proportional module default; "
+            "the aggregate ceiling is never left unset.",
+            nullable=True,
+        ),
+    )
+    max_total_processes: int | None = field(
+        default=None,
+        metadata=_meta(
+            "Max total processes",
+            "cgroup TasksMax for the whole agents SLICE, counting tasks "
+            "(threads) across every agent tree. 0 or unset uses the module "
+            "default; the aggregate ceiling is never left unset.",
+            nullable=True,
+        ),
+    )
+    xdist_auto_cap: int | None = field(
+        default=None,
+        metadata=_meta(
+            "pytest-xdist worker cap",
+            "Ceiling for auto-computed pytest-xdist worker counts. -1 (the "
+            "default) computes it from available memory, 0 disables the "
+            "injection entirely and defers to xdist, and N > 0 pins a fixed "
+            "cap.",
+            nullable=True,
+        ),
+    )
+
+    @classmethod
+    def from_raw(cls, section: object) -> "ResourceLimitsConfig":
+        """Build from a raw ``resource_limits`` dict -- the ONE parse site.
+
+        Accepts whatever ``json.loads`` produced, including ``None`` and a
+        non-dict, because the callers are spawn-path readers that must never
+        raise: a malformed config has to degrade to defaults, not stop the agent
+        from starting. Consumers keep their own interpretation of ``0`` and of
+        ``None``; this method only decides what is a usable integer.
+        """
+        if not isinstance(section, dict):
+            return cls()
+        return cls(
+            max_open_files=_limit_int(section.get("max_open_files"), "max_open_files", lo=0),
+            max_processes=_limit_int(section.get("max_processes"), "max_processes", lo=0),
+            max_memory_mb=_limit_int(section.get("max_memory_mb"), "max_memory_mb", lo=0),
+            max_cpu_seconds=_limit_int(section.get("max_cpu_seconds"), "max_cpu_seconds", lo=0),
+            cpu_weight=_limit_int(section.get("cpu_weight"), "cpu_weight", lo=1, hi=10000),
+            max_cpu_percent=_limit_int(section.get("max_cpu_percent"), "max_cpu_percent", lo=0),
+            max_total_memory_mb=_limit_int(
+                section.get("max_total_memory_mb"), "max_total_memory_mb", lo=0
+            ),
+            max_total_processes=_limit_int(
+                section.get("max_total_processes"), "max_total_processes", lo=0
+            ),
+            xdist_auto_cap=_limit_int(section.get("xdist_auto_cap"), "xdist_auto_cap", lo=-1),
+        )
+
+
 @dataclass
 class TunnelConfig:
     enabled: bool = field(
@@ -7131,6 +7372,15 @@ class KiroCrewConfig:
         default_factory=WatchdogConfig,
         metadata=_meta("Watchdog", "ACP per-session watchdog / liveness-oracle windows."),
     )
+    resource_limits: ResourceLimitsConfig = field(
+        default_factory=ResourceLimitsConfig,
+        metadata=_meta(
+            "Resource Limits",
+            "Kernel confinement ceilings for spawned agents (POSIX rlimits and "
+            "cgroup v2 scope properties). Shared keys mean different things to "
+            "the two mechanisms -- see the per-field help.",
+        ),
+    )
 
     slack: SlackConfig = field(
         default_factory=SlackConfig,
@@ -7490,6 +7740,21 @@ class KiroCrewConfig:
 
             # Preserve fail-closed security semantics before advisory schema
             # validation can replace malformed input with a missing-field default.
+            # Normalize resource_limits FIRST, for exactly that reason. Its
+            # fields are declared ``int | None``, so jsonschema reads a
+            # hand-edited ``512.5`` as a type violation and
+            # ``_apply_field_default`` POPS the key -- deleting a ceiling the
+            # parse rule would have accepted, since it truncates. That deletion
+            # is not neutral: the rlimit path's fallback for a missing value is
+            # ``0``, which means "leave inherited", so a 512 MB ceiling becomes
+            # NO ceiling, and ``to_dict`` then persists ``null`` over what the
+            # operator wrote. Normalizing here means validation sees the same
+            # integers ``from_raw`` would produce; it is idempotent, so the
+            # section build below agrees by construction.
+            if isinstance(data.get("resource_limits"), dict):
+                data["resource_limits"] = asdict(
+                    ResourceLimitsConfig.from_raw(data["resource_limits"])
+                )
             # Validate against JSON Schema (advisory — never fatal)
             _validate_config_data(data)
             # Clamp security-relevant resource-limit knobs to their API ceilings
@@ -7584,6 +7849,7 @@ class KiroCrewConfig:
         telemetry_data = _coerced_section(data, "telemetry", _degraded)
         orchestrator_data = _coerced_section(data, "orchestrator", _degraded)
         watchdog_data = _coerced_section(data, "watchdog", _degraded)
+        resource_limits_data = _coerced_section(data, "resource_limits", _degraded)
 
         # Parse agents section into dict[str, KiroCrewAgentConfig]
         raw_agents = data.get("agents", {})
@@ -7905,6 +8171,7 @@ class KiroCrewConfig:
                     watchdog_data.get("wellness_sample_secs", 3.0), 3.0
                 ),
             ),
+            resource_limits=ResourceLimitsConfig.from_raw(resource_limits_data),
             telemetry=TelemetryConfig(
                 enabled=bool(telemetry_data.get("enabled", False)),
                 local_dir=str(telemetry_data.get("local_dir", "")),
@@ -8738,6 +9005,7 @@ class KiroCrewConfig:
             "taskrunner": asdict(self.taskrunner),
             "orchestrator": asdict(self.orchestrator),
             "watchdog": asdict(self.watchdog),
+            "resource_limits": asdict(self.resource_limits),
             "messaging": asdict(self.messaging),
             "cron_history": asdict(self.cron_history),
             "knowledge": asdict(self.knowledge),
@@ -8792,6 +9060,25 @@ class KiroCrewConfig:
             try:
                 raw_local = json.loads(local_path.read_text(encoding="utf-8"))
                 if isinstance(raw_local, dict):
+                    # Compare CANONICAL values for resource_limits.
+                    # _subtract_overlay recognises an overlay-owned leaf only when
+                    # the emitted value EQUALS the raw overlay value, and this
+                    # section is normalized on load (512.5 -> 512, a refused value
+                    # -> None). A raw comparison therefore stops matching and
+                    # copies an overlay-owned limit into the base file, which is
+                    # the leak the subtraction exists to prevent. Only the keys the
+                    # overlay actually names are canonicalized: feeding the whole
+                    # dataclass would add eight `None` leaves the operator never
+                    # wrote and invite deletions they did not ask for.
+                    rl_overlay = raw_local.get("resource_limits")
+                    if isinstance(rl_overlay, dict):
+                        canonical = asdict(ResourceLimitsConfig.from_raw(rl_overlay))
+                        raw_local = {
+                            **raw_local,
+                            "resource_limits": {
+                                k: canonical[k] for k in rl_overlay if k in canonical
+                            },
+                        }
                     d = _subtract_overlay(d, raw_local)
             except (json.JSONDecodeError, OSError):
                 pass

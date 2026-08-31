@@ -27,7 +27,6 @@ import errno
 import functools
 import json
 import logging
-import math
 import os
 import re
 import select
@@ -5439,39 +5438,30 @@ def _cgroup_limits_from_config() -> tuple[int, int, int, int]:
         # config/security consumers — importing kiro_crew.config.loader at
         # module load would create an import cycle, so it stays function-level
         # (same pattern as resource_limit_preexec below).
-        from kiro_crew.config.loader import _raw_config
+        from kiro_crew.config.loader import ResourceLimitsConfig, _raw_config
 
-        rl = _raw_config().get("resource_limits")
-        if isinstance(rl, dict):
-            p = rl.get("max_processes")
-            # Compare the raw number, not ``int(p)``: config.json (parsed by
-            # Python's permissive json.loads) can carry NaN/Infinity, and
-            # ``int()`` on either raises — inside the try/except below that
-            # would abort parsing of every remaining field (m, w, q), silently
-            # discarding an operator's otherwise-valid stricter limits. A
-            # fraction such as 0.5 still correctly falls through to the
-            # default here, since it truncates to invalid TasksMax=0.
-            if (
-                isinstance(p, (int, float))
-                and not isinstance(p, bool)
-                and math.isfinite(p)
-                and p >= 1
-            ):
-                max_procs = int(p)
-            m = rl.get("max_memory_mb")
-            if (
-                isinstance(m, (int, float))
-                and not isinstance(m, bool)
-                and math.isfinite(m)
-                and m >= 1
-            ):
-                max_mem_mb = int(m)
-            w = rl.get("cpu_weight")
-            if isinstance(w, (int, float)) and not isinstance(w, bool) and 1 <= w <= 10000:
-                cpu_weight = int(w)
-            q = rl.get("max_cpu_percent")
-            if isinstance(q, (int, float)) and not isinstance(q, bool) and q > 0:
-                max_cpu_percent = int(q)
+        # One validated read for the whole block. ResourceLimitsConfig.from_raw
+        # is the only place these keys are coerced, and it is what refuses a
+        # fraction, a NaN/Infinity from json.loads, and a non-number before
+        # ``int()`` can raise on them and abort the remaining fields.
+        rl = ResourceLimitsConfig.from_raw(_raw_config().get("resource_limits"))
+        # ``>= 1``, so 0 lands on the default with everything else out of domain:
+        # TasksMax=0 / MemoryMax=0M are rejected by systemd and the scope would
+        # never start, so this ceiling is never left unset. The SAME two keys
+        # mean "leave inherited" when 0 reaches the rlimit path in
+        # security.apply_resource_limits — ResourceLimitsConfig carries both
+        # domains so neither side can be tightened without seeing the other.
+        if rl.max_processes is not None and rl.max_processes >= 1:
+            max_procs = rl.max_processes
+        if rl.max_memory_mb is not None and rl.max_memory_mb >= 1:
+            max_mem_mb = rl.max_memory_mb
+        # Range-checked at the parse site (1..10000), so any value that arrives
+        # here is usable as-is.
+        if rl.cpu_weight is not None:
+            cpu_weight = rl.cpu_weight
+        # Opt-in: 0 keeps the "emit no CPUQuota" default rather than capping.
+        if rl.max_cpu_percent is not None and rl.max_cpu_percent > 0:
+            max_cpu_percent = rl.max_cpu_percent
     except Exception:
         logger.debug("cgroup limits: config unavailable, using defaults")
     return max_procs, max_mem_mb, cpu_weight, max_cpu_percent
@@ -5866,18 +5856,18 @@ def _slice_limits_from_config() -> tuple[int, int]:
     try:
         # circular import: same constraint as _cgroup_limits_from_config —
         # config.loader consumers import sandbox, so the import stays local.
-        from kiro_crew.config.loader import _raw_config
+        from kiro_crew.config.loader import ResourceLimitsConfig, _raw_config
 
-        rl = _raw_config().get("resource_limits")
-        if isinstance(rl, dict):
-            # int(m) >= 1, not m > 0: a fractional 0.5 passes m > 0 but
-            # truncates to MemoryMax=0M, which kills every agent scope.
-            m = rl.get("max_total_memory_mb")
-            if isinstance(m, (int, float)) and not isinstance(m, bool) and int(m) >= 1:
-                total_mem_mb = int(m)
-            p = rl.get("max_total_processes")
-            if isinstance(p, (int, float)) and not isinstance(p, bool) and int(p) >= 1:
-                total_tasks = int(p)
+        # Same single validated read as the per-scope knobs. This function used
+        # to test ``int(m) >= 1`` directly, which raises on a NaN/Infinity that
+        # json.loads happily produces — and the raise landed in the except below,
+        # discarding a VALID max_total_processes set alongside a junk memory
+        # value. from_raw refuses both before int() sees them, per key.
+        rl = ResourceLimitsConfig.from_raw(_raw_config().get("resource_limits"))
+        if rl.max_total_memory_mb is not None and rl.max_total_memory_mb >= 1:
+            total_mem_mb = rl.max_total_memory_mb
+        if rl.max_total_processes is not None and rl.max_total_processes >= 1:
+            total_tasks = rl.max_total_processes
     except Exception:
         logger.debug("slice limits: config unavailable, using defaults")
     return total_mem_mb, total_tasks
@@ -6360,11 +6350,13 @@ def build_resource_limit_preexec() -> "Callable[[], None] | None":
             cfg = {}
         raw_limits = (cfg or {}).get("resource_limits")
         limits = dict(raw_limits) if isinstance(raw_limits, dict) else {}
-        # Malformed operator values must not break the spawn — resource-limit
-        # handling elsewhere ignores bad values, so mirror that here and fall
-        # back to the ceiling (bools are ints in Python; exclude them).
-        raw = limits.get("max_open_files")
-        configured = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+        # Malformed operator values must not break the spawn — the shared parse
+        # ignores anything out of domain and returns None, which floors to the
+        # build ceiling here. Going through it keeps this path from being a
+        # second rule for a key security.resource_limit_spec also reads.
+        from kiro_crew.config.loader import ResourceLimitsConfig
+
+        configured = ResourceLimitsConfig.from_raw(raw_limits).max_open_files or 0
         limits["max_open_files"] = max(configured, _BUILD_NOFILE_CEILING)
         _BUILD_RESOURCE_PREEXEC = apply_resource_limits({**(cfg or {}), "resource_limits": limits})
     return _BUILD_RESOURCE_PREEXEC  # type: ignore[return-value]
@@ -6444,8 +6436,11 @@ def _rlimit_spec(profile: str) -> str:
     if profile == RLIMIT_PROFILE_BUILD:
         raw_limits = (cfg or {}).get("resource_limits")
         limits = dict(raw_limits) if isinstance(raw_limits, dict) else {}
-        raw = limits.get("max_open_files")
-        configured = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+        # Same shared parse as the post-fork build path above, so the two
+        # spellings of "raise the build NOFILE floor" cannot drift apart.
+        from kiro_crew.config.loader import ResourceLimitsConfig
+
+        configured = ResourceLimitsConfig.from_raw(raw_limits).max_open_files or 0
         limits["max_open_files"] = max(configured, _BUILD_NOFILE_CEILING)
         cfg = {**(cfg or {}), "resource_limits": limits}
     return ",".join(f"{name}:{value}" for name, value in resource_limit_spec(cfg))
