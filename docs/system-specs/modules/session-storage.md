@@ -92,7 +92,7 @@ the legacy stem fails instead of agreeing with itself.
 
 ## An instance that cannot see who is live must not reclaim
 
-`reclaim_block_reason()` blocks an isolated data home whose replay store is outside that home: its local session map cannot establish ownership of the shared store. It compares resolved paths and requires containment rather than checking environment-variable presence or a default path, so an unsafe override that falls back to the shared default cannot appear isolated. The legacy pre-migration home is a default, not isolation.
+`reclaim_block_reason()` blocks an isolated data home whose replay store is outside that home: its local session map cannot establish ownership of the shared store. It compares resolved paths and requires containment rather than checking environment-variable presence or a default path, so an unsafe override that falls back to the shared default cannot appear isolated. The legacy pre-migration home is a default, not isolation. `reclaim_block_reason` defaults to `cached=False` so mutation gates like `_move_to_trash_locked` always evaluate the live co-tenant state; display aggregators (`measure()`) pass `cached=True` to reuse the recent co-tenant scan from `list_units()`.
 
 `cotenant_sids()` handles discoverable pod candidates differently. A pod with its own replay store cannot own files in this store. A candidate that claims sessions but has no own store, or whose map cannot be read or parsed, makes `move_to_trash()` refuse because it can resume a session after the pre-move snapshot. A dev gateway at an arbitrary data home is not discoverable and remains a Known Limitation.
 
