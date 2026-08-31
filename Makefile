@@ -26,6 +26,13 @@ frontend:
 	# `cat` exits 1. With `&&` chaining that non-zero exit aborts the whole
 	# recipe line, so the target fails before npm is ever reached. An absent
 	# marker must degrade to "use whatever node is on PATH", not stop the build.
+	# website/electron is a SEPARATE npm package (website/package.json has no
+	# `workspaces` key), so the dashboard install below does not link its deps
+	# and `npm test` / `npm run check` run from website/electron fail with
+	# MODULE_NOT_FOUND after an otherwise green build. Install its deps too —
+	# install ONLY, no `npm run build`: the desktop bundle is built by
+	# build-desktop.sh, which runs its own `npm ci` + `npm run build` (see the
+	# desktop target below).
 	cd website && \
 	  NBD="$$(cat "$${KIROCREW_HOME:-$$HOME/.kiro/crew}/node-bin-dir" 2>/dev/null || true)"; \
 	  { [ -z "$$NBD" ] || export PATH="$$NBD:$$PATH"; }; \
@@ -34,7 +41,9 @@ frontend:
 	    exit 1; \
 	  fi; \
 	  if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi && \
-	  npm run build
+	  npm run build && \
+	  cd electron && \
+	  if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 	rm -rf src/kiro_crew/static/dist
 	mkdir -p src/kiro_crew/static
 	cp -R website/dist src/kiro_crew/static/dist

@@ -289,6 +289,24 @@ function Invoke-Frontend {
         Pop-Location
     }
 
+    # website\electron is a SEPARATE npm package (website\package.json has no
+    # `workspaces` key), so the install above does not link its dependencies and
+    # `npm test` / `npm run check` run from website\electron fail with
+    # MODULE_NOT_FOUND after an otherwise green build. Install its deps too --
+    # install ONLY, no `npm run build`: the desktop packaging scripts run their
+    # own `npm ci` + `npm run build` for the bundle.
+    Write-Step "installing website\electron dependencies"
+    Push-Location (Join-Path $RepoRoot "website\electron")
+    try {
+        if (Test-Path "package-lock.json") {
+            Invoke-Step $npm @("ci", "--no-audit", "--no-fund") "npm ci (website\electron)"
+        } else {
+            Invoke-Step $npm @("install", "--no-audit", "--no-fund") "npm install (website\electron)"
+        }
+    } finally {
+        Pop-Location
+    }
+
     # Stage into the package. The destination is CLEARED first: vite emits
     # content-hashed filenames, so copying over an existing bundle accumulates
     # stale assets that can then be served or packaged.

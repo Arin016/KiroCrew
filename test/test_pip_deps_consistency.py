@@ -174,6 +174,29 @@ def test_otlp_extra_declares_exact_http_exporter_version():
     assert requirements == ["opentelemetry-exporter-otlp-proto-http==1.44.0"]
 
 
+def test_dev_extra_carries_the_skip_hiding_test_deps():
+    """The dev extra must keep the deps whose absence silently SKIPS guard tests.
+
+    ``pip install -e ".[dev]"`` is the CONTRIBUTING.md first-time setup and what
+    ``make build`` uses; CI instead installs the pyproject ``[dependency-groups]``
+    dev group via ``--group dev``. jsonschema and PyJWT are imported behind
+    try/except (``kiro_crew.config.validation``) or ``importorskip``
+    (``test_teams_client``), so an extra that omits them leaves those guard tests
+    silently skipping — a contributor's run looks green while exercising none of
+    the schema-validation or Teams token-gate paths, and pytest scores a skip as
+    a pass (issue #7226). Exact pins matching the group, so extra and group
+    cannot drift apart; bump both (and this test) in lockstep.
+    """
+    cfg = _read_setup_cfg()
+    dev = [
+        line.strip()
+        for line in cfg.get("options.extras_require", "dev").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert "jsonschema==4.26.0" in dev
+    assert "PyJWT[crypto]==2.13.0" in dev
+
+
 def _pyproject_path() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
 
