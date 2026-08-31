@@ -12074,7 +12074,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Con qué modelo empiezan las sesiones nuevas cuando su agente no tiene uno propio. Define un modelo por agente en Capacidades → Agentes, o elige uno dentro de una sesión para cambiarlo solo allí.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Qué parte del flujo de un subagente se conserva al inyectar su evento de finalización en la sesión principal. Inicio conserva el comienzo (predeterminado, igual que el comportamiento anterior). Cola conserva el resumen final. Ambos conserva un fragmento de cada extremo con un marcador entre ellos.",
         "widget_density": "Densidad de widgets",
-        "your_role": "Tu rol"
+        "your_role": "Tu rol",
+        "session_card_source_links": "Chips de PR e incidencias en las tarjetas de sesión",
+        "session_card_source_links_desc": "Muestra en la tarjeta de cada sesión de la barra lateral un chip por cada pull request, merge request o incidencia mencionada en esa sesión. Al desactivarlo también se detienen las llamadas periódicas al proveedor que mantienen esos chips al día."
       },
       "computerUsePanel": {
         "accessibility": "Accesibilidad",

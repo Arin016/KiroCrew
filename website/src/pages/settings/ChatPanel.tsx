@@ -158,7 +158,7 @@ export function ChatPanel() {
   // second toggle during a save carries the first one's value forward.
   const dashCfg = overlay.shown(
     'dashboardConfig',
-    dashQ.data ?? { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, widget_density: 'more' as const, verbosity: 'default' as const, quick_send: false, session_grid: false, tail_fork_enabled: false, link_previews: false, mcp_app_panel: false, auto_open_git_panel: false, folder_suggestions_enabled: true, use_builtin_browser: true },
+    dashQ.data ?? { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, widget_density: 'more' as const, verbosity: 'default' as const, quick_send: false, session_grid: false, tail_fork_enabled: false, link_previews: false, mcp_app_panel: false, auto_open_git_panel: false, session_card_source_links: true, folder_suggestions_enabled: true, use_builtin_browser: true },
   )
 
   // ── Feature Tips opt-out (server-side per-user state) ──
@@ -187,17 +187,23 @@ export function ChatPanel() {
   const tipsConfigOff = tipsQ.data ? !tipsQ.data.enabled_config : false
   const shownOptedOut = overlay.shown('tipsStatus.opted_out', tipsQ.data?.opted_out)
 
-  // The dashboard config is written whole (the endpoint takes the full
-  // object), so its overlay path is the object itself: a toggle builds its
-  // payload from the SHOWN config, a second toggle therefore already carries
-  // the first one's in-flight value, and the monotonic token keeps a slow
-  // earlier save from clobbering the newer one's display or cache write.
-  const dashMut = useMutation(overlay.mutationOpts<DashboardConfig>({
+  // Only the CHANGED keys go on the wire, the way `BrowserPanel`'s own dashboard
+  // mutation already does it: the config handler applies whichever keys the body
+  // carries, so a full-object PUT rebuilt from this tab's cache would write every
+  // OTHER setting back at its cached value -- clobbering one that a second tab
+  // (or `kirocrew config set`) changed after we cached it.
+  //
+  // The overlay still displays and caches the WHOLE object, so the patch is
+  // merged in both places. Merging onto the SHOWN config rather than the server
+  // value is what keeps the property above -- a second toggle during an in-flight
+  // save carries the first one's value forward -- and the monotonic token still
+  // keeps a slow earlier save from clobbering a newer one's display or cache write.
+  const dashMut = useMutation(overlay.mutationOpts<Partial<DashboardConfig>>({
     queryKey: ['dashboardConfig'],
-    mutationFn: (next: DashboardConfig) => api.updateDashboardConfig(next),
+    mutationFn: (patch: Partial<DashboardConfig>) => api.updateDashboardConfig(patch),
     path: () => 'dashboardConfig',
-    displayValue: next => next,
-    applyToCache: (_cached, next) => next,
+    displayValue: patch => ({ ...dashCfg, ...patch }),
+    applyToCache: (cached, patch) => ({ ...(cached as DashboardConfig), ...patch }),
     onFailure: () => setPathSaveError('dashboardConfig', i18nT('pages.settings.chatPanel.failed_to_save_dashboard_config')),
     onSupersede: clearOwnPathError,
   }))
@@ -475,7 +481,7 @@ export function ChatPanel() {
   }, [])
 
   const setDash = (patch: Partial<DashboardConfig>) => {
-    dashMut.mutate({ ...dashCfg, ...patch })
+    dashMut.mutate(patch)
   }
 
   const dashDisabled = !dashQ.isSuccess
@@ -691,6 +697,7 @@ export function ChatPanel() {
           <SettingsSelect label={i18nT('pages.settings.chatPanel.widget_density')} description={i18nT('pages.settings.chatPanel.how_aggressively_the_agent_uses_inline_widgets_f')} value={dashCfg.widget_density ?? 'more'} options={['more', 'less']} optionLabels={[i18nT('pages.settings.chatPanel.more_encourage_widgets'), i18nT('pages.settings.chatPanel.less_only_when_needed')]} onChange={v => setDash({ widget_density: v as 'more' | 'less' })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.mcp_apps_in_side_panel')} description={i18nT('pages.settings.chatPanel.render_interactive_mcp_apps_in_the_right_side_pa')} checked={dashCfg.mcp_app_panel} onChange={v => setDash({ mcp_app_panel: v })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.auto_open_git_panel')} description={i18nT('pages.settings.chatPanel.expand_the_side_panel_to_the_git_tab_each_time_yo')} checked={dashCfg.auto_open_git_panel} onChange={v => setDash({ auto_open_git_panel: v })} disabled={dashDisabled} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.session_card_source_links')} description={i18nT('pages.settings.chatPanel.session_card_source_links_desc')} checked={dashCfg.session_card_source_links} onChange={v => setDash({ session_card_source_links: v })} disabled={dashDisabled} />
           <SettingsSelect label={i18nT('pages.settings.chatPanel.response_verbosity')} description={i18nT('pages.settings.chatPanel.how_terse_the_agent_s_prose_is_ultra_concise_cap')} value={asVerbosity(dashCfg.verbosity)} options={VERBOSITY_OPTIONS} optionLabels={[i18nT('pages.settings.chatPanel.default_normal_length'), i18nT('pages.settings.chatPanel.concise_trim_filler'), i18nT('pages.settings.chatPanel.ultra_concise_3_sentences'), i18nT('pages.settings.chatPanel.answer_only_details_on_request')]} onChange={v => setDash({ verbosity: v as VerbosityLevel })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.show_context_percentage')} description={i18nT('pages.settings.chatPanel.display_usage_percentage_next_to_the_context_pro')} checked={chatCfg.showContextPct} onChange={v => setChat('showContextPct', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.show_token_usage')} description={i18nT('pages.settings.chatPanel.display_used_and_total_tokens_next_to_the_contex')} checked={chatCfg.showContextTokens} onChange={v => setChat('showContextTokens', v)} />

@@ -4170,7 +4170,17 @@ class _ChatSlot:
         }
 
     def to_dict(self, *, include_check_status: bool = False) -> dict:
-        source_links = self._pr_source_links()
+        # Skip extraction itself when the chips are off, not just the two fields
+        # the projection derives from it: `_pr_source_links()` scans the transcript
+        # under a per-call parse budget, and paying for a payload nothing renders
+        # is the cost this switch exists to remove. The getter is a cache-only
+        # snapshot lookup -- it never touches config, which is what makes it safe
+        # to call from this synchronous per-slot path on the event loop.
+        from kiro_crew.dashboard.handlers.source_providers import (
+            session_card_source_links_enabled,
+        )
+
+        source_links = self._pr_source_links() if session_card_source_links_enabled() else []
         return self._projection.to_dict(
             self,
             include_check_status=include_check_status,
@@ -6514,7 +6524,18 @@ class DashboardState:
 
         Issue links are excluded: the check-status path reaches ``gh pr view``
         and has no meaning for an issue.
+
+        Returns nothing while the chips are switched off. This is the point of
+        gating here rather than only in the payload: the periodic refresh this
+        feeds spawns a credentialed provider subprocess per round, and a user who
+        turned the chips off should stop paying for status nobody renders.
         """
+        from kiro_crew.dashboard.handlers.source_providers import (
+            session_card_source_links_enabled,
+        )
+
+        if not session_card_source_links_enabled():
+            return []
         urls: list[str] = []
         for s in self._slots.values():
             urls.extend(
@@ -6525,7 +6546,17 @@ class DashboardState:
         return urls
 
     def source_link_urls_for_slot(self, key: str) -> list[str]:
-        """Sidebar-visible PR/MR chip URLs for one slot (same cap and kind filter)."""
+        """Sidebar-visible PR/MR chip URLs for one slot (same cap and kind filter).
+
+        Empty while the chips are switched off, for the same reason
+        :meth:`source_link_urls` is: this feeds the turn-boundary status refresh.
+        """
+        from kiro_crew.dashboard.handlers.source_providers import (
+            session_card_source_links_enabled,
+        )
+
+        if not session_card_source_links_enabled():
+            return []
         slot = self._slots.get(key)
         if slot is None:
             return []

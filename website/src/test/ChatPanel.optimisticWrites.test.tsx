@@ -116,10 +116,12 @@ describe('ChatPanel — Feature Tips toggle through the overlay', () => {
 
 describe('ChatPanel — dashboard config through the overlay', () => {
   it("a slow earlier save's success does not clobber a newer toggle's display", async () => {
-    // Two dashboard toggles in quick succession: the second payload is built
-    // from the SHOWN config, so it already carries the first value; the
-    // monotonic token keeps the first save's settle from overwriting the
-    // second's display or cache write.
+    // Two dashboard toggles in quick succession. Each save now carries only its
+    // OWN key on the wire (the handler applies whichever keys a body has, so
+    // sending the whole cached config would clobber a key another tab changed),
+    // while the DISPLAY still composes on the shown config -- which is the
+    // property this test exists to pin: the monotonic token keeps the first
+    // save's settle from overwriting the second's display or cache write.
     const d1 = defer(updateDashboardConfigMock)
     const d2 = defer(updateDashboardConfigMock)
     wrap(<ChatPanel />)
@@ -131,10 +133,9 @@ describe('ChatPanel — dashboard config through the overlay', () => {
     await waitFor(() => expect(quickSendToggle()).toBeChecked())
     fireEvent.click(mergeToggle)
     await waitFor(() => expect(mergeToggle).toBeChecked())
-    // The second payload composes on the first's in-flight value.
-    expect(updateDashboardConfigMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ quick_send: true, merge_queued_messages: true })
-    )
+    // The second body names only its own key; the two saves compose on the
+    // SERVER, and on screen through the shown config (asserted above and below).
+    expect(updateDashboardConfigMock).toHaveBeenLastCalledWith({ merge_queued_messages: true })
 
     // The OLDER save settles first; the server still reports the pre-save
     // config, so a wrongful cache write or pending clear would be visible as

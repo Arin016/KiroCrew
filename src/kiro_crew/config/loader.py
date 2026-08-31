@@ -3454,6 +3454,22 @@ class DashboardConfig:
             "itself is always created either way, so it is one click away.",
         ),
     )
+    # Default TRUE: the chip strip shipped unconditionally before this switch
+    # existed, so a config that never mentions the key must render exactly what
+    # it rendered before.
+    session_card_source_links: bool = field(
+        default=True,
+        metadata=_meta(
+            "PR and issue chips on session cards",
+            "Show a chip on a session's sidebar card for each pull request, merge "
+            "request and issue mentioned anywhere in that session's transcript. "
+            "Turning this off reclaims a row per card on the densest surface in "
+            "the app, keeps numbers from unrelated work off screen while sharing "
+            "it, and stops the periodic credentialed provider calls that keep "
+            "those chips' CI and merge status fresh. The in-session Resources and "
+            "Changes panels are unaffected.",
+        ),
+    )
     terminal: dict = field(
         default_factory=lambda: {"enabled": True},
         metadata=_meta(
@@ -8551,6 +8567,9 @@ class KiroCrewConfig:
                 session_grid=dashboard_data.get("session_grid", False),
                 mcp_app_panel=dashboard_data.get("mcp_app_panel", False),
                 auto_open_git_panel=_safe_bool(dashboard_data.get("auto_open_git_panel"), False),
+                session_card_source_links=_safe_bool(
+                    dashboard_data.get("session_card_source_links"), True
+                ),
                 widget_density=dashboard_data.get("widget_density", "more"),
                 use_builtin_browser=_safe_bool(dashboard_data.get("use_builtin_browser"), True),
                 browser_view_port=_port_or_unset(dashboard_data.get("browser_view_port", 0)),

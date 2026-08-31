@@ -12073,7 +12073,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Con quale modello si avviano le nuove sessioni quando il loro agente non ne specifica uno. Imposta un modello per ogni agente in Capacità dell'agente → Agenti, oppure scegline uno all'interno di una sessione per sostituirlo lì.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Quale parte del flusso di un subagente conservare quando il suo evento di completamento viene inserito nella sessione principale. \"Inizio\" conserva la parte iniziale (predefinito, corrisponde al comportamento legacy). \"Fine\" conserva il riepilogo finale. \"Entrambi\" conserva una porzione da ciascuna estremità con un indicatore tra le due.",
         "widget_density": "Densità dei widget",
-        "your_role": "Il tuo ruolo"
+        "your_role": "Il tuo ruolo",
+        "session_card_source_links": "Chip di PR e issue sulle schede di sessione",
+        "session_card_source_links_desc": "Mostra sulla scheda di ogni sessione nella barra laterale un chip per ogni pull request, merge request e issue citata in quella sessione. Se disattivato, si fermano anche le chiamate periodiche al provider che tengono aggiornati quei chip."
       },
       "computerUsePanel": {
         "accessibility": "Accessibilità",

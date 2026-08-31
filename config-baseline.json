@@ -5827,6 +5827,7 @@
         "session_grid": false,
         "mcp_app_panel": false,
         "auto_open_git_panel": false,
+        "session_card_source_links": true,
         "terminal": {
           "enabled": true
         },
@@ -6345,6 +6346,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
+    },
+    {
+      "path": "dashboard.session_card_source_links",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "PR and issue chips on session cards",
+      "help": "Show a chip on a session's sidebar card for each pull request, merge request and issue mentioned anywhere in that session's transcript. Turning this off reclaims a row per card on the densest surface in the app, keeps numbers from unrelated work off screen while sharing it, and stops the periodic credentialed provider calls that keep those chips' CI and merge status fresh. The in-session Resources and Changes panels are unaffected.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
     },
     {
       "path": "dashboard.terminal",

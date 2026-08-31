@@ -3760,7 +3760,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                 session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
             )
             return web.json_response({"error": "request body must be a JSON object"}, status=400)
-        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "link_previews", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled"}
+        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "link_previews", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links"}
         # One-release backward-compat shim for removed key; delete after all clients update.
         deprecated_ignored_keys = {"tail_fork_head_handling"}
         # Read-only keys the GET exposes: both settings surfaces save with
@@ -3944,6 +3944,20 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     status=400,
                 )
             updates["auto_open_git_panel"] = val
+        if "session_card_source_links" in body:
+            val = body["session_card_source_links"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "session_card_source_links must be a boolean",
+                        "code": "invalid_session_card_source_links",
+                    },
+                    status=400,
+                )
+            updates["session_card_source_links"] = val
         # Serialize the read-modify-write under BOTH config locks so no concurrent
         # writer -- in-process OR another process -- can clobber it:
         #  * update_config_locked holds the cross-process advisory file lock
@@ -4014,6 +4028,38 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="dashboard_config_write", outcome="success"
         )
+        chips_written = updates.get("session_card_source_links")
+        if isinstance(chips_written, bool):
+            # Publish the new value NOW instead of leaving it to the next
+            # allowlist refresh. That refresh is on a 30s TTL, so without this
+            # the sidebar keeps rendering chips for up to half a minute after an
+            # explicit click -- the switch acknowledges itself instantly and
+            # nothing appears to happen, which reads as broken. This handler
+            # already knows the value, so polling for it is the wrong shape.
+            #
+            # The push is the other half: the publisher bumps the shared
+            # generation, but the owner websocket only compares that generation
+            # once per TTL round, so a push here is what re-serializes the slots
+            # with the new answer.
+            #
+            # The value is read OUTSIDE the try on purpose: only the publish and
+            # the push may fail silently, so a body that never carried this key
+            # cannot reach the publisher at all -- and a test can tell the two
+            # apart instead of a swallowed KeyError standing in for the guard.
+            try:
+                from kiro_crew.dashboard.handlers.source_providers import (  # lazy: import cycle
+                    publish_session_card_chips_now,
+                )
+
+                await publish_session_card_chips_now(chips_written)
+                state = request.app.get("state")
+                if state is not None:
+                    state.push_slots_update()
+            except Exception:
+                # Best-effort: the write itself succeeded, and the next refresh
+                # round picks the value up within one TTL. Failing the request
+                # here would report a saved setting as unsaved.
+                logger.debug("chip-switch snapshot publish failed", exc_info=True)
         return web.json_response({"ok": True})
     _sel().log_tool_invocation(
         session_key="dashboard", tool_name="dashboard_config_read", outcome="success"
@@ -4030,6 +4076,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "session_grid": cfg.dashboard.session_grid,
             "mcp_app_panel": cfg.dashboard.mcp_app_panel,
             "auto_open_git_panel": cfg.dashboard.auto_open_git_panel,
+            "session_card_source_links": cfg.dashboard.session_card_source_links,
             "tail_fork_enabled": cfg.dashboard.tail_fork_enabled,
             "link_previews": cfg.dashboard.link_previews,
             "folder_suggestions_enabled": cfg.dashboard.folder_suggestions_enabled,
