@@ -228,8 +228,8 @@ export default function ChatPane({
   // One-time hydrate of this slot's message history via React Query + the api
   // client (caching + cross-pane dedup; staleTime Infinity keeps it one-shot —
   // live updates arrive through the WS store routing, not a refetch).
-  // Bounding a streaming slot would slice its in-flight response: the limit cuts
-  // RAW rows and the chunk run only collapses after, leaving the tail alone.
+  // Unbounded while streaming is deliberate, not a raw-row guard: the handler
+  // collapses chunk runs BEFORE computing total and slicing, even mid-stream.
   // A background slot's stream state reads idle until an SSE frame arrives, so
   // the slot record is the signal; latch only once unbounded so a turn that starts
   // while the bounded fetch is still in flight can still upgrade it.

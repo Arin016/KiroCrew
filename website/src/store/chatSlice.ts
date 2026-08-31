@@ -1425,8 +1425,8 @@ function pagingCursorAfterKeptHead(
  *  treating it as absent would read a later non-zero count as growth.
  *
  *  A count from a RUNNING response is refused, because it is not comparable with
- *  a settled one: the server counts raw rows, so a streaming response is inflated
- *  by rows that collapse when the turn ends. Retaining it makes the next warm read
+ *  a settled one: an unbounded read counts raw rows, so a streaming response is
+ *  inflated by rows that collapse at turn end. Retaining it makes the next warm read
  *  that ordinary collapse as a truncation and suppress the rescue, dropping a live
  *  row -- the opposite direction to the re-append the baseline exists to prevent.
  *  Refusing leaves no baseline rather than a wrong one, which is the same
@@ -1450,8 +1450,8 @@ async function fetchSlotDetail(key: string, limit?: number) {
   // A limit takes the handler's most-recent-N slice. `undefined` keeps the
   // unbounded shape, which two callers still need: refreshSlot replaces the
   // active transcript in place (a bound would shrink history the user already
-  // paged in), and a STREAMING warm/switch fetch (the server's limit slices raw
-  // chunk rows). Omit the arg when unbounded so those keep the one-argument shape.
+  // paged in), and a STREAMING warm/switch fetch (deliberate, though the handler
+  // collapses before slicing). Omit the arg when unbounded to keep the one-arg shape.
   const d = await (limit === undefined ? api.chatSlotDetail(key) : api.chatSlotDetail(key, limit))
   type QueueItem = string | { content: string; id: string }
   return { key, nextBefore: d.next_before || 0, messages: filterMessages(d.messages || []), running: d.running || false, stopping: d.stopping || false, hasMore: d.has_more || false, total: d.total || 0, queue: ((d.queue || []) as QueueItem[]).map((q: QueueItem) => typeof q === 'string' ? { content: q, queueId: crypto.randomUUID(), ts: new Date().toISOString() } : { content: q.content, queueId: q.id, ts: new Date().toISOString() }), context: d.context_pct != null ? { pct: d.context_pct, used: d.context_used_tokens ?? undefined, window: d.context_window_tokens ?? undefined } : undefined }
@@ -1524,9 +1524,8 @@ export const switchSlot = createAsyncThunk<
     // Bounded to the page size so opening a long session costs one page, not the
     // whole chained transcript; `loadOlderMessages` walks back from the cursor
     // this fetch returns. Unbounded while the slot is streaming, for the same
-    // reason warmSlotCache and ChatPane's hydrate are: the server's limit slices
-    // RAW rows, and a streaming response is many chunk rows that only collapse
-    // afterwards -- bounding it would keep just the tail.
+    // reason warmSlotCache and ChatPane's hydrate are -- deliberately, not because a
+    // bound would cut raw rows: the handler collapses chunk runs BEFORE it slices.
     // `slotRun` and not `selectSlotStreamState`: switchSlot.pending has already
     // assigned `activeSlot = key` by the time this body runs, so that selector
     // would always take its active-slot branch and report `slotState`, which
@@ -2208,8 +2207,8 @@ export const warmSlotCache = createAsyncThunk(
   async (key: string, { getState }) => {
     const state = (getState() as { chat: ChatState }).chat
     if (state.activeSlot === key) return null
-    // The server's limit slices RAW rows, and a streaming response is many chunk
-    // rows that only collapse afterwards -- bounding it would keep just the tail.
+    // Unbounded while streaming is deliberate, not a raw-row guard: the handler
+    // collapses chunk runs BEFORE computing total and slicing, even mid-stream.
     const streaming = (state.slotRun[key]?.state ?? 'idle') !== 'idle'
     // Captured BEFORE the fetch: two warms for one slot resolve in any order,
     // and the later-dispatched response is the newer view of the transcript.
