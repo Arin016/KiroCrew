@@ -750,17 +750,27 @@ def _load_agent_config(*, user_home: Path | None = None) -> dict[str, Any]:
 
     # Installed agent config (always check for mcpServers)
     from kiro_crew.agent import AGENT_FILENAME  # circular import: agent imports mcp_discovery
+    from kiro_crew.agent_discovery import _read_agent_spec
 
     installed = (
         (user_home / ".kiro" / "agents") if user_home else kiro_agents_dir()
     ) / AGENT_FILENAME
     if installed.is_file():
-        try:
-            loaded = json.loads(installed.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                configs.append(loaded)
-        except (json.JSONDecodeError, OSError):
-            pass
+        # The agents dir is user-writable and shared with other tools, so this
+        # goes through the hardened agent-spec reader (size cap,
+        # sensitive-symlink screen, non-object rejection, SEL denial event)
+        # rather than a bare read_text + json.loads. It also closes a hole the
+        # old ``except`` could not: ``encoding="utf-8"`` on a non-UTF-8 spec
+        # raises UnicodeDecodeError, a ValueError rather than an OSError or a
+        # JSONDecodeError, so it escaped this handler entirely. ``None``
+        # degrades as absent, exactly as the swallowed exceptions did.
+        loaded = _read_agent_spec(
+            installed,
+            operation="mcp_discovery_agent_config",
+            source="unknown",
+        )
+        if loaded is not None:
+            configs.append(loaded)
 
     if not configs:
         return {}

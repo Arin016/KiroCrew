@@ -1723,17 +1723,41 @@ def _find_server_spec_anywhere(name: str) -> dict | None:
     edition-contributed provider scopes.  Returns a shallow copy with
     ``disabled`` stripped (the caller decides whether to disable in its target
     scope).
+
+    The agents-dir candidate is an AGENT SPEC and is read through the hardened
+    reader (size cap, sensitive-symlink screen, non-object rejection, SEL denial
+    event) rather than the plain loader. It is statically first in merge order,
+    so it is read before the loop instead of being tagged inside one -- a
+    refused spec then degrades exactly as ``_load_json_or_empty``'s ``{}`` did,
+    contributing nothing and falling through to the next scope. The remaining
+    candidates are provider ``mcp.json`` files, not agent specs, so the
+    agent-spec reader does not describe them.
     """
-    candidates = [
-        kiro_agents_dir() / "kirocrew.json",
+
+    def _usable(data: dict[str, Any]) -> dict | None:
+        spec = data.get("mcpServers", {}).get(name)
+        if isinstance(spec, dict) and (spec.get("command") or spec.get("url")):
+            return {k: v for k, v in spec.items() if k != "disabled"}
+        return None
+
+    found = _usable(
+        _read_agent_spec(
+            kiro_agents_dir() / "kirocrew.json",
+            operation="mcp_find_server_spec",
+            source="dashboard",
+        )
+        or {}
+    )
+    if found is not None:
+        return found
+    for path in (
         _kirocrew_mcp_json(),
         _GLOBAL_MCP_JSON,
         *[s.global_json for s in _extra_mcp_scopes()],
-    ]
-    for p in candidates:
-        spec = _load_json_or_empty(p).get("mcpServers", {}).get(name)
-        if isinstance(spec, dict) and (spec.get("command") or spec.get("url")):
-            return {k: v for k, v in spec.items() if k != "disabled"}
+    ):
+        found = _usable(_load_json_or_empty(path))
+        if found is not None:
+            return found
     return None
 
 
