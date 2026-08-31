@@ -1283,9 +1283,17 @@ def _normalize_tagging(raw: Any) -> dict[str, list[dict]]:
 
 
 def read_tagging_cache(owner: str, repo: str, root: Path | None = None) -> dict | None:
-    """Return ``{"suggestions", "generated_at"}`` for a repo, or None when
-    nothing has been generated yet (an unreadable / stale-schema file is a miss,
-    same guard as the other caches)."""
+    """Return ``{"suggestions", "generated_at", "ui_language"}`` for a repo, or None
+    when nothing has been generated yet (an unreadable / stale-schema file is a
+    miss, same guard as the other caches).
+
+    ``ui_language`` is the BCP-47 tag the cached ``reason`` text was WRITTEN in, so
+    a caller can tell a servable entry from one that predates a language switch.
+    Absent reads as ``""`` — identical to the unconfigured sentinel — which is why
+    adding it did not need a schema bump: a document written before this field is
+    still valid, and an install that never set a language keeps every cached
+    suggestion across the upgrade. Bumping the schema would have discarded them
+    all, which is a worse trade for a field whose absence is meaningful."""
     path = tagging_cache_path(owner, repo, root)
     if not path.is_file():
         return None
@@ -1298,12 +1306,13 @@ def read_tagging_cache(owner: str, repo: str, root: Path | None = None) -> dict 
     return {
         "suggestions": _normalize_tagging(data.get("suggestions")),
         "generated_at": str(data.get("generated_at") or ""),
+        "ui_language": str(data.get("ui_language") or ""),
     }
 
 
 def _write_tagging_cache_unlocked(
     owner: str, repo: str, suggestions: dict[str, list[dict]], generated_at: str,
-    root: Path | None = None,
+    root: Path | None = None, ui_language: str = "",
 ) -> None:
     atomic_write(
         tagging_cache_path(owner, repo, root),
@@ -1311,6 +1320,7 @@ def _write_tagging_cache_unlocked(
             {
                 "schema": TAGGING_CACHE_SCHEMA, "owner": owner, "repo": repo,
                 "suggestions": suggestions, "generated_at": generated_at,
+                "ui_language": ui_language,
             },
             indent=2,
         ),
@@ -1318,21 +1328,65 @@ def _write_tagging_cache_unlocked(
 
 
 def merge_tagging_suggestions(
-    owner: str, repo: str, batch: dict[str, list[dict]], *, root: Path | None = None
+    owner: str, repo: str, batch: dict[str, list[dict]], *,
+    verify_language: Callable[[], str],
+    root: Path | None = None, ui_language: str = "",
 ) -> dict:
     """Merge one generated batch into the repo's cached suggestions; return the
-    merged document.
+    merged document, or the untouched one when the batch is refused.
 
     The batch WINS for the issues it covers — a regenerate must replace a stale
     proposal — while every issue outside the batch keeps its existing entry, so
-    analysing the queue in slices accumulates instead of overwriting."""
+    analysing the queue in slices accumulates instead of overwriting.
+
+    EXCEPT across a language change. Each cached entry carries `reason` prose, so
+    accumulating a batch generated in one language on top of entries generated in
+    another would leave the queue showing two languages at once, with nothing to
+    say which rows are which. When the stored tag differs from ``ui_language`` the
+    surviving entries are dropped and the batch starts a fresh document: a
+    regenerate the user can trigger is a better state than a permanently mixed
+    one. Same reasoning as the issue-ai cache, which refuses a hit whose tag no
+    longer matches.
+
+    ``verify_language`` is what makes that safe under concurrency, and it has to
+    be checked HERE rather than by the caller. The caller's own pre-write check
+    and this write would not be atomic, so a switch landing between them lets a
+    stale generation replace a newer-language one that already landed — the replace
+    semantics above turn a lost race into lost data. Re-reading the configured
+    language inside the lock closes that: the check and the write it authorises
+    cannot be separated. REQUIRED, not optional: there is one caller and it always
+    has a language to verify against, so a default would only offer a way to write
+    without the guard that makes writing safe. Refusing returns the CURRENT
+    document with ``stale_language`` set, so the caller can report that nothing was
+    written rather than claiming a batch it did not persist. The stored language is
+    deliberately NOT echoed back: no caller reads it, and the one place that needs
+    it -- the two tagging routes' servable-cache gate -- reads it from
+    :func:`read_tagging_cache`, which is where it lives.
+
+    Deliberately a callable rather than a compare-and-set on the stored tag: a CAS
+    would also refuse the ordinary case of two same-language batches accumulating
+    slice by slice, where the second read the document before the first wrote. What
+    makes a write valid is that the CONFIGURED language is still the one the batch
+    was generated under, not what other writers did in the meantime."""
     with _tagging_cache_lock(owner, repo, root):
+        if verify_language() != ui_language:
+            current = read_tagging_cache(owner, repo, root)
+            return {
+                "suggestions": (current or {}).get("suggestions") or {},
+                "generated_at": (current or {}).get("generated_at") or "",
+                "stale_language": True,
+            }
         current = read_tagging_cache(owner, repo, root)
-        merged = dict(current["suggestions"]) if current else {}
+        if current is not None and str(current.get("ui_language") or "") == ui_language:
+            merged = dict(current["suggestions"])
+        else:
+            merged = {}
         merged.update(_normalize_tagging(batch))
         generated_at = _now_iso()
-        _write_tagging_cache_unlocked(owner, repo, merged, generated_at, root)
-    return {"suggestions": merged, "generated_at": generated_at}
+        _write_tagging_cache_unlocked(
+            owner, repo, merged, generated_at, root, ui_language=ui_language
+        )
+    return {"suggestions": merged, "generated_at": generated_at, "stale_language": False}
 
 
 def drop_tagging_suggestions(
@@ -1346,7 +1400,13 @@ def drop_tagging_suggestions(
             return {"suggestions": {}, "generated_at": ""}
         drop = {int(n) for n in numbers}
         remaining = {k: v for k, v in current["suggestions"].items() if int(k) not in drop}
-        _write_tagging_cache_unlocked(owner, repo, remaining, current["generated_at"], root)
+        # Carries the stored tag through: this rewrites the document, and dropping
+        # the tag here would make every surviving entry read as "generated with no
+        # language configured" and become servable again after a switch.
+        _write_tagging_cache_unlocked(
+            owner, repo, remaining, current["generated_at"], root,
+            ui_language=str(current.get("ui_language") or ""),
+        )
         return {"suggestions": remaining, "generated_at": current["generated_at"]}
 
 
