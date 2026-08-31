@@ -35,6 +35,7 @@ from kiro_crew.validation import (
     MONITOR_START_SCHEMA,
     MONITOR_UPDATE_SCHEMA,
     REGISTER_HOOK_SCHEMA,
+    RESET_CONVERSATION_SCHEMA,
     SELECT_CREW_SCHEMA,
     SET_PROJECT_SCHEMA,
     SUGGEST_FOLLOWUP_SCHEMA,
@@ -406,6 +407,43 @@ def schemas() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["path"],
+            },
+        },
+        {
+            "name": "reset_conversation",
+            "description": (
+                "Give the calling chat session a clean context: the next message "
+                "starts a fresh conversation with no memory of this one. The tab "
+                "stays open and the TRANSCRIPT IS NOT TOUCHED — earlier messages "
+                "remain visible and on disk, so this drops the model's memory, not "
+                "the user's record."
+                "\n\n"
+                "Use when a session walks a list of independent items one at a time "
+                "(reviewing a queue, triaging tickets) and carrying item N's context "
+                "into item N+1 buys nothing but tokens. Also use when a long-lived "
+                "conversation has drifted off the thing it was about."
+                "\n\n"
+                "Do NOT use to escape a context you still need: anything not written "
+                "down somewhere durable — a file, a ticket, a memory — is gone from "
+                "the model's view after the reset, even though the user can still "
+                "read it in the tab. Record what carries forward BEFORE calling this."
+                "\n\n"
+                "Restrictions: headless callers (cron jobs, subagents, task runners) "
+                "are rejected — a cron turn can run on a user's dashboard slot and a "
+                "subagent shares its parent's slot, so neither may wipe it."
+                "\n\n"
+                "The reset lands at a turn BOUNDARY, not inline, so this tool returns "
+                "cleanly without tearing down its own caller mid-write. Normally that "
+                "is the end of this turn, so the next message starts fresh. It waits, "
+                "however, for anything whose work the teardown would destroy: a turn "
+                "still in flight on the session, or sub-agents running, queued, or "
+                "delivering a result. So it can land a turn or more later than the "
+                "next message, and the rest of the current turn always still sees the "
+                "full conversation."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
             },
         },
         {
@@ -899,6 +937,23 @@ def set_project(name: str, args: dict[str, Any]) -> str:
     )
 
 
+def reset_conversation(name: str, args: dict[str, Any]) -> str:
+    validate_tool_args(args, RESET_CONVERSATION_SCHEMA)
+    # Stateless: the session-aware consumer (chat_runner) queues the discard
+    # against ITS OWN slot — no session identity resolved here. The payload is
+    # empty because there is nothing to choose: a caller asking for a clean
+    # context always wants a clean one, and the HTTP route carries a replay flag
+    # for the rare caller that does not.
+    return session_directive.encode(
+        "reset_conversation",
+        {},
+        "Conversation reset requested for this session; if this turn is "
+        "user-facing it takes effect at a turn boundary, and the next message "
+        "starts with no memory of this conversation. The transcript is not "
+        "deleted — write down anything that must carry forward.",
+    )
+
+
 def suggest_followup(name: str, args: dict[str, Any]) -> str:
     args = validate_tool_args(args, SUGGEST_FOLLOWUP_SCHEMA)
     items = args.get("items") or []
@@ -926,5 +981,6 @@ HANDLERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     "monitor_start": monitor_start,
     "monitor_update": monitor_update,
     "set_project": set_project,
+    "reset_conversation": reset_conversation,
     "suggest_followup": suggest_followup,
 }
