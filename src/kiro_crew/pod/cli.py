@@ -53,25 +53,41 @@ def _die(msg: str) -> NoReturn:
 
 
 def _wait_healthy(cfg: PodConfig, name: str, port: int, tries: int = 45) -> int:
-    """Poll until the pod serves (200/401/403), or bail fast if the unit died.
+    """Poll until the pod itself serves (200/401/403), or bail fast on failure.
 
     Returns the HTTP code on success, or a negative sentinel on early failure:
       -1 = the unit's gateway crashed / is crash-looping (a broken worktree build
            — the thing under test won't boot, so there's nothing to wait for). The
            caller surfaces the gateway's own journal as the cause.
+      ``rt.HEALTH_FOREIGN`` = the port answers, but another process owns it, so
+           this pod's gateway cannot have bound it.
     A pod IS the worktree's gateway, so a dead gateway is a real, expected signal —
     we just want it fast and clearly attributed, not a silent 45s timeout.
+
+    A foreign responder does NOT end the wait on sight. The pod may still be
+    starting, and its own gateway may be moments from winning the port back after
+    a predecessor releases it, so the loop keeps its existing exit conditions.
+    What the flag changes is the ATTRIBUTION: a port already held by somebody else
+    is the reason this pod's gateway is crash-looping, so it is reported ahead of
+    the generic crash verdict, which would otherwise send the operator to read a
+    journal that only says "address already in use".
     """
+    saw_foreign = False
     for _ in range(tries):
-        code = rt.health(port)
+        code = rt.health(cfg, name, port)
         if code in (200, 401, 403):
             return code
+        if code == rt.HEALTH_FOREIGN:
+            saw_foreign = True
         state, restarts = rt.unit_state(cfg, name)
         # failed = exited non-zero and not restarting; restarts>0 = crash-looping.
         if state == "failed" or restarts > 0:
-            return -1
+            return rt.HEALTH_FOREIGN if saw_foreign else -1
         time.sleep(1)
-    return rt.health(port)
+    final = rt.health(cfg, name, port)
+    if final in (200, 401, 403):
+        return final
+    return rt.HEALTH_FOREIGN if (saw_foreign or final == rt.HEALTH_FOREIGN) else final
 
 
 def _resolve_or_die(cfg: PodConfig, name: str) -> Path:
@@ -185,6 +201,27 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
             tail = rt.recent_journal(cfg, name, 30)
             print(tail, file=sys.stderr)
             rt.stop_pod(cfg, name)
+            if code == rt.HEALTH_FOREIGN:
+                # Reported ahead of the crash verdict: the port being taken is
+                # WHY this gateway could not boot, and it is fixed by choosing a
+                # port rather than by debugging the worktree. Without this the
+                # operator reads a journal that only says "address already in
+                # use" — or, before the identity check existed, was told the pod
+                # was up and drove somebody else's instance.
+                _audit(
+                    "pod.up",
+                    "failure",
+                    f"name={name} port={port}",
+                    error="derived port held by another process",
+                )
+                _die(
+                    f"{name}: :{port} is already held by another process (another pod, "
+                    f"or the live gateway), so this pod's gateway could not bind it — "
+                    f"the responder on that port is not this pod.\n"
+                    f"  Which pods hold which ports: kirocrew pod ls\n"
+                    f"  Give this pod its own port:  add PORT=<free port> to "
+                    f"{cfg.env_file(name)}, then `kirocrew pod up {name}` again."
+                )
             if code == -1:
                 _die(
                     f"{name}: the worktree's gateway failed to start (see journal above). "
@@ -195,13 +232,45 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
                 f"(see journal above; check the worktree's gateway start path)."
             )
 
+    # The pod is already booted and healthy by here, so the credential is the
+    # LAST step, not the point of the command. That asymmetry decides how the two
+    # refusals are handled:
+    #
+    # * FOREIGN is positive knowledge that the port is somebody else's, so there
+    #   is nothing truthful left to print — die.
+    # * UNPROVEN is not knowledge. On a POSIX host with no lsof there is no way to
+    #   prove ownership at all, and dying here would boot the pod and then fail
+    #   the command that booted it, turning a hardened credential path into a
+    #   `pod up` that never succeeds on that host class. So report what IS known
+    #   (the pod, its port, its base_url), withhold only the credential, and say
+    #   how to get it. The secret still never goes on the wire — the guard lives
+    #   in `mint_token`, which raised before dialling anything.
+    token = ""
+    unproven = ""
     try:
         token = rt.mint_token(cfg, name, args.ttl)
+    except rt.PodOwnershipUnproven as exc:
+        unproven = str(exc)
+        _audit(
+            "pod.token",
+            "denied",
+            f"name={name} port={port}",
+            error="ownership unprovable; credential withheld",
+        )
     except rt.PodError as exc:
         _audit("pod.token", "failure", f"name={name} port={port}", error="mint failed")
         _die(str(exc))
-    _audit("pod.token", "allowed", f"name={name} port={port} ttl={args.ttl}")
+    if token:
+        _audit("pod.token", "allowed", f"name={name} port={port} ttl={args.ttl}")
     base = f"http://127.0.0.1:{port}"
+    if unproven:
+        # The reason goes to stderr on BOTH paths rather than into the payload. The
+        # empty ``token`` is already the machine-readable signal -- it is what
+        # pod-e2e tests, and it is unambiguous because every other mint failure
+        # exits instead of returning -- so a payload field would add schema surface
+        # that is committed forever for no consumer. stderr reaches a subprocess
+        # caller and a human equally.
+        print(f"pod: {unproven}", file=sys.stderr)
     if args.json:
         print(
             json.dumps(
@@ -218,8 +287,11 @@ def _up(cfg: PodConfig, args: argparse.Namespace) -> None:
     else:
         print(f"pod '{name}' is up (full stack: API + frontend on one port)")
         print(f"  base_url : {base}")
-        print(f"  token    : {token}")
-        print(f"  open     : {base}/?token={token}")
+        if token:
+            print(f"  token    : {token}")
+            print(f"  open     : {base}/?token={token}")
+        else:
+            print("  token    : (withheld — ownership of the port could not be proven)")
         print(f"  stop     : kirocrew pod down {name}")
 
 
@@ -277,6 +349,18 @@ def _down(cfg: PodConfig, args: argparse.Namespace) -> None:
         print(f"pod '{name}' was not running (nothing to stop)")
 
 
+def _health_label(code: int) -> str:
+    """Human rendering of a :func:`rt.health` verdict.
+
+    The JSON stays numeric (three callers parse ``pod ls --json``), but a bare
+    ``-2`` on a terminal tells the operator nothing, and "another instance owns
+    this port" is precisely the thing they need to read.
+    """
+    if code == rt.HEALTH_FOREIGN:
+        return "foreign (port held by another instance)"
+    return str(code)
+
+
 def _ls(cfg: PodConfig, args: argparse.Namespace) -> None:
     names = sorted(rt.active_names(cfg))
     # Teardown belongs to `pod down` on BOTH platforms, so a pod that went away
@@ -289,7 +373,7 @@ def _ls(cfg: PodConfig, args: argparse.Namespace) -> None:
         rows: list[dict[str, object]] = []
         for n in names:
             p = rt.derive_port(cfg, n)
-            rows.append({"name": n, "port": p, "health": rt.health(p)})
+            rows.append({"name": n, "port": p, "health": rt.health(cfg, n, p)})
         print(json.dumps(rows))
         return
     # Any fail-closed probe underneath surfaces as PodError, which the dispatch
@@ -299,7 +383,7 @@ def _ls(cfg: PodConfig, args: argparse.Namespace) -> None:
         print(f"{'POD':<28} {'PORT':<7} HEALTH")
         for n in names:
             p = rt.derive_port(cfg, n)
-            print(f"{n:<28} {p:<7} {rt.health(p)}")
+            print(f"{n:<28} {p:<7} {_health_label(rt.health(cfg, n, p))}")
     else:
         print("no pods running")
     _print_orphans(cfg, orphans)
@@ -584,7 +668,7 @@ def _status(cfg: PodConfig, args: argparse.Namespace) -> None:
     name = rt.validate_name(args.name)
     port = rt.derive_port(cfg, name)
     up = rt.is_active(cfg, name)
-    code = rt.health(port) if up else 0
+    code = rt.health(cfg, name, port) if up else 0
     if args.json:
         print(
             json.dumps(
@@ -592,7 +676,7 @@ def _status(cfg: PodConfig, args: argparse.Namespace) -> None:
             )
         )
     else:
-        print(f"{name}: {'up' if up else 'down'}  port={port}  health={code}")
+        print(f"{name}: {'up' if up else 'down'}  port={port}  health={_health_label(code)}")
 
 
 def _token(cfg: PodConfig, args: argparse.Namespace) -> None:

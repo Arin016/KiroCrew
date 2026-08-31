@@ -10,6 +10,7 @@ layer. No state is held; each function reads what it needs from a
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import os
 import re
@@ -31,7 +32,14 @@ except ImportError:  # pragma: no cover - Windows
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.loopback_http import loopback_urlopen
-from kiro_crew.platform_compat import IS_LINUX, IS_MACOS
+from kiro_crew.platform_compat import (
+    IS_LINUX,
+    IS_MACOS,
+    IS_POSIX,
+    find_port_listeners,
+    listening_pid_tool_available,
+    loopback_owner_pids,
+)
 from kiro_crew.pod import launchd
 from kiro_crew.pod import provision as prov
 from kiro_crew.pod import unit as unit_mod
@@ -423,6 +431,38 @@ def is_active(cfg: PodConfig, name: str) -> bool:
             raise PodError(str(exc)) from exc
     cp = systemctl("is-active", "--quiet", pod_unit(cfg, name))
     return cp.returncode == 0
+
+
+def main_pid(cfg: PodConfig, name: str) -> int | None:
+    """PID of the pod's OWN gateway process, or ``None`` when it is not running.
+
+    This is the pod's identity, and it is exact rather than approximate because
+    of how a pod boots: the unit is ``Type=simple`` running ``kirocrew pod _run
+    %i``, and :func:`_run` finishes with ``os.execve`` of the worktree's
+    ``kirocrew gateway``. The gateway therefore REPLACES the unit's main process
+    instead of being spawned beneath it, so ``MainPID`` names the very process
+    that binds the pod's port — no descendant walk, no cgroup scan.
+
+    Raises :class:`PodError` when the service manager could not be asked at all.
+    That is deliberately a different answer from ``None``: "asked, and this pod
+    has no process" is a fact a caller can act on (see :func:`port_owner`, where
+    it is what lets a listener be attributed to somebody else), while "could not
+    ask" must leave the question open. ``systemctl show`` prints ``MainPID=0``
+    for a dead or unknown unit and still exits 0, so an output with no
+    ``MainPID`` line at all is the honest signal that the query itself failed.
+    """
+    if IS_MACOS:
+        return launchd.main_pid(cfg, name)
+    cp = systemctl("show", pod_unit(cfg, name), "-p", "MainPID")
+    for ln in cp.stdout.splitlines():
+        if ln.startswith("MainPID="):
+            raw = ln.split("=", 1)[1].strip()
+            pid = int(raw) if raw.isdigit() else 0
+            return pid if pid > 0 else None
+    raise PodError(
+        f"could not read MainPID for pod {name!r} from systemctl "
+        f"(rc={cp.returncode}): {(cp.stderr or cp.stdout or '').strip()}"
+    )
 
 
 def unit_state(cfg: PodConfig, name: str) -> tuple[str, int]:
@@ -926,10 +966,122 @@ def install_backend(cfg: PodConfig) -> tuple[str, subprocess.CompletedProcess | 
     )
 
 
-def health(port: int, timeout: int = 3) -> int:
-    """HTTP status of the pod's /api/health, or 0 if unreachable.
+# --------------------------------------------------------------------------- #
+# Port ownership — WHO answers the pod's port, not merely whether anyone does.
+#
+# A pod's port is derived, not allocated: `base + (cksum(name) % 199) + 1` maps
+# every pod name into 199 slots, and `PORT=` in the per-pod env file can pin any
+# port by hand. So two pods colliding on one port is an ordinary event, and the
+# live gateway is reachable on the same loopback interface. Whoever binds first
+# wins; the loser's gateway exits "address already in use" and the unit
+# crash-loops behind it.
+#
+# A bare `GET /api/health` cannot tell those apart. `{"ok": true}` is the same
+# answer from any Kiro Crew gateway on the host, and its identity fields say
+# `app=kirocrew` plus a version — true of the squatter as well. Reading a 200 as
+# "this pod is up" therefore reports a crash-looping pod as healthy and points
+# the operator's browser at somebody else's instance.
+#
+# `instances/run_marker` states the rule this module was breaking: it
+# "deliberately does not offer a bare 'is something listening' helper, so no
+# caller can mistake reachability for identity". The pod probe is now held to it
+# — the reachability probe is private and every caller goes through `health`.
+# --------------------------------------------------------------------------- #
+#: Proven: the pod's own gateway process holds the port.
+OWNER_POD = "pod"
+#: Proven: something OTHER than this pod holds the port (another pod, the live
+#: gateway, an unrelated process).
+OWNER_FOREIGN = "foreign"
+#: Not decidable on this host — no listener-lookup tool, or the service manager
+#: could not be asked. Callers keep their pre-identity behaviour.
+OWNER_UNPROVEN = "unproven"
 
-    200 = open; 401/403 = serving but gated — all three mean "up".
+#: :func:`health` verdict for a port that answers but is NOT served by this pod.
+#: Negative like ``_wait_healthy``'s crash sentinel, so it can never collide with
+#: an HTTP status or with ``0`` (unreachable).
+HEALTH_FOREIGN = -2
+
+
+class PodOwnershipUnproven(PodError):
+    """Ownership could not be PROVEN either way, so a credential was withheld.
+
+    A distinct type because the two refusals want different handling. A
+    :data:`OWNER_FOREIGN` verdict is positive knowledge that the port belongs to
+    somebody else, and every caller should stop. "Could not prove it" is not that
+    — the pod may well be serving — so a caller whose main job is something other
+    than the credential (``pod up``, which has already booted the pod) can go on
+    and report what it does know, while still never putting the secret on the
+    wire. ``pod token`` has nothing else to do and still fails.
+    """
+
+
+def port_owner(cfg: PodConfig, name: str, port: int) -> str:
+    """Who holds *port*: :data:`OWNER_POD`, :data:`OWNER_FOREIGN`, or
+    :data:`OWNER_UNPROVEN`.
+
+    The proof is pid identity, the same shape ``port_resolution._gateway_owns_port``
+    uses for the live gateway: the process listening on the port must be the pod's
+    own (:func:`main_pid`). Three branches are worth naming.
+
+    **Ownership is scoped to the address the probe talked to.** A port NUMBER can
+    carry several LISTEN sockets on different local addresses, so "some process of
+    ours holds this port" is not the question -- the question is who a
+    ``127.0.0.1`` connect reaches. ``loopback_owner_pids`` answers exactly that,
+    mirroring the kernel's most-specific-bind dispatch. Taking every pid on the
+    port instead would let a pod bound to one specific local address vouch for a
+    foreign listener holding ``127.0.0.1`` on the same port -- the squatter would
+    be trusted BECAUSE the real pod exists elsewhere on that number. This scope
+    must stay in step with the address :func:`_probe_health` dials.
+
+    **A pod with no process, on a port somebody holds, is FOREIGN -- not
+    unproven.** This is the whole bug. A pod whose gateway lost the bind race has
+    no process at all, so there is no pid to match; if the answer were "cannot
+    tell" the squatter's 200 would still be reported as this pod's health, which
+    is exactly the state this function exists to name. A non-empty listener list
+    plus a pod that authoritatively has no pid IS proof the responder is someone
+    else.
+
+    **Undecidable stays undecidable.** No ``lsof``/``netstat``, a throwing
+    lookup, or a service manager that cannot be asked all return
+    :data:`OWNER_UNPROVEN`. Each caller then decides for itself: :func:`health`
+    keeps its pre-identity behaviour, because refusing would turn every pod on
+    such a host into a permanently unhealthy one -- a self-inflicted outage in
+    place of a misreport -- while :func:`mint_token`, which hands over a
+    credential, requires positive proof. That mirrors
+    ``cli_server._replacement_is_serving`` applying its listener check "only where
+    it can pass", and ``port_resolution._gateway_owns_port`` failing closed on the
+    path that sends the secret.
+    """
+    if not IS_POSIX or not listening_pid_tool_available():
+        return OWNER_UNPROVEN
+    try:
+        pids = set(loopback_owner_pids(find_port_listeners(port)))
+    except Exception:
+        return OWNER_UNPROVEN
+    if not pids:
+        # Something answered HTTP but no LISTEN socket covering loopback is
+        # visible. The two observations disagree, so claim nothing.
+        return OWNER_UNPROVEN
+    try:
+        ours = main_pid(cfg, name)
+    except Exception:
+        # Could not ask the service manager — see the docstring.
+        return OWNER_UNPROVEN
+    return OWNER_POD if ours is not None and ours in pids else OWNER_FOREIGN
+
+
+def _probe_health(port: int, timeout: int = 3) -> int:
+    """Raw HTTP status of ``/api/health`` on *port*, or 0 if unreachable.
+
+    Reachability ONLY — it says nothing about who answered, which is why it is
+    private. Callers want :func:`health`.
+
+    Every failure collapses to 0, ``http.client.HTTPException`` included: a
+    process holding the port that answers the TCP handshake without speaking
+    HTTP raises ``BadStatusLine``, which is neither ``OSError`` nor ``URLError``.
+    That case is not hypothetical here — a foreign listener on a derived port is
+    the reason this probe is being hardened — and it must read as "not serving"
+    rather than escaping as a traceback out of ``pod status``.
     """
     url = f"http://127.0.0.1:{port}/api/health"
     try:
@@ -940,8 +1092,28 @@ def health(port: int, timeout: int = 3) -> int:
             return resp.status
     except urllib.error.HTTPError as e:
         return e.code
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
         return 0
+
+
+def health(cfg: PodConfig, name: str, port: int, timeout: int = 3) -> int:
+    """HTTP status of **this pod's** ``/api/health``, or a non-positive verdict.
+
+    * 200 = open; 401/403 = serving but gated — all three mean this pod is up.
+    * 0 = nothing reachable on the port.
+    * :data:`HEALTH_FOREIGN` = the port answers, but the responder is provably
+      not this pod, so this pod is NOT up.
+
+    The ownership check runs only once something has answered, which keeps the
+    common case free: a stopped pod costs one refused connection and no process
+    lookup, exactly as before.
+    """
+    code = _probe_health(port, timeout)
+    if code == 0:
+        return 0
+    if port_owner(cfg, name, port) == OWNER_FOREIGN:
+        return HEALTH_FOREIGN
+    return code
 
 
 # --------------------------------------------------------------------------- #
@@ -958,6 +1130,30 @@ def mint_token(cfg: PodConfig, name: str, ttl: str = "2h") -> str:
             f"no .local_secret for pod {name!r} — is it running? ({secret_file})"
         ) from exc
     port = derive_port(cfg, name)
+    owner = port_owner(cfg, name, port)
+    if owner != OWNER_POD:
+        # Positive proof REQUIRED here, unlike `health`. This call sends the pod's
+        # own ``.local_secret`` and returns a dashboard credential for whatever
+        # answered, so the two ways of being wrong are not symmetrical: refusing a
+        # live pod costs an error message, while proceeding on an unproven port
+        # hands a different local user -- who can bind 127.0.0.1 but cannot read
+        # this 0600 secret -- a credential for this pod. That is the same reason
+        # ``port_resolution._gateway_owns_port`` fails closed on the path that
+        # sends the secret, including when the listener lookup is simply missing.
+        if owner == OWNER_FOREIGN:
+            raise PodError(
+                f"refusing to mint a credential for pod {name!r}: :{port} is held "
+                f"by another process, not this pod's gateway. `kirocrew pod status "
+                f"{name}` shows the same verdict; a credential minted here would "
+                f"belong to whatever owns that port."
+            )
+        raise PodOwnershipUnproven(
+            f"withholding a credential for pod {name!r}: could not prove which "
+            f"process holds :{port} (no lsof/netstat on this host, or the service "
+            f"manager could not be asked), and this call would put the pod's own "
+            f"secret on the wire to whatever answered. Install lsof so ownership "
+            f"can be proven, or pin a free PORT= in {cfg.env_file(name)}."
+        )
     url = f"http://127.0.0.1:{port}/api/token/local?ttl={urllib.parse.quote(str(ttl))}"
     req = urllib.request.Request(url, headers={"X-Local-Secret": secret})
     try:

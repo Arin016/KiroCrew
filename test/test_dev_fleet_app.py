@@ -6233,6 +6233,44 @@ async def _fleet_with(worktrees, **patches):
 
 
 @pytest.mark.asyncio
+async def test_fleet_pod_health_is_identity_gated_not_a_bare_port_probe():
+    """A squatter's 200 must not paint this worktree's row healthy.
+
+    A pod's port is derived from its name across 199 slots and can be pinned by
+    hand, so it is ordinarily held by another pod or by the live gateway; the row
+    therefore reads health from the identity-gated probe, which needs the pod NAME
+    as well as the port. Pinning the call shape here is what stops a future edit
+    reverting to a port-only probe -- the reported failure was a crash-looping pod
+    showing a healthy dot because somebody else answered its port.
+    """
+    seen: list[tuple] = []
+
+    def _health(cfg, name, port, timeout=3):
+        seen.append((name, port, timeout))
+        return mod.rt.HEALTH_FOREIGN
+
+    fake_cfg = SimpleNamespace()
+    with (
+        patch.object(mod.rt, "health", _health),
+        patch.object(mod.rt, "active_names", lambda cfg: {"repo-wt-x"}),
+        patch.object(mod.rt, "derive_port", lambda cfg, name: 7811),
+    ):
+        fleet = await _fleet_with(
+            [{"path": "/repo-wt-x", "branch": "feat/x", "is_main": False}],
+            _POD_AVAILABLE=True,
+            _POD_IMPORTED=True,
+            _load_cfg=lambda: fake_cfg,
+        )
+
+    row = {w["name"]: w for w in fleet["worktrees"]}["repo-wt-x"]
+    assert seen == [("repo-wt-x", 7811, 2)]
+    # Not a 2xx/401/403, so the frontend's `health >= 200` test renders this row
+    # as unhealthy rather than as an open pod.
+    assert row["health"] == mod.rt.HEALTH_FOREIGN
+    assert row["health"] < 200
+
+
+@pytest.mark.asyncio
 async def test_fleet_payload_marks_an_inferred_main_checkout():
     with patch.object(mod, "MAIN_REPO_INFERRED", True):
         fleet = await _fleet_with(

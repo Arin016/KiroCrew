@@ -3078,8 +3078,15 @@ async def _build_fleet() -> dict:
                     port = await loop.run_in_executor(
                         subprocess_executor(), rt.derive_port, cfg, name
                     )
+                    # Identity-gated: ``rt.health`` takes the pod NAME as well as
+                    # the port because a derived port can be held by another pod
+                    # or by the live gateway, and a bare port probe would report
+                    # that squatter's 200 as this worktree's health — the row
+                    # would show a healthy dot for a pod that never bound its
+                    # port. A foreign responder comes back as
+                    # ``rt.HEALTH_FOREIGN`` and renders as unhealthy.
                     health = await loop.run_in_executor(
-                        subprocess_executor(), rt.health, port, 2
+                        subprocess_executor(), rt.health, cfg, name, port, 2
                     )
             except Exception:  # noqa: BLE001
                 pass
