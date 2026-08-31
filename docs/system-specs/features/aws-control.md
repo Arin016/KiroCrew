@@ -118,6 +118,88 @@ layer after the route's S3-consent and publish-governance checks. It refuses
 credential-bearing artifact content; `test_aws_control_app.py::TestLibraryScan.test_credential_bearing_artifact_is_refused`
 pins that egress boundary.
 
+`library.library_remove` deletes the whole `artifacts/<slug>/` prefix and then
+forgets the slug's ledger record. The order is load-bearing rather than
+transactional: a local file and a remote bucket cannot be committed as one, and
+objects-then-record leaves at worst a record the bucket does not back, which
+`library.reconcile` repairs. The reverse order would leave objects that no
+surface lists. Removal writes delete markers on the versioned bucket, so it
+empties the listing rather than reaching billing-zero; a version purge remains
+outstanding, as it does for the Drive's own deletes.
+
+`library.reconcile` is the direction that makes the ledger's "display state, not
+truth" claim hold: it drops records the bucket does not back and never invents a
+record for a cloud copy it finds, because version and push time live in that
+copy's sidecar. It prunes only what the bucket has had a chance to disprove — a
+record stamped at or after the listing it is judged against is left alone, since
+that listing predates the record — so a push completing mid-render does not lose
+its record. `routes._handle_library_list` reconciles before joining local
+artifacts, and reports whether the bucket was actually read — a failed, absent,
+or unconsented read leaves the rows rendering as an unverified ledger claim
+rather than as an authoritative empty. It reads the prefix through
+`storage.list_library_folders`, which is unredacted and completely paginated
+because a reconcile reasons about absence; the paged, redacted display listing
+cannot answer that question. `library._update_ledger` is the ledger's only
+writer, so push, removal, and reconcile cannot drop each other's records.
+
+`routes._library_lock` serializes the three Library operations on one drive —
+push, removal, and the reconcile read. Each is a network round trip followed by a
+ledger write, and interleaving two of them corrupts state neither half can
+detect: a push completing between the reconcile's listing and its prune, or a
+push racing a removal of the same slug past the delete sweep. The ledger's file
+lock cannot serve this — it covers a sub-second read plus rename by design.
+
+The two mutations wait on that lock unbounded — they are user-initiated actions
+that may legitimately queue — but the render path waits only
+`_LIBRARY_RECONCILE_LOCK_WAIT_SECS` and then reports `reconciled: false`. A push
+holds the lock across an upload allowed up to 600s, and a page render must not
+hang for that; skipping loses nothing durable because the reconcile is
+self-correcting, so the next render performs it. Errors on this path already
+degrade rather than failing, and slowness degrades the same way.
+
+Because that lock makes a caller WAIT, all three operations re-run their
+authorization inside it via `routes._reauthorize_in_lock` — app enabled, then live
+identity still resolving to the requested account, then S3 consent, then the drive
+bucket re-resolved and compared, plus publish governance for the push. This is the
+same re-check `_handle_drive_upload` runs after its spool and for the same reason:
+the wait sits between the checks that authorized the call and the call itself. The
+bucket is included because tag discovery can return a different bucket while the
+identity is unchanged, and this module keeps no bucket-name cache precisely
+because that identity must not be stale. The reconcile read is included because a
+listing is still a call into a paid service; on the read path a failed re-check
+degrades to "not reconciled" rather than an error, so the local half still
+renders, and so does a ledger that cannot be written — the rows are renderable,
+they are merely unverified. The degraded identity denial is SEL-audited even
+though the route does not fail on it: a permission decision reaches SEL whether or
+not it becomes an error response.
+
+`library_remove` CONFIRMS the prefix is gone before touching the ledger.
+`delete_prefix` deliberately degrades on an unreadable listing page — it stops the
+walk and reports the count so far, so it can under-delete — and forgetting a record
+on that would drop a copy still in the bucket while reporting the removal as done.
+A slug still present raises instead, leaving the record intact.
+
+The lock is per-process, so a second gateway sharing the data home is still a
+racer. `library._recorded_at_or_after` is that cross-process guard, one rule
+asked by both operations: reconcile will not prune, and removal will not forget,
+a record written at or after the remote observation each is acting on. Both
+cutoffs are read BEFORE their observation begins, never after — a cutoff that
+postdates its own observation protects nothing, because a record written in the
+gap compares as older than it. Reading early only widens the set of records left
+alone, and a record left behind whose objects were really removed is merely
+stale, which the next render repairs.
+
+Soundness also depends on `pushedAt` being stamped when the record is WRITTEN —
+inside the ledger lock, after the uploads have succeeded — not when the push
+began; a pre-upload stamp would read older than a listing that ran during a slow
+upload. The metadata sidecar keeps its own pre-upload stamp, which is what remote
+metadata should say about when the push started.
+
+Cloud copies with no local artifact row are reported to the caller as
+`remoteOnly` rather than being hidden: `list_pushable` walks the local store, so
+a copy pushed from another machine has no row to carry it and would otherwise be
+unreachable from the console that must be able to remove it.
+
 `costs.fetch_month_costs` calls Cost Explorer for the requested linked account
 and groups results by service. `routes._handle_costs` serves a fresh local cache
 without a new consent check; a stale cache is returned with its stale state when
@@ -145,12 +227,17 @@ resources itself.
 profiles, reconnect guidance, drive status/list/download, costs, library,
 backup status, share metadata, and rendered IAM policy. Its mutations are
 profile registration; drive bootstrap, upload, delete, folder create/delete,
-and share; share-ledger removal; library push; backup run, nightly toggle, and
-staged restore.
+and share; share-ledger removal; library push and library removal; backup run,
+nightly toggle, and staged restore.
 
 Drive bootstrap is the only API-level preview-plus-confirm flow. Upload, profile
-registration, library push, share creation, and backup mutations have no
-separate confirmation request; the dashboard separately confirms object and
-folder deletion. Every mutation is owner-gated, restricted-session refused, and
+registration, library push, library removal, share creation, and backup
+mutations have no separate confirmation request; the dashboard separately
+confirms object and folder deletion. Library removal is API-level only in this
+change — it has no dashboard caller yet, so no UI confirm exists for it; the
+companion frontend is expected to gate it the way object and folder deletion are
+gated. Every mutation is owner-gated, restricted-session refused, and
 SEL-audited. Account-targeted AWS operations additionally enforce live identity
-and service consent, and egress paths enforce publish governance.
+and service consent, and egress paths enforce publish governance. Library removal
+is deliberately outside that egress set: it sends no bytes out, so a profile that
+denies publishing can still empty a bucket it is paying for.
