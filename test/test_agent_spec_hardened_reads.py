@@ -348,6 +348,13 @@ class TestResolveMcpServer:
         assert _resolve_mcp_server("srv-hr") is None
 
     def test_valid_agent_spec_still_resolves_under_the_same_cap(self, agents_dir_resolver):
+        """The positive control for the refusal cases above.
+
+        The resolver returns ``(argv, env)``; this asserts the whole tuple rather
+        than only ``argv`` so the control cannot drift out of step with the
+        contract again -- an env block the caller never receives is how a spawned
+        MCP dies at the ``initialize`` handshake.
+        """
         from kiro_crew.cron_script import _resolve_mcp_server
 
         _plant(
@@ -356,7 +363,34 @@ class TestResolveMcpServer:
             {"name": "kirocrew", "mcpServers": {"srv-hr": {"command": "c", "args": ["a"]}}},
         )
 
-        assert _resolve_mcp_server("srv-hr") == ("c", "a")
+        assert _resolve_mcp_server("srv-hr") == (("c", "a"), {})
+
+    def test_a_declared_env_block_survives_the_hardened_read(self, agents_dir_resolver):
+        """The env half of the contract, on THIS module's read path.
+
+        The refusal cases above prove a capped/oversized spec yields no server.
+        This proves the accepted path still carries the per-server ``env`` the
+        launcher needs, so a future tightening of the hardened read cannot
+        quietly drop it while the argv assertion stays green.
+        """
+        from kiro_crew.cron_script import _resolve_mcp_server
+
+        _plant(
+            agents_dir_resolver,
+            AGENT_FILENAME,
+            {
+                "name": "kirocrew",
+                "mcpServers": {
+                    "srv-hr": {
+                        "command": "c",
+                        "args": ["a"],
+                        "env": {"PATH": "/opt/tools/bin"},
+                    }
+                },
+            },
+        )
+
+        assert _resolve_mcp_server("srv-hr") == (("c", "a"), {"PATH": "/opt/tools/bin"})
 
     def test_malformed_spec_no_longer_escapes_as_a_decode_error(self, agents_dir_resolver):
         """The differential case for THIS site.
