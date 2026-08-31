@@ -57,6 +57,7 @@ from kiro_crew.executors import (
 )
 from kiro_crew.mcp_caller import CallerContext
 from kiro_crew.mcp_caller import _parent_pid as _ppid_fn
+from kiro_crew.mcp_caller import new_tenant_nonce
 from kiro_crew.mcp_gateway import credwatch, hazards, socketsec, transport
 from kiro_crew.mcp_gateway.apps import sweep_spool as apps_sweep_spool
 from kiro_crew.mcp_gateway.backend import Backend, BackendGone, spawn_backend
@@ -1577,7 +1578,14 @@ class _StubConn:
     unreadable /proc) and never counts as a mismatch.
     """
 
-    __slots__ = ("stub_uuid", "ancestor_pids", "pool_label", "caller", "pid_start_ids")
+    __slots__ = (
+        "stub_uuid",
+        "ancestor_pids",
+        "pool_label",
+        "caller",
+        "pid_start_ids",
+        "tenant_nonce",
+    )
 
     def __init__(
         self,
@@ -1586,12 +1594,20 @@ class _StubConn:
         pool_label: str,
         caller: Optional[CallerContext],
         pid_start_ids: Optional[dict[int, Optional[str]]] = None,
+        tenant_nonce: str = "",
     ) -> None:
         self.stub_uuid = stub_uuid
         self.ancestor_pids = ancestor_pids
         self.pool_label = pool_label
         self.caller = caller
         self.pid_start_ids = pid_start_ids if pid_start_ids is not None else {}
+        # Namespace separator for a connection whose session the gateway cannot
+        # name, forwarded to the backend on every request (#5322). GATEWAY-minted
+        # and never derived from the Register frame: ``stub_uuid`` arrives from
+        # the stub, so a nonce derived from it would let one stub choose to share
+        # an unnamed peer's per-tenant namespace. Independent of ``caller``,
+        # which may be retargeted by a later claim-push while this stays put.
+        self.tenant_nonce = tenant_nonce
 
 
 #: Live stub connections indexed by every ancestor PID of the kiro-cli
@@ -2523,7 +2539,14 @@ async def _handle_connection(
         logger.exception("pid start-id snapshot failed for stub %s", stub_uuid)
         pid_start_ids = {}
 
-    conn = _StubConn(stub_uuid, indexed_pids, pool_key.human_readable(), caller, pid_start_ids)
+    conn = _StubConn(
+        stub_uuid,
+        indexed_pids,
+        pool_key.human_readable(),
+        caller,
+        pid_start_ids,
+        new_tenant_nonce(),
+    )
     _conn_index_add(conn)
 
     # Register this connection for the keepalive probe. Scoped to the handler's
@@ -2940,7 +2963,9 @@ async def _handle_connection(
                 captured_init = dict(msg)
 
             try:
-                await backend.forward_from_stub(stub_uuid, msg, caller=caller)
+                await backend.forward_from_stub(
+                    stub_uuid, msg, caller=caller, tenant_nonce=conn.tenant_nonce
+                )
             except BackendGone as exc:
                 # Transparent respawn: a shared backend dying must NOT brick
                 # this stub's transport (which would make kiro-cli mark the

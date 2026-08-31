@@ -32,8 +32,10 @@ from kiro_crew.executors import image_executor, maintenance_executor
 from kiro_crew.mcp_caller import (
     CALLER_CAPABILITY_KEY,
     CALLER_META_KEY,
+    TENANT_META_KEY,
     CallerContext,
     build_caller_meta,
+    build_tenant_meta,
 )
 from kiro_crew.mcp_gateway import hazards
 from kiro_crew.mcp_gateway.apps import (
@@ -296,20 +298,32 @@ class _PendingRequest:
 
 def _strip_caller_meta(msg: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy of ``msg`` with any stub-supplied
-    ``params._meta.kirocrew.caller`` unconditionally removed.
+    ``params._meta.kirocrew.caller`` / ``params._meta.kirocrew.tenant``
+    unconditionally removed.
 
     The gateway is the trust boundary: stubs are untrusted clients and must
     never be able to forge their caller identity by pre-populating
     ``_meta.kirocrew.caller`` in the request. This function is called on
     EVERY forwarded request regardless of method so a malicious stub cannot
     sneak a forged caller block through non-tools/call methods.
+
+    BOTH gateway-owned blocks are stripped here, in ONE place, deliberately: the
+    tenant nonce decides which namespace an unnamed co-tenant's per-tenant state
+    lands in, so a stub allowed to supply its own could choose to land in a
+    PEER's namespace — the same collision #5322 fixed, only chosen instead of
+    accidental. Giving the nonce its own strip function would have added a second
+    site that every future forward path has to remember; both call sites of this
+    one (``forward_from_stub`` and ``_handle_initialize``) already exist.
     """
     out = dict(msg)
     params = out.get("params")
     if not isinstance(params, dict):
         return out
     meta_raw = params.get("_meta")
-    if not isinstance(meta_raw, dict) or CALLER_META_KEY not in meta_raw:
+    if not isinstance(meta_raw, dict):
+        return out
+    forged = [key for key in (CALLER_META_KEY, TENANT_META_KEY) if key in meta_raw]
+    if not forged:
         return out
     # The caller block is a FLAT ``params._meta[CALLER_META_KEY]`` key
     # ("kirocrew.caller") — exactly the shape build_caller_meta writes and
@@ -321,7 +335,8 @@ def _strip_caller_meta(msg: dict[str, Any]) -> dict[str, Any]:
     # request closes that regardless of whether injection happens.)
     params = dict(params)
     meta = dict(meta_raw)
-    del meta[CALLER_META_KEY]
+    for key in forged:
+        del meta[key]
     if meta:
         params["_meta"] = meta
     else:
@@ -497,6 +512,44 @@ def _inject_caller_meta(msg: dict[str, Any], caller: CallerContext) -> dict[str,
     meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
     # Inject the authoritative caller block from the gateway.
     meta.update(build_caller_meta(caller))
+    params["_meta"] = meta
+    out["params"] = params
+    return out
+
+
+def _inject_tenant_meta(msg: dict[str, Any], nonce: str) -> dict[str, Any]:
+    """Return a shallow copy of ``msg`` with ``params._meta.kirocrew.tenant``
+    set to this connection's *nonce*.
+
+    Injected on every request FORWARDED FROM A STUB by an advertising backend,
+    including the ones with no caller — that is the case it exists for. A backend
+    serving a caller the gateway cannot name falls back to a per-PROCESS
+    namespace, which on a pooled backend is one namespace for every unnamed
+    co-tenant (#5322); the nonce splits it per connection.
+
+    Deliberately NOT on the gateway's own synthesized lease frames
+    (``resources/subscribe`` / ``resources/unsubscribe`` replays): those carry the
+    caller because a subscription is held per caller, and no backend keys
+    subscription state by tenant. A backend that ever needs to would have to have
+    the nonce threaded into the lease bookkeeping, which is why this says
+    forwarded-from-a-stub rather than "always".
+
+    It is NOT an identity and must not be read as one: the block carries no
+    session key, so :meth:`CallerContext.from_meta` still finds nothing to parse
+    and every identity resolver keeps returning empty for an unnamed caller.
+
+    Copy discipline mirrors :func:`_inject_caller_meta`; assumes any stub-supplied
+    block was already removed by :func:`_strip_caller_meta`.
+    """
+    out = dict(msg)
+    params = out.get("params")
+    if isinstance(params, dict):
+        params = dict(params)
+    else:
+        params = {}
+    meta_raw = params.get("_meta")
+    meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+    meta.update(build_tenant_meta(nonce))
     params["_meta"] = meta
     out["params"] = params
     return out
@@ -1135,6 +1188,7 @@ class Backend:
         msg: dict[str, Any],
         *,
         caller: Optional[CallerContext] = None,
+        tenant_nonce: str = "",
     ) -> None:
         """Forward one JSON-RPC message from ``stub_uuid`` to the backend.
 
@@ -1151,6 +1205,13 @@ class Backend:
            advertised the capability at initialize time. The block is
            built via :func:`kiro_crew.mcp_caller.build_caller_meta` so
            gateway + backend share exactly one wire format.
+
+        ``tenant_nonce`` is this CONNECTION's namespace separator, injected
+        alongside (3) and independently of it: a caller the gateway cannot name
+        gets no identity block but still gets a nonce, which is what keeps two
+        unnamed co-tenants of one pooled backend out of each other's per-tenant
+        state (#5322). Empty means "no separator available" and leaves the
+        backend on its own per-process fallback.
         """
         if not self.is_alive:
             raise BackendGone(self._dead_reason or "backend is not alive")
@@ -1255,6 +1316,8 @@ class Backend:
             msg = _strip_caller_meta(msg)
             if self.supports_caller_identity and caller is not None:
                 msg = _inject_caller_meta(msg, caller)
+            if self.supports_caller_identity and tenant_nonce:
+                msg = _inject_tenant_meta(msg, tenant_nonce)
 
         self.touch()
         try:

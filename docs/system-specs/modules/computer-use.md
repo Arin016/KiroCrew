@@ -190,7 +190,8 @@ control. `test_mcp_computer.py::test_the_shim_carries_no_identity_refusal_at_all
 guards the absence, because a behavioural test alone passes just as well with a
 refusal that happens to be unreachable.
 
-**An unresolved key becomes `unresolved:<shim pid>`, never the empty string** — and
+**An unresolved key becomes `unresolved:<shim pid>[#<connection nonce>]`, never the
+empty string** — and
 that is a correctness fix, not cosmetics. `SnapshotIndex` namespaces entries by
 `(session_key, window_key)`, so an empty key collapsed EVERY unresolved session onto
 one `("", window)` slot. Since unresolved is the normal case on macOS, two concurrent
@@ -201,13 +202,31 @@ per session, so the shim's own pid separates the namespaces exactly as far as th
 sessions are genuinely separate — in the 1:1 shim topology. On a POOLED backend one
 process serves many sessions, so the pid separates only what the injected caller
 block does not already name: co-tenants gatewayd CAN name get real per-session keys,
-and the residual — two or more co-tenants it cannot name sharing one
-`unresolved:<pid>` namespace — is tracked as #5322. Read at call time rather than
+and the ones it cannot are separated by the **per-connection nonce** gatewayd injects
+alongside the caller block (`_meta."kirocrew.tenant".nonce`, #5322). The nonce is
+gateway-minted and stripped on every inbound frame like the caller block, so a stub
+cannot choose to share a peer's namespace; it carries no session key, so
+`CallerContext.from_meta` still finds no identity and nothing is laundered into
+attribution. Both halves are read at call time rather than
 captured at import, so a forked child cannot inherit its parent's string and
 re-alias with it.
 
+Absent nonce is the normal 1:1 case (no gateway, or a backend that never advertised
+the caller extension), and the key stays `unresolved:<pid>` — correct there, because
+one process is one session. It is ALSO what a pre-nonce gatewayd produces: `manager.py`
+adopts whatever healthy daemon already holds the socket, so a daemon that outlived a
+package upgrade keeps serving and injects nothing, and the backend cannot tell that
+apart from the 1:1 case (absence of both blocks is ambiguous by construction). That
+window is why `kirocrew-computer` stays in `_MANAGED_SERVERS_ADVERTISING_BUT_WITHHELD`
+rather than being reclassified shareable here — the classification is a config WRITE
+via `seed.py`, so it must not promise a separation the serving daemon may not
+implement. A stub that reconnects gets a fresh nonce and therefore a
+fresh namespace: its earlier snapshots become unreachable, which surfaces as "call
+`computer_get_state` first" rather than as an action against a stale tree.
+
 The prefix is deliberate: this is a namespace separator, not attribution, and an audit
-reader must not mistake a pid for a resolved identity. And it is a namespacing fix
+reader must not mistake a pid — or a nonce — for a resolved identity. And it is a
+namespacing fix
 specifically **because** the alternative — refusing an empty key — is the line that
 made the feature unusable on macOS; the security posture is unchanged, only the cache
 key is.
