@@ -523,3 +523,120 @@ class TestSetMigratedFailClosed:
             await mem_mod._set_migrated(True)
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert data["memory"]["migrated"] is True
+
+
+class TestSubprocessStderrRedactedBeforeBound:
+    """The two subprocess-failure ``logger.warning`` sites in memory.py must
+    route decoded stderr through ``redact_and_truncate`` (redact the FULL
+    stream, THEN bound) rather than the old ``stderr.decode()[:500]``.
+
+    A credential-bearing private index that answers 401 puts a raw
+    ``https://<user>:<token>@host/simple`` URL into pip's stderr; the faiss
+    install site decodes and logs it. Bounding first (``[:500]``) would also let
+    a credential straddling the 500-char cut survive as an unredactable prefix,
+    the redact-before-bound invariant documented on ``redact_and_truncate``.
+    """
+
+    # A userinfo credential in exactly the shape pip's warn_on_401 emits.
+    _CRED_URL = "https://svc:SECRET123@pypi.invalid/simple/faiss-cpu/"
+    _TOKEN = "SECRET123"
+
+    @pytest.mark.asyncio
+    async def test_faiss_install_stderr_credential_is_redacted(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        cfg_path = tmp_path / "kirocrew.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        stderr = (
+            f"401 Error, Credentials not correct for {self._CRED_URL}\n"
+            "ERROR: No matching distribution found for faiss-cpu"
+        ).encode()
+        patches, store, proc, mgr = _common_patches(
+            cfg_path, faiss_available=False, proc_rc=1, proc_stderr=stderr
+        )
+
+        with caplog.at_level("WARNING", logger=_MOD), \
+             patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["faiss"], \
+             patches["store"], patches["wrap_argv"]:
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 500
+
+        install_logs = [
+            r.getMessage() for r in caplog.records if "faiss-cpu install failed" in r.getMessage()
+        ]
+        assert install_logs, "expected a 'faiss-cpu install failed' warning"
+        joined = "\n".join(install_logs)
+        # The raw token never reaches the log; the URL userinfo is scrubbed.
+        assert self._TOKEN not in joined
+        assert "svc:SECRET123" not in joined
+        # Redaction actually ran (not merely dropped) — the marker is present.
+        assert "[REDACTED" in joined
+
+    @pytest.mark.asyncio
+    async def test_faiss_install_stderr_credential_straddling_bound_not_leaked(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        # Pad so the credential token lands ACROSS the 500-char truncation
+        # boundary. With the old ``decode()[:500]`` the token's tail would have
+        # been sliced off, leaking an unredactable prefix; redact-before-bound
+        # scrubs the whole stream first.
+        pad = "x" * 444
+        stderr = (
+            f"{pad}401 Error, Credentials not correct for {self._CRED_URL}"
+        ).encode()
+        # Sanity: the token genuinely straddles the 500-char cut (starts before
+        # 500, extends past it).
+        decoded = stderr.decode()
+        start = decoded.index(self._TOKEN)
+        assert start < 500 < start + len(self._TOKEN)
+
+        cfg_path = tmp_path / "kirocrew.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        patches, store, proc, mgr = _common_patches(
+            cfg_path, faiss_available=False, proc_rc=1, proc_stderr=stderr
+        )
+
+        with caplog.at_level("WARNING", logger=_MOD), \
+             patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["faiss"], \
+             patches["store"], patches["wrap_argv"]:
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 500
+
+        joined = "\n".join(
+            r.getMessage() for r in caplog.records if "faiss-cpu install failed" in r.getMessage()
+        )
+        # No fragment of the token survives, even sliced by the bound.
+        assert self._TOKEN not in joined
+        assert "SECRET" not in joined
+
+    @pytest.mark.asyncio
+    async def test_ensurepip_stderr_is_redacted_and_bounded(self, caplog) -> None:
+        # Site 897 carries no index-URL credential (ensurepip never consults an
+        # index), but it is hardened for consistency: full-stream redaction then
+        # a 500-char bound. A URL-shaped secret is still scrubbed, and a long
+        # stream is truncated.
+        cred_line = f"boot noise https://svc:{self._TOKEN}@mirror.invalid/simple\n"
+        stderr = (cred_line + "y" * 2000).encode()
+        proc = _mock_proc(rc=1, stderr=stderr)
+        with caplog.at_level("WARNING", logger=_MOD), \
+             patch.dict("sys.modules", {"pip": None}), \
+             patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            ok, err = await mem_mod._ensure_pip_available()
+        assert ok is False
+
+        logs = [
+            r.getMessage()
+            for r in caplog.records
+            if "ensurepip bootstrap failed" in r.getMessage()
+        ]
+        assert logs, "expected an 'ensurepip bootstrap failed' warning"
+        msg = logs[0]
+        assert self._TOKEN not in msg
+        # The stderr portion is bounded to 500 chars (prefix + bounded payload).
+        stderr_part = msg.split("ensurepip bootstrap failed: ", 1)[1]
+        assert len(stderr_part) <= 500

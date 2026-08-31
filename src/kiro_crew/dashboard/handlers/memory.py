@@ -49,7 +49,7 @@ from kiro_crew.sandbox import (
     wrap_argv,
     wrap_argv_async,
 )
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import redact_and_truncate, redact_credentials, redact_exfiltration_urls
 
 from ._shared import _get_memory, _is_restricted_session, _redact_memory_field, read_bounded_json
 from .cron import _recognize_session
@@ -894,7 +894,10 @@ async def _ensure_pip_available() -> tuple[bool, str]:
             logger.warning("ensurepip bootstrap timed out")
             return False, "pip bootstrap (ensurepip) timed out"
         if proc.returncode != 0:
-            logger.warning("ensurepip bootstrap failed: %s", stderr.decode()[:500])
+            logger.warning(
+                "ensurepip bootstrap failed: %s",
+                redact_and_truncate(stderr.decode(), max_chars=500),
+            )
             return False, "pip bootstrap (ensurepip) failed"
         importlib.invalidate_caches()
         logger.info("Bootstrapped pip via ensurepip")
@@ -1045,7 +1048,10 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
                             {"error": "faiss-cpu install timed out."}, status=500,
                         )
                     if proc.returncode != 0:
-                        logger.warning("faiss-cpu install failed: %s", stderr.decode()[:500])
+                        logger.warning(
+                            "faiss-cpu install failed: %s",
+                            redact_and_truncate(stderr.decode(), max_chars=500),
+                        )
                         _embedding_setup_status = {
                             "step": "idle",
                             "error": "faiss-cpu installation failed — click Enable to retry",
