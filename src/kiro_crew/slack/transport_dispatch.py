@@ -592,8 +592,10 @@ async def handle_message_transport(
             decider=decider,
             # Preserve native handle_message's auto_approve_subagent_spawn hook:
             # auto-approve spawn_run when the context builder's hook is enabled,
-            # regardless of the interactive ladder.
-            auto_approve_tool=lambda title: _should_auto_approve_spawn(context_builder, title),
+            # regardless of the interactive ladder. The predicate takes the
+            # permission EVENT so identity comes from event.tool_name/is_shell,
+            # never the model-authored title.
+            auto_approve_tool=lambda event: _should_auto_approve_spawn(context_builder, event),
             # Per-session Trust (set via the Trust button) auto-approves all
             # subsequent tools for THIS session, mirroring native. Checked per
             # permission request so a mid-turn Trust click takes effect for the

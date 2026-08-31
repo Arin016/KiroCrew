@@ -33,7 +33,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from kiro_crew.acp.types import STOP_REASON_COMPACTION_FAILED
 from kiro_crew.executors import run_in_embed_pool
-from kiro_crew.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY
+from kiro_crew.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY, event_is_spawn_run
 from kiro_crew.messaging.driver import DirectiveConsumer, TurnDriver
 from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn_identity
 from kiro_crew.messaging.link import (
@@ -306,15 +306,21 @@ def build_tool_gate(ctx_builder: Any, *, session_key: str, agent: str) -> Callab
     return _tool_gate
 
 
-def build_auto_approve(ctx_builder: Any) -> Callable[[str], bool]:
-    """Preserve the ``auto_approve_subagent_spawn`` hook for ``spawn_run``."""
+def build_auto_approve(ctx_builder: Any) -> Callable[[Any], bool]:
+    """Preserve the ``auto_approve_subagent_spawn`` hook for ``spawn_run``.
 
-    def _auto_approve(title: str) -> bool:
+    The predicate takes the PERMISSION EVENT, not the title: the title is
+    model-authored, so the spawn check keys on ``event_is_spawn_run``'s
+    canonical identity (``tool_name`` from ``_meta.kiro``; without it the
+    rung does not fire and the request falls to the approval ladder).
+    """
+
+    def _auto_approve(event: Any) -> bool:
         return bool(
             ctx_builder
             and ctx_builder.hooks
             and ctx_builder.hooks.auto_approve_subagent_spawn
-            and title == "spawn_run"
+            and event_is_spawn_run(event)
         )
 
     return _auto_approve

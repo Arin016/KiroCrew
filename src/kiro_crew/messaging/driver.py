@@ -61,11 +61,14 @@ APPROVAL_INTERACTIVE = "interactive"
 #: e.g. by awaiting a button click). Returns None/False => deny.
 ApprovalDecider = Callable[[Any], Awaitable[bool]]
 
-#: A synchronous predicate: given a tool title, return True to auto-approve
-#: that tool regardless of the interactive ladder. The caller injects this
-#: (keeping the driver channel-neutral) to preserve hook-driven auto-approval
-#: such as ``auto_approve_subagent_spawn`` for the ``spawn_run`` tool.
-AutoApprovePredicate = Callable[[str], bool]
+#: A synchronous predicate: given the PERMISSION EVENT, return True to
+#: auto-approve that tool regardless of the interactive ladder. The caller
+#: injects this (keeping the driver channel-neutral) to preserve hook-driven
+#: auto-approval such as ``auto_approve_subagent_spawn`` for the ``spawn_run``
+#: tool. It receives the whole event — never just the title — because the
+#: title is model-authored and a security predicate must key on canonical
+#: identity (``event.tool_name`` / ``event.is_shell``).
+AutoApprovePredicate = Callable[[Any], bool]
 
 #: A session-directive consumer: ``(kind, args) -> awaitable``. The driver
 #: invokes it when a genuine directive-tool result (see ``session_directive``)
@@ -277,11 +280,14 @@ class TurnDriver:
         Optional async callback for the interactive ladder. When omitted,
         interactive mode is deny-by-default.
     auto_approve_tool:
-        Optional sync predicate ``(tool_title) -> bool``. When it returns
-        True for a permission request, the tool is auto-approved immediately
-        (no buttons, no decider wait), mirroring native ``handle_message``'s
-        ``auto_approve_subagent_spawn`` hook for ``spawn_run``. Injected by the
-        caller so the driver stays channel-neutral.
+        Optional sync predicate ``(permission_event) -> bool``. When it
+        returns True for a permission request, the tool is auto-approved
+        immediately (no buttons, no decider wait), mirroring native
+        ``handle_message``'s ``auto_approve_subagent_spawn`` hook for
+        ``spawn_run``. It receives the EVENT so the check can use canonical,
+        non-model-authored identity (``tool_name``/``is_shell``) rather than
+        the forgeable title. Injected by the caller so the driver stays
+        channel-neutral.
     deny_all_tools:
         Reject EVERY permission request, before any auto-approve path. For a turn
         driven by a sender the channel does not trust as its operator: the
@@ -619,9 +625,7 @@ class TurnDriver:
                 #  - hook: auto_approve_subagent_spawn -> spawn_run
                 #  - per-session Trust / global YOLO (injected predicate)
                 _auto_reason = ""
-                if self.auto_approve_tool is not None and self.auto_approve_tool(
-                    getattr(event, "title", "") or ""
-                ):
+                if self.auto_approve_tool is not None and self.auto_approve_tool(event):
                     _auto_reason = "hook_auto_approve"
                 elif self.auto_approve_session is not None and self.auto_approve_session():
                     _auto_reason = "session_trust"
