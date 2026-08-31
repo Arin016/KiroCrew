@@ -3279,8 +3279,30 @@ def _nested_shell_payloads(tokens: "list[str]") -> "list[str]":
                     payloads.append(tokens[j].split("=", 1)[1])
                     break
         elif base in _NESTED_SHELL_VERBS or token in _NESTED_SHELL_VERBS:
-            if i + 1 < len(tokens):
-                payloads.append(tokens[i + 1])
+            # ``--`` ends option parsing, so ``eval -- '<script>'`` runs the token
+            # AFTER it. Taking ``tokens[i + 1]`` blindly yielded the literal ``--``
+            # as the payload and the real script was never walked. Skip any run of
+            # them, exactly as the ``-c`` branch above already does.
+            j = i + 1
+            while j < len(tokens) and tokens[j] == "--":
+                j += 1
+            if j < len(tokens):
+                payloads.append(tokens[j])
+                # ``eval`` CONCATENATES all of its arguments with a space and
+                # evaluates the RESULT, so a command split across several words
+                # is one command line at run time while no single word looks
+                # like one.  Taking only the first argument let
+                # ``eval '<program>' '<verb and args>'`` through: the hooks saw
+                # the bare program name and the publish never appeared.  The
+                # joined form is added ALONGSIDE the first argument, so the
+                # single-argument reading is unchanged.
+                #
+                # ``eval`` only.  ``source``/``.`` take a FILE as the first
+                # argument and pass the rest as positional parameters, so
+                # joining them would invent a command line bash never runs.
+                verb = base if base in _NESTED_SHELL_VERBS else token
+                if verb == "eval" and j + 1 < len(tokens):
+                    payloads.append(" ".join(tokens[j:]))
     # ``bash<<<'<payload>'`` glues the program, the operator and the payload into ONE
     # token, so the program never appears as a token of its own for the walk above to
     # recognise.  Split on the operator and check the left half.
@@ -3472,13 +3494,22 @@ def _decode_printf_escapes(text: str) -> str:
     return _NUMERIC_ESCAPE_RE.sub(_numeric_escape_char, text)
 
 
-def _self_token_frames(text_lower: str) -> "list[list[str]]":
-    """The command's own argv plus the argv of every nested shell payload.
+def _shell_payload_walk(text_lower: str) -> "list[tuple[str, list[str]]]":
+    """``(source, argv)`` for *text_lower* and every nested shell payload in it.
 
     ``bash -c "kirocrew token"`` tokenizes to ``['bash', '-c', 'kirocrew token']``
-    -- the dangerous command is a single opaque token, so the direct scan cannot
-    see it.  Re-tokenizing the payload and checking that argv too closes the
+    -- the dangerous command is a single opaque token, so a direct scan cannot
+    see it.  Re-tokenizing the payload and checking that view too closes the
     class rather than one spelling of it.
+
+    Both the SOURCE text and its argv are returned because the two floors that
+    consume this need different views of the same frame: the self-protection
+    predicates match argv structurally, while the git-publish gate is a
+    verb-anchored scan over command text.  Walking once and handing out both is
+    what keeps the two floors from drifting -- the publish gate previously did
+    its own top-level-only text match, so every wrapper form
+    (``bash -c '<push>'``, ``eval '<push>'``) bypassed the ONLY enforcement
+    pushes have.
 
     Descends to ANY depth.  A numeric depth cap is itself a bypass -- whatever the
     number, one more wrapper defeats it -- so the walk is bounded structurally: a
@@ -3486,7 +3517,7 @@ def _self_token_frames(text_lower: str) -> "list[list[str]]":
     than the parent's source text, and a chain of strictly shorter strings is
     finite.
     """
-    frames: list[list[str]] = []
+    out: list[tuple[str, list[str]]] = []
     seen: set[str] = set()
     pending: list[tuple[str, int]] = [(text_lower, len(text_lower) + 1)]
     while pending:
@@ -3494,7 +3525,7 @@ def _self_token_frames(text_lower: str) -> "list[list[str]]":
         tokens = _self_tokens(source)
         if not tokens:
             continue
-        frames.append(tokens)
+        out.append((source, tokens))
         # Every substitution body is itself a command line -- command substitution
         # (``$( )``, backticks) and PROCESS substitution (``<( )``, ``>( )``) alike, since
         # bash runs the inner command in all of them.  Walking them here means the
@@ -3508,7 +3539,17 @@ def _self_token_frames(text_lower: str) -> "list[list[str]]":
                 continue
             seen.add(payload)
             pending.append((payload, len(source)))
-    return frames
+    return out
+
+
+def _self_token_frames(text_lower: str) -> "list[list[str]]":
+    """The command's own argv plus the argv of every nested shell payload."""
+    return [tokens for _source, tokens in _shell_payload_walk(text_lower)]
+
+
+def _shell_payload_sources(text_lower: str) -> "list[str]":
+    """*text_lower* plus the source text of every nested shell payload in it."""
+    return [source for source, _tokens in _shell_payload_walk(text_lower)]
 
 
 def _substitution_depth_delta(token: str) -> int:
@@ -11076,9 +11117,20 @@ def is_denied(
     # applies), and we record the allow INTENT now — the ``push_allowed`` audit
     # is emitted only at a SUCCESS return path below, so the SEL trail reflects
     # the FINAL outcome (never an allow for a command ultimately denied).
+    #
+    # Evaluated over the whole string AND the source of every nested shell payload
+    # (``_shell_payload_sources``), because this floor is the SOLE enforcement for
+    # pushes -- every git-publish rule is stripped from the regex tier just above.
+    # A top-level-only text match therefore meant one wrapper was a complete
+    # bypass: ``bash -c 'git push origin main'`` and ``eval '<push>'`` reached no
+    # check at all, while the self-protection floor beside it was already immune
+    # because it re-tokenizes payloads. Same walk, same depth guarantee, so a
+    # wrapper cannot buy anything here either.
     push_allow_pending = False
-    if _is_git_publish(lower):
-        if _is_push_to_protected_branch(lower):
+    for payload_source in _shell_payload_sources(lower):
+        if not _is_git_publish(payload_source):
+            continue
+        if _is_push_to_protected_branch(payload_source):
             _emit_deny_event(tool_name, _GIT_PUBLISH_DENY_LABEL, lower)
             return _reason(_GIT_PUBLISH_DENY_LABEL)
         push_allow_pending = True

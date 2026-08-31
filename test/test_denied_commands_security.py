@@ -3894,7 +3894,17 @@ class TestSelfModuleIndexIsLinear:
 
     def test_the_scan_is_linear_not_quadratic(self):
         """Asserted two ways: a doubling ratio, which catches the quadratic regardless
-        of machine speed, and an absolute budget it could not meet on any runner."""
+        of machine speed, and an absolute budget it could not meet on any runner.
+
+        The ratio is taken over the BEST of several samples per size, not a single
+        pair. A ratio of two one-shot wall-clock samples is sensitive to machine
+        NOISE as well as machine speed: the true ratio is 2.0, so a lone slow
+        ``small`` sample on a runner hosting parallel shards pushes it past 3 with
+        no change in complexity (observed: 0.0642s -> 0.2020s, ratio 3.14, while
+        the same code measures 2.00 on a quiet machine). Best-of-N removes the
+        noise and keeps the power -- a quadratic scan cannot produce a passing
+        ratio even on its luckiest sample.
+        """
         import time
 
         from kiro_crew import security
@@ -3905,8 +3915,11 @@ class TestSelfModuleIndexIsLinear:
             security._is_self_restart(text)
             return time.perf_counter() - start
 
+        def best(n: int, samples: int = 3) -> float:
+            return min(elapsed(n) for _ in range(samples))
+
         elapsed(250)
-        small, large = elapsed(1000), elapsed(2000)
+        small, large = best(1000), best(2000)
         assert large < small * 3, f"{small:.4f}s -> {large:.4f}s looks super-linear"
         # Base spent 1.94 s here; a quadratic scan cannot come near this ceiling.
         assert large < 0.5, f"2k tokens took {large:.3f}s"
