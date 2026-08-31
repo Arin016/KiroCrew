@@ -19,6 +19,7 @@ import type {
   UpdateCheckResult,
   WorkflowRunSummary,
 } from '../types'
+import { ApiError, friendlyErrText } from './apiError'
 import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
 import {
   STALE_OWNER_SESSION_CODE,
@@ -1334,30 +1335,14 @@ installStaleOwnerHandler(handleStaleOwnerSession)
 export { STALE_OWNER_SESSION_CODE }
 
 /**
- * HTTP error from an API call. Carries the response status so call sites can
- * branch on specific codes (e.g. 404 = not found, 409 = conflict) without
- * regex-matching the error message text.
- *
- * Extends Error so existing `e instanceof Error ? e.message : String(e)`
- * fallbacks keep working.
+ * `ApiError` and `friendlyErrText` now live in the side-effect-free
+ * `api/apiError` module so app API clients can import them without pulling this
+ * file's graph (queryClient, transport install, the error journal) into their
+ * bundles. Re-exported here because this has always been their import path —
+ * every existing consumer, and every test that mocks `../api/client`, is
+ * unchanged by the move.
  */
-export class ApiError extends Error {
-  readonly status: number
-  /** The raw response body, kept so a caller can read structured fields that
-   * `friendlyErrText` collapses away when it unwraps the human message. */
-  readonly body: string
-  /** The gateway rejected this call because the dashboard session no longer
-   * authenticates (403 + `X-Auth-Required`). Call sites branch on this to drop
-   * retry affordances that cannot succeed until the user re-authenticates. */
-  readonly authRequired: boolean
-  constructor(status: number, message: string, body = '', authRequired = false) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.body = body
-    this.authRequired = authRequired
-  }
-}
+export { ApiError, friendlyErrText }
 
 /**
  * Whether *e* is a failure the user can only clear by signing back in.
@@ -1370,32 +1355,6 @@ export class ApiError extends Error {
  */
 export const isAuthExpiredError = (e: unknown): boolean =>
   e instanceof ApiError && e.authRequired
-
-/**
- * Map raw edge/proxy error bodies to a human-readable message. A dashboard
- * served through Builder Tunnels sits behind API Gateway, whose throttle
- * response is the opaque `{"message":"Rate exceeded","throttlingReasons":null}`
- * — rendering that verbatim in an error card is a terrible UX. The mapped
- * message only ever shows after the QueryClient's 429 retry ladder
- * (api/queryClient.ts) is exhausted.
- */
-export const friendlyErrText = (status: number, body: string): string => {
-  if (status === 429) {
-    return i18nT('api.client.rate_limited_by_the_tunnel_edge_http_429_too_man')
-  }
-  // Backends return errors as {"error": "…"} (or detail/message). Unwrap the
-  // field so the UI shows the human message with its real newlines, not the
-  // raw JSON envelope with escaped \n and \".
-  const trimmed = body.trim()
-  if (trimmed.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(trimmed)
-      const msg = parsed?.error ?? parsed?.detail ?? parsed?.message
-      if (typeof msg === 'string' && msg.trim()) return msg
-    } catch { /* not JSON — fall through to raw body */ }
-  }
-  return body
-}
 
 /**
  * Build the ApiError AND journal it.
