@@ -231,6 +231,52 @@ class TestPushArtifact:
         assert persisted["version"] == 4
         assert persisted["kind"] == "markdown"
 
+    def test_key_layout_is_a_contract_the_drive_page_reads(self, tmp_path, monkeypatch):
+        # THE FRONTEND DEPENDS ON THIS LAYOUT, so changing it needs a change here.
+        #
+        # The account console's Drive lists the `library` prefix and treats its
+        # top level as one FOLDER PER SLUG: the folder name IS the slug, which is
+        # what lets a card recover the artifact's name, kind and preview from the
+        # local library (website/src/apps/aws-control/DrivePage.tsx). If a push
+        # ever wrote a flat key, a differently-nested one, or a different first
+        # path segment, every card would silently degrade to "In the cloud only"
+        # and no test would go red. Hence: assert the SHAPE, not one literal pair.
+        _ledger_at(monkeypatch, tmp_path)
+        # A slug with a hyphen and a two-digit version, so a naive split or a
+        # version-in-the-folder-name layout cannot pass by coincidence.
+        art = NS(
+            slug="my-notes",
+            name="n",
+            kind="markdown",
+            version=12,
+            description="",
+            tags=[],
+            content="body",
+        )
+        with (
+            mock.patch.object(library, "get_default_store") as store,
+            mock.patch.object(library.storage, "put_file") as put,
+        ):
+            store.return_value.get.return_value = art
+            library.push_artifact("p", "us-west-2", "bucket", ACCOUNT, "my-notes")
+
+        sections = {c.args[3] for c in put.call_args_list}
+        keys = [c.args[4] for c in put.call_args_list]
+
+        # One prefix, the one the page lists.
+        assert sections == {"library"}
+        # Every object sits UNDER a folder whose name is exactly the slug, so the
+        # prefix's top level is slugs and nothing else.
+        assert keys, "push uploaded nothing"
+        for key in keys:
+            assert key.startswith("my-notes/"), key
+            assert key.split("/")[0] == "my-notes", key
+        # The sidecar lives INSIDE that folder -- not beside it, where it would
+        # show up as its own top-level entry and render as a bogus card.
+        assert "my-notes/meta.json" in keys
+        # And the content object is versioned within the folder.
+        assert any(k.startswith("my-notes/v") for k in keys), keys
+
     def test_corrupt_account_entry_is_reset_before_ledger_write(self, tmp_path, monkeypatch):
         # If the ledger already holds a corrupted per-account entry (a scalar),
         # the locked write must reset it to a dict rather than raising when it
