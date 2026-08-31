@@ -719,27 +719,27 @@ async def _handle_drive_upload(request: web.Request) -> web.Response:
         if received == 0:
             return _bad_request("empty upload", "empty_upload")
         # A 512 MB stream can take minutes: the authorization resolved before
-        # the transfer may no longer hold. Re-check the app gate, then RE-RESOLVE
-        # the identity, then consent -- in that order, because consent is asked
-        # ABOUT a profile and region, so verifying it against a stale pair proves
-        # nothing about where the bytes are going. A profile repointed A -> B
-        # during the spool would have had consent verified for B while `put_file`
-        # still wrote into A's bucket (reachable whenever B holds cross-account
-        # access), so the write must be refused unless the SAME triple the
-        # request was authorized for still resolves.
-        if not await asyncio.to_thread(is_app_enabled, APP_NAME):
-            _audit("drive_upload", request.path, "denied", error="app_disabled")
-            return _forbidden("aws-control is disabled", "app_disabled")
-        recheck = await _account_target(request)
-        if isinstance(recheck, web.Response):
-            return recheck
-        if recheck != (account, profile, region):
-            _audit("drive_upload", request.path, "denied", error="account_mismatch")
-            return _conflict(
-                "this connection changed while the file was uploading; nothing was written",
-                "account_mismatch",
-            )
-        denied = await _consent(aws_consent.SERVICE_S3, profile, region)
+        # the transfer may no longer hold. Re-run the SAME post-wait re-auth the
+        # Library operations use -- app gate, then RE-RESOLVE the identity, then
+        # consent, then RE-RESOLVE the bucket -- in that order, because consent is
+        # asked ABOUT a profile and region, so verifying it against a stale pair
+        # proves nothing about where the bytes are going. A profile repointed
+        # A -> B during the spool would have had consent verified for B while
+        # `put_file` still wrote into A's bucket (reachable whenever B holds
+        # cross-account access), so the write must be refused unless the SAME
+        # triple the request was authorized for still resolves. The helper also
+        # re-resolves the bucket, which the old inlined copy did NOT: a drive
+        # re-tagged mid-spool would otherwise land the object in the bucket name
+        # discovered before the wait. Must stay AFTER the spool loop and BEFORE
+        # `put_file`; do not move it relative to either.
+        #
+        # The account_mismatch/drive_changed message is now the shared helper's
+        # generic wording ("...while the request was queued..."), accepted
+        # deliberately in place of the old upload-specific text so all post-wait
+        # re-auth callers speak with one voice; tests assert the code, not text.
+        denied = await _reauthorize_in_lock(
+            request, "drive_upload", account, profile, region, bucket, publish=False
+        )
         if denied:
             return denied
         try:
