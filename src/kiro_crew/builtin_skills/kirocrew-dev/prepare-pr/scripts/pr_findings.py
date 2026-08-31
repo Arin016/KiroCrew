@@ -352,6 +352,14 @@ def extract_findings(comments, head_sha, bindings):
 # by test_prepare_pr_findings.py; the scripts are standalone-copyable, so
 # neither imports the other).
 DISPOSITION_PREFIX = "<!-- ai-review-disposition "
+# No caller in THIS script since #6658 moved the listing out of main(): the
+# rule is evaluated once, by pr_status.py, for both the local gate and
+# pr-readiness.yml's server-side enforcement, so re-listing it on every
+# drill-in only re-fetched the comment list and re-spent one permission call
+# per author to print what the same loop already printed. The definitions stay
+# because they ARE the parity subject -- test_prepare_pr_findings.py pins them
+# byte-identical against pr_status.py, which is what keeps the two
+# standalone-copyable scripts from drifting into two different rules.
 # target= names exactly ONE lane (the token admits no separator, so a
 # multi-lane target cannot parse) and head= the commit the ruling judged.
 # Only the LEADING marker is authoritative -- same rationale as
@@ -462,30 +470,73 @@ def fetch_disposition_comments(repo, number):
     return None
 
 
-def author_is_repo_writer(repo, login):
-    """Whether ``login`` holds write/maintain/admin on ``repo``; False on error.
+def author_write_verdict(repo, login):
+    """"writer" / "other" / "unknown" for ``login``'s permission on ``repo``.
 
     The marker prefix alone is forgeable -- anyone can comment on a
     public-repo PR -- so authority comes from the collaborators permission
     API, the same check codex-review.yml applies before a disposition enters
-    the adjudication ledger. Fail-soft per author: an unverifiable author's
-    records are IGNORED, never acted on -- the downstream gate can only add
-    blocking, so ignoring an unverified record degrades to pre-existing
-    behavior while a drive-by commenter can never hold a PR hostage with a
-    crafted marker.
+    the adjudication ledger.
+
+    The three outcomes are NOT interchangeable, and collapsing them is how a
+    dropped record silently produces a clean gate:
+
+    * "writer" -- admin/maintain/write. The record counts.
+    * "other" -- a DEFINITIVE answer that this author is not a writer: a
+      permission below write, or HTTP 404 (not a collaborator at all), or
+      HTTP 403 (this token cannot read the endpoint). The record is IGNORED,
+      never gated on: a drive-by commenter must not be able to hold a PR
+      hostage with a crafted marker. 403 is deliberately definitive rather
+      than unknown -- for a workflow token it is a stable property of the
+      token's permissions, not a blip, so calling it unknown would convert a
+      configuration state into a permanent "cannot evaluate" on every pull
+      request that carries any disposition comment. That trades a missing
+      enforcement for a repository-wide merge block, which is the wrong
+      direction for a required status. The ONE 403 that is not stable is a
+      rate limit, carved out below.
+    * "unknown" -- a TRANSIENT failure (5xx, 429, a rate-limit/abuse-detection
+      403, network, empty or unparseable body). The caller must not treat this
+      as "not a writer": the adjudication ledger may have admitted the same
+      record when ITS lookup succeeded, so dropping it here would let a
+      rule-violating record keep its downgrade power while the required status
+      published success.
     """
     if not repo or not login:
-        return False
-    rc, out, _ = run(
+        return "other"
+    rc, out, err = run(
         ["gh", "api", "repos/{}/collaborators/{}/permission".format(repo, login)]
     )
-    if rc != 0 or not out.strip():
-        return False
-    try:
-        permission = json.loads(out).get("permission") or ""
-    except (ValueError, AttributeError):
-        return False
-    return permission.lower() in ("admin", "maintain", "write")
+    if rc == 0 and out.strip():
+        try:
+            permission = json.loads(out).get("permission") or ""
+        except (ValueError, AttributeError):
+            return "unknown"
+        return "writer" if permission.lower() in ("admin", "maintain", "write") else "other"
+    # GitHub's primary and secondary rate limits surface as HTTP 403 carrying
+    # rate-limit text, which is transient exactly like a 429 -- the same
+    # carve-out pr-readiness.yml's own gh_retry helper already makes for every
+    # read-only call. Tested BEFORE the status classification, because that
+    # 403 must read as unknown rather than as "this token has no access".
+    if re.search(r"rate limit|abuse detection", err or "", re.IGNORECASE):
+        return "unknown"
+    # A definitive "no" is a 404 (not a collaborator) or a non-rate-limit 403
+    # (this token cannot read the endpoint at all); everything else is transient.
+    if re.search(r"HTTP (?:404|403)\b", err or ""):
+        return "other"
+    return "unknown"
+
+
+def author_is_repo_writer(repo, login):
+    """Whether ``login`` holds write/maintain/admin on ``repo``; False on error.
+
+    Kept as the boolean face of author_write_verdict for callers that only
+    need "does this record count": an unknown verdict reads as False here, so
+    a record is never ACTED on without positive confirmation. A caller that
+    must also distinguish "could not determine" -- because dropping a record
+    the ledger admitted would publish a falsely clean verdict -- calls
+    author_write_verdict directly.
+    """
+    return author_write_verdict(repo, login) == "writer"
 
 
 def writer_disposition_records(repo, comments):
@@ -497,8 +548,16 @@ def writer_disposition_records(repo, comments):
     adjudication ledger's own author loop does -- capping them would let a
     flood of non-writer comments push a real writer's record past the cap,
     making this check skip a record the uncapped ledger still consumes.
-    Records whose author cannot be verified are dropped -- see
-    author_is_repo_writer for why that is the safe direction.
+
+    Returns None -- the same "could not establish the record set" signal an
+    unreadable comment list produces -- when any author's permission is
+    INDETERMINATE. Dropping such an author instead would be unsound in one
+    specific, reachable way: the ledger makes the identical lookup at review
+    time, so it can have admitted a record whose later verification here fails
+    transiently, and the record would then keep full downgrade power while this
+    gate reported nothing to answer for. An author DEFINITIVELY below write is
+    dropped as before (see author_write_verdict for why 403 counts as
+    definitive).
     """
     if comments is None:
         return None
@@ -510,8 +569,10 @@ def writer_disposition_records(repo, comments):
             continue
         login = record["author"]
         if login not in verdicts:
-            verdicts[login] = author_is_repo_writer(repo, login)
-        if verdicts[login]:
+            verdicts[login] = author_write_verdict(repo, login)
+        if verdicts[login] == "unknown":
+            return None
+        if verdicts[login] == "writer":
             records.append(record)
     return records
 
@@ -960,23 +1021,10 @@ def main(argv):
     print()
     print("=== Disposition-rule check (one lane / one rationale per finding) ===")
     print("(a repository writer's <!-- ai-review-disposition --> comment must")
-    print(" claim exactly one span= from its own target= lane; pr_status.py")
-    print(" gates on these violations, this listing is advisory)")
-    records = writer_disposition_records(repo, fetch_disposition_comments(repo, number))
-    if records is None:
-        print("(disposition comments could not be read)")
-    else:
-        violations = disposition_violations(
-            records, bot_comments or [], head_sha, resolve_marker_bindings(os.environ)
-        )
-        for v in violations:
-            print("- VIOLATION: " + sanitize(redact(v)))
-        if not violations:
-            print(
-                "(no violations across {} writer-authored disposition record(s))".format(
-                    len(records)
-                )
-            )
+    print(" claim exactly one span= from its own target= lane. Violations are")
+    print(" NOT listed here: pr-readiness.yml evaluates them server-side and")
+    print(" fails the required PR Readiness status, and pr_status.py prints the")
+    print(" same list locally in the same loop -- issue #6658)")
 
     print()
     print(

@@ -165,6 +165,7 @@ class TestMarkerRegexParity:
             "extract_findings",
             "parse_disposition_record",
             "fetch_disposition_comments",
+            "author_write_verdict",
             "author_is_repo_writer",
             "writer_disposition_records",
             "disposition_violations",
@@ -379,7 +380,6 @@ class TestDegradedRollup:
         module.run = fake_run
         module.iter_unresolved_threads = lambda *_a: iter(())
         module.fetch_bot_comments = lambda *_a: []
-        module.fetch_disposition_comments = lambda *_a: []
 
         code = module.main(["pr_findings.py", "42"])
         captured = capsys.readouterr()
@@ -427,7 +427,6 @@ class TestDegradedRollup:
         module.run = fake_run
         module.iter_unresolved_threads = lambda *_a: iter(())
         module.fetch_bot_comments = lambda *_a: []
-        module.fetch_disposition_comments = lambda *_a: []
 
         code = module.main(["pr_findings.py", "42"])
         captured = capsys.readouterr()
@@ -547,17 +546,32 @@ class TestWriterDispositionRecords:
         assert [r["comment_id"] for r in records] == [1, 3]
         assert sorted(lookups) == ["alice", "mallory"], "one lookup per login, cached"
 
-    def test_permission_api_error_drops_the_record_not_the_gate(self) -> None:
-        """Fail-soft per author: the gate can only ADD blocking, so an
-        unverifiable author degrades to pre-existing behavior while a drive-by
-        commenter can never hold the PR hostage with a crafted marker."""
+    def test_a_definitive_denial_drops_the_record_not_the_gate(self) -> None:
+        """Fail-soft for a DEFINITIVE non-writer: a drive-by commenter can never
+        hold the PR hostage with a crafted marker. HTTP 404 means "not a
+        collaborator", which is an answer, not an outage."""
         module = _load_script()
-        module.run = lambda _args: (1, "", "boom")
+        module.run = lambda _args: (1, "", "gh: Not Found (HTTP 404)")
         body = f"<!-- ai-review-disposition target=gpt head={_HEAD} -->"
 
         records = module.writer_disposition_records("o/r", [_disposition_comment("a", body)])
 
         assert records == []
+
+    def test_an_indeterminate_permission_unestablishes_the_record_set(self) -> None:
+        """But a TRANSIENT failure is not a denial. The record set is reported
+        unestablished (None), because the adjudication ledger makes the identical
+        lookup at review time and can have admitted this record when its own
+        lookup succeeded -- dropping it here would leave the record's downgrade
+        power intact while the required status published a clean verdict. Found by
+        GPT review on the PR that made this rule a merge gate."""
+        module = _load_script()
+        module.run = lambda _args: (1, "", "gh: Server Error (HTTP 500)")
+        body = f"<!-- ai-review-disposition target=gpt head={_HEAD} -->"
+
+        records = module.writer_disposition_records("o/r", [_disposition_comment("a", body)])
+
+        assert records is None
 
     def test_every_distinct_author_is_permission_checked(self) -> None:
         """No author cap: the adjudication ledger's own author loop is

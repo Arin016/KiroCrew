@@ -353,9 +353,15 @@ one finding it rules on with a `span=<id>` token, the same 12-hex identity
 lives on the marker line or a `- **…**` title bullet; span ids inside `> `
 quoted lines read as quoted evidence, never as claims. That claim is what
 makes the "one comment covers one lane, one rationale covers one finding"
-rule mechanical rather than prose: `pr_findings.py` computes the violations
-(it stays non-gating) and `pr_status.py`'s byte-identical copy gates on them
-(exit 20). Each record is validated against the findings stamped for the
+rule mechanical rather than prose: `pr_status.py` computes the violations, and
+it does so for BOTH enforcement points — locally it gates the prepare-pr loop
+(exit 20), and `pr-readiness.yml` calls the same script's
+`--disposition-gate` mode so a violation also fails the repository's required
+`PR Readiness` status, which binds a writer who never runs the loop (#6658).
+`pr_findings.py` keeps the parity-pinned copy of the grammar but no longer
+re-lists the violations: one evaluation point is what keeps the rule from
+growing a third and fourth reading of its own bytes. Each record is validated
+against the findings stamped for the
 head its `head=` says it judged — in the ordinary fix-then-push round that
 is the PRIOR head, since the writer rules on the listing they just read —
 and against the current head's, because a record is immutable and the ledger
@@ -384,7 +390,11 @@ and are exempt from the claim requirement (never from the multi-span,
 multi-bullet or cross-lane classes); a superseded record whose judged head's
 stamps are gone
 is not re-litigated — the reviewer has already re-adjudicated the surviving
-findings on the new head.
+findings on the new head. The readiness lane keeps both fail directions: an
+author it cannot verify is ignored exactly as above (so enforcement scope never
+exceeds the ledger's admission scope), and a record set it cannot READ at all
+is UNKNOWN — published as `pending`, never as a red, because a transient
+comments-API failure must not fail the required status.
 
 ## 6. Distribution — keep it built-in
 
