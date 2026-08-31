@@ -3892,24 +3892,113 @@ class TestSelfModuleIndexIsLinear:
         for token in ("-mjson", "-msomething", "python", "-u", "", "kiro_crew"):
             assert not security._is_self_module_flag(token), token
 
-    def test_the_scan_is_linear_not_quadratic(self):
-        """Asserted two ways: a doubling ratio, which catches the quadratic regardless
-        of machine speed, and an absolute budget it could not meet on any runner."""
+    def test_the_scan_is_linear_not_quadratic(self, monkeypatch):
+        """What makes the scan linear is asserted DETERMINISTICALLY, not by timing.
+
+        A timed doubling ratio cannot separate this property from the runner: on a
+        starved shared CI host, scheduler noise, GC pauses, and frequency scaling
+        inflate the ratio past any bound tight enough to catch the quadratic (a run
+        was observed failing the 3x ratio while the absolute budget below passed
+        with 2.1x headroom -- the red measured the runner, not the code), so the
+        ratio form false-reds PRs whose diff never touches this scan. The linearity
+        is structural, so it is asserted structurally, the same two-layer strategy
+        as ``test_mid_dotstar_chain_spam_stays_linear``. A regression has to break
+        one of these to reintroduce the quadratic:
+
+          1. PRECOMPUTE ONCE PER FRAME -- ``_self_module_flag_scan`` (the single
+             pair of linear passes that replaced the per-interpreter-token re-walk)
+             runs exactly once for the frame, however many interpreter tokens the
+             frame holds;
+          2. WORK PER TOKEN IS CONSTANT -- the ``_normalize_operand`` AND
+             ``_is_self_module_flag`` call counts each grow as an exact arithmetic
+             progression in the token count (equal size steps produce equal call
+             increments). The quadratic this test pins against re-normalized the
+             remaining tail once per interpreter token, which makes the increments
+             themselves grow with the size and breaks the progression. The flag
+             predicate is counted SEPARATELY because a cheaper regression shape
+             exists that never re-normalizes: a per-token forward walk over the
+             already-precomputed ``scan.norm`` (losing the ``stops`` O(1) jump)
+             keeps the normalize count linear, but it must consult the stop
+             predicate once per walked token, so that count goes quadratic and
+             breaks its progression.
+
+        The absolute budget stays as the machine-independent catastrophic-blowup
+        backstop: the pre-fix quadratic spent 1.94s where the bound is 0.5s, and it
+        also catches cost added outside the instrumented calls, where the counts
+        cannot see it.
+        """
         import time
 
         from kiro_crew import security
 
-        def elapsed(n: int) -> float:
-            text = " ".join(["python"] * n + ["kirocrew", "restart"])
-            start = time.perf_counter()
-            security._is_self_restart(text)
-            return time.perf_counter() - start
+        def build(n: int) -> str:
+            return " ".join(["python"] * n + ["kirocrew", "restart"])
 
-        elapsed(250)
-        small, large = elapsed(1000), elapsed(2000)
-        assert large < small * 3, f"{small:.4f}s -> {large:.4f}s looks super-linear"
+        # Backstop budget, measured BEFORE instrumenting (the counting wrappers
+        # below would bill their own overhead against it). The input is built
+        # OUTSIDE the timed window, and one untimed small-size call warms the
+        # path first, so first-call cost is not billed against the budget when
+        # this test runs alone.
+        security._is_self_restart(build(250))
+        text = build(2000)
+        start = time.perf_counter()
+        assert security._is_self_restart(text) is True
+        large = time.perf_counter() - start
         # Base spent 1.94 s here; a quadratic scan cannot come near this ceiling.
         assert large < 0.5, f"2k tokens took {large:.3f}s"
+
+        real_scan = security._self_module_flag_scan
+        real_norm = security._normalize_operand
+        real_flag = security._is_self_module_flag
+        counts = {"scan": 0, "norm": 0, "flag": 0}
+
+        def counting_scan(tokens: "list[str]") -> "security._SelfModuleScan":
+            counts["scan"] += 1
+            return real_scan(tokens)
+
+        def counting_norm(token: str) -> str:
+            counts["norm"] += 1
+            return real_norm(token)
+
+        def counting_flag(tok: str) -> bool:
+            counts["flag"] += 1
+            return real_flag(tok)
+
+        monkeypatch.setattr(security, "_self_module_flag_scan", counting_scan)
+        monkeypatch.setattr(security, "_normalize_operand", counting_norm)
+        monkeypatch.setattr(security, "_is_self_module_flag", counting_flag)
+
+        def measured(n: int) -> "tuple[int, int, int]":
+            counts["scan"] = counts["norm"] = counts["flag"] = 0
+            # The verdict must still be reached THROUGH the instrumented path, or
+            # the counts below are counting nothing.
+            assert security._is_self_restart(build(n)) is True
+            return counts["scan"], counts["norm"], counts["flag"]
+
+        results = [measured(n) for n in (500, 1000, 1500)]
+
+        # (1) The precompute runs once per frame, independent of the token count.
+        for scans, _, _ in results:
+            assert scans == 1, (
+                f"_self_module_flag_scan ran {scans} times for one frame -- a "
+                "per-token caller is the quadratic re-walk the precompute removed"
+            )
+
+        # (2) Per-token work is constant: equal size steps, equal call increments,
+        # for BOTH instrumented costs (see the docstring for why each has teeth).
+        for name, series in (
+            ("normalize", [norm for _, norm, _ in results]),
+            ("module-flag-predicate", [flag for _, _, flag in results]),
+        ):
+            assert series[0] > 500, (
+                f"the instrument is not observing the path under test -- fewer "
+                f"{name} calls than tokens means the scan never saw the frame"
+            )
+            assert series[1] - series[0] == series[2] - series[1], (
+                f"{name} counts {series} are not an arithmetic progression -- the "
+                "per-token cost grows with the input, which is the super-linear "
+                "re-walk this precompute exists to prevent"
+            )
 
     def test_the_padded_shape_that_does_not_open_the_gate_stays_cheap(self):
         """Pins the reason the reported reproduction did not reproduce: without a
@@ -4155,24 +4244,96 @@ class TestPythonStdinDetectorStepsOverOutputRedirects:
         for token in ("script.py", "-u", "-", "<<<", "<<PY", "<f", "2", "", "-c"):
             assert security._output_redirect_scan(token) is None, token
 
-    def test_a_chain_of_glued_redirects_is_linear(self):
+    def test_a_chain_of_glued_redirects_is_linear(self, monkeypatch):
         """One word may hold many operators (``>a>a>a...``). Re-slicing the word per
         operator was quadratic in its length -- on a floor that runs for every command,
-        and in a module that pins linearity elsewhere, so it is asserted here too."""
+        and in a module that pins linearity elsewhere, so it is pinned here too.
+
+        Asserted DETERMINISTICALLY, not by timing: a doubling ratio false-reds on a
+        starved shared runner whose scheduler noise exceeds the ratio's slack (see
+        ``test_the_scan_is_linear_not_quadratic`` for the observed case), so what
+        makes the walk linear is asserted structurally instead. The fix's contract is
+        that a chain word is walked ONCE, IN PLACE: ``_output_redirect_scan`` returns
+        an index precisely so the caller can advance through the same string rather
+        than re-slice it. A regression has to break one of these:
+
+          1. ONE SCAN PER OPERATOR -- the ``_output_redirect_scan`` invocation
+             count grows as an exact arithmetic progression in the chain length
+             (equal size steps produce equal call increments; per-operator
+             re-injection or retry work makes the increments themselves grow);
+          2. THE FULL WORD EVERY TIME -- every invocation receives a string of the
+             chain word's full length. Re-slicing the remainder per operator (the
+             quadratic) hands the scan progressively shorter COPIES, each of which
+             costs the slice that made it;
+          3. THE START INDEX ADVANCES -- strictly increasing within the word, never
+             reset to 0, so each character is visited once.
+
+        The absolute budget stays as the machine-independent catastrophic-blowup
+        backstop for cost added outside the scan, where the trace cannot see it.
+        """
         import time
 
         from kiro_crew import security
 
-        def elapsed(k: int) -> float:
-            tokens = [">a" * k, "<<<", "prog"]
-            start = time.perf_counter()
-            assert security._python_reads_stdin(list(tokens)) is True
-            return time.perf_counter() - start
-
-        elapsed(200)
-        small, large = elapsed(800), elapsed(1600)
-        assert large < small * 3, f"{small:.5f}s -> {large:.5f}s looks super-linear"
+        # Backstop budget, measured BEFORE instrumenting (the tracing wrapper below
+        # would bill its own overhead against it). The input is built OUTSIDE the
+        # timed window, and one untimed small-size call warms the path first, so
+        # first-call cost is not billed against the budget when this test runs
+        # alone.
+        security._python_reads_stdin([">a" * 200, "<<<", "prog"])
+        tokens = [">a" * 1600, "<<<", "prog"]
+        start = time.perf_counter()
+        assert security._python_reads_stdin(tokens) is True
+        large = time.perf_counter() - start
         assert large < 0.2, f"1600 glued redirects took {large:.4f}s"
+
+        real_scan = security._output_redirect_scan
+        trace: "list[tuple[int, int]]" = []  # (len(raw), start)
+
+        def tracing_scan(raw: str, start: int = 0) -> "tuple[str, int] | None":
+            trace.append((len(raw), start))
+            return real_scan(raw, start)
+
+        monkeypatch.setattr(security, "_output_redirect_scan", tracing_scan)
+
+        def walked(k: int) -> "list[tuple[int, int]]":
+            trace.clear()
+            word = ">a" * k
+            assert security._python_reads_stdin([word, "<<<", "prog"]) is True
+            return list(trace)
+
+        sizes = (400, 800, 1200)
+        walks = [walked(k) for k in sizes]
+
+        # (1) One scan per operator: equal size steps, equal call increments.
+        # The progression form (rather than exact doubling) is deliberately
+        # immune to a constant per-word offset, so a benign refactor that adds
+        # one trailing probe call does not false-red this test.
+        calls = [len(w) for w in walks]
+        assert calls[0] >= sizes[0], (
+            "the instrument is not observing the path under test -- fewer scans "
+            "than operators means the chain was never walked"
+        )
+        assert calls[1] - calls[0] == calls[2] - calls[1], (
+            f"scan counts {calls} for chain sizes {sizes} are not an arithmetic "
+            "progression -- per-operator work that scales with the chain is the "
+            "re-slicing quadratic the in-place walk exists to prevent"
+        )
+
+        # (2) + (3) The walk is in place: every scan sees the FULL word and the
+        # start index only ever advances.
+        for walk, k in zip(walks, sizes):
+            word_len = len(">a" * k)
+            assert {length for length, _ in walk} == {word_len}, (
+                "a scan received a string shorter than the chain word -- the "
+                "remainder is being re-sliced per operator, which is quadratic "
+                "in the word's length"
+            )
+            starts = [position for _, position in walk]
+            assert all(a < b for a, b in zip(starts, starts[1:])), (
+                "the scan's start index went backwards or repeated -- the walk "
+                "restarted inside the word instead of advancing through it once"
+            )
 
     def test_the_floor_denies_the_stdin_program_behind_a_redirect(self):
         """The end-to-end property: these are credential-mint attempts whose program
