@@ -167,6 +167,7 @@
       "gateway-recovery.js",
       "renderer-recovery.js",
       "native-logging.js",
+    "disable-gpu.js",
     "pierre-perf-log.js",
       "big-alloc-log.js",
       "pyspy-dump.js",

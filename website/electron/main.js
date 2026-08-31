@@ -144,6 +144,7 @@ const { seedRenamedStore } = require("./store-rename");
 const { isLocalGatewayEnabled, setLocalGatewayEnabled, classifyStartFailure } = require("./local-gateway");
 
 const { initNativeLogging } = require("./native-logging");
+const { initGpuPolicy } = require("./disable-gpu");
 
 // Carry settings across the npm `name` rename, by writing the new store's file
 // BEFORE electron-store opens it. Order is load-bearing: construction writes the
@@ -312,6 +313,22 @@ if (!app.requestSingleInstanceLock()) {
     appendSwitch: (name, value) => app.commandLine.appendSwitch(name, value),
     startCrashReporter: (opts) => crashReporter.start(opts),
     fs,
+    log: (m) => glog(m),
+  });
+
+  // Opt-in GPU-disable, applied through the SAME pre-app-ready appendSwitch
+  // seam as native logging above (Chromium reads switches during init, so a
+  // later append is ignored). OFF by default; enabled by KIROCREW_DISABLE_GPU
+  // or the --disable-gpu flag. This is the supported fix for hosts with no
+  // usable GPU — VM guests, Windows RDP sessions, headless/X11-forwarded Linux
+  // — where the renderer otherwise dies with launch-failed / exitCode 18 and
+  // renderer-recovery.js loops. Reading it here (not from forwarded argv on a
+  // second launch, which the single-instance lock drops) is what makes it take
+  // effect on the launch that actually renders.
+  initGpuPolicy({
+    appendSwitch: (name) => app.commandLine.appendSwitch(name),
+    env: process.env,
+    argv: process.argv,
     log: (m) => glog(m),
   });
 
