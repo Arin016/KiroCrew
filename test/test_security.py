@@ -8037,3 +8037,82 @@ class TestModelWeightsAreWriteProtected:
     def test_an_unrelated_path_named_models_is_not_fenced(self) -> None:
         """Scoped to the crew home, so an ordinary project directory is unaffected."""
         assert security.is_sensitive_write_path("~/code/myproject/models/weights.bin") is False
+
+
+class TestMaskedSubstitutionKeepsAdjacentLiterals:
+    """A masked substitution must not swallow the literal text after it.
+
+    The placeholder was a BARE ``$__kc_subst``, so bash-identifier characters
+    following the substitution were absorbed into the placeholder's own name and
+    silently deleted from the path -- the unresolved reading of
+    ``~/.a$(echo '')ws/credentials`` became the benign ``~/.a/credentials``.
+    Masking is a defence, so a form where it DESTROYS the signal is strictly
+    worse than not masking; the brace form keeps the literal separate, which is
+    why the ``${UNSET}`` equivalent was already denied.
+    """
+
+    def test_substitution_glued_to_literal_is_denied(self) -> None:
+        for cmd in (
+            "cat ~/.a$(echo '')ws/credentials",
+            "cat ~/.k$(echo '')iro/crew/token_signing.key",
+            "cat ~/.a`echo`ws/credentials",
+        ):
+            assert is_sensitive_bash_command(cmd) is not None, cmd
+
+    def test_matches_the_unset_variable_equivalent(self) -> None:
+        # The brace-delimited unset-variable form was already denied; the masked
+        # substitution is unresolvable for the same reason, so it must agree.
+        assert is_sensitive_bash_command("cat ~/.a${UNSETX}ws/credentials") is not None
+        assert is_sensitive_bash_command("cat ~/.a$(echo '')ws/credentials") is not None
+
+    def test_unvalued_placeholder_is_brace_delimited(self) -> None:
+        from kiro_crew.security import _SUBST_PLACEHOLDER_NAME, _mask_substitutions
+
+        # The NAME must stay brace-free so the reserved-name refusal still matches.
+        assert "{" not in _SUBST_PLACEHOLDER_NAME
+        assert "}" not in _SUBST_PLACEHOLDER_NAME
+        masked = _mask_substitutions("cat ~/.a$(echo '')ws/credentials")
+        assert "${" in masked and "}ws" in masked, masked
+
+    def test_valued_placeholder_stays_bare(self) -> None:
+        """The asymmetry is deliberate: the two passes fail closed differently.
+
+        The valued pass records a GUESSED value, so a resolvable reference
+        substitutes that guess. Bare, a trailing literal is absorbed into the
+        name, which is then absent from ``values`` and reads as unresolved --
+        the absorption is what makes this pass fail closed. Bracing it let the
+        guess resolve and lost that reading.
+        """
+        from kiro_crew.security import _mask_substitutions_valued
+
+        numbered, values = _mask_substitutions_valued("cat $(pwd)x $(pwd)y")
+        assert "$__kc_subst1x" in numbered, numbered
+        assert "$__kc_subst2y" in numbered, numbered
+        # The absorbed spellings are NOT recorded, which is the fail-closed part.
+        assert "__kc_subst1x" not in values, values
+        assert "__kc_subst2y" not in values, values
+
+    def test_a_wrong_path_guess_cannot_resolve_away_the_unresolved_reading(self) -> None:
+        """Regression: bracing the valued placeholder allowed a credential read.
+
+        ``_substitution_path_guess`` vouches for the LAST path-like word, which
+        here is the redirection ``</dev/null`` rather than a path at all. With
+        the valued placeholder braced, that guess resolved and the following
+        credential read went from denied to allowed. Reported separately: making
+        the guess genuinely additive is the deeper fix.
+        """
+        for cmd in (
+            "cd $(printf /home/ </dev/null)alice; cat .aws/credentials",
+            "cd $(printf /home/ 2>/dev/null)alice; cat .aws/credentials",
+            "cd $(printf /home/)alice; cat .aws/credentials",
+        ):
+            assert is_sensitive_bash_command(cmd) is not None, cmd
+
+    def test_benign_globs_and_paths_not_overblocked(self) -> None:
+        for cmd in (
+            "cat ~/notes/*.md",
+            "ls ~/*.txt",
+            "cat ~/.config/app/settings.json",
+            "echo $(date)x",
+        ):
+            assert is_sensitive_bash_command(cmd) is None, cmd

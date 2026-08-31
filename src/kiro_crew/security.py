@@ -7399,9 +7399,20 @@ _SHELL_SUBST_RE = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`")
 # Stand-in for a masked command substitution. Deliberately shaped like a variable
 # reference: the substitution is unresolvable for the same reason an unassigned
 # variable is, so the existing unresolved-value machinery then handles it.
-_SUBST_PLACEHOLDER = "$__kc_subst"
+#: BRACE-DELIMITED on purpose. A bare ``$__kc_subst`` lets bash-identifier
+#: characters that FOLLOW the substitution be absorbed into the placeholder's own
+#: name, which silently deletes them from the path:
+#:
+#:     cat ~/.a$(echo '')ws/credentials
+#:
+#: masked to ``~/.a$__kc_subst1ws/credentials``, whose variable reference reads as
+#: the single name ``__kc_subst1ws`` -- so the ``ws`` vanished and the unresolved
+#: reading became the benign ``~/.a/credentials``. The brace form keeps the
+#: adjacent literal separate, which is exactly why the equivalent
+#: ``~/.a${UNSET}ws/credentials`` was already denied.
+_SUBST_PLACEHOLDER = "${__kc_subst}"
 #: The bare NAME of the placeholder, for refusing to record an assignment to it.
-_SUBST_PLACEHOLDER_NAME = _SUBST_PLACEHOLDER.lstrip("$")
+_SUBST_PLACEHOLDER_NAME = _SUBST_PLACEHOLDER.lstrip("$").strip("{}")
 #: Every spelling of that reserved name, including the numbered ones
 #: `_mask_substitutions_valued` produces. The refusal has to cover all of them:
 #: a command that assigns one would otherwise choose what the masked pass resolves
@@ -7515,6 +7526,22 @@ def _mask_substitutions_valued(text: str) -> tuple[str, dict[str, str]]:
         guess = _substitution_path_guess(match.group(0))
         if guess is not None:
             values[name] = guess
+        # BARE on purpose -- the opposite of the unvalued placeholder, because the
+        # two passes fail closed by different routes.
+        #
+        # This pass records a GUESSED value for the name, so a resolvable
+        # reference substitutes that guess. Left bare, a trailing literal is
+        # absorbed into the name (``$__kc_subst1`` + ``alice``), which is then
+        # absent from ``values`` and so reads as UNRESOLVED -- the absorption is
+        # exactly what makes this pass fail closed.
+        #
+        # Bracing it separated the name from the literal, the guess resolved, and
+        # the fail-closed reading disappeared: for
+        # ``cd $(printf /home/ </dev/null)alice`` the guess is ``</dev/null`` -- a
+        # redirection, not a path -- and a following credential read went from
+        # denied to allowed. ``_substitution_path_guess`` vouching for the last
+        # path-like word is the deeper defect; until it is genuinely additive,
+        # this pass must not resolve on it.
         return f"${name}"
 
     return _SHELL_SUBST_RE.sub(repl, text), values
