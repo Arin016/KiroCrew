@@ -41,7 +41,7 @@ from kiro_crew import __version__, model_registry, platform_compat, windows_acl
 from kiro_crew.acp_backends import resolve_selected_backend
 
 # Leaf module (stdlib + platform_compat only) — no import cycle with config.
-from kiro_crew.atomic_write import atomic_write
+from kiro_crew.atomic_write import atomic_write, on_event_loop
 
 # Computer-use defaults/ceilings come from the feature's constants module rather
 # than being re-spelled here (AGENTS.md: no hardcoded values in business logic).
@@ -1058,6 +1058,17 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     passing both to ``atomic_write``, which refuses ``restrict_to_owner=True``
     alongside a wider explicit ``mode``.
 
+    **On a network-homed data home the DACL turns on the CALLER, not the volume.**
+    The in-process lockdown costs 0.24 ms on a local volume but is bounded only by
+    SMB on a UNC or mapped-drive path, which a write running inline on the event
+    loop cannot afford. That is a fact about the calling thread, so it is asked as
+    one, via :func:`kiro_crew.atomic_write.on_event_loop`. A caller that has
+    offloaded this write -- ``dashboard/chat_utils.run_config_write``, any
+    ``asyncio.to_thread`` wrapper, and every CLI and startup path, which have no
+    loop at all -- blocks only its own thread and therefore gets the owner-only
+    DACL on **any** volume. Only a write still inline on the loop falls back to
+    classifying the volume and skipping when it is remote.
+
     **Symlinks are followed, not replaced.** ``os.replace`` renames over the link
     itself, turning a symlinked ``config.json`` into a regular file and orphaning
     its target — whereas the ``write_text`` this replaced followed the link and
@@ -1073,10 +1084,19 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
         pass
     # Decide the Windows lockdown HERE, before the stat and the mkdir below and
     # before anything atomic_write does -- every one of those is a round-trip on a
-    # network-homed data home, and this function runs inline on the event loop
-    # (async dashboard handlers reach it on every config write). A DACL write to a
-    # UNC or mapped-drive path is an unbounded SMB round-trip, so it has to be
-    # ruled out before the work starts rather than part way through.
+    # network-homed data home. A DACL write to a UNC or mapped-drive path is an
+    # unbounded SMB round-trip, so when it cannot be afforded it has to be ruled
+    # out before the work starts rather than part way through.
+    #
+    # But whether it can be afforded is a question about the CALLING THREAD, not
+    # about the volume. The volume was only ever a proxy: this function is
+    # synchronous and async dashboard handlers reach it inline, where an unbounded
+    # wait stalls the one loop the whole gateway shares. Off the loop there is
+    # nothing to stall -- a worker started by ``run_config_write`` /
+    # ``asyncio.to_thread``, a CLI invocation, a startup path all block only
+    # themselves -- so the same predicate ``atomic_write`` already gates its own
+    # unbounded-on-Windows step on decides here too, and a network-homed data home
+    # gets the DACL whenever its caller has offloaded the write.
     #
     # This sits just AFTER the symlink resolve rather than at the very top of the
     # function, and deliberately: a config symlinked into a dotfiles repo (which
@@ -1085,19 +1105,27 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     # The resolve is two stats; the earliest CORRECT point is here.
     lock_down = platform_compat.IS_POSIX
     if not platform_compat.IS_POSIX:
-        try:
-            lock_down = windows_acl.volume_is_local(path)
-        except Exception:
-            # A descriptor API that cannot be loaded cannot tell us the volume is
-            # local, and the lockdown would have failed on this host anyway.
-            lock_down = False
-        if not lock_down:
-            logger.warning(
-                "config write: %s is on a non-local volume, so the owner-only "
-                "DACL was SKIPPED to avoid blocking the event loop on SMB; the "
-                "file may be readable by other local users",
-                path,
-            )
+        if not on_event_loop():
+            # Nothing to stall, so the volume does not decide -- and is not even
+            # classified, because its answer could only weaken the outcome.
+            lock_down = True
+        else:
+            try:
+                lock_down = windows_acl.volume_is_local(path)
+            except Exception:
+                # A descriptor API that cannot be loaded cannot tell us the volume
+                # is local, and the lockdown would have failed on this host anyway.
+                lock_down = False
+            if not lock_down:
+                logger.warning(
+                    "config write: %s is on a non-local volume and this write is "
+                    "running on the event loop, so the owner-only DACL was "
+                    "SKIPPED to avoid stalling the loop on SMB; the file may be "
+                    "readable by other local users. Offloading the write "
+                    "(dashboard/chat_utils.run_config_write) applies the DACL "
+                    "here too",
+                    path,
+                )
     try:
         mode = _stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     except OSError:
@@ -1127,11 +1155,12 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
             restrict_on_error="warn",
         )
     else:
-        # Non-local volume: exactly the write this branch did before the lockdown
-        # was added, so a network-homed data home is no worse off than before and
-        # a local one is now protected. The residual is real and declared -- the
-        # file keeps its inherited ACL. Making this function's filesystem work
-        # async is the cause-level fix and is tracked separately (#6353).
+        # Reached only by a write still INLINE ON THE LOOP whose volume is not
+        # local: exactly the write this branch did before the lockdown was added,
+        # so such a data home is no worse off than before. The residual is real and
+        # declared -- the file keeps the ACL it inherits from its parent -- but it
+        # is now per CALLER rather than per platform: offloading a caller moves it
+        # to the branch above and it gets the DACL with no change needed here.
         atomic_write(path, payload, fsync=fsync, mode=mode)
 
 
