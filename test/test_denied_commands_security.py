@@ -3779,3 +3779,142 @@ class TestStdinProgramTextScoping:
             f"echo {rule.pattern!r} >> notes.txt",
         ):
             assert security.is_denied(cmd) is None, f"rule fires on its own text: {cmd!r}"
+
+
+class TestSelfModuleIndexIsLinear:
+    """The self-protection floor's module-flag scan must stay LINEAR in token count.
+
+    ``_self_module_name_index`` walked forward from an interpreter token to the first
+    module flag, normalizing every token it passed.  ``_self_program_index`` called it
+    for every python-looking token and ``_matches_self_subcommand`` looped that over all
+    tokens, so a command of interpreter words with no module flag among them re-walked
+    and re-normalized the whole tail once per word: quadratic, on a floor that runs for
+    every command.
+
+    Reaching it needs only one product word anywhere in the text, which is what opens
+    the floor's cheap keyword gate (``_self_floor_can_fire``).  Padding alone does NOT
+    reproduce it -- ``python ... restart`` leaves that gate shut and the path is linear,
+    which is why the shape below carries ``kirocrew``.  Measured on base:
+    0.035 s / 0.125 s / 0.490 s / 1.937 s / 7.704 s at 250/500/1000/2000/4000 tokens,
+    4x per doubling, against 0.0027 s -> 0.0414 s after -- 186x at 4 000 tokens, and
+    the negative-verdict spelling pays the same cost to decide nothing.
+
+    The scan and the normalized forms are now computed once per token list.  Both the
+    verdicts and the complexity are pinned, since a rewrite that changed which token the
+    scan stops at would silently change what the floor denies.
+    """
+
+    # Every branch of the scan, with the index it must return for the interpreter at 0.
+    SHAPES: "list[tuple[list[str], object]]" = [
+        (["python", "-m", "kiro_crew", "restart"], 2),
+        (["python", "-mkiro_crew", "restart"], 1),
+        # A -m<something-else> is an ordinary interpreter flag: the scan must CONTINUE
+        # past it rather than stop, or the real module flag after it is never seen.
+        (["python", "-mjson", "-m", "kiro_crew"], 3),
+        (["python", "-msomething", "-mkiro_crew"], 2),
+        (["python", "-u", "-O", "-m", "kiro_crew"], 4),
+        # -m present but the module is not ours, and -m as the final token.
+        (["python", "-m", "json"], None),
+        (["python", "-m"], None),
+        (["python"], None),
+        (["python", "-mjson"], None),
+        # Quoting and dotted submodules the normalizer resolves.
+        (["python", "-m", "'kiro_crew'"], 2),
+        (["python", "-m", "kiro_crew.cli"], 2),
+    ]
+
+    def test_the_returned_index_is_unchanged(self):
+        from kiro_crew import security
+
+        for tokens, expected in self.SHAPES:
+            scan = security._self_module_flag_scan(list(tokens))
+            assert security._self_module_name_index(list(tokens), 0, scan) == expected, tokens
+
+    def test_a_shared_scan_answers_as_a_fresh_one_does(self):
+        """The scan is built once per frame and reused for every token in it, so a
+        stale or mismatched table would answer differently from one built for the call.
+        Pinned at every interpreter position, since that reuse is the whole optimization.
+        """
+        from kiro_crew import security
+
+        for tokens, expected in self.SHAPES:
+            shared = security._self_module_flag_scan(list(tokens))
+            for i in range(len(tokens)):
+                fresh = security._self_module_flag_scan(list(tokens))
+                assert security._self_module_name_index(
+                    list(tokens), i, shared
+                ) == security._self_module_name_index(list(tokens), i, fresh), (tokens, i)
+            assert security._self_module_name_index(list(tokens), 0, shared) == expected
+
+    def test_the_scan_is_a_required_argument(self):
+        """Not optional-with-a-fallback: this is called once per token by a loop over
+        those tokens, so a caller able to omit the scan could silently reintroduce the
+        quadratic. A type error is the point."""
+        import inspect
+
+        from kiro_crew import security
+
+        for fn in (security._self_module_name_index, security._self_program_index):
+            param = inspect.signature(fn).parameters["scan"]
+            assert param.default is inspect.Parameter.empty, fn.__name__
+
+    def test_the_floor_verdicts_are_unchanged(self):
+        from kiro_crew import security
+
+        for text in (
+            "kirocrew restart",
+            "python -m kiro_crew restart",
+            "python -mkiro_crew restart",
+            "python -mjson -m kiro_crew restart",
+            "python -msomething -m kiro_crew restart",
+            "python -u -O -m kiro_crew restart",
+            "python -m 'kiro_crew' restart",
+            "python -m kiro_crew -v restart",
+            "python python -m kiro_crew restart",
+        ):
+            assert security._is_self_restart(text), text
+
+        for text in (
+            "kirocrew doctor",
+            "python -m kiro_crew",
+            "python restart",
+            "python -m pytest test/test_restart.py",
+            "echo kirocrew restart",
+        ):
+            assert not security._is_self_restart(text), text
+
+    def test_the_stop_predicate_matches_the_handling(self):
+        from kiro_crew import security
+
+        for token in ("-m", "-mkiro_crew", "-mkiro_crew.cli"):
+            assert security._is_self_module_flag(token), token
+        # Not a stop: the scan has to keep going past these.
+        for token in ("-mjson", "-msomething", "python", "-u", "", "kiro_crew"):
+            assert not security._is_self_module_flag(token), token
+
+    def test_the_scan_is_linear_not_quadratic(self):
+        """Asserted two ways: a doubling ratio, which catches the quadratic regardless
+        of machine speed, and an absolute budget it could not meet on any runner."""
+        import time
+
+        from kiro_crew import security
+
+        def elapsed(n: int) -> float:
+            text = " ".join(["python"] * n + ["kirocrew", "restart"])
+            start = time.perf_counter()
+            security._is_self_restart(text)
+            return time.perf_counter() - start
+
+        elapsed(250)
+        small, large = elapsed(1000), elapsed(2000)
+        assert large < small * 3, f"{small:.4f}s -> {large:.4f}s looks super-linear"
+        # Base spent 1.94 s here; a quadratic scan cannot come near this ceiling.
+        assert large < 0.5, f"2k tokens took {large:.3f}s"
+
+    def test_the_padded_shape_that_does_not_open_the_gate_stays_cheap(self):
+        """Pins the reason the reported reproduction did not reproduce: without a
+        product word the floor's keyword gate stays shut and nothing is scanned."""
+        from kiro_crew import security
+
+        assert not security._self_floor_can_fire("python restart")
+        assert security._self_floor_can_fire("python kirocrew")
