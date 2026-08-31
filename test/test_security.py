@@ -8037,3 +8037,236 @@ class TestModelWeightsAreWriteProtected:
     def test_an_unrelated_path_named_models_is_not_fenced(self) -> None:
         """Scoped to the crew home, so an ordinary project directory is unaffected."""
         assert security.is_sensitive_write_path("~/code/myproject/models/weights.bin") is False
+
+
+class TestImdsMixedBaseEncodings:
+    """The IMDS gate must fold every base in every octet position.
+
+    ``canonicalize_ip`` already resolved all of these; the EXTRACTION regex
+    could not capture them whole, so it handed the canonicalizer a truncated
+    substring that folded to a harmless address while the OS resolver still
+    routed the full token to 169.254.169.254 (credential-theft SSRF).
+    Ground truth for each host below: ``socket.getaddrinfo`` resolves it to the
+    IMDS address on glibc.
+    """
+
+    #: Every spelling here genuinely resolves to the IMDS address.
+    IMDS_FORMS = (
+        "025177524776",  # zero-padded/octal single integer, >10 digits
+        "169.254.0251.0376",  # decimal + octal octets mixed
+        "0251.0376.169.254",  # octal leading, decimal trailing
+        "169.254.0xa9.0376",  # hex + octal in non-leading positions
+        "0251.16689662",  # octal 2-part inet_aton short form
+        "169.254.169.0376",  # octal final octet only
+        "0000000169.254.169.254",  # arbitrary zero padding
+    )
+
+    def test_mixed_base_imds_encodings_blocked(self) -> None:
+        from kiro_crew.security import _check_imds_access, canonicalize_ip
+
+        for host in self.IMDS_FORMS:
+            assert canonicalize_ip(host) == "169.254.169.254", host
+            cmd = f"curl http://{host}/latest/meta-data/iam/security-credentials/"
+            assert _check_imds_access(cmd) is not None, host
+            assert is_sensitive_bash_command(cmd) is not None, host
+
+    def test_padded_hex_imds_encodings_blocked(self) -> None:
+        """A length cap on the extraction regex is itself the bypass.
+
+        Capping the hex run truncated a zero-padded spelling into a DIFFERENT,
+        harmless address -- ``0x0a9fea9fe`` folded to 10.159.234.159 -- so the
+        gate failed open on a form glibc ``inet_aton`` accepts and routes to
+        IMDS. The components are plain character classes with no nested
+        quantifier, so an unbounded run is linear and the cap bought nothing.
+        """
+        from kiro_crew.security import _check_imds_access, canonicalize_ip
+
+        for host in (
+            "0x0a9fea9fe",  # leading-zero hex, 9 digits
+            "0x00000000a9fea9fe",  # heavily padded hex
+            "169.254.0x00000000a9.0376",  # padded hex component mid-token
+        ):
+            assert canonicalize_ip(host) == "169.254.169.254", host
+            cmd = f"curl http://{host}/latest/meta-data/iam/security-credentials/"
+            assert _check_imds_access(cmd) is not None, host
+            assert is_sensitive_bash_command(cmd) is not None, host
+
+    def test_unbounded_extraction_stays_linear(self) -> None:
+        import time
+
+        from kiro_crew.security import _check_imds_access
+
+        # Guards the reason the caps are gone: unbounded runs over plain
+        # character classes must not backtrack. Generous bound -- the observed
+        # cost is single-digit milliseconds.
+        for payload in ("9" * 40000, "0" * 40000, "0x" + "a" * 40000):
+            start = time.monotonic()
+            _check_imds_access(f"curl http://{payload}/x")
+            assert time.monotonic() - start < 5.0, payload
+
+    def test_mixed_base_non_imds_not_overblocked(self) -> None:
+        from kiro_crew.security import _check_imds_access, canonicalize_ip
+
+        # 169.0000254.169.254 is a legal mixed encoding that resolves to
+        # 169.172.169.254 (0254 octal == 172), NOT to IMDS -- widening the
+        # extraction must not turn "looks like an IP" into "is IMDS".
+        assert canonicalize_ip("169.0000254.169.254") == "169.172.169.254"
+        assert _check_imds_access("curl http://169.0000254.169.254/x") is None
+        # Out-of-range single integer stays unparsed and unflagged.
+        assert _check_imds_access("curl http://02511777524776/x") is None
+        # A long digit run that is not an address at all (timestamp/id).
+        assert _check_imds_access("echo 17251234567890123") is None
+
+
+class TestGitPublishSubshellGluing:
+    """``(`` and ``)`` are shell OPERATORS, so they cannot hide a git push.
+
+    Every git-publish rule is stripped from the regex tier, which makes
+    ``_is_git_publish`` the SOLE enforcement for pushes. A paren glued to the
+    program (``(git push``) defeated the detector, and a paren glued to the ref
+    (``main)``) defeated the protected-name compare -- the latter also emitted a
+    SEL ``push_allowed`` event labelled ``feature_branch_push`` for a
+    protected-branch force-push.
+    """
+
+    GLUED_PROTECTED_PUSHES = (
+        "(git push origin main)",
+        "((git push origin main))",
+        "(cd /tmp; git push origin main)",
+        "(cd /tmp && git push origin mainline)",
+        "(cd /tmp; git push --force origin mainline)",
+        "(true; git push origin head:main)",
+        "(git push --mirror origin)",
+    )
+
+    def test_glued_subshell_protected_push_denied(self) -> None:
+        from kiro_crew.security import is_denied
+
+        for cmd in self.GLUED_PROTECTED_PUSHES:
+            assert is_denied(cmd) is not None, cmd
+
+    def test_glued_subshell_push_reaches_protected_branch_check(self) -> None:
+        from kiro_crew.security import _is_push_to_protected_branch
+
+        # Not merely denied: the branch check must SEE the protected target, or
+        # the allow-audit records a protected push as a feature-branch push.
+        for cmd in (
+            "(cd /tmp; git push origin main)",
+            "(cd /tmp; git push --force origin mainline)",
+            "(git push origin mainline)",
+        ):
+            assert _is_push_to_protected_branch(cmd.lower()) is True, cmd
+
+    GLUED_OPERATOR_PUSHES = (
+        "(git push origin main)&",  # trailing background operator
+        "(git push origin main);",
+        "(git push origin main)|cat",
+        "(git push origin mainline)>log",  # operator MID-token, strip cannot reach it
+        "(cd /tmp; git push origin main)&",
+        "{ git push origin main; }",
+        "(git push --force origin mainline)&",
+    )
+
+    def test_glued_operator_on_the_ref_is_not_part_of_the_name(self) -> None:
+        """bash reads ``main)&`` as the ref ``main`` plus two operators.
+
+        Stripping only parens left ``main)&``, which never equalled ``main``, so a
+        protected push was allowed AND audited as a feature-branch push. A
+        redirection glued mid-token (``mainline)>log``) is why this cuts at the
+        first operator instead of stripping the ends.
+        """
+        from kiro_crew.security import _is_push_to_protected_branch, is_denied
+
+        for cmd in self.GLUED_OPERATOR_PUSHES:
+            assert _is_push_to_protected_branch(cmd.lower()) is True, cmd
+            assert is_denied(cmd) is not None, cmd
+
+    def test_cut_at_operator_preserves_a_quoted_ref(self) -> None:
+        from kiro_crew.security import _cut_at_operator
+
+        # Unquoted: operators are structure, so cut.
+        assert _cut_at_operator("(git") == "git"
+        assert _cut_at_operator("main)&") == "main"
+        assert _cut_at_operator("mainline)>log") == "mainline"
+        assert _cut_at_operator("my-feature") == "my-feature"
+        # Quoted: operators are literal text belonging to the ref name.
+        assert _cut_at_operator("'(main)'") == "'(main)'"
+        assert _cut_at_operator('"(main)"') == '"(main)"'
+
+    def test_quoted_paren_ref_is_not_a_protected_branch(self) -> None:
+        from kiro_crew.security import _is_push_to_protected_branch
+
+        # Grouping parens are stripped BEFORE the quotes come off, so a paren the
+        # user QUOTED as part of the ref name survives: a branch literally named
+        # ``(main)`` is not ``main`` and must stay pushable.
+        for cmd in ("git push origin '(main)'", 'git push origin "(main)"'):
+            assert _is_push_to_protected_branch(cmd.lower()) is False, cmd
+
+    QUOTED_REF_GLUED_OPERATOR_PUSHES = (
+        "(git push origin 'main')",
+        '(git push origin "main")',
+        "(git push origin 'mainline')",
+        '(git push origin "mainline")',
+        "(cd /tmp; git push origin 'main')",
+        "(git push --force origin 'mainline')",
+        "(git push origin 'main')&",
+        "{ git push origin 'main'; }",
+    )
+
+    def test_quoting_the_ref_does_not_hide_the_glued_operator(self) -> None:
+        """A quoted ref can still carry an operator OUTSIDE its quotes.
+
+        Bailing on the mere PRESENCE of a quote reopened the very class this
+        cut exists to close: ``(git push origin 'main')`` hands the ref token
+        ``'main')``, whose trailing ``)`` is unquoted. Left in place, the ref
+        resolved to ``main)``, never equalled ``main``, and the protected push
+        was allowed AND audited as ``feature_branch_push``. One quote character
+        was the whole bypass.
+        """
+        from kiro_crew.security import _is_push_to_protected_branch, is_denied
+
+        for cmd in self.QUOTED_REF_GLUED_OPERATOR_PUSHES:
+            assert _is_push_to_protected_branch(cmd.lower()) is True, cmd
+            assert is_denied(cmd) is not None, cmd
+
+    def test_cut_at_operator_cuts_outside_quotes_only(self) -> None:
+        from kiro_crew.security import _cut_at_operator
+
+        # Operator OUTSIDE the quotes is structure -> cut.
+        assert _cut_at_operator("'main')") == "'main'"
+        assert _cut_at_operator('"main")') == '"main"'
+        assert _cut_at_operator("'main')&") == "'main'"
+        # Operator INSIDE the quotes is part of the ref name -> keep.
+        assert _cut_at_operator("'(main)'") == "'(main)'"
+        assert _cut_at_operator("'a;b'") == "'a;b'"
+        assert _cut_at_operator("'weird&name'") == "'weird&name'"
+        # An unbalanced quote reads the remainder as quoted, so nothing is cut.
+        # Safe: bash never runs a command with an unterminated quote.
+        assert _cut_at_operator("'main)") == "'main)"
+
+    def test_quoted_operator_ref_names_stay_pushable(self) -> None:
+        """The no-over-block half: these are legal, unprotected branch names."""
+        from kiro_crew.security import _is_push_to_protected_branch, is_denied
+
+        for cmd in (
+            "git push origin '(main)'",
+            "(git push origin '(main)')",
+            "(git push origin 'release/x')",
+            "git push origin 'feature|x'",
+            "git push origin 'weird&name'",
+            "git push origin 'a;b'",
+            "git push origin 'mainly'",
+        ):
+            assert _is_push_to_protected_branch(cmd.lower()) is False, cmd
+            assert is_denied(cmd) is None, cmd
+
+    def test_feature_branch_push_still_allowed_in_subshell(self) -> None:
+        # The whole point of the branch check is that ordinary work still runs.
+        for cmd in (
+            "git push origin my-feature",
+            "(cd /tmp; git push origin my-feature)",
+            "(git push origin fix/imds-encodings)",
+        ):
+            from kiro_crew.security import _is_push_to_protected_branch
+
+            assert _is_push_to_protected_branch(cmd.lower()) is False, cmd

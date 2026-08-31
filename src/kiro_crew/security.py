@@ -2376,7 +2376,11 @@ _GIT_PUBLISH_RE = re.compile(
     # matched either by the preceding ``\s+`` or by this group's leading char —
     # an ambiguity that backtracks exponentially (ReDoS) on whitespace-laden
     # flag runs when the trailing ``push`` is absent.
-    r"(?:^|[;&|`\n]|\$\()\s*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*push(?=\s|[)`;&|]|$)"
+    # ``(`` is in the leading class because bash treats it as an operator, so
+    # ``(git push`` runs git exactly as ``; git push`` does -- without it the
+    # glued subshell form ``(git push origin main)`` matched no branch and the
+    # only enforcement for git-publish (this floor) never fired.
+    r"(?:^|[;&|`\n(]|\$\()\s*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*push(?=\s|[)`;&|]|$)"
 )
 
 # Glue-evasion guard: bash command-substitution / quoting tricks that evaluate
@@ -4717,6 +4721,12 @@ def _is_git_push_via_normalizer(text_lower: str) -> bool:
     if not tokens:
         return False
 
+    # Glued operators are not part of the word: ``(git`` is the git program and
+    # ``push)`` is the push subcommand. Normalizing them off can only widen
+    # DETECTION (the allow/deny decision stays with
+    # ``_is_push_to_protected_branch``), so it cannot permit a push.
+    tokens = [_cut_at_operator(t) for t in tokens]
+
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -4750,6 +4760,69 @@ def _is_git_push_via_normalizer(text_lower: str) -> bool:
 # to any of these (or a bare push, which may resolve to one) is blocked so the
 # change goes through the normal PR/code-review flow.  KiroCrew (OSS) uses
 # ``main``; ``mainline``/``master`` are covered for internal/mirror clones.
+#: Shell metacharacters that can be GLUED to a word without whitespace, so they
+#: appear inside a naive ``split()`` token while bash treats them as operators.
+#: ``(git push origin main)&`` hands the ref token ``main)&``, and stripping only
+#: the parens left ``main)&``, which never equalled ``main`` -- so a
+#: protected-branch push was allowed AND audited as a feature-branch push. A git
+#: ref cannot legally contain any of these, so stripping them cannot swallow a
+#: real branch name; a QUOTED paren is still preserved because both call sites
+#: strip before removing quotes.
+_SHELL_OPERATOR_CHARS = "()&;|<>"
+
+
+def _cut_at_operator(token: str) -> str:
+    """*token* up to the first GLUED shell operator, with leading ones removed.
+
+    ``strip`` is not enough: an operator can sit in the MIDDLE of a naive
+    ``split()`` token, so ``(git push origin mainline)>log`` hands the ref token
+    ``mainline)>log`` -- which ends in ``g``, so stripping removed nothing and the
+    ref never equalled ``mainline``. bash parses that as the ref ``mainline``
+    followed by the operator ``)`` and the redirection ``>log``, so cutting at the
+    first operator is what reproduces its reading.
+
+    Quote state is TRACKED rather than bailed on. Inside quotes these characters
+    are literal and a ref may legitimately contain them -- ``git push origin
+    '(main)'`` targets a branch actually named ``(main)``, which is not protected
+    and must stay pushable. But a quoted ref can still carry an operator OUTSIDE
+    its quotes: ``(git push origin 'main')`` hands the ref token ``'main')``,
+    whose trailing ``)`` is unquoted. Returning early on the mere PRESENCE of a
+    quote left that ``)`` in place, so the ref resolved to ``main)``, never
+    equalled ``main``, and the protected push was allowed AND audited as a
+    feature-branch push -- reopening the exact class this cut exists to close.
+    Cutting only at operators outside quotes satisfies both readings at once.
+
+    An UNBALANCED quote leaves the remainder read as quoted, so nothing is cut.
+    That is safe because such a token is not executable as written: bash has an
+    unterminated quote and never runs the push. If a later quote in the command
+    balances it, the shell folds the span into one word whose ref likewise no
+    longer equals a protected name.
+
+    Quotes are PRESERVED in the result; both call sites remove them afterwards
+    (see ``_dequote_token``), which is what keeps ``'(main)'`` a literal ref.
+    """
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    for char in token:
+        if char == "'" and not in_double:
+            in_single = not in_single
+            out.append(char)
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            out.append(char)
+            continue
+        if char in _SHELL_OPERATOR_CHARS and not in_single and not in_double:
+            if not out:
+                # Leading operator, e.g. the ``(`` of ``(git push ...``: bash
+                # treats it as punctuation before the word, so drop and continue.
+                continue
+            break
+        out.append(char)
+    return "".join(out)
+
+
 _PROTECTED_BRANCHES = {"main", "mainline", "master"}
 
 # Push flags that push EVERY local branch (protected ones included) regardless
@@ -4792,7 +4865,18 @@ def _dequote_token(token: str) -> str:
     protected name — an evasion of this gate. Remove ALL single/double quotes
     and backslash escapes so the comparison sees the shell-resolved word.
     """
-    return token.replace("'", "").replace('"', "").replace("\\", "")
+    # ``(``/``)`` are shell OPERATORS, never part of the word: in
+    # ``(cd /tmp; git push origin main)`` git receives the ref ``main``, not
+    # ``main)``. Leaving them in made the protected-name compare unequal, so a
+    # protected-branch push inside a subshell was allowed AND audited as a
+    # feature-branch push.
+    #
+    # Stripped BEFORE the quotes come off, matching ``_git_push_args``: an
+    # operator sits OUTSIDE any quoting, so stripping first sees only those.
+    # Doing it last would also eat a paren the user QUOTED as part of the ref
+    # name -- ``git push origin '(main)'`` targets a branch literally named
+    # ``(main)``, which is not a protected branch, and must stay allowed.
+    return _cut_at_operator(token).replace("'", "").replace('"', "").replace("\\", "")
 
 
 def _git_push_args(segment: str) -> list[str] | None:
@@ -4805,7 +4889,9 @@ def _git_push_args(segment: str) -> list[str] | None:
     returns None. Skips leading flags, and a single non-flag value that a flag
     may take (e.g. ``-C <path>``) — but never swallows ``push`` itself.
     """
-    tokens = segment.split()
+    # Strip glued shell operators for the same reason as ``_dequote_token``:
+    # ``(git`` IS the git program to bash, and ``main)&`` IS the ref ``main``.
+    tokens = [_cut_at_operator(t) for t in segment.split()]
     if "git" not in tokens:
         return None
     i = tokens.index("git") + 1
@@ -11879,21 +11965,39 @@ def canonicalize_ip(s: str) -> str:
 
 # Regex to extract potential IP addresses from a command string.
 # Captures dotted-quad, hex/octal per-octet, bare integers, IPv6-mapped forms.
+# One component of a dotted literal, in EVERY base the C resolver accepts: hex
+# (``0x..``), C-style octal (a leading ``0``) or decimal. A digit run covers
+# octal and decimal alike, so leading zeros are admitted in EVERY position.
+# Spelling the bases per-position (the previous form) meant a MIXED encoding
+# such as ``169.254.0251.0376`` matched no branch whole, so the token reached
+# ``canonicalize_ip`` TRUNCATED and folded to a harmless address while the OS
+# resolver still routed the full token to IMDS.
+#
+# UNBOUNDED on purpose. A length cap here is not a safety measure, it is the
+# very defect being fixed: any cap truncates a padded spelling of the same
+# address into a DIFFERENT, harmless one, so the gate fails open on
+# ``0x0a9fea9fe`` and ``169.254.0x00000000a9.0376`` (glibc ``inet_aton``
+# accepts both and routes them to IMDS). These are plain character classes
+# with no nested quantifier, so an unbounded run is linear -- bounding buys no
+# ReDoS protection and costs the match. The canonicalizer stays the strict
+# half (it returns the input unchanged for anything that is not a real
+# address), so admitting more candidates can only ever ADD a denial.
+_IP_COMPONENT = r"(?:0[xX][0-9a-fA-F]+|\d+)"
 _IP_CANDIDATE_RE = re.compile(
     r"(?:"
     r"::ffff:[0-9a-fA-Fx.:]+|"  # IPv6-mapped
     r"[0-9a-fA-F]{1,4}:[0-9a-fA-F:]{2,}|"  # native IPv6 literal (colon run, e.g. fd00:ec2::254)
-    r"0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-Fx]+)*|"  # Hex (with possible dotted)
-    # inet_aton "short" forms the OS resolver / curl accept (a.b.c and a.b),
-    # where the trailing component packs the remaining low-order bytes. These
-    # must be captured WHOLE (not just the tail) so canonicalize_ip can resolve
-    # them and catch an IMDS SSRF hidden in a 2-/3-part encoding. Listed before
-    # the bare-integer / dotted-quad alternatives so the full token wins.
-    r"\d{1,3}\.\d{1,3}\.(?:0[xX][0-9a-fA-F]+|\d{4,10})|"  # 3-part: a.b.c
-    r"\d{1,3}\.(?:0[xX][0-9a-fA-F]+|\d{5,10})|"  # 2-part: a.b
-    r"\d{7,10}|"  # Large decimal (single integer IP)
-    r"(?:0[0-7]+\.){3}0[0-7]+|"  # Octal dotted
-    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"  # Standard dotted-quad
+    # 2-, 3- and 4-part dotted forms, any base per component. The trailing
+    # component of a 2-/3-part inet_aton "short" form packs the remaining
+    # low-order bytes, so it must be captured WHOLE (not just the tail) for
+    # canonicalize_ip to resolve it; the greedy repeat takes every component
+    # present, so the full token always wins over a shorter prefix.
+    rf"{_IP_COMPONENT}(?:\.{_IP_COMPONENT}){{1,3}}|"
+    r"0[xX][0-9a-fA-F]+|"  # bare hex integer, unbounded (see _IP_COMPONENT)
+    # Bare single-integer form. NOT capped: a zero-padded/octal spelling of the
+    # same address is longer (``025177524776`` is IMDS), and a cap truncates it
+    # into a different, harmless address.
+    r"\d{7,}"
     r")"
 )
 
