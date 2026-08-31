@@ -914,8 +914,9 @@ class TestRunTask:
         self, taskrunner_env, tmp_path, monkeypatch
     ) -> None:
         """``VectorMemoryStore.init()`` must honour its caller contract (#5389):
-        the Windows path shells out to icacls, so an async caller offloads it
-        via ``asyncio.to_thread`` instead of freezing the loop. Ordering is
+        the Windows path applies an owner-only DACL in-process — an unbounded
+        SMB round-trip on a UNC or mapped-drive path — so an async caller
+        offloads it via ``asyncio.to_thread`` instead of freezing the loop. Ordering is
         asserted too: init must COMPLETE before ``_run_task`` wires the embed
         hooks (a fire-and-forget offload would reorder them). The sibling
         ``MemoryStore.init()`` (cheap mkdir+seed) carries no contract and is

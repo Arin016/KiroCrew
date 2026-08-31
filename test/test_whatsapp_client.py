@@ -989,8 +989,9 @@ def test_an_undecodable_source_costs_the_preview_not_the_reply():
 
 
 def test_session_store_permissions_are_applied_off_the_loop(monkeypatch):
-    """On Windows these resolve a SID and shell out to `icacls`, so running them
-    inline would put a subprocess on the one gateway event loop.
+    """On Windows these resolve a SID and apply an owner-only DACL in-process —
+    an unbounded SMB round-trip on a UNC or mapped-drive path — so running them
+    inline would stall the one gateway event loop.
     """
     import inspect
 

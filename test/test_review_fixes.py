@@ -148,8 +148,9 @@ class TestEnvPermissions:
 
     def test_env_permission_repair_is_posix_only(self, tmp_path: object, monkeypatch) -> None:
         """On Windows the chmod is a silent no-op for ACLs, and the real
-        lockdown (platform_compat.restrict_to_owner) spawns icacls — a
-        blocking subprocess this loop-reachable reader must never run. The
+        lockdown (platform_compat.restrict_to_owner) applies an owner-only
+        DACL in-process — an unbounded SMB round-trip on a UNC or mapped-drive
+        path, which this loop-reachable reader must never risk inline. The
         repair must not even attempt a chmod there: Windows enforcement lives
         where the file is written (setup wizard, dashboard credential
         writers), all off the loop."""

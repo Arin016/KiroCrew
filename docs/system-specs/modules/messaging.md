@@ -1698,8 +1698,9 @@ An inbound resume binding lives on the bound session's `session_map.json` row. A
   field when `.env` is empty, so a crash between the two writes would otherwise
   resurrect a revoked credential on the next restart, and the copy sits in
   agent-readable `config.json`. Both writes go through `asyncio.to_thread`:
-  the atomic write fsyncs, and the owner-only lockdown shells out to `icacls`
-  on Windows, neither of which may block the gateway loop.
+  the atomic write fsyncs, and on Windows the owner-only lockdown's in-process
+  DACL write is bounded only by SMB on a UNC or mapped-drive path, neither of
+  which may block the gateway loop.
 
 ## Telegram channel
 
