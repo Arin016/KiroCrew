@@ -41,7 +41,6 @@ import type { LibraryColumn } from '../../components/library/LibraryTable'
 import {
   WidgetThumb, ContentThumb, ImageThumb, WebAppThumb,
 } from '../../components/library/ArtifactThumbs'
-import { useColumnCount } from '../../hooks/useColumnCount'
 import { usePersistedString } from '../../hooks/usePersistedString'
 import { api } from '../../api/client'
 import type { Artifact } from '../../types'
@@ -275,7 +274,6 @@ function OrphanThumb() {
 function LibrarySection({ account, bucket }: { account: string; bucket: string }) {
   const [mode, setMode] = useViewMode('library', 'grid')
   const [picking, setPicking] = useState(false)
-  const [gridRef, cols] = useColumnCount(258)
 
   /* What is in the cloud, ACCUMULATED across pages. A plain query keyed by the
      continuation token replaced the visible page on every "Load more", which is
@@ -451,17 +449,15 @@ function LibrarySection({ account, bucket }: { account: string; bucket: string }
       )}
 
       {slugs.length > 0 && mode === 'grid' && (
-        <div ref={gridRef} className="-mr-3" data-testid="library-grid">
-          <div className="grid items-start" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-            {slugs.map((slug) => (
-              <LibraryCloudCard
-                key={slug}
-                slug={slug}
-                local={bySlug.get(slug)}
-                localAnswered={localAnswered}
-              />
-            ))}
-          </div>
+        <div className="grid items-start -mr-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))' }} data-testid="library-grid">
+          {slugs.map((slug) => (
+            <LibraryCloudCard
+              key={slug}
+              slug={slug}
+              local={bySlug.get(slug)}
+              localAnswered={localAnswered}
+            />
+          ))}
         </div>
       )}
 
@@ -695,7 +691,6 @@ function AddFromArtifactsDialog({ account, onClose }: { account: string; onClose
   const qc = useQueryClient()
   const [kind, setKind] = useState<ArtifactKind | 'all'>('all')
   const [q, setQ] = useState('')
-  const [gridRef, cols] = useColumnCount(258)
   const backdropDown = useRef(false)
 
   /**
@@ -892,18 +887,16 @@ function AddFromArtifactsDialog({ account, onClose }: { account: string; onClose
             </p>
           )}
           {shown.length > 0 && (
-            <div ref={gridRef} className="-mr-3">
-              <div className="grid items-start" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-                {shown.map((a) => (
-                  <PickerCard
-                    key={a.slug}
-                    artifact={a}
-                    onPush={() => { void addOne(a.slug) }}
-                    pushing={addingSlugs.has(a.slug)}
-                    failed={failedSlugs.has(a.slug)}
-                  />
-                ))}
-              </div>
+            <div className="grid items-start -mr-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))' }}>
+              {shown.map((a) => (
+                <PickerCard
+                  key={a.slug}
+                  artifact={a}
+                  onPush={() => { void addOne(a.slug) }}
+                  pushing={addingSlugs.has(a.slug)}
+                  failed={failedSlugs.has(a.slug)}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -1061,7 +1054,6 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
      what was removed rather than pretending to predict it. */
   const [deletedCount, setDeletedCount] = useState<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const [filesGridRef, fileCols] = useColumnCount(258)
   /* The pinned Actions cell paints its seam only when the table actually
      overflows, so the edge is measured rather than assumed. */
   const [attachScroller, edges] = useScrollEdges<HTMLDivElement>()
@@ -1267,8 +1259,7 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
           otherwise lose Share and Delete on every future visit with nothing to
           tell them the controls existed. */}
       {listQ.data && mode === 'grid' && (listQ.data.folders.length > 0 || listQ.data.files.length > 0) && (
-        <div ref={filesGridRef} className="-mr-3" data-testid="drive-grid">
-          <div className="grid items-start" style={{ gridTemplateColumns: `repeat(${fileCols}, minmax(0, 1fr))` }}>
+        <div className="grid items-start -mr-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))' }} data-testid="drive-grid">
             {listQ.data.folders.map((name) => {
               const open = () => { setPath(name); setToken(''); setDeletedCount(null) }
               return (
@@ -1397,7 +1388,6 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
                 )}
               </div>
             ))}
-          </div>
         </div>
       )}
 
