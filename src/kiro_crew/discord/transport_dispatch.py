@@ -76,6 +76,7 @@ from kiro_crew.messaging.upload_gate import live_dashboard_slot, uploads_restric
 from kiro_crew.safety_override import describe_grant_lifetime, safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
+from kiro_crew.session_allocation import SessionClosingError
 from kiro_crew.session_map import ConversationOwnershipConflict
 from kiro_crew.stats import Stats
 
@@ -621,6 +622,7 @@ class DiscordDispatcher:
                 ),
                 audit_session_key=session_key,
                 audit_agent=agent or "kirocrew",
+                closing_gate=lambda: self.sessions.begin_turn(session_key),
             )
             accumulated = await driver.run(full_message)
 
@@ -691,6 +693,16 @@ class DiscordDispatcher:
                 )
             except Exception:
                 logger.debug("Discord: success audit failed", exc_info=True)
+        except SessionClosingError:
+            # Shutdown began between the claim and the dispatch, so no turn ever
+            # opened. Caught ahead of the generic handler so a restart is not
+            # charged to the circuit breaker via `record_failure`, which is not
+            # true of a session that never misbehaved. The `finally` still
+            # finalizes the renderer and releases the lease.
+            logger.info(
+                "Discord: aborting dispatch for %s — gateway is shutting down",
+                session_key,
+            )
         except Exception:
             logger.exception("Discord transport_dispatch: error handling message")
             if _acquired:

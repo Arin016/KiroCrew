@@ -318,6 +318,7 @@ class TurnDriver:
         directive_consumer: DirectiveConsumer | None = None,
         audit_session_key: str = "",
         audit_agent: str = "kirocrew",
+        closing_gate: Callable[[], None] | None = None,
     ) -> None:
         self.provider = provider
         self.renderer = renderer
@@ -347,6 +348,14 @@ class TurnDriver:
         # Terminal stop reason of the last run() — read by the dispatcher's
         # post-turn bookkeeping (e.g. COMPACTION_FAILED -> session reset).
         self.last_stop_reason: str = ""
+        # Synchronous pre-registration shutdown gate, supplied by the dispatcher
+        # as a zero-arg closure over its SessionManager and session key. It lives
+        # HERE rather than at each call site because the only placement that is
+        # actually atomic is the one immediately before the provider stream opens,
+        # and `run()` owns that line. Raising from it aborts the turn before any
+        # prompt is registered. A driver built without one keeps the old ungated
+        # behaviour, so a stand-in predating the parameter still works.
+        self.closing_gate = closing_gate
 
     async def run(self, message: str) -> str:
         """Drive one turn; return the accumulated channel-safe assistant text."""
@@ -418,6 +427,25 @@ class TurnDriver:
                 )
 
         await self.renderer.on_turn_start()
+        # Lease-dispatch race gate, placed HERE because this is the only line at
+        # which it is actually atomic. The dispatcher claimed the session long
+        # before this, and everything since -- the context build, and the
+        # `on_turn_start` platform round-trip immediately above -- is awaited. A
+        # gate at the call site therefore still leaves that round-trip open: a
+        # restart landing in it sets `_closing` and takes `close_all`'s drain
+        # snapshot while no turn is registered, and the prompt below then opens
+        # BEHIND that snapshot, where teardown kills it mid-turn holding its
+        # native lock and the user gets an empty response instead of a notice.
+        #
+        # Synchronous, with no await between this call and the `async for` below.
+        # `provider.stream(...)` registers the turn before its own first await
+        # (AcpClient.stream_events clears _turn_done up front), so the gate and
+        # the registration form one span ordered against `_closing`. This is the
+        # same shape the dashboard runner and the native Slack handler use, and
+        # the reason the gate is one line here rather than four at the call
+        # sites. Raises SessionClosingError, which each dispatcher catches.
+        if self.closing_gate is not None:
+            self.closing_gate()
         async for event in self.provider.stream(message):
             kind = event.kind
             if kind == EVENT_TEXT_CHUNK:

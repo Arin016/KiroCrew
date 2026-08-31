@@ -72,6 +72,7 @@ from kiro_crew.messaging.upload_gate import uploads_restricted
 from kiro_crew.safety_override import safety_override
 from kiro_crew.security import redact, redact_local_paths
 from kiro_crew.sel import sel
+from kiro_crew.session_allocation import SessionClosingError
 from kiro_crew.stats import Stats
 from kiro_crew.telegram.attachments import process_telegram_attachments
 from kiro_crew.telegram.commands import (
@@ -808,6 +809,7 @@ class TelegramDispatcher:
                 ),
                 audit_session_key=session_key,
                 audit_agent=agent or "kirocrew",
+                closing_gate=lambda: self.sessions.begin_turn(session_key),
             )
             accumulated = await driver.run(full_message)
 
@@ -899,6 +901,18 @@ class TelegramDispatcher:
                 )
             except Exception:
                 logger.debug("Telegram: success audit failed", exc_info=True)
+        except SessionClosingError:
+            # Shutdown began between the claim and the dispatch, so no turn ever
+            # opened. Caught ahead of the generic handler so a restart is not
+            # charged to the circuit breaker via `record_failure` nor counted as
+            # a failed message — neither is true of a session that never
+            # misbehaved. `failure_reason` is left as it was, so the `finally`
+            # finalizes the placeholder with this channel's usual notice instead
+            # of leaving a perma-"🤔 …".
+            logger.info(
+                "Telegram: aborting dispatch for %s — gateway is shutting down",
+                session_key,
+            )
         except Exception as exc:
             logger.exception("Telegram transport_dispatch: error handling message")
             # Permanent, user-actionable failures (e.g. model entitlement)

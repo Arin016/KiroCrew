@@ -17,6 +17,7 @@ unaffected (they don't go through events.py Slack dispatch).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -37,6 +38,7 @@ from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn
 from kiro_crew.messaging.link import canonical_key
 from kiro_crew.platform import current_context
 from kiro_crew.sel import sel
+from kiro_crew.session_allocation import SessionClosingError
 from kiro_crew.slack.handler import (
     _get_default_agent,
     _hydrate_conv_flags,
@@ -611,6 +613,7 @@ async def handle_message_transport(
             ),
             audit_session_key=session_key,
             audit_agent=_agent or "kirocrew",
+            closing_gate=lambda: sessions.begin_turn(session_key),
         )
         # The thread's owner as of the moment the turn starts producing output.
         # A dashboard link landing during the run moves the conversation to a
@@ -847,6 +850,16 @@ async def handle_message_transport(
                 exc_info=True,
             )
 
+    except SessionClosingError:
+        # Shutdown began between the claim and the dispatch, so no turn opened.
+        # Mirrors the native handler's own gate: clear the thread status and
+        # return quietly. Deliberately NOT the generic branch below -- a restart
+        # is not a session fault (record_failure counts toward tripping the
+        # circuit breaker on a session that never misbehaved), is not a failed
+        # message, and does not warrant an error posted into the thread.
+        logger.info("Aborting Slack dispatch for %s — gateway is shutting down", session_key)
+        with contextlib.suppress(Exception):
+            await slack.set_thread_status(channel, reply_ts, "")
     except Exception:
         logger.exception("transport_dispatch: error handling message")
         Stats().inc_message_failed()
