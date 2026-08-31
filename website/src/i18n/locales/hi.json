@@ -1706,6 +1706,7 @@
         "agentSessionButton": {
           "already_finished_its_session_was_closed": "पहले ही पूरा — प्रतिलेख पुराने सत्र में।",
           "couldn_t_start": "शुरू नहीं हो सका",
+          "open_older_sessions": "पुराने सत्र खोलें",
           "resume": "फिर शुरू करें",
           "start_over": "फिर से शुरू करें"
         },

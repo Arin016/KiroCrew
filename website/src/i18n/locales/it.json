@@ -1740,8 +1740,9 @@
       },
       "components": {
         "agentSessionButton": {
-          "already_finished_its_session_was_closed": "Già completato: trascrizione in Sessioni precedenti.",
+          "already_finished_its_session_was_closed": "Già completato: trascrizione in Sessioni più vecchie.",
           "couldn_t_start": "non è stato possibile avviare",
+          "open_older_sessions": "Apri Sessioni più vecchie",
           "resume": "Riprendi",
           "start_over": "Ricomincia"
         },

@@ -1776,8 +1776,9 @@
       },
       "components": {
         "agentSessionButton": {
-          "already_finished_its_session_was_closed": "Уже завершено — расшифровка в «Прежних сессиях».",
+          "already_finished_its_session_was_closed": "Уже завершено — расшифровка в «Более старых сессиях».",
           "couldn_t_start": "не удалось запустить",
+          "open_older_sessions": "Открыть «Более старые сессии»",
           "resume": "Продолжить",
           "start_over": "Начать заново"
         },

@@ -1742,6 +1742,7 @@
         "agentSessionButton": {
           "already_finished_its_session_was_closed": "Ya finalizado: transcripción en Sesiones anteriores.",
           "couldn_t_start": "no se pudo iniciar",
+          "open_older_sessions": "Abrir Sesiones anteriores",
           "resume": "Reanudar",
           "start_over": "Empezar de nuevo"
         },
