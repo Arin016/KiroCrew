@@ -1538,12 +1538,28 @@ under the 2000-char cap, splitting ordinary text with the shared
 and holding local-image markup for secure multipart extraction at the semantic
 steer/final seal. It rotates messages at the shared driver's structured steer
 boundaries with quote chips, renders trailing `[OPTIONS:]` as button action rows
-(`opt:<i>`, label recovered from the component at interaction time), and posts
+(`opt:<i>:<tag>`, label recovered from the component at interaction time; `<tag>`
+is `session_provenance_tag()` — a 12-hex SHA-256 digest of the session key the
+buttons were rendered for), and posts
 Approve/Deny buttons for interactive tool approvals. Approval `custom_id`s carry a
 per-prompt random nonce (`a:<request_id>:<nonce>:<1|0>`) validated at
 resolution: ACP request IDs are reusable across provider/gateway restarts, so a
 stale button without the matching nonce fails closed. The decision window
 denies by default on timeout and retires the nonce with it.
+
+**Option-press provenance.** Discord replays old components indefinitely, so an
+option press dispatches only when the session the conversation currently
+resolves to (via the resume binding, else the native DM session) is the one the
+tag names — a press carries a non-empty tag, and the tag implies resume routing
+even though the label never executes as a command (button labels are
+model-authored turn content, same rule as the queue drain). The tag is checked
+before the busy path — a press against a busy target is refused, never
+queued/steered, because the drain replays items tag-less — and re-checked after
+idle/daily rotation so it cannot run under a generation the tag never named. A
+mismatch (the chat was rebound or `!new`'d since the buttons were posted) and an
+untagged pre-provenance button both fail closed with a refusal naming the
+remedy; queue drains and AutoNudge fires dispatch untagged with commands off and
+keep their native-session affinity.
 
 Every turn closes with a **one-line footer** as Discord subtext (`-#`) on the
 final segment, rendered by the shared `format_turn_status` (see "Turn-status

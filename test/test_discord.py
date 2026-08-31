@@ -50,6 +50,7 @@ from kiro_crew.discord.renderer import (
     _extract_options,
     _strip_steering,
     build_option_components,
+    session_provenance_tag,
 )
 from kiro_crew.discord.transport import (
     DISCORD_CAPABILITIES,
@@ -1053,6 +1054,17 @@ class TestOptionComponents:
         total = sum(len(r["components"]) for r in comps)
         assert total == 25
 
+    def test_origin_tag_suffixes_every_custom_id(self) -> None:
+        """The provenance tag rides the custom_id; bare ids are the legacy shape.
+
+        ``opt:<i>:<tag>`` is what the press-side gate parses back out, so the
+        two halves meet exactly here.
+        """
+        comps = build_option_components(["a", "b"], "deadbeefcafe")
+        assert comps is not None
+        ids = [b["custom_id"] for row in comps for b in row["components"]]
+        assert ids == ["opt:0:deadbeefcafe", "opt:1:deadbeefcafe"]
+
 
 class TestExtractOptions:
     def test_no_options(self) -> None:
@@ -1687,6 +1699,16 @@ class TestRenderer:
         labels = [b["label"] for row in comps for b in row["components"]]
         assert labels == ["A", "B"]
         assert "[OPTIONS" not in cli.final_text()
+        # The sealed row is PROVENANCE-STAMPED with this renderer's session key —
+        # the producer half of the stale-press fix. Without this pin, reverting
+        # the call sites to untagged build_option_components(opts) keeps the
+        # whole suite green while every new button falls back to the legacy
+        # current-binding path, silently reopening cross-session injection.
+        ids = [b["custom_id"] for row in comps for b in row["components"]]
+        assert ids == [
+            f"opt:0:{session_provenance_tag('sk')}",
+            f"opt:1:{session_provenance_tag('sk')}",
+        ]
 
     @pytest.mark.asyncio
     async def test_long_options_before_streamed_steer_ack_become_buttons(self) -> None:
@@ -3073,7 +3095,8 @@ class TestInteractions:
     @pytest.mark.asyncio
     async def test_option_choice_reinjects_as_turn(self) -> None:
         d, cli, sess = _dispatcher({"u1"})
-        await d.on_interaction(self._itx("opt:0", label="Choice A"))
+        tag = session_provenance_tag(d.current_session_key("u1"))
+        await d.on_interaction(self._itx(f"opt:0:{tag}", label="Choice A"))
         # Buttons retired without clobbering the answer text.
         assert cli.component_edits == [("m1", [])]
         # Choice echoed as a quote, then answered as a fresh turn.
@@ -3083,9 +3106,19 @@ class TestInteractions:
         )
 
     @pytest.mark.asyncio
+    async def test_untagged_option_press_fails_closed(self) -> None:
+        """A pre-provenance button press is refused — its origin is unprovable."""
+        d, cli, sess = _dispatcher({"u1"})
+        await d.on_interaction(self._itx("opt:0", label="Choice A"))
+        assert cli.component_edits == [("m1", [])]
+        assert any("predate" in t for t, _ in cli.sent)
+        assert sess.successes == []
+
+    @pytest.mark.asyncio
     async def test_option_without_label_asks_to_type(self) -> None:
         d, cli, _ = _dispatcher({"u1"})
-        await d.on_interaction(self._itx("opt:0", label=""))
+        tag = session_provenance_tag(d.current_session_key("u1"))
+        await d.on_interaction(self._itx(f"opt:0:{tag}", label=""))
         assert any("type it instead" in t for t, _ in cli.sent)
 
 
@@ -3566,7 +3599,7 @@ class TestOptionChoiceIsNeverACommand:
                 channel_id="c1",
                 user_id="u1",
                 message_id="m1",
-                custom_id="opt:0",
+                custom_id=f"opt:0:{session_provenance_tag(before)}",
                 label="!new",
             )
         )

@@ -4822,6 +4822,17 @@ class DashboardState:
             # which is unbounded on slow storage.
             target = await asyncio.to_thread(_resolve_channel_target, self, key, link)
             if target is None:
+                # The docstring's "logged and dropped" promise, kept: an
+                # unreachable, ungoverned or unregistered channel means the user
+                # was NOT told their conversation lost its way back, and a silent
+                # return here leaves that undeliverable notice invisible to the
+                # operator too (the SEL event records the removal, not the
+                # delivery failure).
+                logging.getLogger(__name__).warning(
+                    "inbound-unbind notice for %s undeliverable: no governed %s transport",
+                    key,
+                    link.channel_type,
+                )
                 return
             resolved, transport = target
             notice = _INBOUND_UNBIND_NOTICE.format(
