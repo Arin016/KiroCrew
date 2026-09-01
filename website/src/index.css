@@ -1632,8 +1632,8 @@ file-tree-container{
    this utility's own transparent base rules: a media query adds no specificity,
    so it ties them and wins on source order alone. */
 @media (pointer: coarse) {
-  .scroll-fade{scrollbar-color:var(--border) transparent}
-  .scroll-fade::-webkit-scrollbar-thumb{background:var(--border)}
+  .scroll-fade{scrollbar-color:var(--muted) transparent}
+  .scroll-fade::-webkit-scrollbar-thumb{background:var(--muted)}
 }
 
 /* ── Overlay auto-hiding vertical scrollbar ──
@@ -1652,10 +1652,17 @@ file-tree-container{
    produces the :hover that restores the thumb. A coarse pointer shows a persistent
    thin thumb instead, so a capped scroll surface keeps a real affordance. Fine
    pointers keep the hidden-until-hover behaviour so a scrollable box does not
-   always carry the global always-visible thumb. */
+   always carry the global always-visible thumb.
+   The token is --muted, NOT the hover reveal's --border: as a filled thumb this is
+   the sole scroll affordance on touch, so it must clear the WCAG 1.4.11 3:1
+   non-text-contrast floor against --bg-elevated in every theme, and --muted is the
+   only existing token that does (--border and both stronger border rungs sit below
+   the floor in nearly every theme). The :hover thumb keeps --border on purpose:
+   hover implies a pointer already engaged with the box, a separate decision from
+   this one. scrollbarThumbContrast.test.ts pins the floor per theme. */
 @media (pointer: coarse) {
-  .scrollbar-overlay{scrollbar-color:var(--border) transparent}
-  .scrollbar-overlay::-webkit-scrollbar-thumb{background:var(--border)}
+  .scrollbar-overlay{scrollbar-color:var(--muted) transparent}
+  .scrollbar-overlay::-webkit-scrollbar-thumb{background:var(--muted)}
 }
 
 /* ── Send button sweep ── */
