@@ -418,6 +418,25 @@ delegates to that same global. Wired sites:
   lazily-composed standalone default resolved per stderr line on the event loop.
   Closing this residual means handing gatewayd a composed context, the same
   remedy that module already names for the ceiling, and is a separate change.
+- **Which spelling a gate-side log line uses is gated in CI**
+  (`test_security_posture.TestGateSideLogRedactorSpelling`). The egress
+  classification (`security_posture._REDACTION_SINKS` vs
+  `NON_EGRESS_REDACTION_MODULES`) is a different axis and cannot cover this one:
+  all three sites converged above sat correctly bucketed as non-egress, with
+  accurate reasons, while reading the companion-blind baseline pass. The gate
+  scans for the PROPERTY — a baseline redactor's result reaching a log or audit
+  write, either nested in the call or through a local assigned from one in the
+  same scope — rather than for a filename or a subject name, because a grep
+  scoped to files mentioning stderr is exactly what missed `task_planner.py` and
+  `name_grant.py`. `_BASELINE_LOG_SITE_CENSUS` records the per-module residual
+  measured when the gate went up (76 sites in 26 modules, `acp/client.py` the
+  largest at 7); it is a census, NOT an approved-exception list and NOT a to-do
+  list, since for a process that never composes — gatewayd above — the baseline
+  is the honest answer. Growth in any module, or a first site in a module absent
+  from it, fails until someone either calls `redact_log_via_context` or raises
+  that number and records which PROCESS the site runs in and why the baseline is
+  correct there. A count that has fallen must be lowered, so a converted module
+  does not leave free slots behind.
 - Exfil exact-host heuristic exemption (`CredentialPolicy.exempt_exact_hosts()`) —
   `security.scan_exfiltration_urls` / `redact_exfiltration_urls` read the
   companion-supplied exact-host set and, for a URL whose domain is an EXACT
