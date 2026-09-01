@@ -2207,6 +2207,69 @@ def build_agent_config(*, gated_off: "frozenset[str] | None" = None) -> dict:
     for name, spec in _extra_mcp_servers().items():
         mcp.setdefault(name, dict(spec))
 
+    # FINAL governance pass over the auto-approve LIST itself, folded in HERE so
+    # the returned config is already floor-safe before ANY caller writes it. The
+    # writers above (managed/shared MCP) apply the ceiling to entries THEY add,
+    # but a builtin auto-approve (fs_read, code, glob, grep, …) arrives straight
+    # from the shipped TEMPLATE into `allowedTools` and no per-entry writer ever
+    # re-touches it. `allowedTools` is kiro-cli's blanket auto-approve list — the
+    # ONE path that never reaches the PreToolUse gate — so a floor-scoped builtin
+    # left on it is approved WITHOUT the deny floor, sensitive-path check, or
+    # governance ceiling ever running. `may_skip_gate_now` (via _may_auto_approve)
+    # returns False for any builtin whose scope intersects the floor gate scopes
+    # ({filesystem.read, filesystem.write, commands}) even on an ungoverned host,
+    # so `code` (commands, tools, filesystem.write) and fs_read/glob/grep
+    # (filesystem.read) lose their blanket grant here, while web_fetch/web_search/
+    # introspect/session/report and any silent-ceiling `@server` are kept.
+    #
+    # Historically only rebuild_agent_config ran this pass, so kirocrew.json
+    # shipped floor-safe but _install_research_agent — which writes this returned
+    # config UNTOUCHED — shipped kirocrew-research.json with fs_read/code/glob/grep
+    # still auto-approved, in the LEAST supervised context (the Research Lab
+    # autonudge worker). Folding the pass in here closes that writer-coverage gap
+    # for every current and future caller instead of relying on each installer to
+    # remember to filter. The pass is pure and idempotent, so rebuild_agent_config
+    # re-running it is a no-op and _install_conductor_agent (which hand-filters) is
+    # unaffected. `tools` (the mount list) is deliberately left intact — mounting a
+    # tool is not auto-approving it, and read-only file tools still auto-approve via
+    # hooks after the floor runs, so this adds NO read prompt on a stock install.
+    allowed = config.get("allowedTools")
+    if isinstance(allowed, list):
+        kept: list[str] = []
+        withheld: list[str] = []
+        for ref in allowed:
+            if not isinstance(ref, str):
+                # A malformed non-string entry (e.g. a hand-edited override with
+                # `allowedTools: [1]`) would crash may_skip_gate's ref.startswith()
+                # and fault the whole build. It is not a valid tool ref, so drop it
+                # entirely rather than keep or audit it — matching the identical
+                # handling in rebuild_agent_config's final pass.
+                continue
+            (kept if _may_auto_approve(ref) else withheld).append(ref)
+        config["allowedTools"] = kept
+        if withheld:
+            # Withholding a grant is a permission DECISION, and folded in here this
+            # is the FIRST place a builtin that arrived straight from the shipped
+            # template (fs_read, code, …) loses its blanket auto-approve. Emit the
+            # SAME SEL event the other writers emit (identical operation name so it
+            # lands in one feed), tagged source=build_agent_config so an operator
+            # can tell the build-time floor pass from rebuild_agent_config's. A
+            # silent drop would leave no record of why a template tool now prompts.
+            # Auditing must never fail the build.
+            try:
+                sel().log_api_access(
+                    caller="system",
+                    operation="mcp_auto_approve_withheld",
+                    outcome="ok",
+                    source="build_agent_config",
+                    resources=(
+                        f"{', '.join(withheld)} mounted without auto-approve "
+                        "(governance floor/ceiling); calls go through the approval gate"
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — the audit must not break a build
+                logger.debug("SEL audit unavailable for withheld auto-approve", exc_info=True)
+
     # Default-model tracking ("managed" vs frozen) is recorded in the
     # agent_state sidecar by the install path (rebuild_agent_config), never as
     # a kiro-spec key — kiro-cli rejects unknown fields and would drop the whole

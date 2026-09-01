@@ -5332,3 +5332,161 @@ class TestSelHookRejectedRedaction:
         _sel_hook_rejected("preToolUse", "c" * 250, "denied")
         assert len(events) == 1
         assert events[0].resources == f"event=preToolUse command={'c' * 200}"
+
+
+# The floor-scoped builtins: their governance scope intersects
+# _FLOOR_GATE_SCOPES ({filesystem.read, filesystem.write, commands}), so
+# may_skip_gate_now declines them for blanket auto-approve even on an ungoverned
+# host. `code` (commands, tools, filesystem.write) is the sharpest of these: it
+# writes files and can shell out, so it must never ship on an auto-approve list.
+_FLOOR_BUILTINS = {"fs_read", "code", "glob", "grep"}
+# Non-floor grants the shipped template lists: these auto-approve fine even
+# ungoverned, so the floor pass must KEEP them.
+_NON_FLOOR_BUILTINS = {"web_fetch", "web_search", "introspect", "session", "report"}
+
+
+class TestBuildAgentConfigFloorPass:
+    """#: the final auto-approve floor pass is folded into ``build_agent_config``.
+
+    ``allowedTools`` is kiro-cli's blanket auto-approve list — the one path that
+    never reaches the PreToolUse gate — and the floor builtins (fs_read, code,
+    glob, grep) arrive on it straight from the shipped template. Previously only
+    ``rebuild_agent_config`` filtered that list, so ``_install_research_agent`` —
+    which writes ``build_agent_config()``'s output untouched — shipped
+    ``kirocrew-research.json`` with ``code`` still auto-approved in the least
+    supervised context (the Research Lab autonudge worker). Folding the pass into
+    ``build_agent_config`` closes that gap for every caller. These tests assert the
+    floor builtins are ABSENT from the produced ``allowedTools``, so they FAIL if
+    the fold-in is reverted.
+    """
+
+    def test_build_agent_config_drops_floor_builtins_from_allowed_tools(self) -> None:
+        from kiro_crew.agent import build_agent_config
+
+        cfg = build_agent_config()
+        allowed = cfg["allowedTools"]
+        assert isinstance(allowed, list)
+
+        # No floor builtin is auto-approved (the regression the fold-in fixes).
+        assert not (_FLOOR_BUILTINS & set(allowed)), (
+            f"floor builtins still on the blanket auto-approve list: "
+            f"{_FLOOR_BUILTINS & set(allowed)}"
+        )
+        # `code` specifically — it writes files and can shell out.
+        assert "code" not in allowed
+
+        # The non-floor grants are retained (the floor pass must not over-filter).
+        assert _NON_FLOOR_BUILTINS.issubset(set(allowed)), (
+            f"non-floor grants dropped: {_NON_FLOOR_BUILTINS - set(allowed)}"
+        )
+        # The managed-server grants survive too.
+        assert any(str(r).startswith("@kirocrew-cron") for r in allowed)
+        assert "@kirocrew-core" in allowed
+
+    def test_build_agent_config_allowed_tools_all_satisfy_predicate(self) -> None:
+        """Every surviving ref passes the one predicate all writers consult."""
+        from kiro_crew.agent import build_agent_config
+        from kiro_crew.platform.governance import may_skip_gate_now
+
+        cfg = build_agent_config()
+        for ref in cfg["allowedTools"]:
+            assert may_skip_gate_now(ref), f"{ref!r} should not be auto-approved"
+
+    def test_build_agent_config_leaves_tools_mount_intact(self) -> None:
+        """Only ``allowedTools`` is filtered; the ``tools`` mount list is untouched.
+
+        Mounting a tool is not auto-approving it — read-only file tools still
+        auto-approve via hooks after the floor runs — so the floor builtins must
+        stay MOUNTED (no read prompt added on a stock install), just not on the
+        blanket auto-approve list.
+        """
+        from kiro_crew.agent import build_agent_config
+
+        cfg = build_agent_config()
+        tools = set(cfg.get("tools", []))
+        assert _FLOOR_BUILTINS & tools, (
+            "the floor builtins were stripped from the tools mount list; only "
+            "allowedTools should be filtered"
+        )
+
+    def test_build_agent_config_drops_non_string_allowed_tools_entries(
+        self, monkeypatch
+    ) -> None:
+        """A malformed non-string entry is dropped silently, not kept or crashed on.
+
+        Mirrors ``rebuild_agent_config``'s handling: a hand-edited override with
+        ``allowedTools: [1]`` must not fault the whole build.
+        """
+        import kiro_crew.agent as agent_mod
+
+        real = agent_mod._load_json
+
+        def _inject(path):  # noqa: ANN001
+            data = real(path)
+            if isinstance(data, dict) and isinstance(data.get("allowedTools"), list):
+                data = dict(data)
+                data["allowedTools"] = [*data["allowedTools"], 123, None]
+            return data
+
+        monkeypatch.setattr(agent_mod, "_load_json", _inject)
+        cfg = agent_mod.build_agent_config()
+        assert all(isinstance(r, str) for r in cfg["allowedTools"])
+        assert 123 not in cfg["allowedTools"]
+
+
+class TestInstallResearchAgentFloorSafe:
+    """``_install_research_agent`` inherits the floor pass via ``build_agent_config``.
+
+    It derives from the kirocrew agent and writes the config straight to disk, so
+    before the fold-in it shipped the template's floor builtins on the blanket
+    auto-approve list. Driving it into a tmp agents dir and reading the written
+    JSON pins that ``code`` (and every floor builtin) is now absent from
+    ``allowedTools`` while the tools stay mounted.
+    """
+
+    def _write_research(self, tmp_path: Path, monkeypatch) -> dict:
+        import kiro_crew.agent as agent_mod
+
+        agents_dir = tmp_path / "kiro_agents"
+        monkeypatch.setattr(agent_mod, "kiro_agents_dir_path", lambda: agents_dir)
+        agent_mod._install_research_agent()
+        written = agents_dir / agent_mod._RESEARCH_AGENT_FILENAME
+        return json.loads(written.read_text())
+
+    def test_research_spec_has_no_floor_builtin_auto_approved(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        data = self._write_research(tmp_path, monkeypatch)
+        assert data["name"] == "kirocrew-research"
+        allowed = data["allowedTools"]
+        assert "code" not in allowed, (
+            "kirocrew-research shipped `code` on the blanket auto-approve list"
+        )
+        assert not (_FLOOR_BUILTINS & set(allowed)), (
+            f"floor builtins auto-approved in research spec: "
+            f"{_FLOOR_BUILTINS & set(allowed)}"
+        )
+
+    def test_research_spec_every_allowed_ref_satisfies_predicate(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression: the research spec agrees with the floor invariant.
+
+        Every ref on the research spec's auto-approve list must satisfy the same
+        predicate ``kirocrew.json`` is held to, so the two Crew-authored specs do
+        not drift apart on the floor.
+        """
+        from kiro_crew.platform.governance import may_skip_gate_now
+
+        data = self._write_research(tmp_path, monkeypatch)
+        for ref in data["allowedTools"]:
+            assert may_skip_gate_now(ref), f"{ref!r} should not be auto-approved"
+
+    def test_research_spec_keeps_tools_mounted(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The floor builtins stay MOUNTED on the research spec (only auto-approve filtered)."""
+        data = self._write_research(tmp_path, monkeypatch)
+        assert _FLOOR_BUILTINS & set(data.get("tools", [])), (
+            "the research spec lost its tools mount; only allowedTools should be filtered"
+        )
