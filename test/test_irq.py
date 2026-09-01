@@ -41,20 +41,53 @@ from kiro_crew.irq import (
 _COALESCE = 0.01
 
 
+class _Clock:
+    """A controllable time source threaded into ``run()`` as its ``clock``.
+
+    It starts at the real ``time.time()`` so on-disk state seeded with real
+    epoch offsets (``opened_at = time.time() - 600``, ``alerted red:a = 2**40``)
+    still reads correctly, and it only moves when a test moves it. That makes
+    the floor/cap/age math exact: an interval the test does not advance cannot
+    expire, so the 'has NOT waited' assertions stop racing wall-clock
+    scheduling on a loaded runner.
+    """
+
+    def __init__(self) -> None:
+        self._now = time.time()
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+#: The fake clock for the current test, reset per test by ``_isolated_home``.
+_CLOCK = _Clock()
+
+
 def _settle() -> None:
-    """Advance wall clock past ``_COALESCE`` so an OPEN window may now fire.
+    """Advance the fake clock past ``_COALESCE`` so an OPEN window may now fire.
 
     A window cannot open and fire within one tick -- ``elapsed`` is zero at
     the moment it opens -- so every coalesced wake costs at least one extra
     tick. See ``test_coalesced_wake_always_costs_an_extra_tick``.
+
+    This steps the injected clock instead of sleeping real wall clock: time
+    only moves when the test moves it, which makes the floor assertions exact
+    (and drops the per-tick sleep from the suite).
     """
-    time.sleep(_COALESCE * 3)
+    _CLOCK.advance(_COALESCE * 3)
 
 
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
     """Point the kernel's state directory at a private tmp home."""
     monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+    # Fresh clock per test, seeded at real wall time, so disk-seeded epoch
+    # offsets stay valid and no time bleeds between tests.
+    global _CLOCK
+    _CLOCK = _Clock()
     return tmp_path
 
 
@@ -80,6 +113,7 @@ class ScriptedProbe(Probe):
 
 def _verdict(probe: Probe, ctx=None, **kwargs):
     """Run one tick and return the raised verdict exception."""
+    kwargs.setdefault("clock", _CLOCK)
     try:
         run(ctx or _ctx(), probe, **kwargs)
     except (Skip, Report, Done) as exc:
@@ -767,7 +801,7 @@ def test_a_sticky_key_is_dropped_once_past_the_realert_window():
         ]
     )
     assert isinstance(_verdict(probe, coalesce_secs=0, realert_secs=0.01), Report)
-    time.sleep(0.05)
+    _CLOCK.advance(0.05)
     assert isinstance(_verdict(probe, coalesce_secs=0, realert_secs=0.01), Skip)
     state = load_state(state_path("test-kind", "sub-1", "job-1"))
     assert not [k for k in state.get("alerted", {}) if "comment:1" in k]
@@ -806,7 +840,7 @@ def test_state_written_before_the_sentinels_existed_costs_no_extra_wake():
     path = state_path("test-kind", "sub-1", "job-1")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"epoch": "e1", "alerted": {"red:a": time.time()}}), encoding="utf-8"
+        json.dumps({"epoch": "e1", "alerted": {"red:a": _CLOCK()}}), encoding="utf-8"
     )
     probe = ScriptedProbe([Tick(epoch="e1", observations=[_wake("red:a")])])
     assert isinstance(_verdict(probe, coalesce_secs=0), Skip)

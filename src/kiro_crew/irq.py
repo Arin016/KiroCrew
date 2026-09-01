@@ -68,6 +68,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.cron_script import Done, Report, Skip
@@ -521,6 +522,7 @@ def run(
     max_consecutive_errors: int = DEFAULT_MAX_CONSECUTIVE_ERRORS,
     coalesce_secs: float = DEFAULT_COALESCE_SECS,
     coalesce_max_secs: float = DEFAULT_COALESCE_MAX_SECS,
+    clock: Callable[[], float] = time.time,
 ) -> None:
     """Run one tick of *probe* and raise the kernel's verdict.
 
@@ -562,6 +564,11 @@ def run(
     convergence that never happened. ``coalesce_max_secs`` is the wall-clock
     wall for a ``pending`` count that never drains, so the worst case is a
     delayed wake, never a dropped one.
+
+    ``clock`` is the wall-clock source, injectable so tests can freeze it and
+    step it by hand: with a clock that only moves when the test moves it, the
+    floor/cap/age math becomes exact instead of racing real scheduling. It
+    defaults to ``time.time``; production callers pass nothing.
     """
     try:
         subject_kind, subject_id = probe.identity(ctx)
@@ -681,7 +688,7 @@ def run(
             # persisted count passes the threshold and never equals it again.
             alerted = state.setdefault("alerted", {})
             blind_ts = _coerce_ts(alerted.get("blind"))
-            now = time.time()
+            now = clock()
             # 0 <= elapsed: a future timestamp (clock rollback, corrupt
             # state) must read as stale, not suppress the alert forever.
             fresh = blind_ts is not None and 0 <= now - blind_ts < realert_secs
@@ -758,7 +765,7 @@ def run(
             state["coalescing"] = carried_window
 
     alerted = state.setdefault("alerted", {})
-    now = time.time()
+    now = clock()
 
     # Epoch-scoped keys are bounded by the epoch reset that wipes them. Sticky
     # keys have no such bound, so a long-lived watch on a busy subject would
