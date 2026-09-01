@@ -520,9 +520,19 @@ export function useVirtualChat<T>(
   const rebaseScheduledRef = useRef(false)
   /** Previous render's identity. `items` is held because `itemsRef` has already
    *  advanced by the time the capture runs, while the mounted nodes still carry
-   *  the PREVIOUS commit's indices. */
-  const prependPrevRef = useRef<{ session: string; count: number; firstKey: string | null; items: T[] }>({
-    session: sessionId, count: itemCount, firstKey: null, items,
+   *  the PREVIOUS commit's indices. `getKey` is held WITH them: a caller's
+   *  getKey may be index-addressed (ChatPage resolves a per-render deduped key
+   *  LIST), so only the getKey of the same render prices these items correctly —
+   *  the current render's closure would return the NEW list's key at the old
+   *  index, misnaming the anchor by the inserted count. */
+  const prependPrevRef = useRef<{
+    session: string
+    count: number
+    firstKey: string | null
+    items: T[]
+    getKey: (it: T, i: number) => string
+  }>({
+    session: sessionId, count: itemCount, firstKey: null, items, getKey,
   })
   const prependPrev = prependPrevRef.current
   const prependFirstKey = itemCount > 0 ? getKey(items[0], 0) : null
@@ -547,7 +557,9 @@ export function useVirtualChat<T>(
       ? captureTopAnchorFrom(prependEl, elIndexRef.current.entries(), (idx) => {
           const it = prependPrev.items[idx]
           if (!it) return null
-          const k = getKey(it, idx)
+          // Previous items resolve through the getKey captured WITH them — see
+          // prependPrevRef's doc for why the current closure misnames them.
+          const k = prependPrev.getKey(it, idx)
           return survivingKeys.has(k) ? k : null
         })
       : null
@@ -566,7 +578,7 @@ export function useVirtualChat<T>(
     prependPrev.session === sessionId &&
     prependPrev.firstKey !== null &&
     prependFirstKey === prependPrev.firstKey
-  prependPrevRef.current = { session: sessionId, count: itemCount, firstKey: prependFirstKey, items }
+  prependPrevRef.current = { session: sessionId, count: itemCount, firstKey: prependFirstKey, items, getKey }
 
   // Window range for what is currently mounted. Initial state is the TAIL of
   // the list (last ~overscan+1 items) — chat sessions always open at the
@@ -1308,6 +1320,15 @@ export function useVirtualChat<T>(
         const it = itemsRef.current[idx]
         if (!it) continue
         const newH = measureBorderBoxHeight(entry.target as HTMLElement)
+        // A 0 here is a hidden ancestor (display:none tab/panel makes the
+        // observer report an empty content box), not a row height. Writing it
+        // would poison the cache — persisted per session — pricing the whole
+        // region at ~1px/row (heightAt's floor) until every row remounts, and
+        // collapsing offsetBefore into the blank-above symptom. The measureRef
+        // seed path applies the same h > 0 floor; skipping loses nothing
+        // because re-showing the ancestor fires the observer again with the
+        // real size.
+        if (newH <= 0) continue
         // Resolved at call time, never captured: a callback that closed over the
         // owner would keep writing into the PREVIOUS session's heights after a
         // slot switch -- the same wrong-transcript class this owner exists to

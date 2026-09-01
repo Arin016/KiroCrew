@@ -61,6 +61,36 @@ function Harness({ items, scrollerRef }: {
   )
 }
 
+/** Same transcript, but getKey is INDEX-ADDRESSED the way ChatPage's is: a
+ *  per-render key LIST looked up by position (ChatPage builds a deduped
+ *  `rowKeys` array and its getKey returns `rowKeys[i]`). The function ignores
+ *  the item argument and changes identity every render — so it only prices an
+ *  item correctly when paired with the items of its OWN render. The prepend
+ *  capture resolves the PREVIOUS render's items and must therefore use the
+ *  getKey snapshotted with them; this harness is what gives that contract a
+ *  failing shape. */
+function PositionalHarness({ items, scrollerRef }: {
+  items: Item[]
+  scrollerRef: RefObject<HTMLDivElement | null>
+}) {
+  const keys = items.map((it) => it.id)
+  const positionalGetKey = (_it: Item, i: number) => keys[i] ?? `oob-${i}`
+  const v = useVirtualChat<Item>({
+    items, sessionId: 'prepend-pos', getKey: positionalGetKey, overscan: 2, externalScrollerRef: scrollerRef,
+  })
+  return (
+    <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+      <div ref={v.topSentinelRef} data-sentinel="top" />
+      <div data-spacer="before" style={{ height: v.offsetBefore }} />
+      {v.virtualItems.map((it) => (
+        <div key={it.key} data-index={it.index} data-key={it.key} ref={v.measureRef(it.index)} />
+      ))}
+      <div data-spacer="after" style={{ height: v.offsetAfter }} />
+      <div ref={v.bottomSentinelRef} data-sentinel="bottom" />
+    </div>
+  )
+}
+
 /** Topmost row still visible (bottom edge below the viewport top), by virtual
  *  key — the identity that survives the index shift a prepend causes. */
 function topVisible(el: HTMLElement): { key: string; idx: number; top: number } | null {
@@ -176,10 +206,10 @@ describe('useVirtualChat: prepend compensation (load older history)', () => {
 
   /** Mounts 30 rows, then scrolls up so stick is released and the window sits
    *  mid-transcript — the state a user reading history is in. */
-  function mountScrolledUp() {
+  function mountScrolledUp(H: typeof Harness = Harness) {
     const scrollerRef: RefObject<HTMLDivElement | null> = { current: null }
     let scrollTop = 0
-    const view = rtlRender(<Harness items={mkItems(30)} scrollerRef={scrollerRef} />)
+    const view = rtlRender(<H items={mkItems(30)} scrollerRef={scrollerRef} />)
     const el = scrollerRef.current!
     Object.defineProperty(el, 'scrollTop', {
       configurable: true, get: () => scrollTop, set: (v: number) => { scrollTop = v },
@@ -269,6 +299,62 @@ describe('useVirtualChat: prepend compensation (load older history)', () => {
     const survivorAfter = screenTopOf(el, survivor.key)
     expect(survivorAfter).not.toBeNull()
     expect(Math.abs(survivorAfter! - survivor.top)).toBeLessThanOrEqual(1)
+    expect(readScrollTop()).toBeGreaterThan(beforeTop)
+  })
+
+  it('shows no blank band when a prepend retires EVERY visible key (no anchor to bind)', () => {
+    const { el, view, scrollerRef, readScrollTop } = mountScrolledUp()
+
+    const visible = visibleByIndex(el)
+    expect(visible.length).toBeGreaterThan(0)
+    const scrollBefore = readScrollTop()
+
+    // A prepend whose commit ALSO retires every previously-visible key (a
+    // wholesale refresh regrouping the transcript). No anchor survives, so the
+    // capture stands down entirely: no stage is set, part 1 never shifts the
+    // window, and the reading position is (acceptably) lost — but the window
+    // must still resolve to a range that covers the viewport, not strand it in
+    // spacer. Pins the deliberate no-anchor design so a future change to the
+    // capture cannot introduce a shift-without-correction path unnoticed.
+    act(() => {
+      view.rerender(
+        <Harness items={[...mkItems(10, 'p'), ...mkItems(30, 'r')]} scrollerRef={scrollerRef} />,
+      )
+    })
+
+    // Not vacuous: the old keys are genuinely gone (the anchor had nothing to
+    // bind to) and no correction moved the viewport.
+    for (const v of visible) expect(screenTopOf(el, v.key)).toBeNull()
+    expect(readScrollTop()).toBe(scrollBefore)
+
+    // No blank band: a mounted row still covers the viewport top.
+    const after = visibleByIndex(el)
+    expect(after.length).toBeGreaterThan(0)
+    expect(after[0].top).toBeLessThanOrEqual(1)
+  })
+
+  it('holds the reading position across a prepend when getKey is INDEX-ADDRESSED (ChatPage shape)', () => {
+    const { el, view, scrollerRef, readScrollTop } = mountScrolledUp(PositionalHarness)
+
+    const before = topVisible(el)
+    expect(before).not.toBeNull()
+    const beforeTop = readScrollTop()
+
+    // The capture resolves the PREVIOUS render's items at their OLD indices.
+    // A positional getKey answers that correctly only through the snapshot
+    // taken with those items — resolving them through the CURRENT render's
+    // closure returns the new list's key at the old index (a row 10 positions
+    // earlier), misnaming the anchor: the correction then either no-ops or
+    // yanks the viewport to the wrong row.
+    act(() => {
+      view.rerender(
+        <PositionalHarness items={[...mkItems(10, 'p'), ...mkItems(30)]} scrollerRef={scrollerRef} />,
+      )
+    })
+
+    const afterTop = screenTopOf(el, before!.key)
+    expect(afterTop).not.toBeNull()
+    expect(Math.abs(afterTop! - before!.top)).toBeLessThanOrEqual(1)
     expect(readScrollTop()).toBeGreaterThan(beforeTop)
   })
 

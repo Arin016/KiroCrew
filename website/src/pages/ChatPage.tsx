@@ -463,6 +463,64 @@ export function virtualKeyFor(
   return turnLeadKey(it, msgKey)
 }
 
+/** Virtualizer keys for the WHOLE display list, with a collision tie-break.
+ *
+ *  `virtualKeyFor` is not unique across the list: a `single` keys on
+ *  `msgKey` alone (`row-<ts>`), and a coarse OS clock can stamp two rows
+ *  appended in one tick with the same `ts` — the exact hazard `msgIdentityKey`
+ *  closes for group leads. Two rows sharing one key reach React as duplicate
+ *  siblings (one is silently dropped from the DOM — content visibly missing)
+ *  and share one HeightCache slot (each re-measure of either row reprices the
+ *  other, oscillating the spacers). Same failure from an overlapping older
+ *  page whose rows lack the `meta.mid` the prepend dedup keys on.
+ *
+ *  The tie-break is positional among COLLIDERS ONLY: the first occurrence
+ *  keeps the bare key — so the common case is byte-identical to
+ *  `virtualKeyFor` and every cached height, DOM node, and scroll anchor keyed
+ *  before this pass survives — and each later duplicate gets an occurrence
+ *  suffix. Deterministic for a given list order, so keys are stable across
+ *  re-renders. An insert BEFORE a collider shifts which physical row holds
+ *  the bare key: those rows remount (a `~#N` height or scroll anchor
+ *  persisted under the old occupant can also go stale until re-measured) —
+ *  bounded to rows that previously rendered broken (dropped sibling), and
+ *  strictly better than that render.
+ *
+ *  NOT folded into `virtualKeyFor`: uniqueness is a property of the list, not
+ *  of one row, and a per-row `~mid` suffix instead would rename every
+ *  streamed/optimistic row (which lacks `mid`) at the post-turn `refreshSlot`
+ *  rebuild (which carries it) — a mass remount per turn end. */
+/** Tie-break suffix for colliding virtualizer keys. Key plumbing only — the
+ *  string never renders as user-visible text. */
+const DUP_KEY_SUFFIX = '~#'
+
+export function uniqueRowKeys(
+  items: readonly DisplayItem[],
+  msgKey: (m: ChatMessage) => string,
+): string[] {
+  const seen = new Map<string, number>()
+  return items.map((it, i) => {
+    const base = virtualKeyFor(it, i, msgKey)
+    const n = seen.get(base)
+    if (n === undefined) {
+      seen.set(base, 1)
+      return base
+    }
+    // The suffixed candidate is re-checked against `seen` too: a NATURAL key
+    // can spell `<base>~#1` (msgKey passes through arbitrary meta), so
+    // emitting the suffix unchecked would reintroduce the duplicate this
+    // function exists to remove.
+    let count = n
+    let candidate = `${base}${DUP_KEY_SUFFIX}${count}`
+    while (seen.has(candidate)) {
+      count++
+      candidate = `${base}${DUP_KEY_SUFFIX}${count}`
+    }
+    seen.set(base, count + 1)
+    seen.set(candidate, 1)
+    return candidate
+  })
+}
+
 /** React key for a message row's INNER bubble (the virtualizer row key is
  *  virtualKeyFor). Prefer the optimistic client ts (stashed by the steer-echo
  *  reconcile, and stamped at birth on streaming/thinking messages) over the
@@ -5874,9 +5932,22 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     if (!id) { id = `mid-${msgIdSeq.current++}`; msgIds.current.set(m, id) }
     return id
   }, [])
+  const rowKeys = useMemo(
+    () => uniqueRowKeys(displayItems, stableMsgKey),
+    [displayItems, stableMsgKey],
+  )
+  // Index lookup into the deduped list, so this getKey prices an item
+  // correctly ONLY against the displayItems of its own render. Live consumers
+  // pair getKeyRef with itemsRef from the same tick; the one stale-ITEMS
+  // consumer — the prepend anchor capture — snapshots getKey ALONGSIDE the
+  // previous items (see prependPrevRef in useVirtualChat). The window-shift /
+  // tail-append captures read previous-commit DOM indices through the current
+  // render, which stays correct in the shapes they fire on (indices before
+  // the change point keep both item and bare key). The fallback covers only
+  // an out-of-range probe.
   const virtualKey = useCallback(
-    (it: DisplayItem, i: number) => virtualKeyFor(it, i, stableMsgKey),
-    [stableMsgKey],
+    (it: DisplayItem, i: number) => rowKeys[i] ?? virtualKeyFor(it, i, stableMsgKey),
+    [rowKeys, stableMsgKey],
   )
 
   // (Sticky widget detection removed — widgets now unmount with the
