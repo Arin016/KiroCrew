@@ -49,7 +49,7 @@ from kiro_crew.sandbox import (
     wrap_argv,
     wrap_argv_async,
 )
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import redact_and_truncate, redact_credentials, redact_exfiltration_urls
 
 from ._shared import _get_memory, _is_restricted_session, _redact_memory_field, read_bounded_json
 from .cron import _recognize_session
@@ -71,6 +71,12 @@ _history_write_lock = LoopBoundLock()
 # would 409. Safe to bound ONLY because the candidate is gated — an abandoned
 # loader publishes into an embedder we close, and close() is terminal.
 _MODEL_LOAD_TIMEOUT_SECS = 600.0
+
+# Log-line budget for pip/ensurepip stderr in the warnings below. The bound is
+# applied by redact_and_truncate AFTER redaction runs over the FULL decoded
+# stderr, so a credential straddling the boundary cannot survive as an
+# unredacted fragment (the redact-before-bound invariant; see security.py).
+_PIP_STDERR_LOG_CHARS = 500
 
 
 def _sel():
@@ -900,7 +906,10 @@ async def _ensure_pip_available() -> tuple[bool, str]:
             logger.warning("ensurepip bootstrap timed out")
             return False, "pip bootstrap (ensurepip) timed out"
         if proc.returncode != 0:
-            logger.warning("ensurepip bootstrap failed: %s", stderr.decode()[:500])
+            logger.warning(
+                "ensurepip bootstrap failed: %s",
+                redact_and_truncate(stderr.decode(errors="replace"), _PIP_STDERR_LOG_CHARS),
+            )
             return False, "pip bootstrap (ensurepip) failed"
         importlib.invalidate_caches()
         logger.info("Bootstrapped pip via ensurepip")
@@ -1051,7 +1060,12 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
                             {"error": "faiss-cpu install timed out."}, status=500,
                         )
                     if proc.returncode != 0:
-                        logger.warning("faiss-cpu install failed: %s", stderr.decode()[:500])
+                        logger.warning(
+                            "faiss-cpu install failed: %s",
+                            redact_and_truncate(
+                                stderr.decode(errors="replace"), _PIP_STDERR_LOG_CHARS
+                            ),
+                        )
                         _embedding_setup_status = {
                             "step": "idle",
                             "error": "faiss-cpu installation failed — click Enable to retry",
