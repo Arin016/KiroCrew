@@ -470,8 +470,9 @@ interface ChatInputProps {
    *  chip debounces, and the row can advance inside that window); `undefined`
    *  when no `followUpSourceKey` is supplied. */
   onFollowUpSelect?: (option: string, event: React.MouseEvent, sourceKeyAtClick?: string | null) => void
-  /** Double-click a follow-up option — send with option text directly (bypasses setInput race) */
-  onFollowUpSend?: (text?: string) => void
+  /** Immediate send (double-click / Send-now). Second arg is the click-time
+   *  row identity FollowUpBar already snapshots for onSelect. */
+  onFollowUpSend?: (text?: string, sourceKeyAtClick?: string | null) => void
   /** Quick Send enabled — clicking sends immediately */
   quickSend?: boolean
   /** Layout mode for the follow-up bar: 'multiline' (default) or 'scroll' (original single-line). */
@@ -1241,8 +1242,8 @@ function ChatInput({
     if (steerActive && onSteer) onSteer()
     else onSend()
   }, [disabled, voiceTranscribing, steerActive, onSteer, onSend])
-  const sendFollowUp = useCallback((text?: string) => {
-    if (!disabled) onFollowUpSend?.(text)
+  const sendFollowUp = useCallback((text?: string, sourceKeyAtClick?: string | null) => {
+    if (!disabled) onFollowUpSend?.(text, sourceKeyAtClick)
   }, [disabled, onFollowUpSend])
   const { botName } = useBranding()
   const isMobile = useIsMobile()

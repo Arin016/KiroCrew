@@ -15,8 +15,13 @@ interface FollowUpBarProps {
    * every existing caller keeps typechecking and behaves exactly as before.
    */
   onSelect: (option: string, event: React.MouseEvent, sourceKeyAtClick?: string | null) => void
-  /** Double-click sends with this option's text directly (bypasses setInput race). */
-  onSend?: (text?: string) => void
+  /**
+   * Immediate send (double-click / Send-now). Second arg is the row identity
+   * captured on the FIRST click of the gesture — same snapshot `onSelect`
+   * already receives — so a footer that replaces the reused chip between the
+   * two clicks of a double-click cannot approve the replacement stage.
+   */
+  onSend?: (text?: string, sourceKeyAtClick?: string | null) => void
   quickSend?: boolean
   /** 'multiline' (default) wraps onto multiple rows; 'scroll' is a single-line horizontally-scrollable view. */
   layout?: FollowUpLayout
@@ -231,7 +236,7 @@ interface ChipProps {
   picked: ReadonlySet<string>
   quickSend: boolean | undefined
   onSelect: (option: string, event: React.MouseEvent, sourceKeyAtClick?: string | null) => void
-  onSend?: (text?: string) => void
+  onSend?: (text?: string, sourceKeyAtClick?: string | null) => void
   className: string
   /** Position in the row, used for the entrance stagger. */
   index: number
@@ -252,6 +257,11 @@ interface ChipProps {
  */
 function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className, index, animating, sourceKey }: ChipProps) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // First-click row identity for the in-flight gesture. A double-click is
+  // click(detail=1) then dblclick; the footer can be replaced on the reused
+  // chip between those two, so onSend must use the key from the FIRST click,
+  // not whatever row is current when the second lands.
+  const armedSourceKeyRef = useRef<string | null | undefined>(undefined)
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current) }, [])
 
   const useDebouncedClick = !!onSend && !(quickSend && !isPicked && picked.size === 0)
@@ -305,17 +315,21 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
     // current now". Read through the render closure deliberately: a ref would
     // be re-read when the timer fires, which is exactly the bug.
     const sourceKeyAtClick = sourceKey
+    armedSourceKeyRef.current = sourceKeyAtClick
     timerRef.current = setTimeout(() => {
       timerRef.current = null
+      armedSourceKeyRef.current = undefined
       onSelect(option, synth, sourceKeyAtClick)
     }, FOLLOWUP_CHIP_DEBOUNCE_MS)
   }
 
-  const handleDoubleClick = () => {
+  const handleImmediateSend = () => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
+    const clickedKey = armedSourceKeyRef.current !== undefined ? armedSourceKeyRef.current : sourceKey
+    armedSourceKeyRef.current = undefined
     // Pass option text directly to send() so it doesn't race with setInput.
     // If already picked, send() will use the current input (which already contains o).
-    onSend?.(isPicked ? undefined : option)
+    onSend?.(isPicked ? undefined : option, clickedKey)
   }
 
   // Inside the split-button wrapper the WRAPPER (below) is the capped, shrink-0
@@ -333,7 +347,7 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
       // prompt clears"). Deliberate keyboard (tab) activation still toggles.
       onMouseDown={(e) => e.preventDefault()}
       onClick={handleClick}
-      onDoubleClick={handleDoubleClick}
+      onDoubleClick={handleImmediateSend}
       className={mainChipClassName}
       style={showSendSegment ? undefined : entrance.style}
       title={title}
@@ -358,7 +372,7 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
         aria-label={i18nT('components.followUpBar.send_now_2', { option })}
         title={i18nT('components.followUpBar.send_now')}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={(e) => { e.stopPropagation(); if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }; onSend?.(isPicked ? undefined : option) }}
+        onClick={(e) => { e.stopPropagation(); handleImmediateSend() }}
         className={sendSegmentClassName(isPicked)}
       >
         <ArrowUp size={13} />

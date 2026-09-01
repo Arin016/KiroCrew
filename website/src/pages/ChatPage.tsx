@@ -5271,6 +5271,19 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // `mode` prop is always '' — the slot's own mode is the source of truth for
   // header identity (Autopilot icon + tooltip).
   const effectiveMode = currentSlot?.mode || mode
+  // One spelling for every plan-chip gesture (single-click, double-click,
+  // Send-now). `sourceKeyAtClick` is the row the gesture started on.
+  const dispatchPlanFollowUp = (action: string, sourceKeyAtClick?: string | null): boolean => {
+    if (!(followUpIsPlan && isPlanAction(action) && effectiveMode === 'orchestrator' && activeSlot)) {
+      return false
+    }
+    planActionMutationRef.current.mutate({
+      slot: activeSlot,
+      action,
+      clickedSourceKey: sourceKeyAtClick,
+    })
+    return true
+  }
   const title = currentSlot?.title && currentSlot.title !== currentSlot.key ? currentSlot.title : activeSlot || ''
   const displayMode = approvalMode === 'yolo' ? 'yolo' : currentSlot?.trust ? 'trust' : currentSlot?.trust_reads ? 'trust_reads' : 'normal'
   // Resolve model for existing slots that don't have one stored
@@ -8063,7 +8076,13 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               onSend={() => send()}
               canSteer={composerBusy}
               onSteer={steer}
-              onFollowUpSend={(text?: string) => send(text)}
+              onFollowUpSend={(text?: string, sourceKeyAtClick?: string | null) => {
+                // Double-click and Send-now share dispatchPlanFollowUp with
+                // single-click (#6240). First-click row identity refuses a
+                // straddled double-click on a replaced footer.
+                if (text && dispatchPlanFollowUp(text, sourceKeyAtClick)) return
+                send(text)
+              }}
               disabled={
                 /* Streaming, compaction, and stopping all
                    keep the input interactive: api_chat queues on slot.running and
@@ -8239,17 +8258,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 // Plan options (Go / Go All / Cancel) dispatch directly — no input fill.
                 // Non-protocol labels on a plan-shaped message keep the composer path:
                 // the endpoint would 400 them while the append was already skipped.
-                if (followUpIsPlan && isPlanAction(o) && effectiveMode === 'orchestrator' && activeSlot) {
-                  // No isPending pre-check: single-flight lives in the hook's
-                  // per-slot latch, which drops a duplicate Go/Go All but lets
-                  // Cancel through — a render-scoped isPending check would
-                  // swallow the stop control while a Go settles.
-                  // `sourceKeyAtClick` is the row the click was made on (the
-                  // chip debounces 220ms and an identical replacement footer
-                  // does not remount it); the hook refuses a stale one.
-                  planActionMutationRef.current.mutate({ slot: activeSlot, action: o, clickedSourceKey: sourceKeyAtClick })
-                  return
-                }
+                if (dispatchPlanFollowUp(o, sourceKeyAtClick)) return
                 // One-click: enabled + no shift + not busy + not already in multi-select
                 if (tryQuickSend(o, dashCfg?.quick_send, e.shiftKey, slotRunning, followUpPickedRef.current.size, send)) return
                 // Regular options: toggle. Click unpicked → append + mark; click

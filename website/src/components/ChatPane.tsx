@@ -185,6 +185,15 @@ export default function ChatPane({
   // click handler see the in-flight state, not the render it closed over.
   const planActionMutation = usePlanActionMutation(slotKey, followUpSourceKey)
   const planActionMutationRef = useRef(planActionMutation); planActionMutationRef.current = planActionMutation
+  // One spelling for every plan-chip gesture (single-click, double-click,
+  // Send-now). `sourceKeyAtClick` is the row the gesture started on.
+  const dispatchPlanFollowUp = (action: string, sourceKeyAtClick?: string | null): boolean => {
+    if (!(followUpIsPlan && isPlanAction(action))) return false
+    if (!paneSlot) return true
+    if (paneSlot.mode !== 'orchestrator') return false
+    planActionMutationRef.current.mutate({ slot: slotKey, action, clickedSourceKey: sourceKeyAtClick })
+    return true
+  }
   const followUpOptionsKey = followUpOptions.join('\x00')
   useEffect(() => { setFollowUpPicked(new Set()) }, [followUpOptionsKey, slotKey])
   // Quick Send parity with ChatPage: same query key, so the cache is shared
@@ -808,27 +817,9 @@ export default function ChatPane({
             // chat. A plan-SHAPED message carrying non-protocol labels keeps
             // the composer path — dispatching those would 400 server-side
             // while also skipping the append, leaving a dead chip.
-            if (followUpIsPlan && isPlanAction(o)) {
-              // Slot record not yet delivered (the first WS slots snapshot
-              // can land after this pane hydrates its transcript from the
-              // detail fetch, e.g. on a reload with a restored grid): the
-              // mode is UNKNOWN, so neither dispatching nor appending is
-              // safe — appending would type an approval label into the
-              // composer, the reported bug. No-op until the record resolves.
-              if (!paneSlot) return
-              if (paneSlot.mode === 'orchestrator') {
-                // No isPending pre-check here: single-flight lives in the
-                // hook's per-slot latch, which drops a duplicate Go/Go All
-                // but must let Cancel through — a render-scoped isPending
-                // check would swallow the stop control while a Go settles.
-                // `sourceKeyAtClick` is the row the user actually clicked on
-                // (the chip debounces 220ms and the row can be replaced by a
-                // byte-identical footer inside that window without remounting
-                // the chip); the hook refuses it if it no longer matches.
-                planActionMutationRef.current.mutate({ slot: slotKey, action: o, clickedSourceKey: sourceKeyAtClick })
-                return
-              }
-            }
+            // Slot record not yet delivered: dispatchPlanFollowUp no-ops
+            // rather than appending an approval label (the reported bug).
+            if (dispatchPlanFollowUp(o, sourceKeyAtClick)) return
             // One-click Quick Send takes the same gate as ChatPage: enabled +
             // no shift + not busy + not already in multi-select.
             if (tryQuickSend(o, dashCfg?.quick_send, e.shiftKey, busy, followUpPickedRef.current.size, (t: string) => doSend(t))) return
@@ -863,7 +854,13 @@ export default function ChatPane({
               setFollowUpPicked(next)
             }
           }}
-          onFollowUpSend={(text?: string) => doSend(text)}
+          onFollowUpSend={(text?: string, sourceKeyAtClick?: string | null) => {
+            // Double-click and Send-now share dispatchPlanFollowUp with
+            // single-click (#6240). `sourceKeyAtClick` is the first-click
+            // row — a straddled double-click on a replaced footer is refused.
+            if (text && dispatchPlanFollowUp(text, sourceKeyAtClick)) return
+            doSend(text)
+          }}
           project={paneSlot?.project ?? ''}
           onUploadFiles={uploadFiles}
           pendingFiles={pendingFiles}
