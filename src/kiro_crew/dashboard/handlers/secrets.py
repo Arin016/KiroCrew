@@ -161,6 +161,14 @@ async def api_secrets_delete(request: web.Request) -> web.Response:
         )
 
     vault = SecretVault(config_dir())
+    # `vault.delete` is a no-op when the name is absent, so an unconditional
+    # `{"ok": true}` would report success for a mistyped name that was never
+    # stored — the SecretsPanel then re-fetches and still shows the old entry,
+    # leaving the user to think a delete failed silently. Check membership first
+    # and return 404 so a missing name is an explicit, actionable error.
+    names = await asyncio.to_thread(vault.list_names)
+    if name not in names:
+        return web.json_response({"error": "Secret not found", "code": "not_found"}, status=404)
     await vault.delete(name)
     logger.info("Vault entry '%s' deleted via dashboard", _sanitize_for_log(name))
     return web.json_response({"ok": True, "name": name})

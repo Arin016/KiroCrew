@@ -155,15 +155,45 @@ class TestApiSecretsDelete:
                 assert vault.get("TEST_KEY") is None
 
     @pytest.mark.asyncio
-    async def test_delete_nonexistent(self, vault_dir: Path) -> None:
+    async def test_deletes_secret_removes_from_list(self, vault_dir: Path) -> None:
+        """A successful DELETE removes the name from the vault; a subsequent list
+        no longer includes it.  Proves the membership check does not block the
+        actual deletion path."""
         app = _app()
 
         from aiohttp.test_utils import TestClient, TestServer
 
         with patch("kiro_crew.dashboard.handlers.secrets.config_dir", return_value=str(vault_dir)):
             async with TestClient(TestServer(app)) as client:
-                resp = await client.delete("/api/secrets/MISSING")
-                assert resp.status == 200  # delete is idempotent
+                resp = await client.delete("/api/secrets/TEST_KEY")
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["ok"] is True
+
+                list_resp = await client.get("/api/secrets")
+                assert list_resp.status == 200
+                names = (await list_resp.json())["names"]
+                assert "TEST_KEY" not in names
+                assert "DB_PASS" in names  # sibling entry untouched
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_returns_404(self, vault_dir: Path) -> None:
+        """DELETE of a name that was never stored returns 404 not_found.
+
+        Before the fix, vault.delete() was a silent no-op and the handler
+        returned 200 ok unconditionally, hiding mistyped names from the caller.
+        """
+        app = _app()
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        with patch("kiro_crew.dashboard.handlers.secrets.config_dir", return_value=str(vault_dir)):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.delete("/api/secrets/NONEXISTENT_NAME")
+                assert resp.status == 404
+                data = await resp.json()
+                assert data["code"] == "not_found"
+                assert "error" in data
 
 
 class TestApiSecretsOwnerAuthorization:
@@ -297,17 +327,29 @@ class TestApiSecretsLogInjection:
 
     @pytest.mark.asyncio
     async def test_crlf_in_delete_name_is_escaped_in_log(
-        self, vault_dir: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """A percent-encoded CR/LF in the path segment decodes to real control
+        characters in request.match_info["name"].  The handler must escape them
+        before logging so the emitted record cannot forge extra audit lines.
+
+        The name must actually exist in the vault so the handler reaches the
+        log statement (a non-existent name returns 404 before logging).
+        """
         app = _app()
 
         from aiohttp.test_utils import TestClient, TestServer
 
-        # A percent-encoded CR/LF in the path segment decodes to real control
-        # characters in request.match_info["name"].
-        with patch("kiro_crew.dashboard.handlers.secrets.config_dir", return_value=str(vault_dir)):
+        # Seed a vault entry whose name contains a literal CRLF.
+        injected_name = "x\r\nWARNING-forged"
+        vault = SecretVault(tmp_path)
+        vault._set_sync(injected_name, "v")
+
+        with patch("kiro_crew.dashboard.handlers.secrets.config_dir", return_value=str(tmp_path)):
             async with TestClient(TestServer(app)) as client:
                 with caplog.at_level(logging.INFO, logger="kiro_crew.dashboard.handlers.secrets"):
+                    # aiohttp URL-encodes the path when using client.delete(url)
+                    # with a plain string, so percent-encode manually.
                     resp = await client.delete("/api/secrets/x%0d%0aWARNING-forged")
                     assert resp.status == 200
 
