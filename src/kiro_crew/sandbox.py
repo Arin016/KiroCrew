@@ -6726,21 +6726,95 @@ def _resolve_spawn_target(
     return found
 
 
-def _absolutely_rooted_path(env: "Mapping[str, str] | None") -> "dict[str, str]":
-    """A copy of *env* whose ``PATH`` keeps only its absolute entries.
+def _pinned_spawn_path(
+    env: "Mapping[str, str] | None", *, chdir_fd: int | None = None
+) -> "dict[str, str]":
+    """A copy of *env* whose ``PATH`` keeps only entries safe under a pinned cwd.
 
     For resolving a command when the child's working directory is pinned by
-    descriptor: a relative entry (``''``, ``.``, ``tools``) is resolved against that
-    directory, which is the one place the pin says not to trust by name. Dropping
-    them can leave ``PATH`` empty, and that is the intended outcome -- the resolve
-    then raises ``FileNotFoundError`` exactly as an unresolvable command already
-    did, rather than silently searching somewhere else.
+    descriptor. Two screens, cheapest first:
+
+    * **Lexical** -- only absolute entries survive. A relative entry (``''``,
+      ``.``, ``tools``) is resolved against the pinned directory, which is the
+      one place the pin says not to trust by name.
+    * **Identity** (when *chdir_fd* is given) -- an absolute entry that IS the
+      pinned directory, or lives anywhere beneath it, is dropped too.
+      ``PATH=/home/me/.kiro/crew/workspace/bin:/usr/bin`` passes the lexical
+      screen unchanged, yet a binary planted behind such an entry wins the
+      child's own later lookup the moment the shim has entered the pinned
+      directory. Entries are compared by ``(st_dev, st_ino)`` ancestry walked
+      over descriptors -- never by pathname -- so a symlink or other alias of
+      the pinned directory cannot dodge the screen. A kept entry is emitted as
+      the OPENED descriptor's own canonical path, never the caller's spelling:
+      the child re-resolves its ``PATH`` strings later, so a spelling that
+      traverses a retargetable symlink could be pointed somewhere else between
+      this screen and that lookup. An entry that cannot be opened, walked, or
+      re-spelled is dropped, fail-closed per entry: an unopenable entry cannot
+      contribute a resolvable binary today, and dropping is the direction that
+      cannot be gamed by making a directory un-``stat``-able.
+
+    When the BOUND descriptor's own identity cannot be read there is nothing to
+    compare entries against, so the lexical screen stands alone for that spawn.
+    That is a deliberate degrade, not a silent fallback: in production
+    ``chdir_fd`` always originates from a real opened directory descriptor, and
+    one that cannot be ``fstat``-ed is one the shim's own ``fchdir`` rejects
+    before any command runs.
+
+    Dropping entries can leave ``PATH`` empty, and that is the intended outcome
+    -- the resolve then raises ``FileNotFoundError`` exactly as an unresolvable
+    command already did, rather than silently searching somewhere else.
     """
     source = dict(env if env is not None else os.environ)
     raw = source.get("PATH") or os.defpath
-    source["PATH"] = os.pathsep.join(
-        entry for entry in raw.split(os.pathsep) if entry and os.path.isabs(entry)
-    )
+    entries = [entry for entry in raw.split(os.pathsep) if entry and os.path.isabs(entry)]
+    bound_identity: "tuple[int, int] | None" = None
+    if chdir_fd is not None:
+        try:
+            bound_info = os.fstat(chdir_fd)
+        except OSError:
+            bound_identity = None
+        else:
+            bound_identity = (bound_info.st_dev, bound_info.st_ino)
+    if bound_identity is not None:
+        # Local import: hooks imports sandbox at call time, so a module-level
+        # dependency would be circular. `_fd_real_path` is private but already
+        # borrowed this way by `bound_agent_workspace_target` above; issue
+        # #6907 tracks promoting it to a shared home.
+        from kiro_crew.hooks import _fd_real_path
+
+        screened: list[str] = []
+        for entry in entries:
+            try:
+                entry_fd = _open_directory_descriptor(entry)
+            except OSError:
+                continue
+            try:
+                ancestors = _directory_ancestor_identities(entry_fd)
+                if bound_identity in ancestors:
+                    # The walk yields the entry's OWN identity first, so one
+                    # membership test covers both "the entry IS the pinned
+                    # directory" and "the entry lives beneath it".
+                    continue
+                # Keep the OPENED descriptor's own canonical path, never the
+                # caller's spelling. The child re-resolves whatever string ends
+                # up in its PATH, so a kept spelling that traverses a symlink
+                # could be retargeted between this screen and that lookup --
+                # the identity verified here must be the identity the child
+                # reaches. A canonical path has no symlink components, and one
+                # inside the pinned directory cannot exist here (its target
+                # would have failed the ancestry test above). Unresolvable ==
+                # dropped: falling back to the mutable spelling would reopen
+                # the window this screen exists to close.
+                resolved_entry = _fd_real_path(entry_fd)
+            except OSError:
+                continue
+            finally:
+                os.close(entry_fd)
+            if resolved_entry is None:
+                continue
+            screened.append(resolved_entry)
+        entries = screened
+    source["PATH"] = os.pathsep.join(entries)
     return source
 
 
@@ -6778,14 +6852,17 @@ async def create_subprocess_limited(
     re-verified would reopen the window the descriptor exists to close.
 
     Setting it also DROPS ``cwd`` from the spawn, since ``Popen`` would otherwise
-    chdir that pathname in the fork child before the shim ever runs, and narrows
-    ``PATH`` to its ABSOLUTE entries -- for the search that resolves a bare command
-    name here AND for the child's own environment. ``execvpe`` resolved a relative
-    entry against the child's cwd, the directory this descriptor exists to distrust,
-    and resolving ``argv[0]`` is not the last lookup that happens: the wrapper this
-    spawns looks its own target up on ``PATH`` after the shim has entered that
-    directory. ``PATH=.:/usr/bin`` would otherwise exec a binary out of the agent's
-    own workspace, ahead of the sandbox meant to contain it.
+    chdir that pathname in the fork child before the shim ever runs, and screens
+    ``PATH`` by directory IDENTITY -- for the search that resolves a bare command
+    name here AND for the child's own environment. Relative entries are dropped
+    (``execvpe`` resolved them against the child's cwd, the directory this
+    descriptor exists to distrust), and so is any absolute entry that is the
+    pinned directory itself or lives beneath it, compared by ``(st_dev, st_ino)``
+    ancestry rather than by pathname. Resolving ``argv[0]`` is not the last
+    lookup that happens: the wrapper this spawns looks its own target up on
+    ``PATH`` after the shim has entered that directory. ``PATH=.:/usr/bin`` --
+    or the same directory spelled absolutely -- would otherwise exec a binary
+    out of the agent's own workspace, ahead of the sandbox meant to contain it.
     """
     if "preexec_fn" in kwargs:
         raise TypeError(
@@ -6814,20 +6891,28 @@ async def create_subprocess_limited(
         kwargs["pass_fds"] = _pass_fds_including(kwargs.get("pass_fds"), chdir_fd)
         # THE INVARIANT: while the cwd is pinned by descriptor, NO resolution of a
         # program name -- not the one below, and not one the child performs later --
-        # may consult a relative PATH entry or the pinned directory. Three things
-        # enforce it together, and each was a hole on its own:
+        # may consult a relative PATH entry, the pinned directory, or anything
+        # inside it. Three things enforce it together, and each was a hole on its
+        # own:
         #
         # (a) `cwd` leaves the spawn. ``Popen`` chdirs it in the fork child BEFORE it
         #     execs the shim, so leaving it in place would resolve the very pathname
         #     the descriptor exists to bypass -- and fail the spawn outright
         #     (EACCES/ENOENT/ENOTDIR) if that name was removed or retargeted since the
         #     bind, with the pinned descriptor never reached.
-        # (b) The search below gets no cwd and an absolute-only PATH. A bare name IS
-        #     the normal shape here -- the macOS sandbox wrapper hands back "env" as
+        # (b) The search below gets no cwd and a PATH screened by directory IDENTITY:
+        #     relative entries are dropped, and so is any absolute entry that IS the
+        #     pinned directory or lives beneath it -- compared by (st_dev, st_ino)
+        #     ancestry, so an alias cannot dodge it; kept entries are re-spelled from
+        #     the verified descriptor, so a retargetable symlink in the caller's
+        #     spelling cannot redirect the child's later lookup. A bare name IS the
+        #     normal shape here -- the macOS sandbox wrapper hands back "env" as
         #     argv[0] and the Linux cgroup wrapper hands back "systemd-run" -- so the
         #     search cannot simply be refused, and `execvpe` resolved a relative entry
-        #     against the child's cwd, i.e. the pinned workspace.
-        # (c) The CHILD gets that same absolute-only PATH. Resolving argv[0] here is
+        #     against the child's cwd, i.e. the pinned workspace. An absolute entry
+        #     pointing INTO that workspace reaches the same binary by a different
+        #     spelling.
+        # (c) The CHILD gets that same screened PATH. Resolving argv[0] here is
         #     not the last resolution that happens: `env` looks `sandbox-exec` up on
         #     PATH itself, inside the child, after the shim has already entered the
         #     workspace. Narrowing only (b) left `PATH=.:/usr/bin` exec'ing a
@@ -6840,10 +6925,23 @@ async def create_subprocess_limited(
         # source, comments included, so writing either identifier here would make the
         # spawn chokepoint read as if it routed on its own behalf.
         kwargs.pop("cwd", None)
-        search_cwd = None
-        search_env = _absolutely_rooted_path(search_env)
+        pinned_env = search_env
+
+        def _screened_spawn_plan() -> "tuple[dict[str, str], str]":
+            # One worker-thread hop covers the identity screen AND the resolve:
+            # the screen opens and walks PATH entries and the resolve stats
+            # them, so a stalled NFS/autofs entry would block either one, and
+            # neither may freeze the event loop. Returning the screened env
+            # alongside the resolved target keeps clauses (b) and (c) fed from
+            # the SAME value by construction.
+            screened = _pinned_spawn_path(pinned_env, chdir_fd=chdir_fd)
+            if _needs_path_search(argv):
+                return screened, _resolve_spawn_target(argv, screened, None)
+            return screened, argv[0]
+
+        search_env, resolved = await asyncio.to_thread(_screened_spawn_plan)
         kwargs["env"] = search_env
-    if not _needs_path_search(argv):
+    elif not _needs_path_search(argv):
         # Explicit path: nothing to resolve, so no filesystem access and no
         # thread hop -- exec does the work.
         resolved = argv[0]
