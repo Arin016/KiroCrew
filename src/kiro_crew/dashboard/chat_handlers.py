@@ -890,12 +890,15 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
 async def api_chat_slots(request: web.Request) -> web.Response:
     """GET /api/chat/slots — list all chat slots."""
     state: DashboardState = request.app["state"]
-    # Credential-backed check status is owner-only. Non-owner and app-token
-    # callers receive source links but neither cached status nor provider work.
+    # Credential-backed check status is owner-only for PRIVATE repos. For a
+    # PUBLIC repo the lifecycle is world-visible, so an authenticated
+    # dashboard-user (non-owner) may see it too. App-token callers receive
+    # source links but neither cached status nor provider work.
     from kiro_crew.dashboard.handlers.source_providers import (
         ensure_gitlab_hosts_loaded,
         is_owner_dashboard_request,
         schedule_check_refresh,
+        schedule_visibility_refresh,
     )
 
     # Same warm-up as the WebSocket connect path: slot source-link extraction is
@@ -907,10 +910,17 @@ async def api_chat_slots(request: web.Request) -> web.Response:
         logger.debug("GitLab allowlist warm-up failed; chips may lag one round", exc_info=True)
 
     include_check_status = is_owner_dashboard_request(request)
-    payloads = state.serialize_slots(include_check_status=include_check_status)
+    is_dashboard_user = bool(request.get("is_dashboard_user"))
+    payloads = state.serialize_slots(
+        include_check_status=include_check_status, dashboard_user=is_dashboard_user
+    )
     if include_check_status:
-        # Issue links carry no check status — skip them so the scheduler never
-        # hands an issue URL to the pull-request-only chip fetch.
+        # Only the OWNER's GET drives provider work. Both the visibility probe
+        # and the status refresh run the operator's `gh`/`glab` credentials, so
+        # a non-owner request must trigger NEITHER (GPT #6789) — it renders the
+        # owner-populated caches read-only via the fail-closed is_repo_public
+        # gate in _project_source_links. Issue links carry no check status, so
+        # skip them (the fetch is pull-request-only).
         urls = [
             link["url"]
             for payload in payloads
@@ -918,6 +928,7 @@ async def api_chat_slots(request: web.Request) -> web.Response:
             if link.get("kind", "change") == "change"
         ]
         if urls:
+            schedule_visibility_refresh(urls, state.push_slots_update)
             schedule_check_refresh(urls, state.push_slots_update)
     return web.json_response(payloads)
 
@@ -988,7 +999,8 @@ async def api_chat_slot_source_links(request: web.Request) -> web.Response:
             "GitLab allowlist warm-up failed; expanded chips may lag one round", exc_info=True
         )
 
-    # Cached status only, owner-gated exactly like the list endpoint. No
+    # Cached status only, gated exactly like the list endpoint: owner sees all,
+    # a dashboard-user sees public-repo status, app tokens see none. No
     # schedule_check_refresh here: that pushes a `slots` update, which by
     # definition cannot carry links outside the budget, so the provider work
     # would produce a result this response can never show.
@@ -1000,7 +1012,10 @@ async def api_chat_slot_source_links(request: web.Request) -> web.Response:
     # the slot's messages -- these URLs are extracted FROM those messages, so
     # gating here would withhold nothing it does not already have.
     return web.json_response(
-        slot.source_links_payload(include_check_status=is_owner_dashboard_request(request))
+        slot.source_links_payload(
+            include_check_status=is_owner_dashboard_request(request),
+            dashboard_user=bool(request.get("is_dashboard_user")),
+        )
     )
 
 

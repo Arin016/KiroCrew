@@ -2207,7 +2207,63 @@ def _source_links_by_kind(links: list[dict]) -> tuple[list[dict], list[dict]]:
     return changes, issues
 
 
-def _project_source_links(links: list[dict], include_check_status: bool) -> list[dict]:
+# Deduplicated SEL audit of the non-owner public-repo status grant. This runs on
+# the per-link serialization path (every push broadcast), so an un-deduplicated
+# write would be unbounded — collapse to one event per URL per window, mirroring
+# ws_event_scope._audit_decision. AUTOSDE (backend-security-controls) requires a
+# SEL event for every permission decision, grants included.
+_PUBLIC_STATUS_GRANT_AUDIT: dict[str, float] = {}
+_PUBLIC_STATUS_DENY_AUDIT: dict[str, float] = {}
+_PUBLIC_STATUS_GRANT_WINDOW_SECS = 300.0
+
+
+def _audit_public_status_grant(url: str) -> None:
+    now = time.monotonic()
+    last = _PUBLIC_STATUS_GRANT_AUDIT.get(url)
+    if last is not None and (now - last) < _PUBLIC_STATUS_GRANT_WINDOW_SECS:
+        return
+    _PUBLIC_STATUS_GRANT_AUDIT[url] = now
+    try:
+        sel().log_api_access(
+            caller="dashboard-user",
+            operation="source_link_public_status",
+            outcome="allowed",
+            source="source_links",
+            resources=url,
+        )
+    except Exception:
+        logger.debug("SEL audit for public-status grant failed", exc_info=True)
+
+
+def _audit_public_status_denied(url: str) -> None:
+    # Symmetric to the grant audit: AUTOSDE backend-security-controls requires a
+    # SEL event for every permission DECISION, denials included. A non-owner
+    # dashboard user requested status on a repo that is NOT confirmed public
+    # (private / unknown / stale) and was denied — record it, deduplicated per
+    # URL per window (same hot per-link broadcast path as the grant).
+    now = time.monotonic()
+    last = _PUBLIC_STATUS_DENY_AUDIT.get(url)
+    if last is not None and (now - last) < _PUBLIC_STATUS_GRANT_WINDOW_SECS:
+        return
+    _PUBLIC_STATUS_DENY_AUDIT[url] = now
+    try:
+        sel().log_api_access(
+            caller="dashboard-user",
+            operation="source_link_public_status",
+            outcome="denied",
+            source="source_links",
+            resources=url,
+        )
+    except Exception:
+        logger.debug("SEL audit for public-status denial failed", exc_info=True)
+
+
+def _project_source_links(
+    links: list[dict],
+    include_check_status: bool,
+    *,
+    dashboard_user: bool = False,
+) -> list[dict]:
     """Attach cached chip status to each link, gated on kind and on the caller.
 
     The chip-status cache is pull-request-only: it holds a {ci, state}
@@ -2215,20 +2271,63 @@ def _project_source_links(links: list[dict], include_check_status: bool) -> list
     URL it never stores -- and if a PR and an issue ever normalized to the same
     key, the issue chip would inherit the PR's CI glyph. Gate on kind.
 
+    ``include_check_status`` is the OWNER gate: the owner sees status for every
+    link, public or private. ``dashboard_user`` is the weaker, PUBLIC-ONLY gate:
+    a non-owner but authenticated dashboard user sees status only for a link
+    whose repository is KNOWN public, because that lifecycle state is already
+    world-visible on the provider's website. Private and not-yet-known repos
+    fall through to owner-only (fail closed). App tokens pass neither flag and
+    keep bare chips.
+
     Shared by the budgeted slots payload and the unbudgeted overflow-expand
     read so the two cannot decorate the same link differently.
     """
-    return [
-        {
-            **link,
-            **(
-                (_cached_check_status(link["url"]) or {})
-                if include_check_status and link.get("kind", "change") == "change"
-                else {}
-            ),
-        }
-        for link in links
-    ]
+
+    def _attach(link: dict) -> bool:
+        if link.get("kind", "change") != "change":
+            return False
+        if include_check_status:
+            return True
+        granted = dashboard_user and _repo_is_public(link["url"]) is True
+        if granted:
+            # SEL-audit the AUTHORIZATION DECISION (AUTOSDE
+            # backend-security-controls: every permission decision, grants
+            # included). This grants a non-owner status on a repo whose public
+            # visibility we positively confirmed — a real access-control
+            # decision, so it must leave an allow event. Deduplicated per URL per
+            # window because this runs per-link on every push broadcast; an
+            # un-deduplicated write here would be unbounded on the hot path.
+            _audit_public_status_grant(link["url"])
+        elif dashboard_user:
+            # DENY decision: a non-owner dashboard user requested status on a
+            # change link but the repo is not confirmed public (private /
+            # unknown / stale), so status is withheld. AUTOSDE requires the
+            # denial to be audited too — deduplicated the same way (GPT #6789
+            # round-15). include_check_status (owner) paths never reach here, and
+            # app tokens set neither flag so they are not "denied dashboard-user"
+            # decisions.
+            _audit_public_status_denied(link["url"])
+        return granted
+
+    def _status(url: str) -> dict:
+        # Project ONLY the known chip-status keys, never the raw cache dict.
+        # Splatting ``**cache`` was fail-open: the cache payload already outgrew
+        # its docstring once (mergeStateStatus), so the next field would ride
+        # silently into every frame — including, via the general broadcast, an
+        # app-token frame (ws_event_scope strips the same names on the far end,
+        # but the two lists must not be the sole guarantee). Enumerating here
+        # fails closed at the source: an unlisted field is simply not emitted.
+        cached = _cached_check_status(url) or {}
+        return {k: cached[k] for k in _CHIP_STATUS_KEYS if k in cached}
+
+    return [{**link, **(_status(link["url"]) if _attach(link) else {})} for link in links]
+
+
+# The only fields the chip-status cache is allowed to project onto a source
+# link. Kept in step with ws_event_scope._SOURCE_LINK_STATUS_KEYS (the app-token
+# strip) and the frontend SidebarSourceLink type; a field absent here is never
+# emitted, so widening the cache cannot leak a new field into any frame.
+_CHIP_STATUS_KEYS = ("ci", "state", "mergeable", "mergeStateStatus")
 
 
 _NON_DURABLE_SOURCE_LINK_ROLES = frozenset({"chunk", "done", "streaming", "queued", "permission"})
@@ -4151,7 +4250,9 @@ class _ChatSlot:
             non_durable_roles=_NON_DURABLE_SOURCE_LINK_ROLES,
         )
 
-    def source_links_payload(self, *, include_check_status: bool = False) -> dict:
+    def source_links_payload(
+        self, *, include_check_status: bool = False, dashboard_user: bool = False
+    ) -> dict:
         """Every source link this slot carries — the unbudgeted read.
 
         ``to_dict`` serializes at most ``_SERIALIZED_SOURCE_LINKS_PER_SLOT`` per
@@ -4165,11 +4266,13 @@ class _ChatSlot:
         links = self._pr_source_links()
         changes, issues = _source_links_by_kind(links)
         return {
-            "links": _project_source_links(changes + issues, include_check_status),
+            "links": _project_source_links(
+                changes + issues, include_check_status, dashboard_user=dashboard_user
+            ),
             "total": len(links),
         }
 
-    def to_dict(self, *, include_check_status: bool = False) -> dict:
+    def to_dict(self, *, include_check_status: bool = False, dashboard_user: bool = False) -> dict:
         # Skip extraction itself when the chips are off, not just the two fields
         # the projection derives from it: `_pr_source_links()` scans the transcript
         # under a per-call parse budget, and paying for a payload nothing renders
@@ -4196,7 +4299,16 @@ class _ChatSlot:
             strip_markdown_preview=strip_markdown_preview,
             resolve_effective_agent=resolve_effective_agent,
             budget_source_links=_budgeted_source_links,
-            project_source_links=_project_source_links,
+            # Bind the PUBLIC-only gate through the projection's positional
+            # (links, include_check_status) callable so slot_projection.py needs
+            # no change: the owner gate rides include_check_status as before, and
+            # dashboard_user (a non-owner authenticated dashboard user) unlocks
+            # status ONLY for links whose repo is known public.
+            project_source_links=(
+                lambda links, incl: _project_source_links(
+                    links, incl, dashboard_user=dashboard_user
+                )
+            ),
         )
 
 
@@ -6595,10 +6707,20 @@ class DashboardState:
         review round is exactly when a PR's lifecycle moved, and nothing else in
         the system invalidates the status caches on that event: the chips would
         wait out the periodic rotation and the detail panel would not refetch at
-        all. Owner-gated (status is credential-backed, and with no owner window
-        open there is nobody to render it, so no provider subprocess is spawned)
-        and rate-floored inside ``request_check_refresh_now``.
+        all. Fires ONLY when an OWNER window is open: the read runs the
+        operator's credentials, so a non-owner window must not drive it (a
+        non-owner renders the owner-populated caches read-only). With no owner
+        window open there is nobody entitled to a credentialed read, so no
+        provider subprocess is spawned. Rate-floored inside
+        ``request_check_refresh_now``.
         """
+        # Both the status read and the visibility revalidation below run the
+        # operator's `gh`/`glab` credentials, so this turn-boundary refresh runs
+        # ONLY when an OWNER window is open. A non-owner dashboard window never
+        # drives it (GPT #6789): the owner's own connection keeps the caches warm
+        # and non-owner windows render the result read-only via the fail-closed
+        # is_repo_public gate. With no owner window open there is nobody entitled
+        # to drive a credentialed read, so this is a no-op.
         if not self._owner_ws_clients:
             return
         try:
@@ -6607,9 +6729,20 @@ class DashboardState:
                 return
             from kiro_crew.dashboard.handlers.source_providers import (
                 request_check_refresh_now,
+                schedule_visibility_refresh,
             )
 
             request_check_refresh_now(urls, self.push_slots_update)
+            # force=True: the status read above bypasses the TTL, so visibility
+            # MUST be revalidated in lockstep — otherwise fresh (now-private)
+            # status could be projected against a still-cached-public visibility
+            # entry, leaking private status to a non-owner (GPT #6789). Runs
+            # AFTER the status schedule: both are fire-and-forget schedulers, and
+            # ordering the status call first preserves the turn-boundary contract
+            # while the downstream render gate (`_project_source_links` ->
+            # is_repo_public) is what actually withholds status until visibility
+            # reconfirms.
+            schedule_visibility_refresh(urls, self.push_slots_update, force=True)
         except Exception:
             logger.debug("turn-boundary source status refresh failed", exc_info=True)
 
@@ -6805,10 +6938,16 @@ class DashboardState:
         return links, False, "", ""
 
     def serialize_slot(
-        self, slot: _ChatSlot, *, include_check_status: bool = False
+        self,
+        slot: _ChatSlot,
+        *,
+        include_check_status: bool = False,
+        dashboard_user: bool = False,
     ) -> dict[str, Any]:
         """Serialize one slot with state-backed channel-link metadata."""
-        payload = slot.to_dict(include_check_status=include_check_status)
+        payload = slot.to_dict(
+            include_check_status=include_check_status, dashboard_user=dashboard_user
+        )
         links, slack_linked, slack_channel, slack_thread_ts = self._slot_links(slot)
         payload.update(
             {
@@ -6820,17 +6959,26 @@ class DashboardState:
         )
         return payload
 
-    def serialize_slots(self, *, include_check_status: bool = False) -> list:
+    def serialize_slots(
+        self, *, include_check_status: bool = False, dashboard_user: bool = False
+    ) -> list:
         """Serialize slots, optionally including owner-only provider status.
 
         ``subagents_running`` remains available to every authenticated caller.
         Credential-backed ``ci`` and ``state`` fields are omitted unless an
-        authenticated owner boundary explicitly opts in.
+        authenticated owner boundary explicitly opts in — EXCEPT a link whose
+        repository is known public, which any authenticated dashboard user
+        (``dashboard_user=True``) may see because that lifecycle is already
+        world-visible. Private/unknown repos and app tokens stay owner-only.
         """
         out = []
         subs = getattr(self, "subagents", None)
         for s in self._slots.values():
-            d = self.serialize_slot(s, include_check_status=include_check_status)
+            d = self.serialize_slot(
+                s,
+                include_check_status=include_check_status,
+                dashboard_user=dashboard_user,
+            )
             d["subagents_running"] = bool(subs and subs.running_agents_for(f"dashboard:{s.key}"))
             out.append(d)
         return out
@@ -6981,7 +7129,22 @@ class DashboardState:
         )
 
         yolo_active = self.is_yolo_active()  # expire first if needed
+        # PUBLIC-repo chip status rides the general frame so any authenticated
+        # dashboard user (SSE and WS both run on dashboard-user tokens) sees the
+        # merged/closed/CI glyph for a repo whose lifecycle is already
+        # world-visible. Private/unknown repos fall through to owner-only inside
+        # serialize_slots, and app tokens are stripped of this status in
+        # ``_serialize_for_client`` -> ``filter_slots_for_app`` before delivery,
+        # so widening the general list here never leaks status to an app scope.
+        # SSE carries the BARE list (see below); the WS dashboard-user frame
+        # carries the enriched one. GPT #6789: the general ``_slots_list`` feeds
+        # BOTH the SSE queue (which has NO per-app filtering) and the WS frame,
+        # so enriching it here leaked public-repo status onto ``/api/stream`` for
+        # any app token allowed that route. Keep the broadcast list bare and put
+        # the public-repo enrichment only on the WS path, where
+        # ``_serialize_for_client`` re-filters app tokens.
         slots_data = self.serialize_slots()
+        slots_data_ws = self.serialize_slots(dashboard_user=True)
         mgr = getattr(self, "channel_manager", None)
         ch_trusted = bool(mgr and any(ch.trusted for ch in mgr._channels.values()))
         # Piggyback the allowlist generation so clients invalidate the cached
@@ -7002,7 +7165,13 @@ class DashboardState:
         self._broadcast(
             {
                 "_type": "slots",
+                # BARE list for SSE and the generic-envelope fields below.
                 "_slots_list": slots_data,
+                # Enriched (public-repo status) list for the WS dashboard-user
+                # frame ONLY. ``_broadcast`` builds the WS frame from this when
+                # present; SSE never reads it, so status cannot reach the
+                # unfiltered stream.
+                "_slots_list_ws": slots_data_ws,
                 "_yolo": yolo_active,
                 "slots": json.dumps(slots_data),
                 "channelTrusted": ch_trusted,
@@ -7138,7 +7307,17 @@ class DashboardState:
             # branch so the chokepoint can filter correctly.
             ws_data: object
             if msg_type == "slots":
-                slots_list = note.get("_slots_list") or json.loads(note["slots"])
+                # SSE (above) consumed the BARE ``_slots_list``. The WS frame is
+                # built from the ENRICHED ``_slots_list_ws`` (public-repo status
+                # for dashboard users) when present — app tokens are re-filtered
+                # in ``_serialize_for_client`` so they never receive it, and SSE
+                # never reads this key. Falls back to the bare list for callers
+                # (targeted title pushes, tests) that send only ``_slots_list``.
+                slots_list = (
+                    note.get("_slots_list_ws")
+                    or note.get("_slots_list")
+                    or json.loads(note["slots"])
+                )
                 # ``data`` for slots carries the whole envelope so the
                 # chokepoint can per-app filter and re-serialize it.
                 ws_data = {
@@ -7535,3 +7714,16 @@ def _cached_check_status(url: str) -> dict | None:
     from kiro_crew.dashboard.handlers.source_providers import get_cached_check_status
 
     return get_cached_check_status(url)
+
+
+def _repo_is_public(url: str) -> bool | None:
+    """Lazy wrapper for the repo-visibility reader (public/private/unknown).
+
+    Function-local import (top-level-imports exception): ``source_providers``
+    imports chat-state helpers from this module, so a module-scope import here
+    would create a bootstrap import cycle. Same rationale as
+    ``_cached_check_status`` directly above.
+    """
+    from kiro_crew.dashboard.handlers.source_providers import is_repo_public
+
+    return is_repo_public(url)

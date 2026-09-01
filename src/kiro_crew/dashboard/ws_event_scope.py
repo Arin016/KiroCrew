@@ -1105,8 +1105,35 @@ def filter_slots_for_app(
         if slot is None:
             continue
         if _slot_visible(slot, app, allowed_events, state):
-            result.append(slot_dict)
+            result.append(_strip_source_link_status(slot_dict))
             _audit_allow(app, "slots_item")
         else:
             _audit_deny(app, "slots_item", "slot_scope_denied")
     return result
+
+
+# Credential-backed chip fields attached by ``state._project_source_links``.
+# The general broadcast carries them for a dashboard user (public repos), but
+# an app token must never receive provider status — its scope is slot metadata,
+# not the operator's credential-backed view of a repository. Stripped here so
+# widening the general list for dashboard users cannot leak into an app frame.
+_SOURCE_LINK_STATUS_KEYS = ("ci", "state", "mergeable", "mergeStateStatus")
+
+
+def _strip_source_link_status(slot_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *slot_dict* with chip status removed from source links.
+
+    Only touches slots that carry source links with status; otherwise returns
+    the input unchanged (no needless copy on the hot path).
+    """
+    links = slot_dict.get("source_links")
+    if not links or not any(
+        any(k in link for k in _SOURCE_LINK_STATUS_KEYS) for link in links
+    ):
+        return slot_dict
+    cleaned = dict(slot_dict)
+    cleaned["source_links"] = [
+        {k: v for k, v in link.items() if k not in _SOURCE_LINK_STATUS_KEYS}
+        for link in links
+    ]
+    return cleaned

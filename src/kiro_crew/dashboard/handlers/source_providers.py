@@ -5415,6 +5415,319 @@ def _clear_check_flap(url: str) -> None:
     _check_flap_damped.discard(url)
 
 
+# ── Repository visibility (public vs private) ────────────────────────────────
+# Chip status (state / CI rollup) is credential-backed provider data, so it is
+# sent only to the owner connection by default. But for a PUBLIC repository that
+# same lifecycle state is world-visible on the provider's website, so withholding
+# it from a legitimate authenticated dashboard user buys no confidentiality — it
+# only removes the chip's most useful signal (is this PR merged / closed / green).
+#
+# This cache lets the status gate admit a public-repo link for a dashboard-user
+# connection while keeping PRIVATE repos strictly owner-only. It is keyed by
+# ``provider|host|owner|repo`` (not by PR URL): visibility is a property of the
+# repository, and one repo backs many PR chips — so a per-repo entry, refreshed
+# on the SAME cadence as the chip status it gates, costs at most one extra
+# provider read per repo per TTL, shared across every chip on it.
+#
+# Fails CLOSED: until a repo is positively known public, ``is_repo_public``
+# returns None and the gate treats it as owner-only. A provider read that errors
+# or is unauthorized never flips a repo to public.
+#
+# TTL == the CHECK TTL, deliberately: the status a public flag authorizes is
+# refreshed every ``_CHECK_TTL_SECS`` and ``schedule_visibility_refresh`` runs
+# on the SAME calls, so visibility is never more than one refresh cycle staler
+# than the status it gates. A repo that flips public->private therefore stops
+# authorizing non-owner status within ~one check TTL (not an hour): the paired
+# status refresh re-reads visibility, the flip is observed, and a stale entry
+# fails closed the moment it crosses this TTL. This bounds the private-status
+# exposure to a single short refresh window rather than a long one.
+_VISIBILITY_TTL_SECS = _CHECK_TTL_SECS
+_VISIBILITY_CACHE_MAX = 512
+# provider|host|owner|repo -> (fetched_monotonic, is_public | None)
+_visibility_cache: dict[str, tuple[float, bool | None]] = {}
+_visibility_inflight: set[str] = set()
+# Per-key counter bumped every time a force=True refresh fails a cached-public
+# entry closed. ``_refresh_repo_visibility`` captures this at start and refuses
+# to write a positive (public) result if the generation changed while it was
+# fetching — i.e. a public->private force-invalidation landed mid-flight — so a
+# stale in-flight read can never RESTORE public across a flip (GPT #6789
+# round-14). The next refresh reconfirms from a fail-closed baseline.
+_visibility_force_gen: dict[str, int] = {}
+_VISIBILITY_TASKS: set[asyncio.Task] = set()
+# Jira has no public-repo concept and its status is credential-gated regardless,
+# so visibility is only meaningful for change providers.
+_VISIBILITY_PROVIDERS = frozenset({"github", "gitlab"})
+
+
+def _visibility_key(ref: SourceRef) -> str:
+    return f"{ref.provider}|{ref.host}|{ref.owner}|{ref.repo}"
+
+
+def _trim_visibility_cache() -> None:
+    while len(_visibility_cache) > _VISIBILITY_CACHE_MAX:
+        del _visibility_cache[min(_visibility_cache, key=lambda k: _visibility_cache[k][0])]
+
+
+def is_repo_public(url: str) -> bool | None:
+    """Whether the repo behind a source URL is known PUBLIC.
+
+    Returns True (known public), False (known private), or None (not yet
+    fetched / unknown / STALE / not a change provider). The status gate treats
+    anything other than True as owner-only, so an unfetched, errored, or stale
+    repo never leaks private status to a non-owner. Never blocks — reads the
+    cache only.
+
+    A cache entry older than ``_VISIBILITY_TTL_SECS`` is treated as STALE and
+    returns None: a repo that flipped public->private while its visibility
+    refresh kept failing must not keep authorizing status forever. The exposure
+    is bounded to one TTL from the last SUCCESSFUL read (``_refresh_repo_visibility``
+    never resets the timestamp on a failed read), after which this fails closed.
+    """
+    try:
+        ref = parse_source_url(url)
+    except Exception:
+        return None
+    if ref.provider not in _VISIBILITY_PROVIDERS:
+        return None
+    entry = _visibility_cache.get(_visibility_key(ref))
+    if not entry:
+        return None
+    fetched_at, value = entry
+    if time.monotonic() - fetched_at >= _VISIBILITY_TTL_SECS:
+        return None
+    return value
+
+
+async def _fetch_repo_visibility(ref: SourceRef) -> bool | None:
+    """Read a repo's public/private flag via the provider CLI. None on failure."""
+    try:
+        if ref.provider == "github":
+            # isPrivate is False for BOTH public AND internal (GitHub Enterprise)
+            # repos, but an internal repo is visible only to enterprise members —
+            # NOT anonymously — so classifying it public would leak credential-
+            # backed status to a non-owner (GPT #6789). Read `visibility` and
+            # require exactly "public" (mirrors the GitLab "public"-only gate);
+            # "internal"/"private" → owner-only. isPrivate is kept only as a
+            # belt-and-braces private check.
+            data = await _run_json(
+                "gh",
+                "repo",
+                "view",
+                f"{ref.owner}/{ref.repo}",
+                "--json",
+                "isPrivate,visibility",
+            )
+            if not isinstance(data, dict):
+                return None
+            if data.get("isPrivate") is True:
+                return False
+            vis = data.get("visibility")
+            if isinstance(vis, str):
+                return vis.lower() == "public"
+            return None
+        if ref.provider == "gitlab":
+            # GitLab exposes repository visibility as public/internal/private.
+            # Only "public" is world-readable without a credential; "internal"
+            # is visible to authenticated instance members, which is NOT the
+            # same as anonymous-public, so it stays owner-only.
+            #
+            # But a PUBLIC project can still restrict individual features:
+            # merge_requests_access_level / builds_access_level can be "private"
+            # (members only) or "disabled" even when the project is public, so a
+            # credentialed refresh would otherwise surface member-only MR/CI
+            # status to a non-owner (GPT #6789). Require the project to be public
+            # AND both feature levels to be "enabled" (available at the project's
+            # public visibility, i.e. anonymously readable) before treating the
+            # PR/MR lifecycle + CI status as public. GitHub has no such per-
+            # feature split — a public repo's PRs and checks are public.
+            #
+            # quote(ref.project, safe="") — NOT f"{owner}%2F{repo}": a subgroup
+            # project path (group/subgroup/repo) has interior slashes that must
+            # all be percent-encoded, and owner/repo drops the subgroup segment
+            # entirely. Mirrors every other glab-api call site.
+            project = quote(ref.project, safe="")
+            data = await _run_json("glab", "api", f"projects/{project}", host=ref.host)
+            if not isinstance(data, dict) or not isinstance(data.get("visibility"), str):
+                return None
+            if data["visibility"] != "public":
+                return False
+            # "enabled" = available at the project's (public) visibility level;
+            # "private"/"disabled" restrict the feature to members. Missing keys
+            # fail closed (owner-only) rather than assuming anonymous access.
+            mr_level = data.get("merge_requests_access_level")
+            ci_level = data.get("builds_access_level")
+            # public_jobs (a.k.a. "Public pipelines") is a SEPARATE gate: when
+            # False, a public project with builds_access_level "enabled" still
+            # hides pipeline/job status from non-members, so a credentialed
+            # refresh would leak private CI state to a non-owner (GPT #6789).
+            # Require it True (missing → fail closed) before treating CI status
+            # as anonymously public.
+            public_jobs = data.get("public_jobs")
+            return mr_level == "enabled" and ci_level == "enabled" and public_jobs is True
+    except Exception:
+        return None
+    return None
+
+
+async def _refresh_repo_visibility(
+    ref: SourceRef,
+    on_update: _CheckUpdateCallback | None = None,
+    *,
+    prev_public_override: bool | None = None,
+) -> None:
+    key = _visibility_key(ref)
+    prev_entry = _visibility_cache.get(key)
+    # Snapshot the force-invalidation generation at start. If a force=True
+    # refresh fails this key closed WHILE we are fetching (generation bumps), our
+    # read is stale w.r.t. that public->private flip, so we must NOT write back a
+    # positive result that would restore ``public`` — we leave the fail-closed
+    # unknown standing and let the next refresh reconfirm (GPT #6789 round-14).
+    start_gen = _visibility_force_gen.get(key, 0)
+    # The RENDERED gate value before this refresh: True only if a fresh public
+    # entry exists (mirrors ``is_repo_public``'s TTL check). A change in this
+    # boolean is exactly when a chip appears or disappears for a non-owner.
+    #
+    # ``prev_public_override`` carries the rendered-public value captured BEFORE
+    # a forced pre-invalidation clobbered the cache entry to unknown. Without it,
+    # the force path would read its own just-written (now, None) as prev_public
+    # =False, so a genuine public->private transition compares False==False and
+    # fires no update — leaving connected non-owners on the stale public chip
+    # indefinitely (GPT #6789). The override restores the true baseline so the
+    # hide-the-chip update is queued.
+    if prev_public_override is not None:
+        prev_public = prev_public_override
+    else:
+        prev_public = (
+            bool(prev_entry[1]) and (time.monotonic() - prev_entry[0]) < _VISIBILITY_TTL_SECS
+            if prev_entry
+            else False
+        )
+    try:
+        async with _check_semaphore:
+            public = await _fetch_repo_visibility(ref)
+    except Exception:
+        public = None
+    finally:
+        _visibility_inflight.discard(key)
+    prev = _visibility_cache.get(key)
+    if public is not None and _visibility_force_gen.get(key, 0) != start_gen:
+        # A force=True invalidation (public->private flip) landed while we were
+        # fetching. Our positive read predates the flip, so restoring ``public``
+        # here would re-open the leak the force path just closed. Discard the
+        # stale positive: leave the fail-closed entry as-is (or record unknown)
+        # so is_repo_public stays None until a post-flip refresh reconfirms.
+        if prev is None:
+            _visibility_cache[key] = (time.monotonic(), None)
+    elif public is not None:
+        # A positive read is authoritative: store the fresh value and reset the
+        # TTL clock. This is the ONLY path that may mark a repo public.
+        _visibility_cache[key] = (time.monotonic(), public)
+    elif prev is not None:
+        # Failed read. Keep the prior value but DO NOT reset the timestamp, so a
+        # persistently-failing refresh cannot extend a stale ``public`` past its
+        # TTL: it ages out from its last SUCCESSFUL read and ``is_repo_public``
+        # then returns None (fail closed). This is the public->private +
+        # visibility-read-fails hole — leaving the old timestamp bounds the
+        # exposure to one TTL rather than forever.
+        _visibility_cache[key] = (prev[0], prev[1])
+    else:
+        # Never successfully read: record an unknown so repeated cold failures
+        # do not re-spawn a fetch every slots push (still returns None).
+        _visibility_cache[key] = (time.monotonic(), None)
+    _trim_visibility_cache()
+    # Notify only when the RENDERED public flag flipped: a cold->public repo now
+    # shows its chip status, and a public->private (or aged-out) repo hides it.
+    # Without this a fresh visibility read never re-serialized the sidebar, so a
+    # chip could stay bare until an unrelated push (GPT #6789).
+    new_entry = _visibility_cache.get(key)
+    new_public = bool(new_entry and new_entry[1] is True)
+    if on_update is not None and new_public != prev_public:
+        _queue_check_update(on_update)
+
+
+def schedule_visibility_refresh(
+    urls: list[str], on_update: _CheckUpdateCallback | None = None, *, force: bool = False
+) -> None:
+    """Kick bounded background visibility reads for repos not freshly cached.
+
+    Fire-and-forget with inflight dedup, mirroring ``schedule_check_refresh``.
+    One entry per repo (deduped by visibility key), TTL-paced, so a large
+    workspace of PRs on a handful of repos costs a handful of reads per repo per
+    TTL.
+
+    ``on_update`` is invoked (debounced) whenever a repo's RENDERED public flag
+    flips, so the sidebar re-serializes when a chip should appear or disappear.
+    ``force`` bypasses the TTL freshness check for callers that know the repo's
+    status just moved (the turn-boundary refresh), so visibility is revalidated
+    in lockstep with the forced status read rather than lagging it.
+
+    On the ``force`` path the cached PUBLIC flag is invalidated SYNCHRONOUSLY
+    before the refresh task is spawned: the forced status read and the
+    visibility read run as concurrent tasks, and if status finished first it
+    could otherwise broadcast fresh (now-private) status against a still-cached-
+    public visibility entry (a non-owner private-status leak). Dropping the entry
+    to unknown up front makes ``is_repo_public`` fail closed for the whole
+    in-flight window; the refresh restores ``public`` only on a positive
+    reconfirmation, and its ``on_update`` re-serializes when it does.
+    """
+    now = time.monotonic()
+    seen: set[str] = set()
+    for url in dict.fromkeys(urls):
+        try:
+            ref = parse_source_url(url)
+        except Exception:
+            continue
+        if ref.provider not in _VISIBILITY_PROVIDERS:
+            continue
+        key = _visibility_key(ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = _visibility_cache.get(key)
+        if not force and entry and now - entry[0] < _VISIBILITY_TTL_SECS:
+            continue
+        prev_public_override: bool | None = None
+        if force:
+            # Bump the force generation on EVERY forced refresh, BEFORE the
+            # inflight-dedup return below and regardless of the current cache
+            # value. A forced refresh means "the status just moved, revalidate
+            # now"; any visibility read already in flight (which may have started
+            # before a public->private flip) must be treated as stale and
+            # refused write-back. Gating this bump on "currently public" was a
+            # hole: an entry already dropped to unknown (e.g. a first force
+            # landed, then a second arrives while the pre-privacy fetch is still
+            # in flight) would skip the bump, and that in-flight positive read
+            # could then restore ``public`` (GPT #6789 round-15).
+            _visibility_force_gen[key] = _visibility_force_gen.get(key, 0) + 1
+            if entry is not None and entry[1] is True:
+                # Capture the TRUE rendered-public baseline BEFORE clobbering, so
+                # the refresh's on_update comparison measures the flip against
+                # what non-owners currently see (public), not the unknown we are
+                # about to write. Otherwise a public->private transition compares
+                # False==False and never hides the chip (GPT #6789).
+                prev_public_override = (now - entry[0]) < _VISIBILITY_TTL_SECS
+                # Synchronously fail the entry closed so ``is_repo_public``
+                # returns None for the whole in-flight window; the refresh
+                # restores True only on a positive reconfirmation. Only clobber
+                # when currently public — an already-unknown entry is already
+                # fail-closed, and the generation bump above covers the stale
+                # in-flight read either way.
+                _visibility_cache[key] = (now, None)
+        if key in _visibility_inflight:
+            # A refresh is already running for this repo. We have already failed
+            # a cached-public entry closed above on the force path, so the
+            # in-flight result can only ever restore ``public`` via a positive
+            # reconfirmation (never leave a stale public flag standing); dedup
+            # the redundant spawn.
+            continue
+        _visibility_inflight.add(key)
+        task = asyncio.get_running_loop().create_task(
+            _refresh_repo_visibility(ref, on_update, prev_public_override=prev_public_override)
+        )
+        _VISIBILITY_TASKS.add(task)
+        task.add_done_callback(_VISIBILITY_TASKS.discard)
+
+
 def get_cached_check_status(url: str) -> dict[str, str] | None:
     """Cached status for a PR url: {"ci": ..., "state": ..., "mergeable": ...}.
 
@@ -5609,6 +5922,16 @@ def record_full_payload_status(url: str, payload: dict[str, Any]) -> None:
         # single repeating A→B loop and falsely damp legitimate CI churn (e.g.
         # three real re-runs of the same job).
         _clear_check_flap(url)
+        # Lockstep visibility revalidation (GPT #6789): the full-payload writer
+        # is a SECOND authoritative status writer alongside _refresh_check_status.
+        # A public->private change whose owner detail fetch refreshes status here
+        # would otherwise be served to a non-owner against a still-cached-public
+        # visibility flag. force=True bypasses the visibility TTL and synchronously
+        # fails a cached-public entry closed for the in-flight window (restoring
+        # public only on positive reconfirmation), closing the same window the
+        # chip-refresh path already guards. Bounded to real status transitions.
+        with contextlib.suppress(Exception):
+            schedule_visibility_refresh([url], force=True)
         _emit_status_delta(url, status, "detail")
 
 
@@ -5813,6 +6136,20 @@ async def _refresh_check_status(url: str, on_update: _CheckUpdateCallback | None
     if not changed:
         return
     assert status is not None  # narrowed by `changed`
+    # Lockstep visibility revalidation (GPT #6789) — FIRST, before flap handling
+    # and before the first ``await``. A status refresh can land a freshly-fetched
+    # (possibly now-private) status while this URL's visibility entry is still
+    # within its TTL, so ``is_repo_public`` would authorize the new status
+    # against a stale-fresh public flag. ``schedule_visibility_refresh(force=True)``
+    # SYNCHRONOUSLY fails a cached-public entry closed for the in-flight window
+    # (it pre-invalidates before spawning the refresh task), so it must run
+    # before any ``await`` yields the event loop and before the flap path's
+    # early return — otherwise a concurrent slots push (or the flap path, which
+    # returns without reaching the old call site) could observe the newly-cached
+    # private status against an un-invalidated public flag. Bounded to real
+    # status transitions only.
+    with contextlib.suppress(Exception):
+        schedule_visibility_refresh([url], on_update, force=True)
     # Structural loop-breaker: if this URL keeps repeating the identical chip
     # transition every refresh, the chip and full-payload projections disagree
     # on vocabulary and the mutual-invalidation protocol below would spin a

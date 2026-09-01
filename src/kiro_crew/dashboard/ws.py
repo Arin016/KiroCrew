@@ -330,6 +330,7 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
         gitlab_hosts_generation,
         is_owner_dashboard_request,
         schedule_check_refresh,
+        schedule_visibility_refresh,
     )
 
     owner_request = is_owner_dashboard_request(request)
@@ -402,8 +403,11 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
     # Push current slots immediately so sidebar populates without waiting.
     # App tokens get only the slots their manifest scope allows.
     try:
-        all_slots = state.serialize_slots(include_check_status=owner_request)
-        if ws.get("_is_dashboard_user", False):
+        is_dashboard_user = ws.get("_is_dashboard_user", False)
+        all_slots = state.serialize_slots(
+            include_check_status=owner_request, dashboard_user=is_dashboard_user
+        )
+        if is_dashboard_user:
             slots_data = all_slots
         elif ws_app:
             slots_data = filter_slots_for_app(all_slots, ws_app, allowed_events, state)
@@ -456,7 +460,7 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
                 "gitlabHostsGeneration": gitlab_hosts_generation(),
             }
         )
-        if owner_request:
+        if owner_request or is_dashboard_user:
             # Issue links carry no check status — skip them so the scheduler
             # never hands an issue URL to the pull-request-only chip fetch.
             urls = [
@@ -466,7 +470,23 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
                 if link.get("kind", "change") == "change"
             ]
             if urls:
-                schedule_check_refresh(urls, state.push_slots_update)
+                # Both the status refresh AND the visibility probe run the
+                # operator's `gh`/`glab` credentials, so a NON-owner connection
+                # must trigger NEITHER — otherwise a non-owner would cause
+                # authenticated provider reads (status content AND repo
+                # visibility metadata) on repos it has no right to drive traffic
+                # for (GPT #6789). Only the OWNER's connection refreshes the
+                # caches; a non-owner is READ-ONLY against them. The owner is the
+                # dashboard operator and is effectively always connected, so its
+                # driver classifies each repo's visibility and fetches public
+                # status once, and every authenticated non-owner viewer then
+                # renders that cached public-repo status via the fail-closed
+                # `is_repo_public` gate in `_project_source_links`. A repo the
+                # owner has never classified stays owner-only for non-owners
+                # (fail closed) — no non-owner-driven credentialed probe.
+                if owner_request:
+                    schedule_visibility_refresh(urls, state.push_slots_update)
+                    schedule_check_refresh(urls, state.push_slots_update)
     except Exception:
         pass
 
@@ -559,6 +579,14 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
                 if urls:
                     offset = (refresh_round * CHECK_STATUS_PENDING_MAX) % len(urls)
                     urls = urls[offset:] + urls[:offset]
+                    # Owner-only driver (see _run_status_driver): both refreshes
+                    # run operator credentials, so only the owner's connection
+                    # drives them. This keeps the check + visibility caches warm
+                    # for every repo the owner's slots reference; non-owner
+                    # viewers render the resulting cached public-repo status
+                    # read-only via is_repo_public. No non-owner-driven
+                    # credentialed provider read (GPT #6789).
+                    schedule_visibility_refresh(urls, state.push_slots_update)
                     schedule_check_refresh(urls, state.push_slots_update)
                 refresh_round += 1
             except asyncio.CancelledError:
@@ -566,7 +594,16 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
             except Exception:
                 logger.warning("check-status refresh round failed; continuing", exc_info=True)
 
-    check_task = asyncio.create_task(_refresh_check_loop()) if owner_request else None
+    # Run the refresh driver ONLY for the owner connection: both the status and
+    # the visibility refresh call the operator's `gh`/`glab` credentials, so a
+    # non-owner must never drive them (GPT #6789). The owner is the dashboard
+    # operator and is effectively always connected, so its driver keeps the
+    # check + visibility caches warm for every repo its slots reference; a
+    # non-owner dashboard connection renders the resulting cached PUBLIC-repo
+    # status read-only (via the fail-closed is_repo_public gate) and spawns no
+    # provider subprocess. App tokens never render status either way.
+    _run_status_driver = owner_request
+    check_task = asyncio.create_task(_refresh_check_loop()) if _run_status_driver else None
     # The resume prefetch this socket's most recent slot_focused frame armed.
     # Tracked per connection so a focus change (or blur/disconnect) cancels
     # only this socket's speculation, never another window's.
