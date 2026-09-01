@@ -1162,6 +1162,10 @@ _CRITICAL_RULES_TAIL = (
     'widget" | "Include the stop button too" -- sent alone, the second names '
     "no action). Fold the shared base action into each label instead "
     '("Build the widget with the stop button included").\n'
+    "Keep each option label SHORT -- aim for at most 8 words. The chip row "
+    "renders each label on a single line, so a long label displays cut off; "
+    "put supporting detail in the message body before the [OPTIONS:] line and "
+    "keep the label itself to the bare instruction.\n"
     "[END CRITICAL RULES]\n\n"
 )
 # The dashboard variant is the module's canonical block: tests and the

@@ -268,9 +268,9 @@ describe('FollowUpBar', () => {
       // The clamp must sit on an unpadded inner element, not on the padded
       // button — otherwise a sliver of the next line shows in the padding.
       const label = chip.querySelector('span')
-      expect(label?.className).toContain('line-clamp-1')
-      expect(label?.className).toContain('break-words')
-      expect(chip.className).not.toContain('line-clamp-1')
+      expect(label?.className).toContain('truncate')
+      expect(label?.className).toContain('block')
+      expect(chip.className).not.toContain('truncate')
     })
 
     it('caps the split-button wrapper too, not just the button', () => {
@@ -359,7 +359,7 @@ describe('FollowUpBar', () => {
       render(<FollowUpBar options={[LONG]} picked={new Set()} onSelect={() => {}} />)
       const chip = screen.getByRole('button', { name: LONG })
       expect(chip.className).toContain('followup-chip')
-      expect(chip.querySelector('span')?.className).toContain('line-clamp-1')
+      expect(chip.querySelector('span')?.className).toContain('truncate')
     })
 
     it('clamps to ONE line so a long label cannot make its chip taller than its neighbours', () => {
@@ -373,7 +373,7 @@ describe('FollowUpBar', () => {
         )
         for (const label of [LONG, 'Ship it']) {
           const span = screen.getByRole('button', { name: label }).querySelector('span')
-          expect(span?.className).toContain('line-clamp-1')
+          expect(span?.className).toContain('truncate')
           expect(span?.className).not.toContain('line-clamp-2')
         }
         unmount()

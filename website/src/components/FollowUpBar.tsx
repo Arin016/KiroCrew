@@ -167,20 +167,22 @@ function splitMainChipClassName(isPicked: boolean) {
 }
 
 /**
- * The clamp lives on an unpadded inner element on purpose: `-webkit-line-clamp`
- * clips at the padding edge, so clamping the padded button itself leaves a
- * sliver of the next line visible inside its bottom padding.
+ * `truncate` (nowrap + `text-overflow: ellipsis`), not `line-clamp-1`: line
+ * clamping ellipsizes after the last whole WORD that fits, which leaves up to
+ * a word's width of dead space between the ellipsis and the chip edge when the
+ * next word is long. `text-overflow` trims at the character level, so the
+ * ellipsis sits flush against the edge on every label. `block` is required:
+ * the chip button is not a flex container, and `overflow` cannot clip an
+ * inline span.
  *
- * ONE line, not two. A chip is a teaser for the instruction, not the payload —
+ * ONE line. A chip is a teaser for the instruction, not the payload —
  * clicking it puts the full text in the composer, and the untruncated string
  * stays in the DOM (accessible name) and on `title` (hover), so the truncation
- * is recoverable. Wrapping instead makes a long label's chip taller than its
- * neighbours, which is the one thing a row of sibling controls cannot afford;
- * one line makes every chip the same height by construction rather than by an
- * alignment rule.
+ * is recoverable. One line keeps every chip the same height by construction
+ * rather than by an alignment rule.
  */
 function ChipLabel({ option }: { option: string }) {
-  return <span className="line-clamp-1 break-words">{option}</span>
+  return <span className="block truncate">{option}</span>
 }
 
 /**
