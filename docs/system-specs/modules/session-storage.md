@@ -107,14 +107,16 @@ making the authority check the freshest view available. The two active sets are
 **unioned**, so a re-read can only ever add protection, and a re-read that fails
 refuses the operation rather than proceeding on the stale view.
 
-The move loop then closes most of what the re-read cannot. Every source file is
-stat'd there anyway, to record its size in the manifest, and that same stat carries
-an mtime. A candidate qualified by being untouched for `MIN_RECLAIM_AGE_DAYS`, so a
-source whose mtime is newer than the instant the reclaim began has been written to
-since every read that certified it — which an idle session's file cannot be. The
-whole session is left in place, whatever already moved for it is rolled back, and it
-is named in `TrashBatch.revived` so the caller can report it. This costs no extra
-syscall: the detection rides on a stat the loop already performs.
+The move loop then closes part of what the re-read cannot, for a resume that
+**writes**. Every source file is stat'd there anyway, to record its size in the
+manifest, and that same stat carries an mtime. A candidate qualified by being
+untouched for `MIN_RECLAIM_AGE_DAYS`, so a source whose mtime is newer than the
+instant the reclaim began has been written to since every read that certified it —
+which an idle session's file cannot be. The whole session is left in place, whatever
+already moved for it is rolled back, and it is named in `TrashBatch.revived` so the
+caller can report it. This costs no extra syscall: the detection rides on a stat the
+loop already performs. A resume that only READS is invisible to it — see Known
+Limitations.
 
 Naming a session in `revived` is a claim -- "this one was left where it was" -- so it
 is only made when the rollback actually completed. Putting a file back is
@@ -133,9 +135,11 @@ loop, which is most of the elapsed time. Taking it early adds no false positives
 because a candidate has to be untouched for `MIN_RECLAIM_AGE_DAYS` to qualify at all.
 
 Detection, not prevention: a session revived *after* its last file was stat'd and
-moved is still staged. The window is therefore the gap between one file's stat and
-its rename rather than the whole loop, and what lands in that gap lands in the
-trash — fully restorable, with destruction still needing a second explicit `empty`.
+moved is still staged. For a resume that writes, the window is therefore the gap
+between one file's stat and its rename rather than the whole loop. For a resume that
+only reads it is still the whole loop, because there is no write for the stat to see.
+Either way what lands in that gap lands in the trash — fully restorable, with
+destruction still needing a second explicit `empty`.
 
 ## What is reclaimable
 
@@ -887,11 +891,13 @@ distinguish it from a malformed request without reading the code, and retrying i
 the only recovery.
 
 A session that goes live *later still* — after the `refresh`, while the move loop is
-running — is not all-or-nothing. The loop's mtime check leaves that one session in
-place and the rest of the batch proceeds, and the handler folds each such uid into
-the same `refused` list under `in_use`. The mechanism differs from the pre-pass
-(caught by a stat during the move rather than by the index before it) but the reason
-a reader needs is identical, so it carries no new code.
+running — is not all-or-nothing, provided the resume writes. The loop's mtime check
+leaves that one session in place and the rest of the batch proceeds, and the handler
+folds each such uid into the same `refused` list under `in_use`. The mechanism differs
+from the pre-pass (caught by a stat during the move rather than by the index before
+it) but the reason a reader needs is identical, so it carries no new code. A resume
+that only reads writes nothing for that stat to catch, so it is staged instead of
+refused — the gap recorded in Known Limitations.
 
 **The guarantee is not weakened.** `move_to_trash()` still re-reads the session map
 inside the mutation lock and still unions the active sets, so the pre-pass can only
@@ -954,7 +960,7 @@ instead of the trash over-deleting. `TestEmptyTrash` and
 
 ## Known Limitations
 
-- **A much smaller residual race with session-map writes remains.** The authority
+- **A much smaller residual race remains for a resume that writes.** The authority
   check is re-read after the scan and inside the reclaim lock, and the move loop then
   rejects any source whose mtime is newer than the batch's validation instant, so a
   session resumed *during* the loop is left in place and reported rather than staged.
@@ -964,6 +970,23 @@ instead of the trash over-deleting. `TestEmptyTrash` and
   restorable — nothing is destroyed without a second explicit action. Removing it
   entirely still requires the session/slot code and this module to share one lock,
   which is a wider change than this surface.
+- **A resume that only READS the transcript is not detected at all, and its window is
+  the whole loop.** The bullet above describes a resume that writes; the mtime check
+  has nothing to see when the resume writes nothing. The sequence: a retired session's files
+  are certified reclaimable, the session is resumed, the resume reads the old transcript
+  to rebuild history, and the turn that follows is recorded under a newly mapped SID
+  without rewriting that old transcript. Every one of the session's files therefore
+  still carries its original mtime, all of them pass the validation-instant check, and
+  the live slot's durable history is staged out from under it. Detection would need the
+  index re-read to happen inside the loop rather than once before it, and the naive form
+  of that is not affordable: `refresh` is `_build_index`, which costs a file read plus a
+  full json parse — about 0.26 ms even against a 100-entry map — so at the
+  `_MAX_SELECTION` cap of 200,000 units it is ~56 s at that floor and hours against a
+  realistic map, and it would take `SessionMap._MAP_LOCK` once per unit while the
+  reclaim lock is held. Making it affordable means the caller memoizing its own index on
+  a change token, which is a contract change to `refresh` rather than an adjustment to
+  the loop. Like the write-shaped gap this stays restorable: the history lands in the
+  trash, and destruction still needs a second explicit `empty`.
 - Reclaiming is offered both by age (`cleanup`) and by explicit selection
   (`trash`). Neither can take a session the map still lists, so targeting one large
   conversation only works if that conversation is unmapped.
