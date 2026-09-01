@@ -368,6 +368,16 @@ class SecretVault:
         raw = self._store_path.read_text(encoding="utf-8")
         envelope = json.loads(raw)
 
+        # A corrupt / hand-edited store can carry a non-object top-level value
+        # (a list, a string, null, a number). Guard before ``.get`` so it fails
+        # closed with a descriptive ValueError rather than a raw AttributeError,
+        # matching the ``entries`` guard below. No store content is echoed.
+        if not isinstance(envelope, dict):
+            raise ValueError(
+                f"Vault store corrupt: top-level value must be an object, "
+                f"got {type(envelope).__name__}."
+            )
+
         if envelope.get("backend") != self._BACKEND:
             raise ValueError(
                 f"Vault backend mismatch: expected {self._BACKEND!r}, "
