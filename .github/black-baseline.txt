@@ -856,7 +856,6 @@ test/test_mcp_cron_orphan_validation.py
 test/test_mcp_cron_persistent_session.py
 test/test_mcp_cron_security.py
 test/test_mcp_custom_api.py
-test/test_mcp_dashboard_folders.py
 test/test_mcp_dashboard_registration.py
 test/test_mcp_discovery.py
 test/test_mcp_gateway_apps_spool.py

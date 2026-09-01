@@ -2540,6 +2540,155 @@ def _save_slot_to_history(
             note_auth_key,
         )
     if not window:
+        if force or closed:
+            # A FORCED (or closing) save of a message-less slot is a metadata
+            # mutation (folder filing/unfiling, a tag assignment, a pin, a
+            # pinned title, a mode switch, a close) -- the full save below has no window to
+            # write, but the mutation still has to reach disk. This became
+            # reachable when `session_create` started persisting `folder_id`
+            # at birth (#6118): an empty newborn HAS a metadata line, so any
+            # acknowledged metadata change before its first message must
+            # overwrite that line, or a restart resurrects the birth state the
+            # user already changed. The merge carries every slot-owned field a
+            # force/closed save is responsible for -- not just `folder_id`:
+            # the tag routes, the pin route, the recreate PATCH (folder or
+            # pinned title) and the close path all persist ONLY through this
+            # save, so a folder-only merge would silently drop their
+            # acknowledged writes on restart. Merged ONLY into an existing
+            # line: a slot with no line at all does not survive a restart, so
+            # there is nothing to reconcile, and materializing files for every
+            # empty tab here would create transcripts nothing else expects.
+            # The existence guard runs INSIDE the same cross-process lock as
+            # the merge (`update_metadata_if`): the plain update is an upsert,
+            # so a checked-then-written pair would let a permanent deletion
+            # land between the two and be resurrected as a fresh file.
+            # Clearable fields are written even when empty -- the merge cannot
+            # delete a key, and rehydrate treats a falsy value as cleared
+            # (unfiled / untagged / unpinned / untitled / default mode). Fails
+            # closed on an unreadable record, per `update_metadata_if`'s own
+            # contract.
+            def _fresh_fields() -> dict:
+                # Mirrors the FULL save's slot-owned enumeration (the
+                # ``meta_line`` construction below), so a forced save of an
+                # empty slot persists exactly what a forced save of a
+                # non-empty slot would persist for the metadata line -- the
+                # invariant that keeps this branch from silently dropping
+                # whichever acknowledged mutation a route happens to persist
+                # through it (folder, tags, pin, title, mode, project,
+                # artifact binding, ...). Two write classes, matching
+                # rehydrate's semantics:
+                # - CLEARABLE fields are written even when empty (the merge
+                #   cannot delete a key; rehydrate treats a falsy value as
+                #   cleared: unfiled / untagged / unpinned / untitled /
+                #   default mode / unbound artifact / uncolored).
+                # - IDENTITY and MONOTONIC fields are written only when
+                #   truthy, exactly like the full save (origin's fail-closed
+                #   sentinel and the once-flags must never be erased by a
+                #   writer that has not learned them).
+                fields: dict = {
+                    "folder_id": slot.folder_id or "",
+                    "tags": list(slot.tags),
+                    "pinned": bool(slot.pinned),
+                    "mode": slot.mode or "",
+                    "artifact": slot._artifact or "",
+                    "reasoning_effort": slot.reasoning_effort or "",
+                    "color_index": slot.color_index,
+                    "color_hex": slot.color_hex or "",
+                    "color_theme": slot.color_theme or "",
+                    "memory_mode": slot.memory_mode,
+                    "model": slot.model,
+                }
+                if slot.title and slot.title != slot.key:
+                    fields["title"] = slot.title
+                    # Persist the title's provenance next to it (mirrors the
+                    # full save): without it rehydration conservatively
+                    # re-classifies an auto title as "user" and locks the
+                    # refresh out.
+                    _origin = getattr(slot, "_title_origin", "")
+                    if _origin:
+                        fields["title_origin"] = _origin
+                    _mark = getattr(slot, "_title_refresh_mark", 0)
+                    if _mark:
+                        fields["title_refresh_mark"] = _mark
+                else:
+                    fields["title"] = ""
+                if slot.agent:
+                    fields["agent"] = slot.agent
+                if slot.workspace:
+                    fields["workspace"] = slot.workspace
+                if slot.project:
+                    fields["project"] = slot.project
+                if slot._app:
+                    fields["app"] = slot._app
+                if slot._origin:
+                    fields["origin"] = slot._origin
+                if slot.linked_session_key:
+                    fields["linked_session_key"] = slot.linked_session_key
+                if getattr(slot, "channel_origin", False):
+                    fields["channel_origin"] = True
+                if slot.forked_from is not None:
+                    fields["forked_from"] = slot.forked_from
+                if getattr(slot, "_tab_id", None):
+                    fields["tab_id"] = slot._tab_id
+                if getattr(slot, "_auto_tagged", False):
+                    # Once-flag, monotonic (see the full save): written when
+                    # set, never cleared.
+                    fields["auto_tagged"] = True
+                if getattr(slot, "_human_seen", False):
+                    fields["human_seen"] = True
+                if slot._channel_folder_filed:
+                    # Sticky like the full save; the disk-carry half is
+                    # inherent here since a merge never deletes a key.
+                    fields["channel_folder_filed"] = True
+                if closed:
+                    # Without this a closed empty newborn's line stays
+                    # open-shaped and the next restart resurrects a tab the
+                    # user dismissed.
+                    fields["closed"] = True
+                    fields["closed_at"] = closed_at if closed_at is not None else time.time()
+                return fields
+
+            # The slot fields are read INSIDE the guard, which
+            # `update_metadata_if` evaluates under the cross-process lock at
+            # write time -- exactly the contract that method exists for ("the
+            # decision is re-made here rather than trusted from before the
+            # lock"). A dict snapshotted before the lock could commit out of
+            # order: a tag save that snapshotted `pinned=False` before a
+            # concurrent pin request committed `pinned=True` would land its
+            # stale aggregate second and silently revert the acknowledged pin.
+            # The full save has the same shape -- it builds its metadata line
+            # from slot state inside the locked block -- so whichever writer
+            # commits last writes the newest slot state.
+            merged_fields: dict = {}
+            guard_state = {"ran": False}
+
+            def _refresh_under_lock(meta: dict) -> bool:
+                guard_state["ran"] = True
+                if not meta:
+                    return False
+                merged_fields.clear()
+                merged_fields.update(_fresh_fields())
+                return True
+
+            applied = state.conversation_log.update_metadata_if(
+                history_key,
+                merged_fields,
+                _refresh_under_lock,
+            )
+            if not applied and not guard_state["ran"]:
+                # `update_metadata_if` fails CLOSED on an unreadable record
+                # WITHOUT invoking the guard -- that is a failed write, not the
+                # by-design skip for a line-less tab (where the guard runs and
+                # sees an empty record). Returning True here would report a
+                # merge that never happened as durable: a close would remove
+                # the tab while the on-disk line stays open-shaped and the
+                # next restart resurrects it. Raise instead, matching the save
+                # contract: best-effort callers log + mark the slot dirty, and
+                # archival callers (close, best_effort=False) roll back and
+                # keep the slot.
+                raise OSError(
+                    f"empty-window metadata merge skipped: record unreadable for {history_key}"
+                )
         return True
     # Skip a pure no-op: a freshly resumed slot with no new AND no edited
     # messages. ``slot._dirty`` is set by both append and in-place edits
