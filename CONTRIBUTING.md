@@ -55,11 +55,13 @@ cd website
 npm install
 npm run build
 cp -r dist ../src/kiro_crew/static/dist
+cd electron && npm ci && cd ..       # desktop sub-package deps (npm test needs them)
 cd ..
 
-# 3. Editable backend install (with optional voice extras)
+# 3. Editable backend install (with dev/test tooling)
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[voice]"
+pip install -e ".[dev]"
+# Optional voice extras (local speech-to-text): pip install -e ".[dev,voice]"
 
 # 4. Configure and verify
 kirocrew setup               # data dir, agent backend (channels connect later)
@@ -70,9 +72,11 @@ kirocrew gateway             # start server (dashboard + messaging channels)
 The dashboard is at `http://localhost:5476`.
 
 On Windows, `.\make.ps1 build` does steps 2 and 3 in one command (the venv lands
-in `.venv\Scripts\`, and `Activate.ps1` replaces `source .venv/bin/activate`).
-Read the [Windows guide](docs/guides/windows-install.md) first — a few features
-need an explicit opt-in there.
+in `.venv\Scripts\`, and `Activate.ps1` replaces `source .venv/bin/activate`),
+except the `website/electron` sub-package — run
+`npm ci --prefix website/electron` separately before `npm test`. Read the
+[Windows guide](docs/guides/windows-install.md) first — a few features need an
+explicit opt-in there.
 
 **Messaging channels are optional**: the default `kirocrew setup` configures
 none, and the dashboard + CLI work without any channel credentials. Connect
@@ -103,7 +107,8 @@ truth (with `.github/workflows/ci.yml` canonical for the gate list).
 ### Backend
 
 ```bash
-pip install -e ".[voice]"    # installs deps + console scripts
+pip install -e ".[dev]"      # installs deps + console scripts + test tooling
+# Optional voice extras (local speech-to-text): pip install -e ".[dev,voice]"
 pytest                       # run the test suite
 ```
 
@@ -116,6 +121,7 @@ The React SPA lives in `website/`. Production builds are bundled into
 cd website
 npm install
 npm run build                # tsc + vite build → website/dist
+cd electron && npm ci && cd ..       # desktop sub-package deps (npm test needs them)
 ```
 
 After building, copy `website/dist` into `src/kiro_crew/static/dist/` so the
