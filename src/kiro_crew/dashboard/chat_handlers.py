@@ -6559,63 +6559,81 @@ async def api_chat_mode(request: web.Request) -> web.Response:
 
     # If any slot has a pending approval and mode is trust/yolo, auto-approve it
     if mode in ("trust", "yolo"):
-        for slot in state._slots.values():
-            for aid, fut in list(slot._approval_futures.items()):
+        # A slot-scoped ``trust`` grants auto-approval to ONE session only (the
+        # target slot and any slot sharing its effective key). The pending-approval
+        # sweep MUST honour that scope: sweeping every slot's pending prompt would
+        # clear the approval card in unrelated chats — making them LOOK approved —
+        # while their ``_trust`` flag stays False, so their very next tool call
+        # prompts again. ``yolo`` is process-global and an unscoped ``trust`` (no
+        # slot named = the documented all-slots request) still sweeps everything,
+        # including background and channel approvals. Only a slot-scoped ``trust``
+        # narrows.
+        scoped = mode == "trust" and slot is not None
+        _target_key = effective_session_key(slot) if slot is not None and scoped else None
+        for _slot in state._slots.values():
+            if scoped and effective_session_key(_slot) != _target_key:
+                continue
+            for aid, fut in list(_slot._approval_futures.items()):
                 if not fut.done():
                     fut.set_result("approved")
                     # Persist resolved state into the permission message. The
                     # periodic flush skips non-dirty slots, so the mark must
                     # flag the slot or the write can be lost on restart.
-                    if _mark_permission_resolved(slot.messages, aid, mode):
-                        slot._dirty = True
+                    if _mark_permission_resolved(_slot.messages, aid, mode):
+                        _slot._dirty = True
                     # ``slot`` keys the frame for the slot-scoped WS gate — an
                     # app token cannot receive its own resolution without it.
                     state.broadcast_ws(
                         "approval_resolved",
-                        {"id": aid, "approved": True, "slot": slot.key},
+                        {"id": aid, "approved": True, "slot": _slot.key},
                     )
                     try:
                         sel().log_api_access(
-                            caller=f"dashboard:{slot.key}",
+                            caller=f"dashboard:{_slot.key}",
                             operation=f"tool_approval:bulk_{mode}",
                             outcome="approved",
                             resources=aid,
                         )
                     except Exception:
                         logger.warning("SEL audit failed for bulk approval %s", aid, exc_info=True)
-        # Also auto-approve all pending background approvals (cron/subagent/taskrunner)
-        for aid in list(state._approval_futures):
-            fut = state._approval_futures[aid]
-            if not fut.done():
-                state.resolve_approval(aid, True)
-                try:
-                    sel().log_api_access(
-                        caller="dashboard:background",
-                        operation=f"tool_approval:bulk_{mode}",
-                        outcome="approved",
-                        resources=aid,
-                    )
-                except Exception:
-                    logger.warning("SEL audit failed for bulk approval %s", aid, exc_info=True)
-        # Auto-approve pending channel approvals
-        mgr = getattr(state, "channel_manager", None)
-        if mgr:
-            for ch in mgr._channels.values():
-                for agent in ch.members.values():
-                    fut = agent._approval_future
-                    if fut and not fut.done():
-                        fut.set_result("approved")
-                        try:
-                            sel().log_api_access(
-                                caller=f"channel:{ch.id}:{agent.agent_name}",
-                                operation=f"tool_approval:bulk_{mode}",
-                                outcome="approved",
-                                resources=getattr(fut, "_approval_id", "unknown"),
-                            )
-                        except Exception:
-                            logger.warning(
-                                "SEL audit failed for channel bulk approval", exc_info=True
-                            )
+        # Background (cron/subagent/taskrunner) and channel approvals are NOT
+        # slot-scoped, so a slot-scoped ``trust`` must leave them pending — it
+        # asked for auto-approval on one session and cannot answer for unrelated
+        # background work. Only ``yolo`` and an all-slots ``trust`` sweep them.
+        if not scoped:
+            for aid in list(state._approval_futures):
+                fut = state._approval_futures[aid]
+                if not fut.done():
+                    state.resolve_approval(aid, True)
+                    try:
+                        sel().log_api_access(
+                            caller="dashboard:background",
+                            operation=f"tool_approval:bulk_{mode}",
+                            outcome="approved",
+                            resources=aid,
+                        )
+                    except Exception:
+                        logger.warning("SEL audit failed for bulk approval %s", aid, exc_info=True)
+            # Auto-approve pending channel approvals
+            mgr = getattr(state, "channel_manager", None)
+            if mgr:
+                for ch in mgr._channels.values():
+                    for agent in ch.members.values():
+                        fut = agent._approval_future
+                        if fut and not fut.done():
+                            fut.set_result("approved")
+                            try:
+                                sel().log_api_access(
+                                    caller=f"channel:{ch.id}:{agent.agent_name}",
+                                    operation=f"tool_approval:bulk_{mode}",
+                                    outcome="approved",
+                                    resources=getattr(fut, "_approval_id", "unknown"),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "SEL audit failed for channel bulk approval",
+                                    exc_info=True,
+                                )
 
     # Propagate trust/yolo to session approval policies so subagents inherit.
     #

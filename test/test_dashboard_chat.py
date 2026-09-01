@@ -9137,6 +9137,78 @@ class TestBulkApproveBroadcast:
         assert "req-1" in ids
         assert "req-2" in ids
 
+    @pytest.mark.asyncio
+    async def test_slot_scoped_trust_leaves_other_slots_pending(self, tmp_path, monkeypatch):
+        """A slot-scoped ``trust`` must NOT sweep other slots' pending approvals.
+
+        Regression: bulk auto-approve iterated EVERY slot regardless of scope, so
+        trusting one chat resolved the pending approval card in unrelated chats
+        (making them LOOK approved) while their ``_trust`` flag stayed False — so
+        their next tool call prompted again. Scope the sweep to the target
+        session; other slots keep their pending future AND their untrusted state.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.dashboard.chat.sel", lambda: MagicMock())
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.broadcast_ws = MagicMock()
+        s1 = state.get_or_create_slot("s1")
+        s2 = state.get_or_create_slot("s2")
+        loop = asyncio.get_running_loop()
+        f1: asyncio.Future[str] = loop.create_future()
+        f2: asyncio.Future[str] = loop.create_future()
+        s1._approval_futures["req-1"] = f1
+        s2._approval_futures["req-2"] = f2
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post("/api/chat/mode", json={"mode": "trust", "slot": "s1"})
+            assert (await resp.json())["ok"] is True
+
+        # Target slot: approved + broadcast + trusted.
+        assert f1.done() and f1.result() == "approved"
+        assert s1._trust is True
+        # Other slot: still pending, never broadcast, still untrusted.
+        assert not f2.done()
+        assert s2._trust is False
+        resolved_ids = {
+            c.args[1]["id"]
+            for c in state.broadcast_ws.call_args_list
+            if c.args[0] == "approval_resolved"
+        }
+        assert "req-1" in resolved_ids
+        assert "req-2" not in resolved_ids
+        # Clean up the still-pending future so the loop does not warn on GC.
+        f2.set_result("rejected")
+
+    @pytest.mark.asyncio
+    async def test_unscoped_trust_still_sweeps_all_slots(self, tmp_path, monkeypatch):
+        """An all-slots ``trust`` (no slot named) keeps sweeping every slot."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.dashboard.chat.sel", lambda: MagicMock())
+        state = _make_state(tmp_path)
+        state.push_slots_update = MagicMock()
+        state.broadcast_ws = MagicMock()
+        s1 = state.get_or_create_slot("s1")
+        s2 = state.get_or_create_slot("s2")
+        loop = asyncio.get_running_loop()
+        f1: asyncio.Future[str] = loop.create_future()
+        f2: asyncio.Future[str] = loop.create_future()
+        s1._approval_futures["req-1"] = f1
+        s2._approval_futures["req-2"] = f2
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post("/api/chat/mode", json={"mode": "trust"})
+            assert (await resp.json())["ok"] is True
+
+        assert f1.done() and f2.done()
+        assert s1._trust is True and s2._trust is True
+        resolved_ids = {
+            c.args[1]["id"]
+            for c in state.broadcast_ws.call_args_list
+            if c.args[0] == "approval_resolved"
+        }
+        assert {"req-1", "req-2"} <= resolved_ids
+
 
 # ── Coverage: multi-pending approval 400 and trust auto-approve ──
 
