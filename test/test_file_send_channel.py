@@ -1003,3 +1003,334 @@ class TestChannelUploadEndpoint:
                 body = await resp.json()
         assert resp.status == 502
         assert body["error"] == "channel delivery failed"
+
+
+class TestDestinationOracleEquivalence:
+    """The rungs the destination oracle must keep answering exactly as the two
+    inline ladders did (issue #6060).
+
+    The classes above already pin the seven Slack destination OUTCOMES and the
+    channel leg's skip-vs-error semantics, and they run unchanged against the
+    oracle. What they never asserted is what a fold could silently change while
+    leaving those outcomes intact: the SEL record each refusal writes, the
+    fail-closed direction when the tracking probe RAISES, and which callers get
+    to consult the session map at all. Those are pinned here.
+    """
+
+    @staticmethod
+    def _state(slack, *, thread_ts=None, channel=None):
+        state = MagicMock()
+        state.slack_client = slack
+        sessions = MagicMock()
+        sessions.get_slack_link = MagicMock(return_value=(thread_ts, channel))
+        state.sessions = sessions
+        return state
+
+    @staticmethod
+    def _records(sel):
+        """The kwargs of every SEL tool-invocation the request wrote."""
+        return [c.kwargs for c in sel.log_tool_invocation.call_args_list]
+
+    async def _post_slack(self, app, payload, *, headers=None):
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/slack/upload-file", json=payload, headers=headers)
+            return resp, await resp.json()
+
+    @pytest.mark.asyncio
+    async def test_an_untracked_channel_refusal_keeps_its_audit_record(
+        self, tmp_path, outbox_file
+    ):
+        """A refused destination writes ONE denied record naming the channel,
+        with ``downstream_service`` set — the audit lane an operator greps to
+        find refused sends. The client response still does not name it."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        app = _make_app(slack, tmp_path)
+        sel = MagicMock()
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=False
+        ), patch(
+            "kiro_crew.dashboard.handlers.files._sel", return_value=sel
+        ):
+            resp, body = await self._post_slack(
+                app,
+                {
+                    "file_path": str(outbox_file),
+                    "filename": "report.txt",
+                    "channel": "C0UNTRACKED9",
+                },
+            )
+
+        assert resp.status == 403
+        assert body["code"] == "channel_not_tracked"
+        assert "C0UNTRACKED9" not in body.get("error", "")
+        denials = [r for r in self._records(sel) if r.get("outcome") == "denied"]
+        assert denials == [
+            {
+                "session_key": "api",
+                "source": "api",
+                "tool_name": "file_send",
+                "tool_kind": "slack",
+                "outcome": "denied",
+                "downstream_service": "slack",
+                "error": "channel_not_tracked: C0UNTRACKED9",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_send_carries_no_downstream_service(self, tmp_path, outbox_file):
+        """A skip is not a refusal: the shipped skip records carry no
+        ``downstream_service``, so an audit reader can tell "nowhere to send" from
+        "refused to send there"."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        app = _make_app(slack, tmp_path)
+        sel = MagicMock()
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.config.loader.KiroCrewConfig.load"
+        ) as mock_cfg, patch(
+            "kiro_crew.dashboard.handlers.files._sel", return_value=sel
+        ):
+            mock_cfg.return_value.load_credentials.return_value = {}
+            resp, body = await self._post_slack(
+                app,
+                {"file_path": str(outbox_file), "filename": "report.txt", "channel": ""},
+            )
+
+        assert resp.status == 200
+        assert body == {"ok": True, "skipped": "no_channel"}
+        skips = [r for r in self._records(sel) if r.get("outcome") == "skipped"]
+        assert skips == [
+            {
+                "session_key": "api",
+                "source": "api",
+                "tool_name": "file_send",
+                "tool_kind": "slack",
+                "outcome": "skipped",
+                "error": "no_channel",
+            }
+        ]
+        slack.upload_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_raising_tracking_probe_denies_a_named_channel(self, tmp_path, outbox_file):
+        """Deny-by-default extends to uncertainty: a tracking check that RAISED
+        has not authorized anybody, so the named channel is refused rather than
+        treated as tracked."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        app = _make_app(slack, tmp_path)
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.dashboard.handlers.files.is_tracked_channel",
+            side_effect=RuntimeError("config unreadable"),
+        ):
+            resp, body = await self._post_slack(
+                app,
+                {
+                    "file_path": str(outbox_file),
+                    "filename": "report.txt",
+                    "channel": "C0TRACKED123",
+                },
+            )
+
+        assert resp.status == 403
+        assert "not in tracked channels" in body.get("error", "")
+        slack.upload_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_raising_tracking_probe_denies_a_non_dm_session_map_channel(
+        self, tmp_path, outbox_file
+    ):
+        """Same fail-closed direction on the session-map branch, where the
+        D-prefix short-circuit does NOT apply: a raising probe refuses the
+        channel instead of letting the trusted-link path carry it."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        state = self._state(slack, thread_ts="111.222", channel="C0ROGUE999")
+        app = _make_app(slack, tmp_path, state=state)
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.dashboard.handlers.files.is_tracked_channel",
+            side_effect=RuntimeError("config unreadable"),
+        ):
+            resp, body = await self._post_slack(
+                app,
+                {"file_path": str(outbox_file), "filename": "report.txt", "channel": ""},
+                headers={"X-Session-Key": "dashboard:chat-1"},
+            )
+
+        assert resp.status == 403
+        assert "not authorized" in body.get("error", "")
+        slack.upload_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_dm_from_the_session_map_never_consults_the_tracking_probe(
+        self, tmp_path, outbox_file
+    ):
+        """The D-prefix short-circuit is not just an alternative to tracking, it
+        is evaluated FIRST: a system-created DM link uploads even when the
+        tracking probe would raise."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        state = self._state(slack, thread_ts="111.222", channel="D0SLOTDM01")
+        app = _make_app(slack, tmp_path, state=state)
+        probe = MagicMock(side_effect=RuntimeError("must not be consulted"))
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.dashboard.handlers.files.is_tracked_channel", new=probe
+        ):
+            resp, _ = await self._post_slack(
+                app,
+                {"file_path": str(outbox_file), "filename": "report.txt", "channel": ""},
+                headers={"X-Session-Key": "dashboard:chat-1"},
+            )
+
+        assert resp.status == 200
+        probe.assert_not_called()
+        assert slack.upload_file.call_args[0][0] == "D0SLOTDM01"
+
+    @pytest.mark.asyncio
+    async def test_a_non_linkable_caller_never_reads_the_session_map(
+        self, tmp_path, outbox_file
+    ):
+        """Only a ``dashboard:`` or channel-native key owns a Slack link. A
+        ``cron:``/``subagent:``-style key must not inherit one: the lookup is
+        never made, and the send falls back to the owner DM."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER_DM")
+        state = self._state(slack, thread_ts="111.222", channel="C0SOMEONE_ELSE")
+        app = _make_app(slack, tmp_path, state=state)
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.config.loader.KiroCrewConfig.load"
+        ) as mock_cfg:
+            mock_cfg.return_value.load_credentials.return_value = {
+                "KIROCREW_OWNER_ID": "U_OWNER"
+            }
+            resp, _ = await self._post_slack(
+                app,
+                {"file_path": str(outbox_file), "filename": "report.txt", "channel": ""},
+                headers={"X-Session-Key": "cron:nightly"},
+            )
+
+        assert resp.status == 200
+        state.sessions.get_slack_link.assert_not_called()
+        assert slack.upload_file.call_args[0][0] == "D_OWNER_DM"
+        assert slack.upload_file.call_args[0][1] == ""
+
+    @pytest.mark.asyncio
+    async def test_the_admission_gate_runs_before_any_destination_work(self, tmp_path):
+        """Ordering the two legs share: a file that cannot ship is refused before
+        the oracle is consulted, so a rejected upload cannot open a DM or read
+        the session map as a side effect."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER_DM")
+        state = self._state(slack, thread_ts="111.222", channel="D0SLOTDM01")
+        app = _make_app(slack, tmp_path, state=state)
+        outside = tmp_path / "elsewhere" / "secret.txt"
+        outside.parent.mkdir()
+        outside.write_text("data", encoding="utf-8")
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=tmp_path / "outbox"
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path / "workspace"
+        ):
+            resp, body = await self._post_slack(
+                app,
+                {"file_path": str(outside), "filename": "secret.txt"},
+                headers={"X-Session-Key": "dashboard:chat-1"},
+            )
+
+        assert resp.status == 403 and body["code"] == "path_not_allowed"
+        state.sessions.get_slack_link.assert_not_called()
+        slack.open_dm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_credential_store_is_a_skip_not_a_500(
+        self, tmp_path, outbox_file
+    ):
+        """The owner-DM fallback is best-effort: a credential read that RAISES
+        leaves the caller with no destination, which is a skip. The request must
+        not surface a 500 (nor an exception naming the credential store) just
+        because no channel could be resolved."""
+        slack = MagicMock()
+        slack.upload_file = AsyncMock()
+        slack.open_dm = AsyncMock(return_value="D_OWNER_DM")
+        app = _make_app(slack, tmp_path)
+
+        with patch(
+            "kiro_crew.config.loader.outbox_dir", return_value=outbox_file.parent
+        ), patch(
+            "kiro_crew.config.loader.workspace_root", return_value=tmp_path
+        ), patch(
+            "kiro_crew.config.loader.KiroCrewConfig.load",
+            side_effect=RuntimeError("credential store unreadable"),
+        ):
+            resp, body = await self._post_slack(
+                app,
+                {"file_path": str(outbox_file), "filename": "report.txt", "channel": ""},
+            )
+
+        assert resp.status == 200
+        assert body == {"ok": True, "skipped": "no_channel"}
+        slack.open_dm.assert_not_called()
+        slack.upload_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_both_legs_resolve_through_the_one_oracle_module(self):
+        """The point of the change: neither endpoint carries its own resolver any
+        more. Pinned structurally so a future edit that re-inlines a ladder in
+        one leg fails here instead of in review."""
+        import inspect
+
+        from kiro_crew.dashboard import upload_destination
+        from kiro_crew.dashboard.handlers import files
+
+        def _body(func):
+            """The function's code, with its docstring dropped — the docstrings
+            NAME these rungs to say where they live, and a text scan would flag
+            exactly the sentence documenting the move."""
+            return inspect.getsource(func).replace(func.__doc__ or "\0", "")
+
+        slack_src = _body(files.api_slack_upload_file)
+        channel_src = _body(files.api_channel_upload_file)
+        assert "upload_destination.resolve_slack(" in slack_src
+        assert "upload_destination.resolve_channel(" in channel_src
+        # The rungs themselves live in the oracle, not in either handler.
+        for rung in ("get_slack_link(", "open_dm(", "_resolve_mirror_target", "may_send_to("):
+            assert rung not in slack_src, f"{rung} is back in the Slack handler"
+            assert rung not in channel_src, f"{rung} is back in the channel handler"
+        assert "is_tracked_channel(" not in slack_src, "the tracking check is back in the handler"
+        oracle_src = inspect.getsource(upload_destination)
+        for rung in ("get_slack_link(", "open_dm(", "_resolve_mirror_target", "tracked_probe("):
+            assert rung in oracle_src

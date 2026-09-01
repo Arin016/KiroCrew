@@ -32,7 +32,7 @@ from kiro_crew import platform_compat
 from kiro_crew.atomic_write import atomic_write, open_access_control_source
 from kiro_crew.config import loader as config_loader
 from kiro_crew.config.loader import KiroCrewConfig, WorkspaceConfig, config_dir, data_home
-from kiro_crew.dashboard import part_stream
+from kiro_crew.dashboard import part_stream, upload_destination
 from kiro_crew.dashboard.chat_utils import dashboard_slot_key
 from kiro_crew.dashboard.file_index import _SKIP_DIRS as _WALK_SKIP_DIRS
 from kiro_crew.dashboard.handlers._shared import _probe_persisted_session
@@ -40,9 +40,7 @@ from kiro_crew.dashboard.origin import is_direct_local_request
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.doc_parser import extract_text
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes, safe_read_prefix
-from kiro_crew.messaging import upload_gate
 from kiro_crew.messaging.display_safety import redact_for_display
-from kiro_crew.messaging.link import is_channel_session_key
 from kiro_crew.messaging.outbound_files import OutboundFile
 from kiro_crew.messaging.raster import SNIFF_BYTES, sniff_raster_mime
 from kiro_crew.platform import redact_via_context as redact
@@ -56,7 +54,6 @@ from kiro_crew.security import (
 from kiro_crew.slack.handler import is_tracked_channel
 from kiro_crew.validation import (
     FILE_READ_SCHEMA,
-    FILE_SEND_SCHEMA,
     ValidationError,
     validate_tool_args,
 )
@@ -88,6 +85,41 @@ def _sel():
     """Late-binding _sel() for test monkeypatch compatibility."""
     import kiro_crew.dashboard.handlers as _pkg  # noqa: F811
     return _pkg.sel()
+
+
+def _audit_file_send(
+    *,
+    leg: str,
+    outcome: str,
+    error: str | None = None,
+    downstream: str | None = None,
+    resources: str | None = None,
+) -> None:
+    """The one audit shape both ``file_send`` delivery legs write.
+
+    Every record the Slack and channel endpoints emit is the same tool
+    invocation under a different ``tool_kind`` (the leg), so the shape lives
+    here rather than being spelled out at each of the dozen decision sites it
+    used to be copied to -- one drifted field was previously a one-line edit
+    away. Optional fields are OMITTED when unset, exactly as the shipped call
+    sites omitted them: skips carry no ``downstream_service``, refusals and
+    deliveries do.
+    """
+    extra: dict[str, str] = {}
+    if error is not None:
+        extra["error"] = error
+    if downstream is not None:
+        extra["downstream_service"] = downstream
+    if resources is not None:
+        extra["resources"] = resources
+    _sel().log_tool_invocation(
+        session_key="api",
+        source="api",
+        tool_name="file_send",
+        tool_kind=leg,
+        outcome=outcome,
+        **extra,
+    )
 
 
 async def api_reveal_path(request: web.Request) -> web.Response:
@@ -601,34 +633,32 @@ def _gate_upload_file(
 
 
 async def api_slack_upload_file(request: web.Request) -> web.Response:
-    """POST /api/slack/upload-file — upload a file to Slack (internal, called by file_send)."""
+    """POST /api/slack/upload-file — upload a file to Slack (internal, called by file_send).
+
+    Destination and authorization come from the shared oracle
+    (:func:`kiro_crew.dashboard.upload_destination.resolve_slack`), which holds
+    this leg's ladder — request-named channel, session-map-linked thread,
+    owner-DM fallback, tracked-channel authorization — next to the non-Slack
+    leg's, so the two cannot drift apart rung by rung (issue #6060). What stays
+    here is what only this leg can answer: the Slack client, its upload verb,
+    and the response shapes.
+
+    The client-presence check stays AHEAD of the body parse, where it shipped: a
+    gateway with no Slack client answers ``skipped: no_slack`` even for a
+    malformed body.
+    """
     state: DashboardState = request.app["state"]
     slack = state.slack_client
     if not slack:
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="slack",
-            outcome="skipped",
-            error="no_slack_client",
-        )
+        _audit_file_send(leg="slack", outcome="skipped", error="no_slack_client")
         return web.json_response({"ok": True, "skipped": "no_slack"})
     try:
         body = await request.json()
     except ValueError:
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="slack",
-            outcome="denied",
-            error="invalid_json_body",
-        )
+        _audit_file_send(leg="slack", outcome="denied", error="invalid_json_body")
         return web.json_response({"error": "Invalid JSON body"}, status=400)
     file_path_raw = body.get("file_path", "")
     filename = body.get("filename", "")
-    thread_ts = body.get("thread_ts")
     # Off-loop: the gate reads up to MAX_FILE_BYTES and regex-scans the content
     # (no-blocking-call-on-event-loop).
     error_resp, resolved, raw = await asyncio.to_thread(
@@ -637,130 +667,56 @@ async def api_slack_upload_file(request: web.Request) -> web.Response:
     if error_resp is not None:
         return error_resp
     assert resolved is not None and raw is not None  # narrowed by the gate
-    file_path = file_path_raw
-    # Resolve thread_ts and channel from linked slot when not explicitly provided
-    target_channel = body.get("channel", "")
-    channel_from_session_map = False
-    session_key = request.headers.get("X-Session-Key", "").strip()
-    # A dashboard session carries its Slack link in the session map; a
-    # channel-born one is linked under that same channel key by the Slack
-    # handler, so both resolve their thread from the one lookup. Skipping the
-    # channel case would DM the owner instead of landing the file in the thread
-    # the conversation is happening in.
-    linkable = session_key.startswith("dashboard:") or is_channel_session_key(session_key)
-    if not thread_ts and linkable and state.sessions:
-        link_ts, link_ch = state.sessions.get_slack_link(session_key)
-        if link_ts and (not target_channel or target_channel == link_ch):
-            thread_ts = link_ts
-            if not target_channel and link_ch:
-                target_channel = link_ch
-                channel_from_session_map = True
-    # Resolve channel: use explicit channel if provided, else owner DM
-    channel = ""
-    if target_channel:
-        try:
-            validate_tool_args(
-                {"path": "x", "channel": target_channel}, FILE_SEND_SCHEMA
-            )
-        except ValidationError:
-            _sel().log_tool_invocation(
-                session_key="api",
-                source="api",
-                tool_name="file_send",
-                tool_kind="slack",
-                outcome="denied",
-                downstream_service="slack",
-                error="channel_validation_failed",
-            )
+    # ``is_tracked_channel`` is handed to the oracle rather than imported there:
+    # one binding site, and the module stays free of the Slack handler's config
+    # dependency (same contract as ``persisted_probe`` below).
+    destination = await upload_destination.resolve_slack(
+        state,
+        slack,
+        session_key=request.headers.get("X-Session-Key", "").strip(),
+        requested_channel=body.get("channel", ""),
+        thread_ts=body.get("thread_ts"),
+        tracked_probe=is_tracked_channel,
+    )
+    if isinstance(destination, upload_destination.Refusal):
+        _audit_file_send(
+            leg="slack",
+            outcome="denied",
+            error=destination.audit_error,
+            downstream=destination.downstream,
+        )
+        # One branch per literal status, body inline. `status=<expression>` and a
+        # body hoisted into a variable are both invisible to the error-code
+        # contract scanner, which counts either as its own bucket
+        # (test_error_code_contract) -- so the refusal says WHICH answer it is
+        # and each answer is spelled out here.
+        if destination.status == 400:
             return web.json_response(
-                {"error": "invalid channel value"}, status=400
+                {"error": destination.error, "code": destination.code}, status=400
             )
-        # Session-map-sourced channels are trusted (system created the link).
-        # Only enforce tracking check for user-supplied channels.
-        # Defense-in-depth: session-map channels must be DMs (D-prefix) or tracked.
-        if not channel_from_session_map:
-            try:
-                tracked = is_tracked_channel(target_channel)
-            except Exception:
-                tracked = False  # deny-by-default extends to uncertainty
-            if not tracked:
-                _sel().log_tool_invocation(
-                    session_key="api",
-                    source="api",
-                    tool_name="file_send",
-                    tool_kind="slack",
-                    outcome="denied",
-                    downstream_service="slack",
-                    error=f"channel_not_tracked: {target_channel}",
-                )
-                return web.json_response(
-                    {"error": "channel not in tracked channels"}, status=403
-                )
-        else:
-            try:
-                allowed = target_channel.startswith("D") or is_tracked_channel(target_channel)
-            except Exception:
-                allowed = False  # deny-by-default extends to uncertainty
-            if not allowed:
-                _sel().log_tool_invocation(
-                    session_key="api",
-                    source="api",
-                    tool_name="file_send",
-                    tool_kind="slack",
-                    outcome="denied",
-                    downstream_service="slack",
-                    error=f"session_map_channel_not_authorized: {target_channel}",
-                )
-                return web.json_response(
-                    {"error": "channel not authorized"}, status=403
-                )
-        channel = target_channel
-    else:
-        try:
-            creds = KiroCrewConfig.load().load_credentials()
-            owner_id = creds.get("KIROCREW_OWNER_ID", "")
-            if owner_id:
-                channel = await slack.open_dm(owner_id)
-        except Exception:
-            pass
-    if not channel:
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="slack",
-            outcome="skipped",
-            error="no_channel",
+        return web.json_response(
+            {"error": destination.error, "code": destination.code}, status=403
         )
-        return web.json_response({"ok": True, "skipped": "no_channel"})
+    if isinstance(destination, upload_destination.Skip):
+        _audit_file_send(leg="slack", outcome="skipped", error=destination.reason)
+        return web.json_response({"ok": True, "skipped": destination.reason})
     try:
-        safe_filename = filename
-        if redact(safe_filename) != safe_filename:
-            _sel().log_tool_invocation(
-                session_key="api",
-                source="api",
-                tool_name="file_send",
-                tool_kind="slack",
-                outcome="denied",
-                downstream_service="slack",
-                error="sensitive_filename_rejected",
-            )
-            return web.json_response({"error": "filename contains sensitive content"}, status=400)
+        # The filename was already cleared by the shared admission gate above —
+        # same predicate, same value, strictly earlier in this function — so the
+        # leg no longer re-checks it. #6044 made that gate the one site for the
+        # rule; a second copy here could only drift from it.
         await slack.upload_file(
-            channel,
-            thread_ts or "",
+            destination.channel,
+            destination.thread_ts,
             str(resolved),
-            safe_filename,
-            safe_filename,
+            filename,
+            filename,
         )
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="slack",
+        _audit_file_send(
+            leg="slack",
             outcome="completed",
-            downstream_service="slack",
-            resources=f"channel={channel} file={file_path}",
+            downstream="slack",
+            resources=f"channel={destination.channel} file={file_path_raw}",
         )
         return web.json_response({"ok": True})
     except Exception as e:
@@ -769,15 +725,7 @@ async def api_slack_upload_file(request: web.Request) -> web.Response:
         # reaches the client or the audit record (see api_slack_pins).
         safe_error, _ = redact_credentials(str(e))
         safe_error, _ = redact_exfiltration_urls(safe_error)
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="slack",
-            outcome="error",
-            downstream_service="slack",
-            error=safe_error,
-        )
+        _audit_file_send(leg="slack", outcome="error", downstream="slack", error=safe_error)
         return web.json_response({"error": safe_error}, status=500)
 
 
@@ -785,19 +733,21 @@ async def api_channel_upload_file(request: web.Request) -> web.Response:
     """POST /api/channel/upload-file — deliver a file to the caller's own
     conversation on a non-Slack channel (internal, called by file_send).
 
-    The Slack counterpart above has its own identity ladder; this one serves
-    every transport-registry channel through the SAME send ladder the
-    cross-surface reply mirror uses (``_resolve_mirror_target``): channel-scope
-    governance, transport registration, proactive-send capability, and
-    ``may_send_to`` recipient re-authorization, all fail-closed and
-    SEL-audited in one place — plus the restricted-session ceiling the
-    renderers' extraction path enforces, on the same shared predicate. The
-    destination comes exclusively from the caller's session map entry — a
-    request cannot name an arbitrary conversation, which is what keeps this
-    endpoint from being a broadcast primitive. Delivery today: Telegram and
-    Discord, each via its own purpose-built name-preserving ``send_document``
-    (see the delivery-branch comment below); every other channel is a skip
-    until its transport grows that verb.
+    Destination and authorization come from the shared oracle
+    (:func:`kiro_crew.dashboard.upload_destination.resolve_channel`), which for
+    this leg is the SAME send ladder the cross-surface reply mirror uses
+    (``_resolve_mirror_target``): channel-scope governance, transport
+    registration, proactive-send capability, and ``may_send_to`` recipient
+    re-authorization, all fail-closed and SEL-audited in one place — plus the
+    restricted-session ceiling the renderers' extraction path enforces, on the
+    same shared predicate. The destination comes exclusively from the caller's
+    session map entry — a request cannot name an arbitrary conversation, which is
+    what keeps this endpoint from being a broadcast primitive. The oracle also
+    resolves the delivery verb, since which channels have one is part of "can
+    this file land here": Telegram and Discord today, each via its own
+    purpose-built name-preserving ``send_document``; every other channel is a
+    skip until its transport grows that verb. The Slack counterpart above
+    resolves through the same module, one rung table away (issue #6060).
 
     "Cannot deliver here" is a SKIP (``delivered: false``), not an error: most
     sessions mirror nowhere, and the caller falls back to the dashboard card
@@ -807,67 +757,21 @@ async def api_channel_upload_file(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except ValueError:
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="channel",
-            outcome="denied",
-            error="invalid_json_body",
-        )
+        _audit_file_send(leg="channel", outcome="denied", error="invalid_json_body")
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
     def _skip(reason: str) -> web.Response:
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="channel",
-            outcome="skipped",
-            error=reason,
-        )
+        _audit_file_send(leg="channel", outcome="skipped", error=reason)
         return web.json_response({"ok": True, "delivered": False, "skipped": reason})
 
-    session_key = request.headers.get("X-Session-Key", "").strip()
-    if not session_key or not getattr(state, "sessions", None):
-        return _skip("no_session")
-    from kiro_crew.dashboard.chat_runner import _resolve_mirror_target
-
-    # Off-loop like the admission gate below: the ladder reloads governance
-    # profiles and reads the persisted session map — synchronous filesystem
-    # work (no-blocking-call-on-event-loop). The session map's reads are
-    # lock-guarded, so the call is thread-safe.
-    target = await asyncio.to_thread(_resolve_mirror_target, state, session_key)
-    if target is None:
-        # No mirror link, a Slack link (the Slack leg owns those), a missing or
-        # capability-less transport, a governance denial, or a may_send_to
-        # refusal — the ladder audited the ones that matter; all mean the same
-        # thing here: this caller has no non-Slack conversation to deliver to.
-        return _skip("no_channel_destination")
-    link, transport = target
-    # The restricted ceiling the renderers' extraction path already enforces:
-    # an incognito/temporary session ships no local file bytes to a channel,
-    # and an explicit file_send must not be the bypass. Same shared predicate
-    # (which SEL-audits the denial), same skip shape as every other "cannot
-    # deliver here" answer. Checked before capability probing: a restricted
-    # caller learns nothing about which channels could upload.
-    if await upload_gate.uploads_restricted(
+    destination = await upload_destination.resolve_channel(
         state,
-        session_key,
-        channel_type=link.channel_type,
+        request.headers.get("X-Session-Key", "").strip(),
         persisted_probe=_probe_persisted_session,
-    ):
-        return _skip("restricted_session")
-    deliver = None
-    # Both legs resolve the SAME purpose-built verb: a name-preserving document
-    # send, distinct from each transport's extraction upload whose filename
-    # sanitizer maps any non-raster mime to `.bin` (`upload_filename`) — correct
-    # for LLM-authored reference paths, wrong for a name this endpoint's gate
-    # already scanned. A channel is listed here only once it has that verb.
-    if link.channel_type in ("telegram", "discord"):
-        deliver = getattr(transport, "send_document", None)
-    if deliver is None:
-        return _skip(f"channel_upload_unsupported:{link.channel_type}")
+    )
+    if isinstance(destination, upload_destination.Skip):
+        return _skip(destination.reason)
+    link, deliver = destination.link, destination.deliver
     # Off-loop: the gate reads up to MAX_FILE_BYTES and regex-scans the content
     # (no-blocking-call-on-event-loop).
     error_resp, resolved, raw = await asyncio.to_thread(
@@ -905,36 +809,27 @@ async def api_channel_upload_file(request: web.Request) -> web.Response:
         # reaches the client or the audit record (see api_slack_upload_file).
         safe_error, _ = redact_credentials(str(e))
         safe_error, _ = redact_exfiltration_urls(safe_error)
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="channel",
+        _audit_file_send(
+            leg="channel",
             outcome="error",
-            downstream_service=link.channel_type,
+            downstream=link.channel_type,
             error=safe_error,
         )
         return web.json_response({"error": safe_error}, status=502)
     if not mid:
         # The transport reported failure without raising (the clients return
         # an empty id on an API-level refusal).
-        _sel().log_tool_invocation(
-            session_key="api",
-            source="api",
-            tool_name="file_send",
-            tool_kind="channel",
+        _audit_file_send(
+            leg="channel",
             outcome="error",
-            downstream_service=link.channel_type,
+            downstream=link.channel_type,
             error="delivery_reported_no_message_id",
         )
         return web.json_response({"error": "channel delivery failed"}, status=502)
-    _sel().log_tool_invocation(
-        session_key="api",
-        source="api",
-        tool_name="file_send",
-        tool_kind="channel",
+    _audit_file_send(
+        leg="channel",
         outcome="completed",
-        downstream_service=link.channel_type,
+        downstream=link.channel_type,
         resources=f"channel_type={link.channel_type} file={body.get('file_path', '')}",
     )
     return web.json_response(
