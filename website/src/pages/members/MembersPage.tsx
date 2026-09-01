@@ -408,7 +408,11 @@ export default function MembersPage() {
                 aria-current={m.name === activeName ? 'true' : undefined}
               >
                 <span className="relative shrink-0">
-                  <CrewAvatar seed={m.name} size={36} />
+                  <CrewAvatar
+                    seed={m.name}
+                    size={36}
+                    working={isRunning(m) ? 'subtle' : undefined}
+                  />
                   {/* Presence dot renders only while the member is working —
                       an idle member shows nothing rather than a gray dot,
                       which read as a broken/disabled state. */}
@@ -484,7 +488,11 @@ export default function MembersPage() {
               >
                 <ArrowLeft size={16} className="lucide-inline" />
               </button>
-              <CrewAvatar seed={active.name} size={30} />
+              <CrewAvatar
+                seed={active.name}
+                size={30}
+                working={isRunning(active) ? 'full' : undefined}
+              />
               <div className="min-w-0 flex-1">
                 <div className="text-[13.5px] font-semibold truncate">{active.name}</div>
               </div>
