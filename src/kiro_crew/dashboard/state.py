@@ -6311,6 +6311,16 @@ class DashboardState:
             self._chat_pins = []
             return
 
+        # Reuse the create-time ingress caps (source of truth: chat_pins.py) so a
+        # hand-edited chat_pins.json cannot smuggle an over-long mid/message_ts/
+        # preview past a loader that only checked type + non-emptiness. Imported
+        # here (not at module top) because chat_pins.py imports this module.
+        from kiro_crew.dashboard.chat_pins import (
+            _MAX_MESSAGE_TS_CHARS,
+            _MAX_MID_CHARS,
+            _MAX_PREVIEW_INPUT_CHARS,
+        )
+
         def _is_valid(pin: Any) -> bool:
             return (
                 isinstance(pin, dict)
@@ -6325,6 +6335,19 @@ class DashboardState:
                 and isinstance(pin.get("preview"), str)
                 and isinstance(pin.get("pinned_at"), str)
                 and bool(pin.get("pinned_at"))
+                # Enforce the create-time length caps at load, so an over-long
+                # record is partitioned into _unparsed rather than served. Guard
+                # each optional identity with isinstance before len(): a
+                # hand-edited record can carry a non-string mid/message_ts (e.g.
+                # a JSON number) while still being valid via the other identity,
+                # and len() on a non-string would crash the whole loader. preview
+                # is already isinstance-checked as a str above.
+                and (not isinstance(pin.get("mid"), str) or len(pin["mid"]) <= _MAX_MID_CHARS)
+                and (
+                    not isinstance(pin.get("message_ts"), str)
+                    or len(pin["message_ts"]) <= _MAX_MESSAGE_TS_CHARS
+                )
+                and len(pin.get("preview") or "") <= _MAX_PREVIEW_INPUT_CHARS
             )
 
         valid, unparsed = self._partition_preserving(
