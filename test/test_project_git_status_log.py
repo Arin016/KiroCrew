@@ -178,6 +178,41 @@ class TestGitStatus:
         # Should have additions (2 new lines) and deletions (original line changed)
         assert "additions" in a or "deletions" in a
 
+    @pytest.mark.asyncio
+    async def test_rows_colliding_after_redaction_collapse_to_one(self, repo, mock_sel):
+        """Two DISTINCT changed paths whose credential-shaped segments redact to
+        the same placeholder yield exactly one row (first wins): the dashboard
+        renders one row per (path, staged) pair, so the API must not emit two
+        rows that read identically.
+        """
+        (repo / "AKIAIOSFODNN7EXAMPLE_model.txt").write_text("x\n")
+        (repo / "AKIAI44QH8DHBEXAMPLE_model.txt").write_text("y\n")
+        async with TestClient(TestServer(_make_app(str(repo)))) as client:
+            resp = await client.get(f"/api/project/git/status?path={repo}")
+            data = await resp.json()
+        assert data["repo"] is True
+        rows = [f for f in data["files"] if f["path"].endswith("_model.txt")]
+        assert len(rows) == 1
+        assert "AKIA" not in rows[0]["path"]
+        # No two rows share a (path, staged) pair.
+        keys = [(f["path"], f["staged"]) for f in data["files"]]
+        assert keys == list(dict.fromkeys(keys))
+
+    @pytest.mark.asyncio
+    async def test_staged_plus_unstaged_rows_for_one_file_both_survive(self, repo, mock_sel):
+        """The de-duplication is keyed per lane: a file with both a staged and
+        an unstaged change legitimately emits two rows sharing one path, and
+        collapsing them would hide the unstaged edit from the git panel.
+        """
+        (repo / "a.txt").write_text("staged\n")
+        _git(repo, "add", "a.txt")
+        (repo / "a.txt").write_text("staged\nthen modified again\n")
+        async with TestClient(TestServer(_make_app(str(repo)))) as client:
+            resp = await client.get(f"/api/project/git/status?path={repo}")
+            data = await resp.json()
+        rows = [f for f in data["files"] if f["path"] == "a.txt"]
+        assert sorted(r["staged"] for r in rows) == [False, True]
+
 
 # ── /api/project/git/log tests ──
 

@@ -209,9 +209,15 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
 
   // The rendered path set: the whole workspace, or just the changed files —
   // the SAME tree component either way, so both modes share look, keyboard
-  // model, search, and git-status lanes.
+  // model, search, and git-status lanes. De-duplicated defensively while
+  // preserving order: the tree builder throws on duplicate paths and that
+  // uncaught throw would take down the whole route, so a duplicate arriving
+  // from any source must degrade to one collapsed row instead. Server-side
+  // egress redaction can legitimately collapse two distinct paths into one
+  // string, so duplicates are reachable, not hypothetical.
   const paths = useMemo<string[]>(
-    () => (mode === 'changed' ? statusEntries.map(e => e.path) : tree?.paths ?? []),
+    () =>
+      Array.from(new Set(mode === 'changed' ? statusEntries.map(e => e.path) : tree?.paths ?? [])),
     [mode, statusEntries, tree],
   )
   const ready = mode === 'changed' ? status != null : tree != null

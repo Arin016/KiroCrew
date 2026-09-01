@@ -152,6 +152,20 @@ describe('PierreWorkspaceTreeImpl — data loading', () => {
     )
   })
 
+  it('collapses duplicate paths before they reach the model, without throwing', async () => {
+    // Server-side egress redaction can collapse two distinct paths into one
+    // string; the real tree builder throws on adjacent duplicates and the
+    // throw would take down the whole route. The wrapper must hand the model
+    // a de-duplicated set, first occurrence winning, order preserved.
+    vi.mocked(api.projectTree).mockResolvedValue(
+      mkTree({ paths: ['README.md', 'dup_model.txt', 'dup_model.txt', 'src/a/b.ts'] }),
+    )
+    renderTree()
+    await waitForTree()
+
+    expect(treeMock.last().calls.resetPaths).toEqual([['README.md', 'dup_model.txt', 'src/a/b.ts']])
+  })
+
   it('reports an empty workspace instead of an empty tree', async () => {
     vi.mocked(api.projectTree).mockResolvedValue(mkTree({ paths: [] }))
     renderTree()

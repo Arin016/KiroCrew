@@ -198,3 +198,25 @@ class TestProjectTree:
             data = await resp.json()
         assert data["truncated"] is True
         assert len(data["paths"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_distinct_paths_colliding_after_redaction_collapse_to_one(self, repo, mock_sel):
+        """Two DISTINCT paths whose credential-shaped segments redact to the same
+        placeholder yield exactly one entry: the client's presorted tree builder
+        throws on duplicate paths, so the API must never emit two rows for one
+        displayed path. Order is preserved (a set would destroy the sorted order
+        the tree builder relies on).
+        """
+        (repo / "AKIAIOSFODNN7EXAMPLE_model.txt").write_text("x\n")
+        (repo / "AKIAI44QH8DHBEXAMPLE_model.txt").write_text("y\n")
+        async with TestClient(TestServer(_make_app(str(repo)))) as client:
+            resp = await client.get(f"/api/project/tree?path={repo}")
+            data = await resp.json()
+        assert data["repo"] is True
+        # Both raw names are gone and the collapsed placeholder appears once.
+        assert not any("AKIA" in p for p in data["paths"])
+        assert sum(1 for p in data["paths"] if p.endswith("_model.txt")) == 1
+        # No duplicates anywhere, and first-occurrence order is intact.
+        assert data["paths"] == list(dict.fromkeys(data["paths"]))
+        assert "a.txt" in data["paths"]
+        assert "src/mod.py" in data["paths"]

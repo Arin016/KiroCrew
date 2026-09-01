@@ -4778,8 +4778,24 @@ async def api_project_git_status(request: web.Request) -> web.Response:
         result["repoRoot"] = redact(result["repoRoot"])
     if result.get("branch"):
         result["branch"] = redact(result["branch"])
+    # Collapse rows whose paths become identical AFTER redaction (first row
+    # wins). redact() maps every match to a fixed placeholder, so two distinct
+    # paths can collapse to one output string; emitting both would hand the
+    # dashboard two identical rows (and duplicate render keys). Pre-redaction
+    # the parsed paths within a lane are already distinct, so de-duplicating
+    # earlier would change nothing. Keyed on (path, staged) because one file
+    # with both a staged and an unstaged change legitimately emits two rows
+    # sharing a path — only same-lane duplicates are the collision artifact.
+    deduped: list[dict] = []
+    seen_rows: set[tuple[str, bool]] = set()
     for f in result.get("files", []):
         f["path"] = redact(f["path"])
+        key = (f["path"], bool(f.get("staged")))
+        if key in seen_rows:
+            continue
+        seen_rows.add(key)
+        deduped.append(f)
+    result["files"] = deduped
     return web.json_response(result)
 
 
@@ -4916,7 +4932,15 @@ async def api_project_tree(request: web.Request) -> web.Response:
     # Egress redaction, same rationale as api_project_git_status: listed names
     # are repo content and this body is rendered by the dashboard.
     result["root"] = redact(result["root"])
-    result["paths"] = [redact(p) for p in result["paths"]]
+    # De-duplicate AFTER redaction, preserving order and the first occurrence:
+    # redact() maps every match to a fixed placeholder, so two distinct listed
+    # paths can collapse to one output string, and the frontend's presorted
+    # tree builder throws on adjacent duplicates. Pre-redaction the listing is
+    # already distinct (git/walk emit each entry once), so an earlier pass
+    # would change nothing. The entry cap above ran on the raw listing, so a
+    # collapse here only shrinks the response — it never re-opens room for
+    # more entries, and the truncated flag keeps describing the raw count.
+    result["paths"] = list(dict.fromkeys(redact(p) for p in result["paths"]))
     return web.json_response(result)
 
 
