@@ -832,6 +832,60 @@ def test_runtime_uses_clients_augmented_kiro_bin_resolver():
     assert runtime_mod._resolve_kiro_bin_for_spawn is client_mod._resolve_kiro_bin_for_spawn
 
 
+@pytest.mark.parametrize("backend", [None, ACP_BACKEND_KAS])
+@pytest.mark.asyncio
+async def test_runtime_missing_kiro_bin_reports_the_directories_it_searched(backend):
+    """The runtime spawn path must DIAGNOSE a missing Kiro CLI, not just name it.
+
+    ``AcpClient._spawn`` already separates "this binary is not installed" from
+    "its install directory is outside the search" by naming every directory it
+    walked (see ``test_spawn_kiro_missing_bin_reports_only_resolver_search_dirs``
+    and ``env.describe_search_path``). The runtime sibling raised a bare
+    ``kiro-cli not found in PATH``, which is both less information and factually
+    wrong: resolution also walks ``%LOCALAPPDATA%\\Kiro-Cli``,
+    ``%ProgramFiles%\\Kiro-Cli`` and the ``KIROCREW_KIRO_BIN`` override, none of
+    which is PATH.
+
+    That gap is what produced #6497. A Windows reporter read "not found in PATH",
+    ran ``where kiro-cli``, got nothing, saw the gateway's OWN ``kirocrew.exe``
+    in the app bundle, and concluded the agent CLI had been renamed and this
+    lookup left stale. It had not been: ``kirocrew`` is Kiro Crew's own console
+    script and ``kiro-cli`` is a separate prerequisite the message never said it
+    was looking for anywhere but PATH.
+
+    Both spawn branches are covered because both resolve the same binary and both
+    have to answer the same question.
+    """
+    import kiro_crew.acp.client as client_mod
+    import kiro_crew.acp.runtime as runtime_mod
+
+    searched = [os.path.join(os.sep, "managed-bin"), os.path.join(os.sep, "path-bin")]
+    unsearched = os.path.join(os.sep, "never-checked")
+    rt = AcpRuntime(work_dir="/tmp")
+    if backend is not None:
+        rt._acp_backend = backend
+
+    async def _no_bin(*, environ=None, home=None):
+        return None
+
+    with (
+        patch.object(runtime_mod, "_resolve_kiro_bin_for_spawn", _no_bin),
+        patch.object(client_mod, "known_kiro_cli_dirs", return_value=searched),
+    ):
+        with pytest.raises(AcpRuntimeError) as raised:
+            await rt._resolve_spawn_argv()
+
+    message = str(raised.value)
+    assert "searched 2 directories" in message
+    assert searched[0] in message
+    assert searched[1] in message
+    assert unsearched not in message
+    # The remedy travels with the diagnosis, the rule env.MCP_PATH_HINT exists
+    # for: a reader who learns the search missed their install needs the one
+    # knob that covers it named here, not only in the source.
+    assert "KIROCREW_KIRO_BIN" in message
+
+
 async def _wait_for_queued(admission: _ColdStartAdmission, expected: int) -> None:
     """Yield to scheduled starters until the coordinator exposes the queue."""
     for _ in range(100):
@@ -1039,7 +1093,7 @@ async def test_runtime_spawn_passes_installed_path_through_exact_wrappers(
         wrapped["spawn_kwargs"] = kwargs
         raise _StopSpawn()
 
-    async def resolve_installed():
+    async def resolve_installed(*, environ=None, home=None):
         return launch_path
 
     monkeypatch.setattr(
@@ -5916,7 +5970,7 @@ async def test_runtime_spawn_scrubs_sensitive_env_on_default_auto(monkeypatch):
         captured["env"] = kwargs.get("env")
         raise _StopSpawn()
 
-    async def resolve_kiro_bin():
+    async def resolve_kiro_bin(*, environ=None, home=None):
         return "/fake/kiro"
 
     monkeypatch.setattr(
@@ -5976,7 +6030,7 @@ async def test_runtime_spawn_names_its_own_browser_session(monkeypatch):
         captured["env"] = kwargs.get("env")
         raise _StopSpawn()
 
-    async def resolve_kiro_bin():
+    async def resolve_kiro_bin(*, environ=None, home=None):
         return "/fake/kiro"
 
     monkeypatch.setattr(runtime_mod, "_resolve_kiro_bin_for_spawn", resolve_kiro_bin)

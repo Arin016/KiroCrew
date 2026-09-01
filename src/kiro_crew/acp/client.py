@@ -337,6 +337,55 @@ async def _resolve_kiro_bin_for_spawn(
     return await asyncio.to_thread(_resolve_kiro_bin, environ=environ, home=home)
 
 
+def kiro_cli_not_found_message(
+    *,
+    environ: Mapping[str, str],
+    home: Path,
+) -> str:
+    """The one message for "the Kiro CLI is not where we looked".
+
+    Every spawn path that resolves the CLI has to answer the same two-way
+    question a bare name cannot: is the binary not installed, or is its install
+    directory outside the search? :func:`env.describe_search_path` exists for
+    that, and this function is where the ACP paths get it, so the client and the
+    runtime cannot drift into reporting the same failure differently (the same
+    single-source rule ``_resolve_kiro_bin_for_spawn`` and
+    ``_drain_oversize_line`` are already shared under).
+
+    Two properties are deliberate:
+
+    * The directories are computed from the *caller's* ``environ`` and ``home``,
+      not a fresh read. ``known_kiro_cli_dirs`` is a pure function of
+      ``(platform, home, environ)``, so a caller that passes the same mapping it
+      resolved against gets a message naming the directories actually searched —
+      the guarantee #5048 established for the Claude adapter.
+    * The message never says "in PATH". Resolution also walks
+      ``%LOCALAPPDATA%\\Kiro-Cli``, ``%ProgramFiles%\\Kiro-Cli`` and the
+      ``KIROCREW_KIRO_BIN`` override, so "not found in PATH" sent a reader whose
+      install was simply uncovered off to check the one thing that was not the
+      question. In #6497 it sent them further: ``where kiro-cli`` found nothing,
+      the app bundle did contain a ``kirocrew.exe`` — Kiro Crew's OWN console
+      script — and the conclusion drawn was that the agent CLI had been renamed
+      and this lookup left stale. Naming the searched directories and the
+      override makes both wrong turns unavailable.
+
+    Off the event loop when called from async code: expanding the inherited PATH
+    touches the filesystem.
+    """
+    # Local import: ``kiro_prerequisite`` pulls in the sandbox plane that this
+    # module also feeds, and the sibling ``snapshot_trusted_acp_executable``
+    # import above is deferred for the same acyclicity reason.
+    from kiro_crew.kiro_prerequisite import OFFICIAL_INSTALL_DOCS_URL
+
+    searched_dirs = known_kiro_cli_dirs(sys.platform, home, environ)
+    return (
+        f"{KIRO_CLI_BIN} not found "
+        f"({describe_search_path(os.pathsep.join(searched_dirs))}). "
+        f"Kiro CLI is a separate prerequisite Kiro Crew does not bundle: install it "
+        f"from {OFFICIAL_INSTALL_DOCS_URL}, or point KIROCREW_KIRO_BIN at the binary."
+    )
+
+
 def _mise_which(tool: str) -> str | None:
     """Ask mise for the resolved path of *tool*.
 
@@ -2898,15 +2947,12 @@ class AcpClient:
                 # Pure function of the arguments, so this reproduces exactly the
                 # set the resolution above walked. Still off-loop: it expands the
                 # inherited PATH.
-                searched_dirs = await asyncio.to_thread(
-                    known_kiro_cli_dirs,
-                    sys.platform,
-                    spawn_home,
-                    spawn_environ,
-                )
                 raise AcpError(
-                    f"{KIRO_CLI_BIN} not found "
-                    f"({describe_search_path(os.pathsep.join(searched_dirs))})"
+                    await asyncio.to_thread(
+                        kiro_cli_not_found_message,
+                        environ=spawn_environ,
+                        home=spawn_home,
+                    )
                 )
             # Self-heal (B): ensure the managed default agent file exists before
             # this --agent spawn, so kiro-cli registers the mode and step 4's

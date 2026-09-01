@@ -47,6 +47,7 @@ from kiro_crew.acp.client import (
     _resolve_kiro_bin_for_spawn,
     finish_suspended_spawn,
     is_auth_failure_output,
+    kiro_cli_not_found_message,
 )
 from kiro_crew.acp.kas_agents import (
     KasAgentTranslationError,
@@ -1051,25 +1052,42 @@ class AcpRuntime:
             self._discard_sandbox_cleanup()
             raise
 
+    @staticmethod
+    async def _kiro_cli_missing(environ: dict[str, str], home: Path) -> str:
+        """Off-loop wrapper over the shared missing-CLI message.
+
+        Off-loop because building it expands the inherited PATH (filesystem
+        work), the same reason AcpClient._spawn defers its own call.
+        """
+        return await asyncio.to_thread(kiro_cli_not_found_message, environ=environ, home=home)
+
     async def _resolve_spawn_argv(self) -> list[str]:
         """Pre-sandbox argv for this runtime's backend.
 
         Explicit per-backend construction: the two agents share no flags, and
         only kiro-cli needs its agent file materialized first.
         """
+        # ONE reading of the environment drives both the search and the message
+        # that reports it, so a "not found (searched ...)" line here cannot name
+        # directories the resolve never walked -- the property AcpClient._spawn
+        # already holds, and the reason both go through
+        # kiro_cli_not_found_message instead of formatting their own text.
+        spawn_environ = dict(os.environ)
+        spawn_home = Path.home()
+
         if self._acp_backend == ACP_BACKEND_KAS:
             # KAS is reached through kiro-cli's own ACP relay, so it resolves the
             # same trusted binary as the kiro backend. No --agent: KAS takes
             # custom agents over the wire in session/new
             # (_meta.kiro.customAgents), not from a CLI flag.
-            kas_bin = await _resolve_kiro_bin_for_spawn()
+            kas_bin = await _resolve_kiro_bin_for_spawn(environ=spawn_environ, home=spawn_home)
             if not kas_bin:
-                raise AcpRuntimeError(f"{KIRO_CLI_BIN} not found in PATH")
+                raise AcpRuntimeError(await self._kiro_cli_missing(spawn_environ, spawn_home))
             return build_kas_argv(kas_bin)
 
-        kiro_bin = await _resolve_kiro_bin_for_spawn()
+        kiro_bin = await _resolve_kiro_bin_for_spawn(environ=spawn_environ, home=spawn_home)
         if not kiro_bin:
-            raise AcpRuntimeError(f"{KIRO_CLI_BIN} not found in PATH")
+            raise AcpRuntimeError(await self._kiro_cli_missing(spawn_environ, spawn_home))
 
         # Self-heal (B): kiro-cli discovers its selectable modes at startup from
         # ~/.kiro/agents/*.json, so the managed default agent file must exist
