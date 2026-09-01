@@ -992,9 +992,37 @@ strict-JSON monitor payload remains durable across unrelated store rewrites for
 inspection. A non-mapping payload is skipped because it has no preservable monitor
 identity. Structured cadence is typed state with a 300-second default;
 the legacy loop default remains 60 seconds. This substrate has no delivery
-controller: loading, generic updating, arming, or a pre-existing timer all fail
-closed without a model turn until a later slice wires typed decisions. The pure
-`decide_monitor` policy performs no I/O. It
+dispatcher: loading, generic updating, arming, or a pre-existing timer all fail
+closed without a model turn until the probe controller is wired. It does expose
+a dormant completed-turn controller seam. An actionable fingerprint is persisted
+in-flight before dispatch; dispatch failure clears that claim without spend; a
+correlated completion charges one agent turn exactly once, adds only reported
+non-negative token counts, and records token usage as unknown when authoritative
+counts are unavailable. Duplicate, removed, replaced, legacy, and mismatched
+callbacks are no-ops. Recovery of persisted in-flight state deactivates the
+record with `completion_evidence_unavailable` while retaining the acknowledged
+fingerprint, so restart cannot immediately duplicate the wake. Completion stops
+on the first exhausted runtime, turn, or token bound (in that precedence), and
+the completed-turn bound is validated against the universal eight-turn ceiling
+when constructed or loaded. Approval-stall completion is terminal and budget exhaustion takes
+precedence when both apply.
+Claim, budget-stop, completion, and pre-turn dispatch-failure mutations are
+applied to a staged copy; the replacement snapshot is persisted before the live
+record or timer changes. A failed write therefore leaves runtime state aligned
+with the restart snapshot instead of suppressing or releasing a wake only in
+memory.
+
+Dashboard structured actions receive a runtime-only completion hook and report
+only from `_run_chat`'s `EVENT_COMPLETE` branch when its reason is safe completion
+evidence. ACP-synthesized terminal reasons are excluded from accounting. The
+stale-stream compatibility path reuses `end_turn` for a synthetic completion, so
+that reason is also excluded until ACP events carry provenance that distinguishes
+it from a provider result. That correlated completion
+is persisted before cancellable token-analytics I/O, so slot cleanup cannot lose
+provider completion evidence after the event has arrived. Legacy dashboard nudge
+scheduling still returns immediately and still rearms from the existing
+`notify_turn_complete` `finally`; the completion hook neither replaces nor moves
+that lifecycle call. The pure `decide_monitor` policy performs no I/O. It
 checks the non-zero runtime/turn/token budgets first, classifies provider errors
 without a model turn, suppresses an unchanged observation, and permits
 `wake_actionable` only when the actionable fingerprint differs from the last
