@@ -18,7 +18,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent, within } from '@testing-library/react'
 import type { ChatSlot } from '../types'
-import SessionFlyout, { FLYOUT_MAX_ROWS, TOGGLE_RECT, toggleClip, FULL_CLIP } from '../pages/chat/SessionFlyout'
+import SessionFlyout, { FLYOUT_MAX_ROWS, toggleClip, FULL_CLIP } from '../pages/chat/SessionFlyout'
 
 // Render framer-motion elements as plain DOM (jsdom can't run projection).
 vi.mock('framer-motion', async () => {

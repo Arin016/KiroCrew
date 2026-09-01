@@ -29,7 +29,7 @@ vi.mock('framer-motion', async () => {
   const React = await import('react')
   const make = (tag: string) =>
     React.forwardRef((props: any, ref: any) => {
-      const { children, initial, animate, exit, transition, ...rest } = props
+      const { children, initial, animate, exit, transition: _transition, ...rest } = props
       return React.createElement(tag, {
         ...rest,
         ref,

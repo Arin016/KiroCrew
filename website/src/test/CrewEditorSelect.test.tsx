@@ -128,7 +128,6 @@ vi.mock('../components/SimpleSelect', () => ({
 
 
 import KiroCrewAgentsPage from '../pages/KiroCrewAgentsPage'
-import CrewAvatar from '../components/CrewAvatar'
 
 function createTestStore() {
   return configureStore({
