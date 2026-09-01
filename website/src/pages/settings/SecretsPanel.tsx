@@ -33,7 +33,14 @@ const j = async (r: Response) => {
   }
   return r.json()
 }
-const _sk = { 'X-Session-Key': localStorage.getItem('kiro_crew_token') || '' }
+// Send the same fixed `dashboard:ui` session key the shared transport uses
+// (`src/api/client.ts`). This panel previously read `localStorage['kiro_crew_token']`,
+// but nothing in the app ever writes that key — the browser's dashboard identity
+// is the `dashboard:ui` literal, and the backend treats a missing/empty
+// X-Session-Key as `dashboard:ui` anyway — so the read was vestigial dead code
+// that always resolved to ''. Use the literal directly so the header is explicit
+// and matches every other panel.
+const _sk = { 'X-Session-Key': 'dashboard:ui' }
 const get = (url: string) => fetch(url, { headers: { ..._sk } })
 const post = (url: string, body?: object) =>
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify(body) })
