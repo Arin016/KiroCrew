@@ -218,6 +218,7 @@ from kiro_crew.platform import boot_platform
 from kiro_crew.platform.context import (
     PlatformCompositionError,
     current_context,
+    redact_log_via_context,
     redact_via_context,
     safe_context_call,
 )
@@ -5297,9 +5298,13 @@ class GatewayOrchestrator:
             # Only notify when task is complete — suppress delivery for
             # incomplete tasks (HEARTBEAT_KEEP) to avoid spamming every cycle.
             if is_keep_response(result_safe):
+                # Context-aware, and sliced AFTER: this process composes (it calls
+                # `boot_platform`), so a loaded companion's extra patterns must run
+                # here rather than the OSS baseline pass. Truncating second is what
+                # keeps a credential from surviving as an unmatchable fragment.
                 logger.info(
                     "Heartbeat task incomplete, suppressing delivery: %s",
-                    redact_and_truncate(task_text, 80),
+                    redact_log_via_context(task_text)[:80],
                 )
             else:
                 task_safe = redact_and_truncate(task_text, 100)
