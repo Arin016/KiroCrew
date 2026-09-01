@@ -155,7 +155,6 @@ src/kiro_crew/apps/dependencies.py
 src/kiro_crew/apps/dependency_ledger.py
 src/kiro_crew/apps/dev_mode.py
 src/kiro_crew/apps/execution.py
-src/kiro_crew/apps/hooks_integration.py
 src/kiro_crew/apps/install_receipt.py
 src/kiro_crew/apps/manager.py
 src/kiro_crew/apps/manifest.py
