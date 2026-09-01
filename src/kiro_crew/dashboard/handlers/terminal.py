@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 # its own terminals (frontend MAX_TERMINALS_PER_CHAT); this is the server-side
 # backstop. Override via config.json dashboard.terminal.max_sessions.
 _MAX_SESSIONS = 12
+# Bound on a ``{session_id}`` URL path param, applied by BOTH routes that read
+# one. Named rather than repeated because the two call sites drifted while the
+# bound was a bare literal: WS-open enforced it and DELETE did not.
+_MAX_SESSION_ID_LEN = 64
 _ORPHAN_TIMEOUT_S = 900  # 15 min with no WS → reap PTY (grace window for reload/network drops; in-app nav keeps the WS alive)
 _SCROLLBACK_MAX = 50 * 1024  # 50KB ring buffer per session for reconnect replay
 
@@ -601,7 +605,7 @@ async def api_terminal_ws(request: web.Request) -> web.WebSocketResponse | web.R
         return web.Response(status=403, text="Terminal panel disabled")
 
     session_id = request.match_info.get("session_id", "")
-    if not session_id or len(session_id) > 64:
+    if not session_id or len(session_id) > _MAX_SESSION_ID_LEN:
         _sel().log_api_access(
             caller=caller,
             operation="terminal.ws.open",
@@ -1667,6 +1671,21 @@ async def api_terminal_delete(request: web.Request) -> web.Response:
         return web.Response(status=403, text="Terminal panel disabled")
 
     session_id = request.match_info.get("session_id", "")
+    # Same bound ``api_terminal_ws`` applies when a session is created, so an id
+    # outside it provably keys nothing in this registry. Rejecting it here means
+    # a malformed request is told so, rather than being answered "no such
+    # session" after the lookup. Plaintext 400 to match this handler's other
+    # responses (401/403/404 above and below are all plaintext).
+    if not session_id or len(session_id) > _MAX_SESSION_ID_LEN:
+        _sel().log_api_access(
+            caller=caller,
+            operation="terminal.session.delete",
+            outcome="denied",
+            source="dashboard",
+            resources=f"invalid_session_id={session_id!r}",
+        )
+        return web.Response(status=400, text="Invalid session_id")
+
     registry = _get_registry(request)
     sess = registry.pop(session_id, None)  # type: ignore[arg-type]
     if not sess:

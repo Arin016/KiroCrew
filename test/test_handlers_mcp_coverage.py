@@ -523,6 +523,70 @@ class TestServerDetail:
         assert "server name is required" in _payload(resp)["error"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "name",
+        ["../../evil", "..", "a/../b", "a" * 129, "-leading-dash"],
+        ids=["traversal", "bare-dotdot", "embedded-dotdot", "overlong", "bad-leading-char"],
+    )
+    async def test_put_rejects_a_name_the_rest_of_the_tree_would_refuse(
+        self, sandbox: SimpleNamespace, name: str
+    ) -> None:
+        """PUT is the writer, so it must not plant a key nothing else can address.
+
+        ``_is_valid_mcp_name`` is the predicate the validation-dependent readers
+        in this tree enforce (several call sites in ``mcp.py`` itself, plus
+        ``mcp_custom.py``, ``mcp_discover.py`` and ``connections.py``). A name
+        carrying ``..`` or exceeding ``_MAX_MCP_NAME_LEN`` written through this
+        route is invisible to those, so the entry cannot be managed through them.
+        """
+        _write_global(sandbox, {})
+        resp = await mcp_mod.api_mcp_server_detail(
+            _request({"command": "node"}, match_info={"name": name}, method="PUT")
+        )
+        assert resp.status == 400
+        assert _payload(resp)["code"] == "invalid_server_name"
+        # The refusal must land before the write, not after it.
+        assert _read_global(sandbox) == {}
+
+    @pytest.mark.asyncio
+    async def test_delete_still_removes_a_malformed_junk_key(
+        self, sandbox: SimpleNamespace
+    ) -> None:
+        """DELETE stays permissive on purpose, so a junk key remains clearable.
+
+        This mirrors the documented grant/revoke asymmetry in ``security.py``:
+        the writer validates, the remover does not, because guarding a remover
+        would strand exactly the entries the writer guard prevents. ``DELETE``
+        and ``api_mcp_remove`` are both such removers. Guarding this handler's
+        DELETE half is the specific regression this test forbids.
+        """
+        _write_global(sandbox, {"../../evil": {"command": "x"}})
+        resp = await mcp_mod.api_mcp_server_detail(
+            _request(None, match_info={"name": "../../evil"}, method="DELETE")
+        )
+        assert resp.status == 200
+        assert _payload(resp)["removed"] is True
+        assert _read_global(sandbox) == {}
+
+    @pytest.mark.asyncio
+    async def test_put_accepts_the_names_the_validator_allows(
+        self, sandbox: SimpleNamespace
+    ) -> None:
+        """The guard must not narrow the accepted set beyond the shared validator.
+
+        ``_VALID_MCP_NAME_RE`` deliberately admits ``@``, ``/``, ``.``, ``:`` and
+        ``_`` so scoped package ids (``@scope/pkg``) keep working.
+        """
+        _write_global(sandbox, {})
+        resp = await mcp_mod.api_mcp_server_detail(
+            _request(
+                {"command": "node"}, match_info={"name": "@scope/pkg.name_v2:1"}, method="PUT"
+            )
+        )
+        assert resp.status == 200
+        assert "@scope/pkg.name_v2:1" in _read_global(sandbox)
+
+    @pytest.mark.asyncio
     async def test_delete_absent_is_404(self, sandbox: SimpleNamespace) -> None:
         _write_global(sandbox, {})
         resp = await mcp_mod.api_mcp_server_detail(

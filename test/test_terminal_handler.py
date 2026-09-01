@@ -1588,6 +1588,30 @@ class TestApiTerminalDelete:
         assert resp.status == 404
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("session_id", ["", "x" * 65], ids=["empty", "overlong"])
+    async def test_rejects_an_id_the_create_route_could_never_have_minted(
+        self, session_id
+    ):
+        """Reject at the same bound the WS-open route applies, before the lookup.
+
+        ``api_terminal_ws`` refuses ``not session_id or len(session_id) > 64``
+        when a session is created, so an id outside that bound provably keys
+        nothing in the registry. Today this route does the ``registry.pop``
+        first and reports 404 — correct, but it answers "no such session" to a
+        request that was malformed, and it is the only one of this file's two
+        ``session_id`` readers without the guard.
+        """
+        sess = _make_session()
+        registry = {"abc123": sess}
+        req = _make_request(session_id=session_id, registry=registry)
+        with patch.object(terminal, "_sel") as mock_sel:
+            mock_sel.return_value.log_api_access = MagicMock()
+            resp = await terminal.api_terminal_delete(req)
+        assert resp.status == 400
+        # The refusal lands before any registry mutation.
+        assert registry == {"abc123": sess}
+
+    @pytest.mark.asyncio
     async def test_deletes_existing_session(self):
         sess = _make_session()
         registry = {"abc123": sess}

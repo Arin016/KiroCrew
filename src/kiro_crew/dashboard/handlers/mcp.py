@@ -1532,6 +1532,30 @@ async def api_mcp_server_detail(request: web.Request) -> web.Response:
         return web.json_response({"ok": removed, "name": name, "removed": removed}, status=status)
 
     # PUT — register or update
+    #
+    # Validate the name on the WRITE path only. ``_is_valid_mcp_name`` is the
+    # predicate the validation-dependent readers enforce — several call sites in
+    # this module, plus ``mcp_custom``, ``mcp_discover`` and ``connections`` — so
+    # a key written outside it is filtered out by those and the entry cannot be
+    # managed through them. The listing, toggle and remove paths do not apply it,
+    # which is what keeps such an entry visible and clearable. Checked before the
+    # body is parsed so a malformed name costs no further work.
+    #
+    # The removal paths stay permissive: DELETE above and ``api_mcp_remove`` both
+    # accept a name this guard would reject, which is how a junk key — including
+    # one written before this guard existed — can still be cleared. Guarding a
+    # remover would strand exactly what the writer guard is meant to prevent.
+    # Same writer-validates / remover-does-not split that ``security.py``'s
+    # trusted-app grant and revoke pair documents.
+    if not _is_valid_mcp_name(name):
+        return web.json_response(
+            {
+                "error": f"invalid server name '{name[:64]}'",
+                "code": "invalid_server_name",
+            },
+            status=400,
+        )
+
     try:
         body = await request.json()
     except Exception:
