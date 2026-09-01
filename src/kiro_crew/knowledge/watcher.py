@@ -473,7 +473,9 @@ class KnowledgeWatcher:
 
     async def _run_reembed_job(self, embedder, job_id: str) -> None:
         try:
-            processed = await rebuild_embeddings(self.store, embedder, job_id=job_id)
+            # Unattended self-heal: keep it paced (pace=True default) so the
+            # post-migration re-embed sweep doesn't pin cores for the user.
+            processed = await rebuild_embeddings(self.store, embedder, job_id=job_id, pace=True)
             # OFFLOADED: single-row write, but a commit can block up to the
             # busy_timeout behind a concurrent writer — keep it off the loop.
             await asyncio.to_thread(self._finalize_reembed_job, job_id, processed)

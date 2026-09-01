@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import TypeVar
 from uuid import uuid4
 
+from kiro_crew.embeddings import PRIORITY_BULK, PRIORITY_NORMAL, bulk_pace_delay
 from kiro_crew.llm_helpers import _extract_json_of_type
 from kiro_crew.security import (
     is_sensitive_path,
@@ -1231,7 +1233,7 @@ def count_stale_items(store, sig: str, *, now: datetime | None = None) -> int:
 
 
 async def rebuild_embeddings(store, embedder, *, job_id: str | None = None,
-                             force: bool = False) -> int:
+                             force: bool = False, pace: bool = True) -> int:
     """Re-embed active items in place, stamping the current embedding signature.
 
     Sig-gated by default: only items whose stored ``embedding_sig`` differs from the
@@ -1245,10 +1247,19 @@ async def rebuild_embeddings(store, embedder, *, job_id: str | None = None,
     same function powers the dashboard trigger and the watcher self-heal. Returns the
     number of items successfully re-embedded.
 
+    ``pace`` selects both the idling AND the scheduling class: attendance, not
+    corpus size, is what the bulk dials key on. When ``pace=True`` (the watcher
+    self-heal, where nobody is waiting) each row embeds at ``PRIORITY_BULK`` so
+    ``memory.embedding_bulk_threads`` sizes its pool, and is followed by an idle
+    window from ``bulk_pace_delay`` proportional to the work it just did. When
+    ``pace=False`` (the dashboard trigger, where a user watches the progress bar)
+    the loop embeds at ``PRIORITY_NORMAL`` and never idles.
+
     Serial single-item embed (the in-process embedder is the CPU floor and fans out
     internally); batch size is only the commit/progress cadence, not a throttle.
     """
     loop = asyncio.get_running_loop()
+    priority = PRIORITY_BULK if pace else PRIORITY_NORMAL
     sig = embedder_signature(embedder)
     processed = 0
     failed = 0
@@ -1278,9 +1289,27 @@ async def rebuild_embeddings(store, embedder, *, job_id: str | None = None,
         if not rows:
             break
         for row in rows:
+            # Measure the embed's own elapsed time around the call regardless of
+            # success: a row that returns no vector still ran the model, so it is
+            # paced by the work it did, not by whether a vector came back.
+            started = _time.monotonic()
             vec = await loop.run_in_executor(
-                None, embedder.embed_for_item, row["title"], row["summary"], row["content"]
+                None,
+                functools.partial(
+                    embedder.embed_for_item,
+                    row["title"],
+                    row["summary"],
+                    row["content"],
+                    priority=priority,
+                ),
             )
+            if pace:
+                delay = bulk_pace_delay(_time.monotonic() - started)
+                if delay > 0:
+                    # Idle OFF the loop's work: awaiting sleep here yields the
+                    # gateway loop (holding neither the DB lock nor the model) so
+                    # the pause quiets the sweep without freezing chat/liveness.
+                    await asyncio.sleep(delay)
             now_iso = datetime.now().isoformat()
             # Per-item SQLite writes are OFFLOADED (asyncio.to_thread): a sync
             # write can block up to the busy_timeout under a concurrent writer,

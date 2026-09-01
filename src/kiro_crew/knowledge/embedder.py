@@ -110,13 +110,21 @@ class InProcessEmbedder:
             return self._available
         return await run_in_embed_pool(self.is_available)
 
-    def embed(self, text: str) -> list[float] | None:
-        """Embed a single text. Returns float list or None on failure."""
+    def embed(
+        self, text: str, *, priority: int = _embeddings.PRIORITY_NORMAL
+    ) -> list[float] | None:
+        """Embed a single text. Returns float list or None on failure.
+
+        ``priority`` selects the shared backend's scheduling class. A corpus
+        loop (the sig-gated rebuild) passes ``PRIORITY_BULK`` so
+        ``memory.embedding_bulk_threads`` sizes its pool; single-item callers
+        leave the default ``PRIORITY_NORMAL`` and are unchanged.
+        """
         if not text.strip():
             return None
         if not self.is_available():
             return None
-        vec = self._get_embedder().embed(text)
+        vec = self._get_embedder().embed(text, priority=priority)
         if vec is None:
             # The backend stopped producing vectors (reset/reload failure) —
             # invalidate the cached availability so the next call re-probes
@@ -125,9 +133,18 @@ class InProcessEmbedder:
         return vec
 
     def embed_for_item(
-        self, title: str, summary: str | None, content: str | None = None
+        self,
+        title: str,
+        summary: str | None,
+        content: str | None = None,
+        *,
+        priority: int = _embeddings.PRIORITY_NORMAL,
     ) -> list[float] | None:
-        """Embed title + summary + chunk content for knowledge items."""
+        """Embed title + summary + chunk content for knowledge items.
+
+        ``priority`` is forwarded to :meth:`embed` so a bulk rebuild loop can
+        reach the ``PRIORITY_BULK`` lane; single-item callers keep the default.
+        """
         parts = [title]
         if summary:
             parts.append(summary)
@@ -142,7 +159,7 @@ class InProcessEmbedder:
                 )
                 content = content[: self.content_budget]
             parts.append(content)
-        return self.embed(" ".join(parts))
+        return self.embed(" ".join(parts), priority=priority)
 
 
 # Keep the old name as an alias so references to OllamaEmbedder in type
