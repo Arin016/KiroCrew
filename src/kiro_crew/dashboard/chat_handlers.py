@@ -439,7 +439,9 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                 # fall back to default bindings and falsely equate a
                 # project-agent slot with a request naming the default alias.
                 # Warm the cache off-loop first so the on-loop lookup is a hit.
-                await warm_project_agent_names(slot.project or None)
+                await warm_project_agent_names(
+                    slot.project or None, operation="api_chat", source="dashboard"
+                )
                 _stored = resolve_agent_bindings(_cfg, slot.agent, slot.project or None)
                 _requested = resolve_agent_bindings(_cfg, agent, slot.project or None)
                 # Identity itself lives on ResolvedBindings, next to the field
@@ -4273,7 +4275,9 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
                 # PREVIOUS agent's project — latent until app agents could dispatch.
                 # Resolve WITH the slot's project scope (warmed off-loop first) so a
                 # project agent counts as resolved rather than falling back.
-                await warm_project_agent_names(slot.project or None)
+                await warm_project_agent_names(
+                    slot.project or None, operation="api_chat_slot_agent", source="dashboard"
+                )
                 bindings = resolve_agent_bindings(cfg, agent_name, slot.project or None)
                 ws_name = _workspace_name_for_dir(cfg, bindings.workspace_dir)
                 new_workspace = ws_name

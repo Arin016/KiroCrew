@@ -5320,7 +5320,10 @@ async def _run_chat(
             # the warm is offloaded: resolve_agent_bindings can raise StopIteration
             # on a malformed config, and StopIteration cannot be delivered through a
             # Future, so awaiting it would hang instead of surfacing the error.
-            await warm_project_agent_names(slot.project)
+            # source="unknown", not "dashboard": Slack-triggered turns reach
+            # _run_chat too (slack/gateway.py and slack/handler.py call it
+            # directly), so this hop serves multiple channels (#6764).
+            await warm_project_agent_names(slot.project, operation="chat_turn", source="unknown")
             bindings = resolve_agent_bindings(cfg, slot.agent or None, slot.project or None)
             kiro_agent = bindings.kiro_agent
             crew_alias = bindings.resolved_alias

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import os
@@ -2555,7 +2556,13 @@ async def api_kirocrew_agents(request: web.Request) -> web.Response:
     if project_dir:
         try:
             project_names = await asyncio.get_running_loop().run_in_executor(
-                discovery_executor(), project_agent_names, project_dir
+                discovery_executor(),
+                functools.partial(
+                    project_agent_names,
+                    project_dir,
+                    operation="api_kirocrew_agents",
+                    source="dashboard",
+                ),
             )
         except Exception:
             logger.warning("Failed to list project agents for %s", project_dir, exc_info=True)

@@ -10411,7 +10411,9 @@ def _project_declares_agent(agent_name: str, project_dir: str) -> bool:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return agent_name in project_agent_names(project_dir)
+            return agent_name in project_agent_names(
+                project_dir, operation="project_declares_agent", source="unknown"
+            )
         names = cached_project_agent_names(project_dir)
         if names is None:
             logger.debug(
