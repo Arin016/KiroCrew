@@ -11,6 +11,7 @@ import React, { useMemo, useCallback, memo } from 'react'
 import CollapsibleToolGroup from '../pages/chat/CollapsibleToolGroup'
 import TurnBlock from '../pages/chat/TurnBlock'
 import { isSubagentCompletionMessage } from '../pages/chat/subagentCompletion'
+import { isInvisibleAssistantRow } from '../pages/chat/groupDisplayItems'
 import {
   type MessageRenderer,
   type MessageRenderContext,
@@ -96,6 +97,9 @@ const ChatMessageList = memo(function ChatMessageList({
       // A sub-agent completion the card cannot parse stays internal — the model
       // sees it, the reader does not.
       if (messages[i].role === 'subagent' && !isSubagentCompletionMessage(messages[i])) continue
+      // A finalized assistant reply that renders as nothing (quiet-cycle ZWSP) —
+      // same skip as groupDisplayItems, or it draws an empty bubble per cycle.
+      if (isInvisibleAssistantRow(messages[i])) continue
       if (GROUPED_ROLES.includes(messages[i].role)) {
         if (!group.length) groupStart = i
         group.push(messages[i])

@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 
 from kiro_crew.constants import OPTIONS_RE_LINE
+from kiro_crew.validation import strip_hidden_unicode
 
 # Fenced code blocks — ```lang ... ``` (or unterminated, running to the end
 # of the message). Replaced with a short placeholder; the code body would
@@ -49,10 +50,21 @@ def strip_markdown_preview(text: str) -> str:
 
     Strips markdown syntax (fences → ``(code)``/``(diff)`` placeholders,
     emphasis markers, link/image syntax, headers, quote/bullet markers) and
-    collapses all whitespace to single spaces. Truncation is the caller's
-    job — this only cleans.
+    collapses all whitespace to single spaces. Hidden Unicode is dropped first
+    via :func:`kiro_crew.validation.strip_hidden_unicode`: the whitespace
+    collapse below uses ``str.split()``, which keeps category-``Cf`` code
+    points (zero-width space, BOM, bidi controls), so a message whose content
+    is a bare U+200B — the monitor loop's quiet-cycle "say nothing" reply —
+    would otherwise survive as a truthy-but-invisible preview and the
+    empty-preview fallbacks in ``last_message_info`` / the slot projection
+    would never fire (#7534). ``strip_hidden_unicode`` rather than a blanket
+    ``Cf`` strip because the blanket strip corrupts visible text: it keeps the
+    script-essential shaping marks (ZWJ/ZWNJ/LRM/RLM) when a neighbour is
+    non-ASCII, so emoji ZWJ sequences and Persian/Arabic/Indic orthography
+    survive intact. Truncation is the caller's job — this only cleans.
     """
-    t = _FENCE_RE.sub(_fence_placeholder, text)
+    t = strip_hidden_unicode(text)
+    t = _FENCE_RE.sub(_fence_placeholder, t)
     t = _MCWIDGET_RE.sub(" (widget) ", t)
     t = _INLINE_CODE_RE.sub(r"\1", t)
     t = _IMAGE_RE.sub(lambda m: m.group(1) or "(image)", t)

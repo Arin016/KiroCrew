@@ -141,3 +141,70 @@ class TestHistoryLastMessagePreviewStripsMarkdown:
         ]
         log._path(key).write_text("\n".join(lines) + "\n")
         assert log.last_message_preview(key) == "Compacted the GitHub Triage rail"
+
+
+class TestInvisibleOnlyMessages:
+    """A quiet monitor cycle replies with a bare U+200B (category Cf, not
+    whitespace), which used to survive as a truthy-but-invisible preview:
+    the empty-preview fallbacks never fired and the sidebar subtitle
+    rendered blank (#7534)."""
+
+    def test_zwsp_only_yields_empty_preview(self):
+        assert strip_markdown_preview("\u200b") == ""
+
+    def test_all_format_chars_yield_empty_preview(self):
+        # ZWSP, ZWNJ, ZWJ, word joiner, BOM, LRM bidi mark — all Cf.
+        assert strip_markdown_preview("\u200b\u200c\u200d\u2060\ufeff\u200e") == ""
+
+    def test_format_chars_and_whitespace_yield_empty_preview(self):
+        assert strip_markdown_preview(" \u200b \n\u200b ") == ""
+
+    def test_embedded_zwsp_dropped_from_visible_text(self):
+        assert strip_markdown_preview("done\u200b — pushed") == "done — pushed"
+
+    def test_emoji_zwj_sequence_survives(self):
+        # GPT review catch (#7534): a blanket Cf strip would break the family
+        # emoji into three separate glyphs. strip_hidden_unicode keeps ZWJ
+        # between non-ASCII neighbours.
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+        assert strip_markdown_preview(f"shipped {family} party") == f"shipped {family} party"
+
+    def test_persian_zwnj_survives(self):
+        # ZWNJ is orthographically required in Persian (می‌روم); dropping it
+        # renders a different word. Must survive the preview strip.
+        word = "\u0645\u06cc\u200c\u0631\u0648\u0645"
+        assert strip_markdown_preview(word) == word
+
+    def test_ascii_flanked_zwj_still_dropped(self):
+        # Between two ASCII chars a shaping mark has no rendering effect and
+        # only splits credentials past redaction — it must go.
+        assert strip_markdown_preview("AKIA\u200dIOSF") == "AKIAIOSF"
+
+    def test_ascii_fast_path_unchanged(self):
+        assert strip_markdown_preview("plain ascii text") == "plain ascii text"
+
+    def test_sidebar_preview_falls_back_past_invisible_reply(self):
+        s = _ChatSlot("chat-1")
+        for role, content in (
+            ("user", "watch the CR"),
+            ("assistant", "Cycle 3: nothing new, still watching."),
+            ("assistant", "\u200b"),
+        ):
+            s.append(role, content, "msg msg-a", broadcast=False)
+        assert s.to_dict()["last_message"] == "Cycle 3: nothing new, still watching."
+
+    def test_history_preview_falls_back_past_invisible_reply(self, tmp_path):
+        import json
+
+        from kiro_crew.history import ConversationLog
+
+        log = ConversationLog(base_dir=tmp_path)
+        log.init()
+        key = "dash-test"
+        lines = [
+            json.dumps({"_type": "metadata", "title": "t"}),
+            json.dumps({"role": "assistant", "content": "Cycle-30 status checkpoint"}),
+            json.dumps({"role": "assistant", "content": "\u200b"}),
+        ]
+        log._path(key).write_text("\n".join(lines) + "\n")
+        assert log.last_message_preview(key) == "Cycle-30 status checkpoint"

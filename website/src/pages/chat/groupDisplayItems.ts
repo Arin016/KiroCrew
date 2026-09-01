@@ -49,6 +49,70 @@ export const isReasoningBurst = (t: TurnItem): t is Extract<TurnItem, { kind: 's
   t.kind === 'single' && hasReasoningContent(t.msg)
 
 /**
+ * Content that RENDERS as nothing: empty, or only whitespace and Unicode
+ * *format* characters (`\p{Cf}` — zero-width space, joiners, BOM, bidi
+ * controls). The monitor loop's quiet-cycle "say nothing" reply is a bare
+ * U+200B, so a long babysit session accumulates dozens of assistant rows that
+ * draw as empty bubbles. Mirrors the backend's `preview_text` handling via
+ * `validation.strip_hidden_unicode` (invisible-only content previews as "").
+ */
+const INVISIBLE_ONLY_RE = /^[\s\p{Cf}]*$/u
+export const isInvisibleOnly = (text: string): boolean => INVISIBLE_ONLY_RE.test(text)
+
+/**
+ * A finalized assistant row that renders as nothing. Skipped at grouping time
+ * so historical transcripts (and forks, which replay them) stop showing one
+ * empty bubble per quiet monitor cycle. Three deliberate boundaries:
+ *
+ *  - Strictly role `assistant`: the live `streaming` role starts empty by
+ *    construction and must keep its row; other roles carry non-text payloads
+ *    (files, cards) that render from meta.
+ *  - A row carrying non-empty `meta.file_changes` is KEPT even when its text
+ *    is invisible: `_flush_file_changes` (chat_runner.py) attaches the diff
+ *    chips to the last assistant row on every exit path, so a quiet monitor
+ *    cycle that edited files is exactly an invisible-text row whose chips are
+ *    the visible content.
+ *  - `variants` deliberately does NOT block the skip: `content` IS the
+ *    selected variant's text (AssistantMessage renders effectiveContent ===
+ *    content), so an invisible `content` means the selected variant is
+ *    invisible too — only the hover-reveal switcher would be lost, and that
+ *    compound state (regenerating a quiet-cycle reply, then selecting the
+ *    invisible variant) does not occur in practice.
+ */
+export const isInvisibleAssistantRow = (msg: { role: string; content: string; meta?: unknown }): boolean => {
+  if (msg.role !== 'assistant' || !isInvisibleOnly(msg.content)) return false
+  const fc = (msg.meta as Record<string, unknown> | undefined)?.file_changes
+  return !(Array.isArray(fc) && fc.length > 0)
+}
+
+/**
+ * Should the assistant message at raw index `i` show the turn footer
+ * (timestamp, copy/actions, turn stats)? True for the last assistant of a
+ * completed turn: the forward scan looks for the next `user` (end of turn →
+ * footer) or the next `assistant`/`streaming` (a later answer owns the
+ * footer). Invisible assistant rows are skipped — groupDisplayItems drops
+ * them from the transcript (#7534), so counting one as "a later assistant"
+ * would strip the footer off the last VISIBLE answer of a babysit session
+ * whose transcript ends in quiet-cycle ZWSP replies. At end of transcript the
+ * footer shows only when the slot is idle. Extracted from ChatPage's
+ * renderMessage so the skip stays in lockstep with the grouping filter above
+ * and is directly testable.
+ */
+export const showsTurnFooter = (
+  messages: readonly { role: string; content: string; meta?: unknown }[],
+  i: number,
+  slotRunning: boolean,
+): boolean => {
+  for (let j = i + 1; j < messages.length; j++) {
+    if (isInvisibleAssistantRow(messages[j])) continue
+    if (messages[j].role === 'user') return true // end of turn — show footer
+    if (messages[j].role === 'assistant' || messages[j].role === 'streaming') return false // not last assistant in turn
+  }
+  // End of messages — show footer only if the agent is done.
+  return !slotRunning
+}
+
+/**
  * Roles that OPEN a turn, and are therefore the rows a reader can be anchored to.
  *
  * `nudge` and `subagent` are machine-injected but they ARE the thing that started
@@ -161,6 +225,9 @@ export function groupDisplayItems(messages: ChatMessage[]): GroupedTurns {
   for (let i = 0; i < messages.length; i++) {
     // Permission messages handled by pinned ApprovalBar — skip entirely
     if (messages[i].role === 'permission') continue
+    // A finalized assistant reply that renders as nothing (quiet-cycle ZWSP) —
+    // skip, or it draws an empty bubble per monitor cycle. See isInvisibleOnly.
+    if (isInvisibleAssistantRow(messages[i])) continue
     // A sub-agent completion the card cannot parse stays internal: the LLM sees
     // it, the user does not. One it CAN parse renders as a compact outcome row,
     // which is the only scrollback record that a wave's results arrived.
