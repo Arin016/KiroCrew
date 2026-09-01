@@ -615,6 +615,18 @@ jobs:
             pyproject.toml
             setup.cfg
 
+      - name: Restore test-duration ledger
+        # Read-only restore: only a push to main writes this cache (see the
+        # test-durations job). A miss is benign -- pytest-split falls back to
+        # splitting by test count, which is what every run did before the
+        # ledger existed.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .test_durations
+          key: test-durations-v1-${{ github.run_id }}
+          restore-keys: |
+            test-durations-v1-
+
       - name: Install dependencies
         run: uv pip install --system -e ".[voice,desktop]" --group dev
 
@@ -645,17 +657,28 @@ jobs:
           echo "Reduced scope: $(wc -l < "$TARGETS_FILE") cross-surface backend file(s)."
 
       - name: Run tests (shard ${{ matrix.group }}/${{ env.SHARD_COUNT }})
-        # pytest-split slices the suite into SHARD_COUNT balanced groups. With a
-        # committed .test_durations file the split is balanced by *recorded time*,
-        # and brand-new tests are auto-assigned the average duration (distributed
-        # with no manual work); without that file it falls back to an even split
-        # by test count. -n auto still parallelizes within each shard across the
+        # pytest-split slices the suite into SHARD_COUNT balanced groups. The
+        # split is balanced by *recorded time* when the durations ledger was
+        # restored from the cache above, and falls back to an even split by
+        # test count on a cache miss. Brand-new tests are auto-assigned the
+        # average duration, so the balance degrades gracefully between
+        # refreshes. -n auto still parallelizes within each shard across the
         # runner's cores -- sharding scales across runners, -n auto across cores.
         #
-        # Coverage runs only on 3.12 (fast sys.monitoring path); each shard emits
-        # a partial data file merged later by the coverage-combine job. 3.10
-        # passes --no-cov (overriding setup.cfg's forced --cov) for a trace-free,
-        # faster run.
+        # Coverage runs only on 3.12; each shard emits a partial data file merged
+        # later by the coverage-combine job. 3.10 passes --no-cov (overriding
+        # setup.cfg's forced --cov) and is therefore the lane that RECORDS test
+        # durations: instrumentation costs ~1.97x wall time (measured 20.45s ->
+        # 40.35s on a 1,517-test subset), so timings taken under coverage would
+        # bake that distortion into the ledger every future shard splits on.
+        #
+        # That 2x is also the whole 3.12-vs-3.10 gap (26.3 min vs 12.6 min on the
+        # same tests). It is NOT reducible by COVERAGE_CORE=sysmon: coverage
+        # 7.10.6's sys.monitoring core does not support branch coverage, and
+        # setup.cfg sets `branch = true`, so sysmon silently falls back to the C
+        # tracer -- measured at 40.37s, i.e. no change. Dropping branch coverage
+        # is the only lever, and that is a measurement-rigour decision, not a
+        # free optimisation.
         env:
           REDUCED: ${{ steps.scope.outputs.reduced }}
           TARGETS_FILE: ${{ runner.temp }}/backend-targets.txt
@@ -689,7 +712,7 @@ jobs:
           fi
           pytest -q -n auto --timeout=120 \
             --splits "$SHARD_COUNT" --group ${{ matrix.group }} \
-            ${{ matrix.python-version == '3.12' && '--cov=kiro_crew --cov=sage_lib' || '--no-cov' }}
+            ${{ matrix.python-version == '3.12' && '--cov=kiro_crew --cov=sage_lib' || format('--no-cov --store-durations --durations-path .test_durations_shard_{0}', matrix.group) }}
         # Nothing is deselected. The eleven files that used to be -- the two sandbox
         # suites, the two ops git/gh suites, and the seven auto_improvement suites --
         # each carry `skipif(not userns_available())` on the tests that need a namespace
@@ -716,6 +739,81 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      - name: Upload shard test durations
+        # 3.10 only (trace-free timings) and full-scope only -- see the
+        # test-durations job for why both conditions matter.
+        if: matrix.python-version == '3.10' && steps.scope.outputs.reduced != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-durations-shard-${{ matrix.group }}
+          path: .test_durations_shard_${{ matrix.group }}
+          # upload-artifact excludes dotfiles unless this is set.
+          include-hidden-files: true
+          # A shard that recorded nothing must not silently yield an incomplete
+          # ledger; the merge step counts files and refuses a partial set.
+          if-no-files-found: error
+
+
+  # ── Test-duration ledger (pytest-split) ──────────────────────────────
+  # pytest-split balances shards by RECORDED runtime, which needs a durations
+  # file. That file used to be a committed ~78k-line JSON blob refreshed by a
+  # weekly workflow that opened a pull request -- except this org forbids
+  # Actions from opening pull requests, so the PR was never created and the
+  # file never landed on main. The shards therefore silently used the fallback
+  # path (an even split by test COUNT) for their whole existence.
+  #
+  # It is carried in the Actions cache instead. Nothing is committed, nothing
+  # needs review, and there is no weekly PR to babysit. A cache miss is not a
+  # failure: pytest-split falls back to the count-based split exactly as it
+  # does today, so a cold cache degrades to the current behaviour rather than
+  # breaking the run.
+  #
+  # Durations are recorded on the 3.10 lane, NOT 3.12: 3.10 runs --no-cov
+  # while 3.12 carries coverage instrumentation that costs ~1.97x wall time
+  # (measured: 20.45s -> 40.35s on a 1,517-test subset). Recording under
+  # coverage would bake that distortion into the ledger and mis-balance every
+  # future shard.
+  #
+  # Saved only on a push to main: a pull request must not be able to poison the
+  # ledger every other branch then splits on, and GitHub scopes caches so that
+  # branches read main's cache anyway.
+  test-durations:
+    name: Save test-duration ledger
+    runs-on: ubuntu-latest
+    needs: backend-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: test-durations-shard-*
+          path: shard-durations
+          merge-multiple: true
+
+      - name: Merge shard durations
+        # The shards are DISJOINT by construction (pytest-split assigns every
+        # test to exactly one group), so a plain dict merge reconstructs the
+        # whole-suite ledger with no double counting. A partial set is refused:
+        # fewer than all four shards means one failed or ran reduced, and a
+        # ledger missing a quarter of the suite is worse than no ledger --
+        # pytest-split would treat the absent tests as average-duration and
+        # rebalance every future run on that lie.
+        env:
+          SHARD_COUNT: 4
+        run: |
+          python3 scripts/merge_test_durations.py \
+            --shard-dir shard-durations \
+            --expected "$SHARD_COUNT" \
+            --out .test_durations
+
+      - name: Save ledger to cache
+        if: hashFiles('.test_durations') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .test_durations
+          # Cache keys are immutable, so a unique key per run plus the
+          # restore-keys PREFIX on the consuming side gives "newest wins"
+          # without ever needing to delete an entry.
+          key: test-durations-v1-${{ github.run_id }}
   # Windows regression line: the backend supports Windows natively via
   # kiro_crew.platform_compat (see docs/guides/windows-install.md for the
   # per-feature status), but until this job existed nothing in CI held

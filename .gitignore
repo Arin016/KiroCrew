@@ -155,3 +155,10 @@ website/.vitest-reports/
 
 # Skill eval A/B outputs (regenerated per run; not review artifacts)
 evals/*/iteration-*/
+
+# pytest-split test durations. Carried between CI runs through the GitHub
+# Actions cache (see the durations steps in .github/workflows/ci.yml), never
+# committed: it is ~78k regenerated lines whose every refresh would be a new
+# blob in git history forever.
+.test_durations
+.test_durations_shard_*
