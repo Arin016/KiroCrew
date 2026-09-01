@@ -6,8 +6,27 @@ redacted output. This module performs ZERO vault I/O — the caller resolves
 any literal secret values and passes them in via ``install_log_redaction``.
 
 Currently the only caller (``cli._setup_cli_logging``) passes an empty list,
-so Bearer tokens are the only patterns redacted in practice. Wiring resolved
+so the built-in patterns — Bearer tokens, AWS access key IDs, and standalone
+JWTs — are what is redacted in practice. Wiring resolved
 vault secret values into the filter at gateway boot is a follow-up.
+
+Records are mutated only when redaction changes the rendered message — for
+``msg``/``args`` whose args are exact immutable scalars (str/int/float/bool/
+None, no subclasses) with clean text: a scalar's entire exportable surface IS
+the string the scan inspects. Any opaque object arg disqualifies preservation
+— its attributes can carry credentials a structured handler would serialize
+but no text scan can bound. ``exc_info`` is ALWAYS rendered, redacted into
+``exc_text``, and cleared: a live traceback is an object graph whose frames
+carry locals no text scan can bound. The trade this makes explicit: redaction inspects the RENDERED
+text, never the internals of the ``args`` objects themselves, so a structured
+handler that serializes arg objects directly (attribute dumps, JSON) can emit
+content the text scan never saw. That limitation existed before too — the scan
+has never looked inside objects — but previously such records were destroyed
+wholesale as collateral. Preservation also moves rendering from creation time
+to emit time: an arg object whose ``str()`` reads live state, or one mutated
+before a ``QueueHandler`` drains, can emit text the creation-time scan never
+saw. Both halves of the trade are accepted deliberately in favor of keeping
+structured fields intact on the overwhelmingly common secretless record.
 """
 
 from __future__ import annotations
@@ -22,8 +41,32 @@ logger = logging.getLogger(__name__)
 # serializations that lowercase the scheme, e.g. "bearer <token>").
 _BEARER_RE = re.compile(r"Bearer [A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 
-# Default patterns applied even when no vault secrets are provided.
-DEFAULT_PATTERNS: list[re.Pattern[str]] = [_BEARER_RE]
+# AWS access key IDs: fixed 4-letter prefix + exactly 16 uppercase
+# alphanumerics. Precise enough for near-zero false positives, and the ID is
+# the searchable half of a leaked AWS credential pair.
+#
+# These live LOCALLY rather than importing ``security.py``'s scrubbing
+# helpers: this module is a deliberate import leaf (it installs at CLI
+# bootstrap before heavy modules load, and ``test_zero_vault_imports`` pins
+# its dependency-free shape). The JWT spelling below is identical to
+# ``security.py``'s; this AWS spelling is a DELIBERATE SUPERSET of
+# ``security.py``'s ``(?:AKIA|ASIA)[A-Z0-9]{16}`` (adds the ``ABIA``/``ACCA``
+# prefixes — wider matching is fail-closed for redaction).
+# ``test_log_redaction.py`` pins BOTH relationships so the homes cannot
+# silently drift.
+# No word-boundary assertions: a key rendered adjacent to word characters
+# (``aws_AKIA…``, ``key=AKIA…x``) has no ``\b`` between ``_`` and ``A`` and
+# would slip past a bounded pattern. Over-matching inside a longer token is
+# the fail-closed direction for a redaction floor.
+_AWS_KEY_ID_RE = re.compile(r"(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}")
+
+# Standalone JWTs: same derived spelling as ``security.py``'s scrubber —
+# ``eyJ`` header plus 2-4 further dot-separated base64url segments, covering
+# 3-segment JWS AND 4-5-segment JWE (dir/ECDH-ES). Catches tokens logged
+# OUTSIDE a ``Bearer `` scheme — JSON-embedded, bare, or assignment-style.
+# ``test_log_redaction.py`` pins parity with ``security.py``'s spelling so the
+# two homes cannot silently drift.
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){2,4}")
 
 
 class SecretRedactionFilter:
@@ -51,13 +94,15 @@ class SecretRedactionFilter:
         )
 
     def redact(self, text: str) -> str:
-        """Replace secret values and Bearer tokens with [REDACTED].
+        """Replace secret values, Bearer tokens, AWS key IDs, and JWTs.
 
         Zero I/O — only applies pre-compiled patterns.
         """
         if self._secret_pattern is not None:
             text = self._secret_pattern.sub("[REDACTED]", text)
         text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+        text = _AWS_KEY_ID_RE.sub("[REDACTED]", text)
+        text = _JWT_RE.sub("[REDACTED]", text)
         return text
 
 
@@ -83,14 +128,67 @@ _FACTORY_BASE = "_kirocrew_redaction_base"
 _FACTORY_FILTER = "_kirocrew_redaction_filter"
 
 
+#: Exact scalar types whose exportable content IS their text: no attributes,
+#: no interiors, nothing a structured handler can serialize beyond the string
+#: form the scan inspects. Exact ``type()`` match — a *subclass* of ``str`` or
+#: ``int`` can carry attributes holding credentials, so subclasses do not
+#: qualify.
+_BOUNDED_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
+def _args_are_scan_bounded(args: object, filt: "SecretRedactionFilter") -> bool:
+    """True only when every arg's exportable content was fully scanned clean.
+
+    Args qualify only as a plain ``tuple`` whose every element is an exact
+    immutable scalar (:data:`_BOUNDED_SCALAR_TYPES`) with clean text. The
+    scalar restriction is what bounds the export surface: an OPAQUE object can
+    have a benign ``str()`` while its attributes carry a credential that a
+    structured handler serializing the object (attribute dump, JSON) would
+    export — text scanning cannot bound that. A MAPPING is unbounded for the
+    same reason: the dict object itself is exportable, and its KEYS (which
+    ``%(name)s`` formatting never renders in full) can carry a credential — so
+    mappings are never preserved, not key/value scanned. The text check on top
+    closes the lossy-format hole (``%.100s`` rendering a clean prefix of a
+    secret-bearing scalar).
+    """
+    # Only genuinely-absent args qualify as trivially bounded: ``None`` or an
+    # exact empty tuple. A truthiness check would trust ANY falsy object —
+    # e.g. a custom instance whose ``__bool__`` returns False while its
+    # attributes carry a credential.
+    if args is None or (type(args) is tuple and len(args) == 0):
+        return True
+    if type(args) is not tuple:
+        # dict args (``%(name)s`` style), subclasses, or the odd bare arg:
+        # all carry exportable content beyond their rendered text.
+        return False
+    try:
+        for value in args:
+            if type(value) not in _BOUNDED_SCALAR_TYPES:
+                return False
+            text = str(value)
+            if filt.redact(text) != text:
+                return False
+    except Exception:
+        return False
+    return True
+
+
 def _redacting_factory(base: Callable[..., logging.LogRecord]) -> Callable[..., logging.LogRecord]:
     """Build a record factory that redacts everything *base* produces.
 
     The wrapper runs at record CREATION, before any handler sees it, which is what
-    covers handlers added after installation. It materializes the final message
-    (``msg % args``) and clears ``args`` so a handler cannot re-format and leak, and it
-    renders ``exc_info`` into ``exc_text`` and clears it so a handler cannot re-render
-    an unredacted traceback.
+    covers handlers added after installation.
+
+    Redaction stays process-wide — EVERY record is inspected. ``msg``/``args``
+    are preserved only when every arg is an exact immutable scalar whose text
+    scans clean (see :func:`_args_are_scan_bounded`), so a downstream JSON or
+    observability handler still sees the original ``%s`` template and its
+    ``args`` tuple on the common secretless-scalar record, while a record
+    carrying any opaque object — whose attributes no text scan can bound — is
+    materialized and cleared. ``exc_info`` is always rendered, redacted into
+    ``exc_text``, and cleared — traceback frames carry locals no text scan can
+    bound, so a live triple is never handed to a handler that might export
+    them.
     """
 
     def factory(*args, **kwargs) -> logging.LogRecord:  # type: ignore[no-untyped-def]
@@ -99,23 +197,59 @@ def _redacting_factory(base: Callable[..., logging.LogRecord]) -> Callable[..., 
         if filt is None:
             return record
 
-        # Materialize the full formatted message so deferred %s args cannot
-        # bypass redaction at handler-format time.
+        # Materialize the full formatted message and redact it. Preserve the
+        # record ONLY when nothing a handler could export carries a secret: the
+        # rendered text AND every arg's own string form must scan clean.
+        # Scanning args individually closes the lossy-format hole — a spec like
+        # ``%.100s`` can render a clean prefix while the full secret stays in
+        # ``record.args`` for a structured handler to export.
         try:
-            materialized = record.getMessage()
+            rendered = record.getMessage()
         except Exception:
-            materialized = str(record.msg) if record.msg else ""
-        record.msg = filt.redact(materialized)
-        record.args = None  # Already materialized — prevent double-format
+            # Render failure: args were never inspected, so "unchanged text ⇒
+            # secretless" does not hold on this branch. Fall back to the old
+            # unconditional destruction — scan the bare template and drop args
+            # wholesale. Fidelity is already lost (the record cannot format),
+            # and CPython's Handler.handleError prints ``Arguments: %s`` to
+            # stderr on a later format failure, which would leak a
+            # secret-bearing arg this scan never saw.
+            record.msg = filt.redact(str(record.msg) if record.msg else "")
+            record.args = None
+            rendered = None
+        if rendered is not None:
+            redacted = filt.redact(rendered)
+            # Preserve only when EVERY exportable component is bounded by the
+            # scanned text: ``msg`` must be an exact ``str`` (an opaque msg
+            # OBJECT has attributes a structured handler could export that its
+            # rendered text never showed), and args must be a plain tuple of
+            # exact scalars with clean text (see _args_are_scan_bounded).
+            if (
+                redacted != rendered
+                or type(record.msg) is not str
+                or not _args_are_scan_bounded(record.args, filt)
+            ):
+                record.msg = redacted
+                record.args = None  # Already materialized — prevent double-format
 
+        # exc_text: an already-rendered traceback string. Redacting in place is
+        # idempotent, so assign unconditionally — the smaller form.
         if record.exc_text:
             record.exc_text = filt.redact(record.exc_text)
+
+        # exc_info: ALWAYS render, redact, pin into exc_text, and clear. Unlike
+        # msg/args — whose exportable surface is exactly the string forms the
+        # scan inspects — a live exc_info triple is an object graph whose
+        # traceback FRAMES carry locals (e.g. a client object holding a token)
+        # that no text scan can bound: a locals-capturing handler would export
+        # credentials the rendered-text check never saw. The preserve-on-clean
+        # rule therefore applies only to msg/args; exc_info is destroyed
+        # unconditionally, exactly as before this module preserved anything.
         if record.exc_info:
             import traceback
 
-            tb_lines = traceback.format_exception(*record.exc_info)
-            record.exc_text = filt.redact("".join(tb_lines))
-            record.exc_info = None  # Prevent handler from re-formatting
+            rendered_tb = "".join(traceback.format_exception(*record.exc_info))
+            record.exc_text = filt.redact(rendered_tb)
+            record.exc_info = None  # Prevent handler re-render / locals export
         return record
 
     setattr(factory, _FACTORY_BASE, base)

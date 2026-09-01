@@ -140,9 +140,10 @@ one scope down:
   multithreaded, which the kernel answers with an EINVAL the probe used to cache as
   "this host has no sandbox backend".
 * `_restore_log_record_factory` puts `logging`'s record factory back. There is one such
-  slot per process, and `log_redaction`'s wrapper deliberately clears `args` and
-  `exc_info` on every record it creates, so leaving it installed reds whatever unrelated
-  test later asserts on either field. `cli._setup_cli_logging` installs it for a
+  slot per process, and `log_redaction`'s wrapper ALWAYS renders and clears
+  `exc_info` (frame locals are unscannable), and clears `args` on any record that
+  is not a clean tuple of exact scalars, so leaving it installed reds whatever
+  unrelated test later asserts on either field. `cli._setup_cli_logging` installs it for a
   long-lived command, so grepping `cli.main()` finds only some of the tests that reach
   it — most call that helper directly, and they are in `test_cli_logging.py`, whose own
   `_pristine_logging` fixture restores handlers and levels but not the factory, which is
