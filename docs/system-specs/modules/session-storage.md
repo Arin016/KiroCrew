@@ -297,11 +297,177 @@ Every new batch starts an append-only `manifest.jsonl`: a header line followed b
 
 A partial restore is the exception to append-only growth: `_rewrite_manifest()` writes a temporary replacement and uses `os.replace`. That gives readers the old or replacement pathname during the running filesystem operation, not a power-loss durability guarantee. A batch with no readable manifest is omitted from `list_trash()`: its files could not be put back, so offering it as restorable would be a false promise.
 
+**A manifest that is a link stops the empty before anything is removed**
+(`SKIP_UNREADABLE`), and the check runs BEFORE the manifest is read and before the
+platform branch, because both delete paths act on what it says. It uses
+`platform_compat.is_link_or_junction()` rather than `is_symlink()`: on Windows a
+junction reports False for the latter, and the coarse path is the Windows path.
+Without it there, `rmtree` removed the link and left any staged file it could not
+delete -- a locked one -- so the batch lost its listing and kept its data.
+
+A manifest cannot be treated as this batch's own: the product writes it with
+`atomic_write`, so a link at that name was not written here, and the entries an
+approval was computed from were read through it.
+
+The descriptor path checks the same thing AGAIN from its pinned scan, and that is
+not duplication. The first check is computed from a path, so it cannot see a link
+planted after it; the scan's view can. It is refused rather than deferred to the end
+with the real manifest, because the scan records a link as a LINK and the link
+removal pass unlinks every link it recorded -- while the manifest is only excluded
+from the FILE pass. That is what made this reachable: the listing went early, and a
+batch that then failed to finish left files on disk that `list_trash()` omits, so
+the user could neither see them nor restore them.
+`test_a_symlinked_manifest_is_refused_rather_than_unlinked` and
+`test_the_coarse_path_refuses_a_linked_manifest_too` cover the path check on each
+branch, and `test_a_manifest_linked_after_the_path_check_is_still_refused` covers
+the scan check; removing either check reds only its own tests.
+
+**Each staged directory is removed under a name nothing can predict.** The
+approved-inode chain check admits only the directory the approval named, but
+`rmdir` addresses a NAME and so did that check, so an actor with write access to
+the parent could swap the name in between and have an unapproved directory
+removed on another one's approval. `_remove_scanned_dirs()` therefore renames the
+name to `.<name>.removing-<random>` in the same parent, re-checks dev/ino there
+against the approved map, and removes THAT. A swap that beats the rename moves
+the intruder within its own parent instead of deleting it, and is then refused and
+renamed back by `_restore_staged_dir()`, so a refusal never leaves a directory
+under a name the user cannot recognise. Removal by name is what the coarse batch
+path and the manifest already avoid this way.
+`test_a_directory_swapped_after_its_identity_check_is_not_removed` covers the
+interval, and `test_a_directory_is_removed_under_a_name_nothing_can_predict`
+covers the unguessable name; the first fails if the re-check goes, the second if
+the rename does.
+
+A REFUSAL leaves the object under the staging name; only a matched identity is renamed
+back. Renaming back on a mismatch writes to a name the refusal has just proved is not
+ours, and `rename` replaces its destination. POSIX limits what that can destroy -- a
+directory rename fails against a file (`ENOTDIR`) and against a non-empty directory
+(`ENOTEMPTY`), so the reachable loss is an empty directory rather than data -- but the
+rule is not worth having conditionally: the same courtesy applied to the manifest, which
+IS a file, and there it destroyed the only copy (hence `os.link` on that path). Restoring
+is correct in exactly one case, when the identity matched and only the removal failed, so
+that name is the object's own.
+
+**The batch's own directory is re-pinned the same way** (`_remove_pinned_batch()`),
+and it is the one where a name-addressed removal did the most damage rather than
+the least: the final scan proves the batch empty by descriptor, and by the time it
+is removed the manifest has already been moved aside, so a swap in that interval
+removed an empty replacement and left the real batch holding data with nothing to
+list it -- while the caller reported success. The name is moved to
+`.<batch id>.removing-<random>`, checked against `os.fstat(batch_fd)`, and only
+that name is removed; a refusal raises, so the existing recovery renames the
+manifest back THROUGH the descriptor and the real batch stays listed.
+`test_a_batch_swapped_before_its_removal_is_refused_and_keeps_its_manifest` fails
+if the identity check goes -- and fails by reporting success, which is the defect
+itself.
+
+**The post-condition authenticates the survivor by inode, not by name.** Everything
+after it treats whatever answers to the manifest's name as the batch's own manifest:
+it is renamed aside, and once the batch is gone the debris is unlinked. So a file
+substituted at that name after the first scan would satisfy "nothing left but the
+manifest" and then be destroyed -- an unapproved file whose only copy it is, deleted
+for matching a name. The survivor's inode must equal the one the first scan recorded
+in `present`, and a mismatch reports `incomplete` and leaves the file untouched --
+not even moved aside.
+`test_a_file_substituted_at_the_manifests_name_is_not_destroyed` fails if the
+comparison is reduced to the name, and it fails by reporting success.
+
+**The move-aside checks what LANDED, since it cannot check first.** The
+post-condition verifies the manifest's inode and the rename that follows addresses
+its name -- two syscalls apart, the same irreducible interval the leaf unlink has,
+because POSIX has no rename-by-inode either. What can be checked is the result: if
+the debris is not the file that was verified, the rename moved something else, and
+the unlink that ends the successful path would destroy it. It is left as debris
+instead, with both names and both inodes logged at ERROR. The real manifest was
+already replaced by then, and that loss is not this code's to undo -- but it does not
+have to add a second one.
+`test_a_file_swapped_after_the_post_condition_is_not_deleted_as_debris` fails if the
+landed check is removed, and fails by reporting success.
+
+**Putting the manifest back fails rather than replaces.** The manifest is moved
+aside under a random debris name so the batch can be removed, and restored if that
+fails -- but POSIX `rename` REPLACES its destination silently, which is the very
+property the debris name is randomised to be safe against, and the restore direction
+needs the opposite guarantee. If anything has written a `manifest.jsonl` into the
+batch since ours went aside, renaming over it destroys the only copy of a file this
+code has never read. The restore is therefore `os.link`, which fails with `EEXIST`,
+and the debris is unlinked only after the batch has its manifest back, so no window
+has neither. `os.link` is part of the `_FD_SAFE_DELETE` capability set for this
+reason: a platform that cannot do it takes the coarse path rather than reaching a
+recovery it cannot perform safely.
+`test_manifest_recovery_never_overwrites_a_manifest_that_arrived_since` fails if the
+restore goes back to `rename`.
+
+`link` is not universally available, so the restore has a fallback and the fallback has a
+precondition. A filesystem without hard links refuses `os.link` outright, and the capability
+probe cannot see that -- it tests whether the OS accepts `dir_fd`, not what the MOUNT
+supports. Failing there would leave the batch holding data with no manifest, the exact loss
+this recovery exists to prevent. A non-`EEXIST` failure therefore falls back to an
+EXCLUSIVE CREATE and a copy (`_copy_back_exclusive()`), not to a rename after checking the
+name is free: that check and that rename are two syscalls, and a file arriving between them
+is replaced -- the same trusted-a-name mistake every other guard here exists to remove.
+`O_CREAT | O_EXCL` decides in ONE syscall, so there is no window to lose, and it needs no
+hard-link support, so it strands nothing. The cost is a copy rather than a link, paid only
+on a filesystem without links and only when a batch has already failed to empty. A copy that
+fails part way is REMOVED rather than left: a manifest holding some of its entries lists some
+sessions and silently drops the rest, which reads as a smaller batch rather than as damage. `EEXIST` itself needs no fallback -- something holds that name, so the batch is
+still listable, and the debris is left for a human.
+`test_a_filesystem_without_hard_links_still_gets_its_manifest_back`,
+`test_the_fallback_still_refuses_to_overwrite_an_arriving_manifest` and
+`test_a_failed_copy_back_leaves_no_half_written_manifest` pin the three cases; dropping
+`O_EXCL` reds the second, and dropping the partial-file cleanup reds the third.
+
+**Recorded links are checked before they are unlinked, exactly as files are.**
+"Removing a link destroys nothing" describes the link the scan SAW, not whatever
+holds that name when the pass runs: a regular file moved onto a recorded link's
+name is data, and unlinking it would be the loss the file pass's identity check
+exists to prevent. `_scan_batch()` therefore records each link's inode rather than
+just its path, and the pass demands `S_ISLNK` plus the recorded dev/ino before
+unlinking. This closes the scan-to-unlink interval; the two syscalls between the
+check and the unlink remain the same POSIX residual the leaf file has, for the same
+reason. `test_a_file_swapped_onto_a_scanned_link_is_not_unlinked` fails if the
+check is removed.
+
 **The directory is the batch's identity, not the manifest header.** A header
 claiming a different batch id would make a targeted empty delete the batch it named
 rather than the one it came from, so a disagreement is treated as corruption and the
 batch is withheld. `TestBatchIdentityIsTheDirectory` covers both the tampered case
 and the invariant that every listed id resolves to its own directory.
+
+The APPROVAL re-checks the same agreement, because the listing check happens earlier and
+the manifest is read again afterwards. A directory swapped into the selected name between
+the two brings its OWN manifest, and everything else about that approval is
+self-consistent -- identity, files and digest all describe one directory. What they do not
+describe is the batch the user SELECTED, and the name is the only link back to that
+selection. `_header_names_this_batch()` is the check; note it only ever COMPARES the
+header, never resolves in its favour, so the rule above still holds -- a disagreement
+withholds the batch.
+`test_the_approval_binds_identity_and_size_to_one_directory` renames a second real batch
+over the selected name and expects a refusal; it fails if the comparison goes.
+
+That comparison demands EQUALITY, not merely the absence of disagreement. `_write_header()`
+always writes `batch_id` beside `schema`, and a summary is returned only for the current
+schema, so within what reaches the approval the id is always present and its absence means
+the header was tampered with. Treating a missing id as "nothing to disagree with" is the
+fail-OPEN reading and it is the one an actor gets to choose: strip the field and a swapped
+batch walks through. `list_trash()` keeps the looser form deliberately -- it decides what to
+OFFER, not what to delete, so a batch with a stripped header is still listed and simply
+cannot be approved, which surfaces as a refusal on a named selection and as an
+`unreadable_batch` skip on the sweep rather than as a batch that silently vanishes from the
+screen.
+`test_a_header_with_no_batch_id_is_refused_rather_than_waved_through` fails if the approval
+goes back to the looser form.
+
+The SCAN that produces that map has a check-to-use window of its own, and it is the one
+place that could not be allowed to trust a name: every other guard here is downstream of
+the map it builds. `scandir` lists a name and the child is opened a moment later, so a rename
+in between records the REPLACEMENT's inode -- the approval then blesses the impostor and the
+delete, validating faithfully against that map, removes it. `_scan_batch()` compares the
+opened descriptor's inode against `entry.inode()` from the listing and refuses on a
+mismatch.
+`test_a_directory_swapped_between_the_listing_and_the_open_is_refused` covers it, and the
+hook placement matters: swapping inside a patched `scandir` happens BEFORE the entries are
+materialised, so both sides see the impostor and agree -- the swap has to land in the open.
 
 **A move that cannot be recorded is rolled back.** If appending a session's manifest
 entry fails — a full disk is the realistic case — its files are already out of live
@@ -348,28 +514,66 @@ with the link test removed: the live archive segment is enumerated as a batch an
 `empty_trash()` additionally re-resolves each target and confirms it is inside the
 trash root, so a tampered manifest cannot direct the delete outside it.
 
-Removal itself is `shutil.rmtree(batch, ignore_errors=True)`, one call per batch, so
-progress is reported per batch. That is coarser than the store this exists for deserves
-— one staged batch can hold tens of thousands of sessions, where "one batch done" is a
-single step from nothing to finished minutes later — and it is also unhardened against an
-ancestor directory swapped to a link mid-delete, since `rmtree` re-resolves the path it
-was given. Both are addressed by a descriptor-walk removal tracked separately: it is a
-security change with its own reasoning and its own review, and folding it into a progress
-fix put a bespoke security-critical surface inside a UX change.
+Within a batch the delete removes the files the MANIFEST names, one at a time, and never
+discovers a file by walking. That is what lets progress be reported per file rather than
+per batch, and it is also the safer form: a walk has to decide per entry whether to
+descend, and on Windows a junction is not a symlink — `os.path.islink` reports False for
+one — so a walk descends into it and unlinks the files it points at, outside the trash.
 
-What the delete does add over a bare `rmtree` is honest REPORTING. The bytes freed are
-measured after the attempt and the survivors subtracted, because `ignore_errors=True`
-returns quietly when a locked file leaves the batch standing — the up-front figure would
-otherwise be reported as reclaimed with the bytes still on disk. And the batch's absence
-is checked as a post-condition, so a tree that could not be removed is reported as kept
-rather than counted as emptied.
+The batch itself is opened by walking from the filesystem ROOT, one component at a time
+with `O_NOFOLLOW`, because that flag constrains only the last component: opening the batch
+by path left the trash root and everything above it — writable by the same user — to be
+re-resolved, so an ancestor swapped to a link after validation was followed. The walk is
+`pinned_fs.pin_parent`, not a second copy of it: that module exists because two closed PRs
+(#2446, #2447) tried to spell the mechanism per call site and neither converged, so a second
+spelling is the failure it was created to end. `supports_pinned_tree_walk()` and its
+`_dir_flags()` come from the same place; what this module adds is only the three mutating
+calls this path makes relative to a descriptor. The path walked is the RESOLVED one, so this
+cannot refuse an install whose data home legitimately sits behind a symlinked home
+directory.
 
-The byte figures come from the MANIFEST rather than from a directory walk. Callers reach
-the delete only after the unlisted-file guard has confirmed the batch holds nothing the
-manifest omits, so the manifest's own sums describe the whole batch — and a walk would be
-the unsafe way to learn the same number, because on Windows a junction is not a symlink
-(`os.path.islink` reports False for one), so a walk descends into it and would measure,
-and later delete, files outside the trash entirely.
+Each named file is then removed by `(directory fd, name)`, with every directory component
+opened `O_NOFOLLOW` from the batch down, and the emptied directories go the same way —
+bottom-up by descriptor, including the batch itself through its parent's descriptor. NO
+step of that path resolves a path: checking a path and then unlinking it re-resolves the
+prefix, so a component swapped to a link in between is followed, and finishing with
+`rmtree(batch)` re-resolved the whole prefix, sending the removal outside the trash even
+though the walk above it was pinned.
+
+Removing the emptied directories is driven by that approved map rather than by discovery,
+deepest first, each through a descriptor chain that admits only the approved inode — the
+directory being removed included, since `rmdir` addresses a name and a top-level staged
+directory's parent is the batch itself. A recursive sweep that enumerated children and
+descended into whatever answered would remove an empty directory swapped in after
+verification; nothing here is discovered, so a directory the approval never named is not
+opened and not removed. Both walks are ITERATIVE: a recursive one raises `RecursionError` on
+a deeply nested tree, which is not `OSError`, so it escaped the callers that turn a failed
+read into a refusal. A tree deep enough still fails, but with `EMFILE`, which is handled.
+Whether the batch is empty afterwards is then answered by a fresh pinned scan — nothing may
+remain but the manifest — instead of by the sweep that was also deciding what to delete.
+
+The manifest and the batch directory then go TOGETHER, or neither goes. `rmdir` cannot run
+while the manifest is inside, and unlinking it first left a window a file created after the
+scan turned into silent loss: the `rmdir` failed on a non-empty directory and the batch, now
+without a manifest, left `list_trash()` with that file inside it. So the manifest is RENAMED
+to the trash root under `.<batch-id>.manifest.jsonl.removing-<random>`, the batch is removed,
+and the debris unlinked; if the `rmdir` fails the manifest is renamed straight back. The
+suffix is random for the same reason the coarse staging name is: `os.rename` replaces an
+existing destination silently on POSIX, so a deterministic name is one an actor with write
+access to the trash root can plant a file at and have the rename destroy its only copy.
+
+The removal never unlinks a regular file it does not recognise: callers reach it only after
+the unlisted-file guard has passed, so a regular file appearing there is unaccounted-for
+data and the batch is reported as kept instead. A link recorded by the scan IS removed,
+because removing a link destroys nothing, and leaving one would make a batch holding it
+impossible to empty for good. Where the platform supports neither `openat` nor
+`O_NOFOLLOW` (Windows) the batch is renamed to an unguessable staging name, verified there,
+and taken with `rmtree(ignore_errors=True)`, and progress degrades to one report per batch —
+a smoother bar is not worth a weaker delete. On that path the bytes freed are measured after
+the attempt and the survivors subtracted, because `ignore_errors=True` returns quietly when
+a locked file leaves the batch standing, and the batch's absence is checked as a
+post-condition so a tree that could not be removed is reported as kept rather than counted
+as emptied.
 
 Every manifest name goes through one validator, `_plain_parts`, before it is stat'd or
 unlinked. Absoluteness is asked of the PATH in BOTH flavours rather than by comparing
@@ -538,13 +742,122 @@ refusal a user has to be told: keeping a batch raises nothing, so an outcome rea
 only from the exception reported "0 bytes freed, success" above a batch still on
 screen, with the reason in a log the user cannot read.
 
-**The snapshot approves a name, not an object.** `staged_targets()` fixes WHICH batches
+**The snapshot approves a directory, not a name.** `staged_targets()` fixes WHICH batches
 an empty will destroy, under the mutation lock, so the worker cannot re-enumerate later
-and destroy a batch the user never saw. It returns ids, and an id is only a name: the lock
-is released for the async handoff, so a directory moved into an approved name would be
-deleted on consent given for a different one. Closing that needs the batch re-checked
-against a descriptor at delete time, which only works once removal goes through
-descriptors — so it travels with the descriptor-walk change rather than with this one.
+and destroy a batch the user never saw. It returns each id together with a `BatchIdentity`
+recording the `(st_dev, st_ino)` of the batch directory AND the inode of every directory
+inside it, all read while the lock was held, and the delete re-checks both — the batch with
+`fstat` on the descriptor it opened, the interior against that same map —
+`identity_changed` if either differs. Without it, the lock being released for the async
+handoff meant a directory moved into an approved name would be deleted on consent given for
+a different one, destroying sessions the user was never shown.
+
+The interior half matters for the same reason and is easy to get wrong: `O_NOFOLLOW` refuses
+a LINK, but a real directory RENAMED onto a staged directory's name is not a link, and the
+batch's own inode does not change when something is renamed INSIDE it. A map built at
+DELETE time cannot authorise the delete either, because it records the impostor along with
+everything else — the map has to come from approval time. The batch check is on the
+DESCRIPTOR, not a second stat of the path, because the fd is the object every removal
+addresses: a swap after that point no longer reaches the data. A batch that cannot be read
+at snapshot time is dropped from the set rather than carried unchecked.
+
+The identity and the batch's SIZE come from the same pinned descriptor (`_approve_batch()`).
+`list_trash()` reads each manifest by path and takes no lock, so its byte totals describe
+whatever answered to that name then; recording the identity separately, by the same name,
+could straddle a swap and pair the REPLACEMENT's identity with the original's numbers. The
+manifest is therefore re-read through the pinned directory fd (`O_NOFOLLOW`, so a link at
+that name is never mistaken for the manifest), and a batch whose summary cannot be read
+that way is dropped from the approved set too.
+`test_the_approval_binds_identity_and_size_to_one_directory` fails if the total goes back
+to the listing's value.
+
+The approval records the FILES and LINKS as well, for a sharper reason than symmetry with
+the directories. The delete checks each staged file's identity, but it used to check
+against a map its OWN scan built -- self-consistent, and authorising nothing. A listed
+file replaced during the handoff had its replacement's inode recorded, matched, and was
+unlinked: an unapproved file, whose only copy it may be, destroyed on consent given for a
+different one. `BatchIdentity` therefore carries `files` and `links`, and the delete demands
+equality of the whole map in both directions, exactly as it does for `dirs` -- a file added,
+removed or replaced since the approval is `identity_changed` rather than something to
+reconcile, and a concurrent restore that removed staged files lands there too.
+`test_a_listed_file_replaced_after_approval_is_not_unlinked` fails if the comparison is
+removed, and it fails by unlinking the replacement.
+
+The LISTING is pinned too, by digest (`rels_digest`). The manifest's inode is not enough:
+rewritten in place it keeps that inode, and every other identity check still passes because
+no file changed -- only which files the delete believes it may unlink. A file already sitting
+in the batch, unlisted, is refused at delete time; adding it to the listing after the
+approval would have it deleted as though the user had approved it. A digest rather than the
+rels themselves keeps the approval constant-size on a batch with six figures of entries, and
+a refusal does not need to say which line moved. `test_a_manifest_rewritten_to_list_more
+_after_approval_is_refused` fails if the digest comparison goes, and fails by deleting the
+newly-listed file. The digest is captured FIRST inside the approval and read
+through the pinned descriptor, before the interior scan. Taken after that scan it could
+describe a manifest rewritten in between -- the NEW listing recorded against the OLD inode
+maps, which authorises exactly the file the digest exists to refuse -- and taken by path it
+could describe another directory's manifest entirely. Ordering it first also fails closed: a
+rewrite after that point leaves the digest describing the old listing, so the delete refuses.
+`test_a_manifest_rewritten_during_the_approval_does_not_authorize_it` fails if the capture
+moves after the scan, and fails by deleting the smuggled file.
+
+The approval resolves only the PARENT and re-joins the batch's own name. `Path.resolve()`
+follows the final component too, so a batch directory replaced by a symlink resolved to its
+TARGET and the pinned walk pinned that target: the approval would record another
+directory's identity under this batch's id, and the delete, checking the identity it was
+handed, would destroy session data from outside the trash. Re-joining keeps `O_NOFOLLOW` on
+the component that matters, which refuses the link. `test_a_batch_replaced_by_a_symlink_is
+_not_approved_as_its_target` points the name at a SECOND real batch -- one with a valid
+manifest, because a target without one is refused for that reason instead and the test would
+pass either way.
+
+An id that a SUPPLIED approval map does not name is refused (`unreadable_batch`), not treated
+as unapproved-and-therefore-unchecked. That is what lets the unnamed sweep stay honest without
+blocking: `staged_targets()` raises for a NAMED selection it cannot verify, but on the sweep it
+returns the batch in the id list WITHOUT an approval -- raising there would let one batch
+damaged by a crash mid-append make the whole trash un-emptyable, which is why the delete loop
+skips rather than aborts. The batch then comes back as a skip the user can read instead of
+vanishing from the job beneath a success message.
+`test_the_sweep_reports_an_unverifiable_batch_instead_of_dropping_it` fails if the membership
+check goes -- and fails by DELETING the unverified batch, which is worse than the silent
+success that prompted the check.
+
+A selected batch that cannot be approved is a REFUSAL, not a silent omission. Dropping it
+from the approved set is right -- no identity means no check -- but dropping it quietly
+turned "destroy this" into a reported success for a batch still on screen, which is the
+bug the missing-id refusal beside it exists to prevent. `staged_targets()` raises for a NAMED
+selection, the same asymmetry that rule already draws: raising on the unnamed sweep would
+let one batch damaged by a crash mid-append make the whole trash un-emptyable, which is why
+the delete path skips rather than aborts. The dashboard already answers a
+`SessionStorageError` from this call as a 400 rather than a job.
+`test_a_batch_that_cannot_be_approved_is_refused_not_dropped` fails if the raise is
+removed.
+
+A snapshot that cannot be taken at all **cancels the delete**, for a named selection exactly
+as for "everything staged": the request is answered as an already-settled job carrying the
+reason, and no worker is dispatched. The named case used to proceed anyway, on the reasoning
+that the caller had said WHICH batches and a missing snapshot only cost the progress bar its
+denominator — but the snapshot is what turns those names into approval of the directories
+they pointed at, so proceeding deleted whatever answered to the names by the time the worker
+ran. The failure is not always benign either: a staged tree deep enough to exhaust
+descriptors arrives as an exception, and writing into the trash is how it gets there.
+
+That cancellation is AUDITED where it returns, with outcome `refused` and `snapshot_unreadable`.
+Every other outcome of this endpoint reaches the SEL record inside the worker, and the named case
+used to reach it too -- by dispatching, which is the loss above. Failing closed is right, but it
+moves the request off the audited path, and the one irreversible operation in this surface must
+not be able to be ATTEMPTED with no record that it was.
+`test_an_explicit_delete_refused_by_a_failed_snapshot_is_still_audited` pins it.
+
+Where the platform has no descriptor to bind to, the coarse path RENAMES the batch to
+`.<batch-id>.removing-<random>` first — atomic within the trash root — verifies the identity
+of the renamed directory, and removes it under that name. Checking a path and then handing
+the same path to `rmtree` re-resolves it, so a swap in between was followed; after the
+rename the approved name no longer exists, a swap that happened BEFORE it is caught and the
+impostor renamed back rather than destroyed, and the name finally removed is unguessable.
+Not airtight — `rmtree` still resolves the staging path — but failing closed instead would
+refuse every empty on that platform, which is a worse answer than a window an attacker has
+to guess their way into. A tree that will not go is renamed back, so the batch stays listed
+and restorable rather than stranded under a name `list_trash()` does not offer.
 
 A selection larger than `_MAX_SELECTION` stages the **oldest** that many sessions
 and returns `remaining` rather than refusing. Refusing would dead-end the install

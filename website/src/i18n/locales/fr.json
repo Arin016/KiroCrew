@@ -11634,7 +11634,8 @@
       "trash_summary": "{{sessions}} sessions · {{size}}",
       "unknown_session": "une session non répertoriée",
       "busy_emptying": "Vidage de la corbeille. Certaines actions sont suspendues jusqu'à la fin.",
-      "empty_failed_next_step": "Réessayez Supprimer définitivement. Les détails sont dans le journal du gateway."
+      "empty_failed_next_step": "Réessayez Supprimer définitivement. Les détails sont dans le journal du gateway.",
+      "kept_identity_changed": "Un lot a changé sur le disque après votre sélection, il a donc été conservé."
     },
     "sessionsTab": {
       "agent": "Agent",

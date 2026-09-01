@@ -11301,7 +11301,8 @@
       "trash_summary": "세션 {{sessions}}개 · {{size}}",
       "unknown_session": "목록에 없는 세션",
       "busy_emptying": "휴지통을 비우고 있습니다. 완료될 때까지 일부 작업이 중지됩니다.",
-      "empty_failed_next_step": "'완전히 삭제'를 다시 시도하세요. 자세한 내용은 게이트웨이 로그에 있습니다."
+      "empty_failed_next_step": "'완전히 삭제'를 다시 시도하세요. 자세한 내용은 게이트웨이 로그에 있습니다.",
+      "kept_identity_changed": "선택한 뒤 디스크에서 바뀐 배치가 있어 그대로 두었습니다."
     },
     "sessionsTab": {
       "agent": "에이전트",

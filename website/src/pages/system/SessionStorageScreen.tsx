@@ -1094,6 +1094,7 @@ function skipReason(code: string): string {
     case 'unreadable_batch': return i18nT('pages.sessionStorage.kept_unreadable')
     case 'outside_trash_root': return i18nT('pages.sessionStorage.kept_outside_root')
     case 'incomplete': return i18nT('pages.sessionStorage.kept_incomplete')
+    case 'identity_changed': return i18nT('pages.sessionStorage.kept_identity_changed')
     default: return i18nT('pages.sessionStorage.kept_unknown')
   }
 }

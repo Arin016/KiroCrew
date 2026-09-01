@@ -51,6 +51,7 @@ __all__ = [
     "SkipReporter",
     "copy_file_pinned",
     "create_and_open_dir_pinned",
+    "dir_flags",
     "fatal_skip_reporter",
     "is_reparse_point",
     "is_regular_at",
@@ -151,7 +152,15 @@ def supports_pinned_tree_walk() -> bool:
     return supports_pinned_walk() and os.listdir in os.supports_fd and os.stat in os.supports_dir_fd
 
 
-def _dir_flags() -> int:
+def dir_flags() -> int:
+    """Open flags every pinned directory walk uses: read-only, a directory, never a link.
+
+    Public because a second module needs the same flags to walk a tree the same way, and
+    reaching for a private was the beginning of the divergence this module exists to end.
+    Called rather than captured at import: the Windows-simulation tests delete
+    ``os.O_NOFOLLOW`` at runtime, and a frozen constant would keep offering a flag the
+    platform no longer has.
+    """
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -202,7 +211,7 @@ def pin_parent(
     try:
         for component in rest:
             try:
-                nxt = os.open(component, _dir_flags(), dir_fd=dir_fd)
+                nxt = os.open(component, dir_flags(), dir_fd=dir_fd)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise refusal(
@@ -266,7 +275,7 @@ def open_dir_pinned(
         return open_in_pinned_parent(
             resolved_parent,
             as_given.name,
-            flags=_dir_flags(),
+            flags=dir_flags(),
             mode=0o700,
             what=what,
             refusal=refusal,
@@ -642,7 +651,7 @@ def create_and_open_dir_pinned(
                     "gateway stopped."
                 ) from None
         try:
-            return os.open(as_given.name, _dir_flags(), dir_fd=parent_fd)
+            return os.open(as_given.name, dir_flags(), dir_fd=parent_fd)
         except OSError as exc:
             # A link (or a plain file) at the destination's own name. O_NOFOLLOW already
             # refuses it -- the gap review found was that it escaped as a raw OSError, so
@@ -905,7 +914,7 @@ def _open_child_dir(parent_fd: int, entry: str, by_name: str, on_skip: SkipRepor
     skipped escape the destination as a raw ``OSError``.
     """
     try:
-        return os.open(entry, _dir_flags(), dir_fd=parent_fd)
+        return os.open(entry, dir_flags(), dir_fd=parent_fd)
     except FileNotFoundError:
         on_skip(SKIP_VANISHED, by_name)
         return None

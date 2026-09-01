@@ -11633,7 +11633,8 @@
       "trash_summary": "{{sessions}} sessões · {{size}}",
       "unknown_session": "uma sessão não listada",
       "busy_emptying": "Esvaziando a lixeira. Algumas ações ficam pausadas até terminar.",
-      "empty_failed_next_step": "Tente Excluir permanentemente novamente. Os detalhes estão no log do gateway."
+      "empty_failed_next_step": "Tente Excluir permanentemente novamente. Os detalhes estão no log do gateway.",
+      "kept_identity_changed": "Um lote mudou no disco depois de você selecioná-lo, por isso foi mantido."
     },
     "sessionsTab": {
       "agent": "Agente",

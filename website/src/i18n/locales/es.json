@@ -11634,7 +11634,8 @@
       "trash_summary": "{{sessions}} sesiones · {{size}}",
       "unknown_session": "una sesión no listada",
       "busy_emptying": "Vaciando la papelera. Algunas acciones se pausan hasta que termine.",
-      "empty_failed_next_step": "Vuelve a intentar Eliminar permanentemente. Los detalles están en el registro del gateway."
+      "empty_failed_next_step": "Vuelve a intentar Eliminar permanentemente. Los detalles están en el registro del gateway.",
+      "kept_identity_changed": "Un lote cambió en el disco después de seleccionarlo, así que se conservó."
     },
     "sessionsTab": {
       "agent": "Agente",

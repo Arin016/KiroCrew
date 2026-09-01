@@ -11301,7 +11301,8 @@
       "trash_summary": "{{sessions}} 个会话 · {{size}}",
       "unknown_session": "未列出的会话",
       "busy_emptying": "正在清空回收站，部分操作会暂停到完成为止。",
-      "empty_failed_next_step": "请再次尝试“永久删除”。详细信息见网关日志。"
+      "empty_failed_next_step": "请再次尝试“永久删除”。详细信息见网关日志。",
+      "kept_identity_changed": "有一批在你选择之后于磁盘上发生了变化，因此被保留。"
     },
     "sessionsTab": {
       "agent": "代理",

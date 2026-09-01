@@ -11301,7 +11301,8 @@
       "trash_summary": "{{sessions}}セッション · {{size}}",
       "unknown_session": "一覧にないセッション",
       "busy_emptying": "ゴミ箱を空にしています。完了するまで一部の操作は停止します。",
-      "empty_failed_next_step": "「完全に削除」をもう一度お試しください。詳細はゲートウェイのログにあります。"
+      "empty_failed_next_step": "「完全に削除」をもう一度お試しください。詳細はゲートウェイのログにあります。",
+      "kept_identity_changed": "選択後にディスク上で変化したバッチがあったため、保持しました。"
     },
     "sessionsTab": {
       "agent": "エージェント",

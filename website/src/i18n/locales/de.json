@@ -11467,7 +11467,8 @@
       "trash_summary": "{{sessions}} Sitzungen · {{size}}",
       "unknown_session": "eine nicht gelistete Sitzung",
       "busy_emptying": "Papierkorb wird geleert. Einige Aktionen pausieren bis zum Abschluss.",
-      "empty_failed_next_step": "Versuchen Sie „Endgültig löschen“ erneut. Details stehen im Gateway-Log."
+      "empty_failed_next_step": "Versuchen Sie „Endgültig löschen“ erneut. Details stehen im Gateway-Log.",
+      "kept_identity_changed": "Ein Stapel hat sich nach der Auswahl auf der Festplatte geändert und wurde daher behalten."
     },
     "sessionsTab": {
       "agent": "Agent",

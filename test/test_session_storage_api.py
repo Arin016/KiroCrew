@@ -399,14 +399,14 @@ class TestEmpty:
         """
         done = threading.Event()
 
-        def slow_empty(batch_ids, on_progress=None, on_skip=None):  # type: ignore[no-untyped-def]
+        def slow_empty(batch_ids, on_progress=None, on_skip=None, expect=None):  # type: ignore[no-untyped-def]
             time.sleep(0.2)
             done.set()
             return 0
 
         with (
             patch.object(handler, "_sel", return_value=_sel_stub()),
-            patch.object(handler, "staged_targets", return_value=([], 0)),
+            patch.object(handler, "staged_targets", return_value=([], 0, {})),
             patch.object(handler, "empty_trash", slow_empty),
         ):
             resp = await handler.api_session_storage_empty(
@@ -420,6 +420,48 @@ class TestEmpty:
         # of waiting, `done` would still be unset when the next test starts and the
         # thread would outlive this one.
         assert not done.is_set()
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_delete_refused_by_a_failed_snapshot_is_still_audited(
+        self,
+    ) -> None:
+        """Refusing an irreversible operation must still record that it was attempted.
+
+        Every other outcome of this endpoint reaches the audit inside ``_run_empty_job``,
+        and before this change an explicit selection reached it even on a failed snapshot,
+        because it DISPATCHED anyway. Failing closed is right -- dispatching without the
+        snapshot deletes whatever answers to the names by the time the worker runs -- but it
+        moved the request off the audited path, and an unrecorded attempt at the one
+        irreversible operation in this surface is a worse hole than the one it closed.
+        """
+
+        def unreadable(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise OSError("too many open files")
+
+        sel = _sel_stub()
+        with (
+            patch.object(handler, "_sel", return_value=sel),
+            patch.object(handler, "staged_targets", unreadable),
+        ):
+            resp = await handler.api_session_storage_empty(
+                _request(
+                    "POST",
+                    "/api/system/session-storage/empty",
+                    {"batch_ids": ["20260101T000000Z-aaaa"]},
+                )
+            )
+        body = json.loads(resp.body)
+
+        assert resp.status == 202
+        assert body["error"], "the refusal must be visible on the job"
+        audited = [
+            c.kwargs
+            for c in sel.log_api_access.call_args_list
+            if c.kwargs["operation"] == "session_storage.empty"
+        ]
+        assert audited, "the refused empty must be audited"
+        assert audited[0]["outcome"] == "refused"
+        assert audited[0]["resources"] == "snapshot_unreadable"
 
     @pytest.mark.asyncio
     async def test_accepts_the_work_then_frees_the_space_and_audits_it(
@@ -486,7 +528,7 @@ class TestEmpty:
         release = asyncio.Event()
         loop = asyncio.get_running_loop()
 
-        def _slow_empty(batch_ids, on_progress=None, on_skip=None):  # type: ignore[no-untyped-def]
+        def _slow_empty(batch_ids, on_progress=None, on_skip=None, expect=None):  # type: ignore[no-untyped-def]
             if on_progress is not None:
                 on_progress(512)
             asyncio.run_coroutine_threadsafe(_wait(), loop).result()
@@ -549,13 +591,13 @@ class TestEmpty:
     ) -> None:
         """The request is already answered, so a refusal has to be readable later."""
 
-        def _refuse(batch_ids, on_progress=None, on_skip=None):  # type: ignore[no-untyped-def]
+        def _refuse(batch_ids, on_progress=None, on_skip=None, expect=None):  # type: ignore[no-untyped-def]
             raise session_storage_module.SessionStorageError("the trash root moved")
 
         sel = _sel_stub()
         with (
             patch.object(handler, "_sel", return_value=sel),
-            patch.object(handler, "staged_targets", return_value=([], 0)),
+            patch.object(handler, "staged_targets", return_value=([], 0, {})),
             patch.object(handler, "empty_trash", _refuse),
         ):
             await handler.api_session_storage_empty(
@@ -576,13 +618,13 @@ class TestEmpty:
     ) -> None:
         """A job left flagged running is a screen polling a delete that stopped."""
 
-        def _boom(batch_ids, on_progress=None, on_skip=None):  # type: ignore[no-untyped-def]
+        def _boom(batch_ids, on_progress=None, on_skip=None, expect=None):  # type: ignore[no-untyped-def]
             raise RuntimeError("disk went away")
 
         sel = _sel_stub()
         with (
             patch.object(handler, "_sel", return_value=sel),
-            patch.object(handler, "staged_targets", return_value=([], 0)),
+            patch.object(handler, "staged_targets", return_value=([], 0, {})),
             patch.object(handler, "empty_trash", _boom),
         ):
             await handler.api_session_storage_empty(
@@ -686,12 +728,12 @@ class TestEmpty:
 
         def _slow_totals(batch_ids):  # type: ignore[no-untyped-def]
             time.sleep(0.05)
-            return [], 0
+            return [], 0, {}
 
         release = asyncio.Event()
         loop = asyncio.get_running_loop()
 
-        def _held_empty(batch_ids, on_progress=None, on_skip=None):  # type: ignore[no-untyped-def]
+        def _held_empty(batch_ids, on_progress=None, on_skip=None, expect=None):  # type: ignore[no-untyped-def]
             asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
             return 0
 
@@ -790,7 +832,7 @@ class TestEmpty:
         # And the slot is free again, rather than answering 409 forever.
         with (
             patch.object(handler, "_sel", return_value=_sel_stub()),
-            patch.object(handler, "staged_targets", return_value=([], 0)),
+            patch.object(handler, "staged_targets", return_value=([], 0, {})),
             patch.object(handler, "empty_trash", lambda *a, **k: 0),
         ):
             again = await handler.api_session_storage_empty(
@@ -816,12 +858,12 @@ class TestEmpty:
         """
         leak = "refused near AKIAIOSFODNN7EXAMPLE " + ("y" * 900)
 
-        def _refuse(batch_ids, on_progress=None, on_skip=None):  # type: ignore[no-untyped-def]
+        def _refuse(batch_ids, on_progress=None, on_skip=None, expect=None):  # type: ignore[no-untyped-def]
             raise session_storage_module.SessionStorageError(leak)
 
         with (
             patch.object(handler, "_sel", return_value=_sel_stub()),
-            patch.object(handler, "staged_targets", return_value=([], 0)),
+            patch.object(handler, "staged_targets", return_value=([], 0, {})),
             patch.object(handler, "empty_trash", _refuse),
         ):
             await handler.api_session_storage_empty(
@@ -845,13 +887,21 @@ class TestEmpty:
         assert "refused" in reported
 
     @pytest.mark.asyncio
-    async def test_an_explicit_selection_still_runs_without_a_denominator(
+    async def test_a_named_selection_fails_closed_when_the_snapshot_cannot_be_read(
         self, stores: tuple[Path, Path]
     ) -> None:
-        """A named selection needs no snapshot, so a failed read only costs the bar.
+        """A list of names is not approval, so a failed snapshot cancels the delete.
 
-        The widening hazard does not apply: the caller said which batches, and that
-        list is what the worker gets.
+        This case used to dispatch anyway, on the reasoning that the caller had already
+        said WHICH batches and a missing snapshot only cost the progress bar its
+        denominator. That reading was wrong: the snapshot is what turns those names into
+        approval of the DIRECTORIES they pointed at, so dispatching without it deletes
+        whatever answers to the names by the time the worker runs. The failure is not
+        always benign either - a staged tree deep enough to exhaust descriptors arrives
+        here as an exception, and writing into the trash is how it gets there.
+
+        Answered as a settled job carrying the reason, not a 500, so the screen has one
+        shape to read.
         """
 
         def _explode(batch_ids):  # type: ignore[no-untyped-def]
@@ -872,12 +922,14 @@ class TestEmpty:
                 )
             )
             job = handler._empty_job
-            assert job is not None and job.task is not None
-            await job.task
+            assert job is not None
 
         assert resp.status == 202
-        assert json.loads(resp.body)["total_bytes"] == 0, "no denominator, but a job"
-        assert seen == [["b-1", "b-2"]]
+        body = json.loads(resp.body)
+        assert body["running"] is False, "the job is settled, not left polling"
+        assert body["error"], "the user has to be told why nothing moved"
+        assert seen == [], "nothing may be deleted without an identity to check against"
+        assert job.task is None, "no worker was dispatched"
 
     @pytest.mark.asyncio
     async def test_empty_all_hands_the_worker_the_batches_it_resolved(

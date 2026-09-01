@@ -7470,7 +7470,8 @@
       "trash_summary": "{{sessions}} sessions · {{size}}",
       "unknown_session": "an unlisted session",
       "busy_emptying": "Emptying the Trash. Some actions are paused until it finishes.",
-      "empty_failed_next_step": "Try Delete forever again. Details are in the gateway log."
+      "empty_failed_next_step": "Try Delete forever again. Details are in the gateway log.",
+      "kept_identity_changed": "One batch changed on disk after you selected it, so it was kept."
     },
     "sessionsTab": {
       "agent": "Agent",
