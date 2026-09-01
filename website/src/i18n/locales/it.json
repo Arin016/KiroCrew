@@ -13749,10 +13749,13 @@
       "delete": "Elimina",
       "cancel": "Annulla",
       "save": "Salva",
+      "saving": "Salvataggio…",
       "loading": "Caricamento…",
       "delete_secret_name": "Elimina segreto {{name}}",
       "secret_name_aria": "Nome del segreto",
-      "secret_value_aria": "Valore del segreto"
+      "secret_value_aria": "Valore del segreto",
+      "save_error": "Impossibile salvare il segreto: {{error}}",
+      "delete_error": "Impossibile eliminare il segreto: {{error}}"
     }
   },
   "store": {

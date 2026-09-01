@@ -8597,10 +8597,13 @@
       "delete": "Delete",
       "cancel": "Cancel",
       "save": "Save",
+      "saving": "Saving…",
       "loading": "Loading…",
       "delete_secret_name": "Delete secret {{name}}",
       "secret_name_aria": "Secret name",
-      "secret_value_aria": "Secret value"
+      "secret_value_aria": "Secret value",
+      "save_error": "Could not save secret: {{error}}",
+      "delete_error": "Could not delete secret: {{error}}"
     }
   }
 }

@@ -13750,10 +13750,13 @@
       "delete": "Supprimer",
       "cancel": "Annuler",
       "save": "Enregistrer",
+      "saving": "Enregistrement…",
       "loading": "Chargement…",
       "delete_secret_name": "Supprimer le secret {{name}}",
       "secret_name_aria": "Nom du secret",
-      "secret_value_aria": "Valeur du secret"
+      "secret_value_aria": "Valeur du secret",
+      "save_error": "Impossible d’enregistrer le secret : {{error}}",
+      "delete_error": "Impossible de supprimer le secret : {{error}}"
     }
   },
   "store": {

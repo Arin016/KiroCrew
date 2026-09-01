@@ -13571,10 +13571,13 @@
       "delete": "Löschen",
       "cancel": "Abbrechen",
       "save": "Speichern",
+      "saving": "Wird gespeichert…",
       "loading": "Laden…",
       "delete_secret_name": "Secret {{name}} löschen",
       "secret_name_aria": "Name des Secrets",
-      "secret_value_aria": "Wert des Secrets"
+      "secret_value_aria": "Wert des Secrets",
+      "save_error": "Geheimnis konnte nicht gespeichert werden: {{error}}",
+      "delete_error": "Geheimnis konnte nicht gelöscht werden: {{error}}"
     }
   },
   "store": {

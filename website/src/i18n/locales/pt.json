@@ -13749,10 +13749,13 @@
       "delete": "Excluir",
       "cancel": "Cancelar",
       "save": "Salvar",
+      "saving": "Salvando…",
       "loading": "Carregando…",
       "delete_secret_name": "Excluir segredo {{name}}",
       "secret_name_aria": "Nome do segredo",
-      "secret_value_aria": "Valor do segredo"
+      "secret_value_aria": "Valor do segredo",
+      "save_error": "Não foi possível salvar o segredo: {{error}}",
+      "delete_error": "Não foi possível excluir o segredo: {{error}}"
     }
   },
   "store": {

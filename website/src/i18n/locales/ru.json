@@ -13928,10 +13928,13 @@
       "delete": "Удалить",
       "cancel": "Отмена",
       "save": "Сохранить",
+      "saving": "Сохранение…",
       "loading": "Загрузка…",
       "delete_secret_name": "Удалить секрет {{name}}",
       "secret_name_aria": "Имя секрета",
-      "secret_value_aria": "Значение секрета"
+      "secret_value_aria": "Значение секрета",
+      "save_error": "Не удалось сохранить секрет: {{error}}",
+      "delete_error": "Не удалось удалить секрет: {{error}}"
     }
   },
   "store": {

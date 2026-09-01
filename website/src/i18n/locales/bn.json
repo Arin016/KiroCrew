@@ -13572,10 +13572,13 @@
       "delete": "মুছুন",
       "cancel": "বাতিল",
       "save": "সংরক্ষণ",
+      "saving": "সংরক্ষণ করা হচ্ছে…",
       "loading": "লোড হচ্ছে…",
       "delete_secret_name": "{{name}} সিক্রেট মুছুন",
       "secret_name_aria": "সিক্রেটের নাম",
-      "secret_value_aria": "সিক্রেটের মান"
+      "secret_value_aria": "সিক্রেটের মান",
+      "save_error": "সিক্রেট সংরক্ষণ করা যায়নি: {{error}}",
+      "delete_error": "সিক্রেট মুছে ফেলা যায়নি: {{error}}"
     }
   },
   "store": {

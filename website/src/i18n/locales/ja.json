@@ -13393,10 +13393,13 @@
       "delete": "削除",
       "cancel": "キャンセル",
       "save": "保存",
+      "saving": "保存中…",
       "loading": "読み込み中…",
       "delete_secret_name": "シークレット {{name}} を削除",
       "secret_name_aria": "シークレット名",
-      "secret_value_aria": "シークレット値"
+      "secret_value_aria": "シークレット値",
+      "save_error": "シークレットを保存できませんでした：{{error}}",
+      "delete_error": "シークレットを削除できませんでした：{{error}}"
     }
   },
   "store": {

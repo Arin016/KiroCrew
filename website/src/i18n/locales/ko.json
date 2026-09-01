@@ -13393,10 +13393,13 @@
       "delete": "삭제",
       "cancel": "취소",
       "save": "저장",
+      "saving": "저장 중…",
       "loading": "로딩 중…",
       "delete_secret_name": "시크릿 {{name}} 삭제",
       "secret_name_aria": "시크릿 이름",
-      "secret_value_aria": "시크릿 값"
+      "secret_value_aria": "시크릿 값",
+      "save_error": "시크릿을 저장하지 못했습니다: {{error}}",
+      "delete_error": "시크릿을 삭제하지 못했습니다: {{error}}"
     }
   },
   "store": {

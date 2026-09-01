@@ -13393,10 +13393,13 @@
       "delete": "删除",
       "cancel": "取消",
       "save": "保存",
+      "saving": "保存中…",
       "loading": "加载中…",
       "delete_secret_name": "删除密钥 {{name}}",
       "secret_name_aria": "密钥名称",
-      "secret_value_aria": "密钥值"
+      "secret_value_aria": "密钥值",
+      "save_error": "无法保存密钥：{{error}}",
+      "delete_error": "无法删除密钥：{{error}}"
     }
   },
   "store": {

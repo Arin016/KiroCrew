@@ -13572,10 +13572,13 @@
       "delete": "हटाएँ",
       "cancel": "रद्द करें",
       "save": "सहेजें",
+      "saving": "सहेजा जा रहा है…",
       "loading": "लोड हो रहा है…",
       "delete_secret_name": "सीक्रेट {{name}} हटाएं",
       "secret_name_aria": "सीक्रेट का नाम",
-      "secret_value_aria": "सीक्रेट का मान"
+      "secret_value_aria": "सीक्रेट का मान",
+      "save_error": "सीक्रेट सहेजा नहीं जा सका: {{error}}",
+      "delete_error": "सीक्रेट हटाया नहीं जा सका: {{error}}"
     }
   },
   "store": {
