@@ -1333,6 +1333,15 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # scan hits, and the change degrades to the local queue instead. Lives in
         # push_policy because all three push paths share this one implementation.
         "apps/builtins/auto_improvement/spine/push_policy.py",
+        # Source-side pre-pass, same shape as the aws_control scrubbers: pip's
+        # stderr tail is scrubbed with redact_and_truncate at the point the
+        # install-failure payload is BUILT, so the 200-char bound can never cut
+        # a credential mid-match (a sliced fragment no longer matches the
+        # credential regex, and the route's own redaction pass cannot catch
+        # it). It owns no output — the payload reaches the dashboard only
+        # through ``_handle_deps_install`` in routes.py, the registered sink
+        # for this app.
+        "apps/builtins/auto_improvement/backend/deps.py",
         # Inbound: the crew worker's slot title is derived from an issue title,
         # which is untrusted text anyone who can open an issue wrote. It is
         # scrubbed before it becomes a slot title (and fails CLOSED to the slot
