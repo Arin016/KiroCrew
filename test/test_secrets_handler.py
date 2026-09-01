@@ -379,3 +379,96 @@ class TestApiSecretsSetInputValidation:
                 # Name is still trimmed, as before.
                 assert data["name"] == "PADDED"
                 assert SecretVault(empty_vault_dir).list_names() == ["PADDED"]
+
+
+class TestApiSecretsSetWhitespaceValue:
+    """POST /api/secrets rejects a value that is whitespace-only (F2 regression).
+
+    Before the fix, ``name`` was stripped before its empty-check but ``value``
+    was not — so a body like ``{"name":"K","value":"   "}`` bypassed the
+    ``if not value:`` guard (a non-empty string of spaces is truthy) and wrote
+    a blank secret to the vault.  After the fix, ``value = value.strip()`` is
+    applied before the empty-check, so the three-space value collapses to ``""``
+    and correctly hits the existing ``missing_value`` 400 path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_value_is_rejected(self, empty_vault_dir: Path) -> None:
+        """``{"name":"K","value":"   "}`` must return 400 missing_value."""
+        app = _app()
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        with patch(
+            "kiro_crew.dashboard.handlers.secrets.config_dir",
+            return_value=str(empty_vault_dir),
+        ):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/secrets", json={"name": "K", "value": "   "})
+                assert resp.status == 400
+                data = await resp.json()
+                assert data["code"] == "missing_value"
+                # The vault must not have stored K.
+                assert SecretVault(empty_vault_dir).list_names() == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ws_value", ["   ", "\t", "\n", " \t \n "])
+    async def test_various_whitespace_variants_are_rejected(
+        self, empty_vault_dir: Path, ws_value: str
+    ) -> None:
+        """Tabs, newlines, and mixed whitespace all reduce to empty after strip."""
+        app = _app()
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        with patch(
+            "kiro_crew.dashboard.handlers.secrets.config_dir",
+            return_value=str(empty_vault_dir),
+        ):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/secrets", json={"name": "K", "value": ws_value})
+                assert resp.status == 400
+                data = await resp.json()
+                assert data["code"] == "missing_value"
+                assert SecretVault(empty_vault_dir).list_names() == []
+
+    @pytest.mark.asyncio
+    async def test_normal_value_still_stores(self, empty_vault_dir: Path) -> None:
+        """Positive regression: a real value continues to be stored correctly."""
+        app = _app()
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        with patch(
+            "kiro_crew.dashboard.handlers.secrets.config_dir",
+            return_value=str(empty_vault_dir),
+        ):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/secrets", json={"name": "K", "value": "real-value"})
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["ok"] is True
+                assert SecretVault(empty_vault_dir).list_names() == ["K"]
+
+    @pytest.mark.asyncio
+    async def test_padded_value_is_stored_unchanged(self, empty_vault_dir: Path) -> None:
+        """A value with real content plus surrounding whitespace is stored VERBATIM.
+
+        The emptiness check uses ``value.strip()``, but the stored value must be
+        the original, untrimmed string — a credential can legitimately carry
+        leading/trailing whitespace and trimming it would corrupt the secret.
+        """
+        app = _app()
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        padded = "  sk-live-abc  "
+        with patch(
+            "kiro_crew.dashboard.handlers.secrets.config_dir",
+            return_value=str(empty_vault_dir),
+        ):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/secrets", json={"name": "K", "value": padded})
+                assert resp.status == 200
+                # The vault must hold the ORIGINAL padded value, byte-for-byte.
+                assert SecretVault(empty_vault_dir).get("K").reveal() == padded

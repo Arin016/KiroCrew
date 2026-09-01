@@ -134,7 +134,11 @@ async def api_secrets_set(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "Secret name is required", "code": "missing_name"}, status=400
         )
-    if not value:
+    # Reject a value that is empty or whitespace-only, but store the ORIGINAL
+    # value unchanged: a credential can legitimately contain leading/trailing
+    # whitespace, and trimming it before storage would corrupt the secret and
+    # break downstream authentication. Only the emptiness *check* strips.
+    if not value.strip():
         return web.json_response(
             {"error": "Secret value is required", "code": "missing_value"}, status=400
         )
