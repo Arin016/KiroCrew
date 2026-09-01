@@ -5272,9 +5272,9 @@
       },
       "trustAppModal": {
         "title": "Vuoi autorizzare «{{app}}» a eseguire codice proprio?",
-        "scope": "Vale solo per {{app}}. Tutte le altre app di terze parti restano bloccate.",
-        "on_cancel": "Annulla non cambia nulla: {{app}} resta installata ma spenta, e puoi accenderla più tardi.",
-        "intro": "Se autorizzi {{app}}, {{productName}} le permetterà di fare tutto quanto segue.",
+        "scope": "Vale solo per «{{app}}». Tutte le altre app di terze parti restano bloccate.",
+        "on_cancel": "Annulla non cambia nulla: «{{app}}» resta installata ma spenta, e puoi accenderla più tardi.",
+        "intro": "Se autorizzi «{{app}}», {{productName}} le permetterà di fare tutto quanto segue.",
         "capability_python": "Eseguire codice proprio all'interno di {{productName}}, con gli stessi accessi di {{productName}} — i tuoi file, le tue credenziali salvate e Internet",
         "capability_backend": "Tenere in esecuzione un proprio programma su questo computer, in background, mentre {{productName}} è aperto",
         "capability_shell": "Eseguire comandi su questo computer, da un elenco fornito dall'app e che tu non hai mai visto",
@@ -5286,8 +5286,8 @@
         "confirm": "Autorizza questa app e attivala",
         "confirm_after_failure": "Riprova",
         "working": "Autorizzazione e attivazione in corso...",
-        "failed": "Non è stato possibile attivare {{app}}, ma l'autorizzazione potrebbe essere già salvata. Scegli Riprova, oppure apri Impostazioni → Sicurezza → App di terze parti attendibili per verificarla e rimuoverla.",
-        "failed_generic": "Non è stato possibile attivare {{app}} e nulla è stato modificato. Scegli Riprova, oppure controlla i log di {{productName}}."
+        "failed": "Non è stato possibile attivare «{{app}}», ma l'autorizzazione potrebbe essere già salvata. Scegli Riprova, oppure apri Impostazioni → Sicurezza → App di terze parti attendibili per verificarla e rimuoverla.",
+        "failed_generic": "Non è stato possibile attivare «{{app}}» e nulla è stato modificato. Scegli Riprova, oppure controlla i log di {{productName}}."
       }
     },
     "artifactBody": {

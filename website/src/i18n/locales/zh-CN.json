@@ -5100,9 +5100,9 @@
       },
       "trustAppModal": {
         "title": "信任“{{app}}”运行它自己的代码？",
-        "scope": "这只对 {{app}} 生效，其他第三方应用仍然会被拦截。",
-        "on_cancel": "点击“取消”不会改变任何设置：{{app}} 仍处于已安装但已关闭的状态，你之后可以再打开它。",
-        "intro": "如果你信任 {{app}}，{{productName}} 将允许它执行以下全部操作。",
+        "scope": "这只对“{{app}}”生效，其他第三方应用仍然会被拦截。",
+        "on_cancel": "点击“取消”不会改变任何设置：“{{app}}”仍处于已安装但已关闭的状态，你之后可以再打开它。",
+        "intro": "如果你信任“{{app}}”，{{productName}} 将允许它执行以下全部操作。",
         "capability_python": "在 {{productName}} 内部运行自身代码，访问权限与 {{productName}} 完全相同 — 你的文件、已保存凭据以及互联网",
         "capability_backend": "在 {{productName}} 打开期间，在这台电脑上后台持续运行它自己的程序",
         "capability_shell": "在这台电脑上执行命令，命令来自应用自带的、你从未看过的清单",
@@ -5114,8 +5114,8 @@
         "confirm": "信任并启用此应用",
         "confirm_after_failure": "重试",
         "working": "正在信任并启用…",
-        "failed": "{{app}} 未能启用，但信任可能已经保存。请选择“重试”，或打开“设置 → 安全 → 受信任的第三方应用”查看并移除。",
-        "failed_generic": "{{app}} 未能启用，且没有做任何更改。请选择“重试”，或查看 {{productName}} 的日志。"
+        "failed": "“{{app}}”未能启用，但信任可能已经保存。请选择“重试”，或打开“设置 → 安全 → 受信任的第三方应用”查看并移除。",
+        "failed_generic": "“{{app}}”未能启用，且没有做任何更改。请选择“重试”，或查看 {{productName}} 的日志。"
       }
     },
     "artifactBody": {

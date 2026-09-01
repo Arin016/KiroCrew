@@ -5272,9 +5272,9 @@
       },
       "trustAppModal": {
         "title": "Faire confiance à « {{app}} » pour exécuter son propre code ?",
-        "scope": "Cela s'applique uniquement à {{app}}. Toutes les autres applications tierces restent bloquées.",
-        "on_cancel": "Annuler ne change rien : {{app}} reste installée mais désactivée, et tu peux l'activer plus tard.",
-        "intro": "Si tu fais confiance à {{app}}, {{productName}} l'autorisera à faire tout ce qui suit.",
+        "scope": "Cela s'applique uniquement à « {{app}} ». Toutes les autres applications tierces restent bloquées.",
+        "on_cancel": "Annuler ne change rien : « {{app}} » reste installée mais désactivée, et tu peux l'activer plus tard.",
+        "intro": "Si tu fais confiance à « {{app}} », {{productName}} l'autorisera à faire tout ce qui suit.",
         "capability_python": "Exécuter son propre code à l'intérieur de {{productName}}, avec les mêmes accès que {{productName}} — tes fichiers, tes identifiants enregistrés et Internet",
         "capability_backend": "Faire tourner son propre programme en arrière-plan sur cet ordinateur, tant que {{productName}} est ouvert",
         "capability_shell": "Exécuter des commandes sur cet ordinateur, à partir d'une liste fournie par l'application et que tu n'as jamais vue",
@@ -5286,8 +5286,8 @@
         "confirm": "Faire confiance à cette application et l'activer",
         "confirm_after_failure": "Réessayer",
         "working": "Confiance accordée et activation...",
-        "failed": "{{app}} n'a pas pu être activée, mais la confiance est peut-être déjà enregistrée. Choisis Réessayer, ou ouvre Paramètres → Sécurité → Applications tierces de confiance pour vérifier et la retirer.",
-        "failed_generic": "{{app}} n'a pas pu être activée, et rien n'a été modifié. Choisis Réessayer, ou consulte les journaux de {{productName}}."
+        "failed": "« {{app}} » n'a pas pu être activée, mais la confiance est peut-être déjà enregistrée. Choisis Réessayer, ou ouvre Paramètres → Sécurité → Applications tierces de confiance pour vérifier et la retirer.",
+        "failed_generic": "« {{app}} » n'a pas pu être activée, et rien n'a été modifié. Choisis Réessayer, ou consulte les journaux de {{productName}}."
       }
     },
     "artifactBody": {

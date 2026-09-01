@@ -183,6 +183,13 @@ export const QUOTED_OPERAND_CONFIRM_KEYS = [
   'apps.papyrus.workspace.co_author_conflict_discard_confirm', // #4676
   'apps.papyrus.workspace.delete_file_confirm', // quoted by #4677
   'autoImprovement.commitConfirm', // bare {{branch}} #4821
+  // The code-execution grant's title AND body. #5725 quoted only the title, which left
+  // the scope sentence one line under it reading as prose about every app (#6016).
+  'components.appstore.trustAppModal.failed', // bare {{app}} #6016
+  'components.appstore.trustAppModal.failed_generic', // bare {{app}} #6016
+  'components.appstore.trustAppModal.intro', // bare {{app}} #6016
+  'components.appstore.trustAppModal.on_cancel', // bare {{app}} #6016
+  'components.appstore.trustAppModal.scope', // bare {{app}} #6016
   'components.appstore.trustAppModal.title', // bare {{app}} on the code-execution grant #5725
   'components.artifactFolderDeleteDialog.delete_folder', // already quoted; pin #5725
   'pages.artifactDeployPage.destroy_confirm',

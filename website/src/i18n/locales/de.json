@@ -5186,9 +5186,9 @@
       },
       "trustAppModal": {
         "title": "„{{app}}“ vertrauen und eigenen Code ausführen lassen?",
-        "scope": "Das gilt nur für {{app}}. Alle anderen Apps von Drittanbietern bleiben blockiert.",
-        "on_cancel": "Abbrechen ändert nichts: {{app}} bleibt installiert, aber ausgeschaltet, und du kannst sie später einschalten.",
-        "intro": "Wenn du {{app}} vertraust, erlaubt {{productName}} der App alles Folgende.",
+        "scope": "Das gilt nur für „{{app}}“. Alle anderen Apps von Drittanbietern bleiben blockiert.",
+        "on_cancel": "Abbrechen ändert nichts: „{{app}}“ bleibt installiert, aber ausgeschaltet, und du kannst sie später einschalten.",
+        "intro": "Wenn du „{{app}}“ vertraust, erlaubt {{productName}} der App alles Folgende.",
         "capability_python": "Eigenen Code innerhalb von {{productName}} ausführen, mit denselben Zugriffsrechten, die {{productName}} hat — deine Dateien, deine gespeicherten Zugangsdaten und das Internet",
         "capability_backend": "Ein eigenes Programm auf diesem Computer im Hintergrund laufen lassen, solange {{productName}} geöffnet ist",
         "capability_shell": "Befehle auf diesem Computer ausführen, aus einer Liste, die die App mitliefert und die du nie gesehen hast",
@@ -5200,8 +5200,8 @@
         "confirm": "Dieser App vertrauen und aktivieren",
         "confirm_after_failure": "Erneut versuchen",
         "working": "Vertrauen wird gewährt und aktiviert...",
-        "failed": "{{app}} konnte nicht eingeschaltet werden, aber das Vertrauen ist möglicherweise schon gespeichert. Wähle Erneut versuchen, oder öffne Einstellungen → Sicherheit → Vertrauenswürdige Apps von Drittanbietern, um es zu prüfen und zu entfernen.",
-        "failed_generic": "{{app}} konnte nicht eingeschaltet werden, und es wurde nichts geändert. Wähle Erneut versuchen, oder sieh in den Logs von {{productName}} nach."
+        "failed": "„{{app}}“ konnte nicht eingeschaltet werden, aber das Vertrauen ist möglicherweise schon gespeichert. Wähle Erneut versuchen, oder öffne Einstellungen → Sicherheit → Vertrauenswürdige Apps von Drittanbietern, um es zu prüfen und zu entfernen.",
+        "failed_generic": "„{{app}}“ konnte nicht eingeschaltet werden, und es wurde nichts geändert. Wähle Erneut versuchen, oder sieh in den Logs von {{productName}} nach."
       }
     },
     "artifactBody": {

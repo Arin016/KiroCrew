@@ -5272,9 +5272,9 @@
       },
       "trustAppModal": {
         "title": "Confiar no “{{app}}” para executar o próprio código?",
-        "scope": "Isso vale só para o {{app}}. Todos os outros apps de terceiros continuam bloqueados.",
-        "on_cancel": "Cancelar não muda nada: o {{app}} continua instalado, mas desligado, e você pode ligá-lo depois.",
-        "intro": "Se você confiar no {{app}}, o {{productName}} vai permitir que ele faça tudo o que está abaixo.",
+        "scope": "Isso vale só para o “{{app}}”. Todos os outros apps de terceiros continuam bloqueados.",
+        "on_cancel": "Cancelar não muda nada: o “{{app}}” continua instalado, mas desligado, e você pode ligá-lo depois.",
+        "intro": "Se você confiar no “{{app}}”, o {{productName}} vai permitir que ele faça tudo o que está abaixo.",
         "capability_python": "Executar o próprio código dentro do {{productName}}, com o mesmo acesso que o {{productName}} tem — seus arquivos, suas credenciais salvas e a internet",
         "capability_backend": "Manter um programa próprio rodando neste computador, em segundo plano, enquanto o {{productName}} estiver aberto",
         "capability_shell": "Executar comandos neste computador, a partir de uma lista que o app traz e que você nunca viu",
@@ -5286,8 +5286,8 @@
         "confirm": "Confiar neste app e ativar",
         "confirm_after_failure": "Tentar de novo",
         "working": "Concedendo confiança e ativando...",
-        "failed": "Não foi possível ligar o {{app}}, mas a confiança pode já estar salva. Escolha Tentar de novo, ou abra Configurações → Segurança → Apps de terceiros confiáveis para conferir e remover.",
-        "failed_generic": "Não foi possível ligar o {{app}} e nada foi alterado. Escolha Tentar de novo, ou confira os logs do {{productName}}."
+        "failed": "Não foi possível ligar o “{{app}}”, mas a confiança pode já estar salva. Escolha Tentar de novo, ou abra Configurações → Segurança → Apps de terceiros confiáveis para conferir e remover.",
+        "failed_generic": "Não foi possível ligar o “{{app}}” e nada foi alterado. Escolha Tentar de novo, ou confira os logs do {{productName}}."
       }
     },
     "artifactBody": {
