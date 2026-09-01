@@ -620,7 +620,7 @@ function LibraryMasonry({
   cols: number
   /** Attached to the width-defining wrapper below so the page's measurement is
    *  taken from the element that actually lays the columns out. */
-  widthRef: React.RefObject<HTMLDivElement>
+  widthRef: React.Ref<HTMLDivElement>
   /** The page's scrolling column. A ref, not the resolved element: the
    *  virtualizer takes `externalScrollerRef` and reads it when it needs it, so
    *  nothing has to re-render just because the element appeared. */
