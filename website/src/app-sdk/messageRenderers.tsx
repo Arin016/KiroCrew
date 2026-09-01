@@ -27,6 +27,7 @@ import SubagentCompletionCard from '../pages/chat/SubagentCompletionCard'
 import NudgeCard from '../pages/chat/NudgeCard'
 import NoticeCard from '../pages/chat/NoticeCard'
 import { ErrorCard } from '../pages/chat/ErrorCard'
+import StopEventCard from '../pages/chat/StopEventCard'
 import { isSubagentCompletionMessage } from '../pages/chat/subagentCompletion'
 import { REASONING_ROLES } from '../pages/chat/groupDisplayItems'
 import MarkdownRenderer from '../components/MarkdownRenderer'
@@ -218,11 +219,15 @@ export const defaultMessageRenderers: readonly MessageRenderer[] = [
     id: 'stop_event',
     roles: ['*'],
     match: m => m.kind === 'stop_event' || m.meta?.kind === 'stop_event',
-    render: (m, ctx) => ctx.row(
-      <div className="text-danger text-[13px] leading-5 font-mono px-3 py-2 rounded-md bg-danger-subtle inline-flex items-center gap-2">
-        {m.content}
-      </div>,
-    ),
+    // The shared StopEventCard, which reads `meta.state` and draws the stop's
+    // actual outcome. It deliberately ignores `content`: a stop row's content is
+    // the card's own JSON envelope, mirrored there by the gateway for consumers
+    // that read only `content`
+    // (`{"kind":"stop_event","id":…,"state":"stopping","outcome":null,…}`), so
+    // the hand-rolled row this replaced printed that envelope into the
+    // transcript verbatim. The label is the only human-readable rendering there
+    // has ever been.
+    render: (m, ctx) => ctx.row(<StopEventCard message={m} />),
   },
   {
     id: 'subagent_completion',
