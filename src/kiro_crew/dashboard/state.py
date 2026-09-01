@@ -6225,7 +6225,11 @@ class DashboardState:
 
         Takes the list to persist explicitly so a caller can save a candidate
         list before committing it to ``_cron_folders`` (see ``create_cron_folder``),
-        keeping in-memory state and disk from diverging mid-operation. Any
+        keeping in-memory state and disk from diverging mid-operation. This is the
+        single persist chokepoint for all folder mutations: ``create_cron_folder``
+        passes a candidate list here before committing it, while ``save_cron_folders``
+        (used by ``rename_cron_folder`` and ``delete_cron_folder``) passes the
+        already-mutated ``_cron_folders`` to commit an in-place edit. Any
         malformed entries preserved at load time (``_unparsed_cron_folder_entries``)
         are appended, so a save cannot erase bytes a hand-edit left in a shape
         the loader could not validate.
