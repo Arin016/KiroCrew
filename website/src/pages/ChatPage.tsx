@@ -19,11 +19,12 @@ import type { ResizeInfo } from '../utils/resizeImage'
 import { useAppSelector, useAppDispatch, store } from '../store'
 import { useConnected } from '../hooks/useConnected'
 import { usePlanActionMutation, isPlanAction } from '../hooks/usePlanActionMutation'
+import { useQueuedMessageActions } from '../hooks/useQueuedMessageActions'
 import { useChatPopouts } from '../hooks/useChatPopouts'
 import {
   switchSlot, createSlot, deleteSlot, fetchHistory, loadOlderMessages, isSupersededPagingRejection,
   appendMessage, appendSlotMessage, resumeFromHistory, forkSlot,
-  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, setAgentSwitchNotice, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, editQueuedMessage,
+  setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, setAgentSwitchNotice, resolveByApprovalId, clearPendingPermissions,
   selectComposerBusy,
   selectContinuable,
   selectTurnInterrupted,
@@ -6179,54 +6180,33 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     saveDrafts()
   }, [activeSlot, slotRunning, send, steerMutation, saveDrafts, dispatch])
 
-  const handleCancelQueued = useCallback((queueId: string) => {
-    if (!activeSlot) return
-    const msg = messagesRef.current.find(m => m.role === 'queued' && (m.meta?.queueId as string) === queueId)
-    if (msg?.content) setInput(msg.content)
-    // Optimistically remove the card; WS event is a no-op if already gone
-    dispatch(cancelQueuedMessage({ slot: activeSlot, queue_id: queueId }))
-    api.cancelQueuedMessage(activeSlot, queueId).catch(() => {})
-  }, [activeSlot, dispatch])
-
-  const handleInterruptQueued = useCallback((queueId: string) => {
-    if (!activeSlot) return
-    api.interruptSlot(activeSlot, queueId).catch(() => {})
-  }, [activeSlot])
-
-  const handleEditQueued = useCallback((queueId: string, content: string) => {
-    if (!activeSlot) return
-    const trimmed = content.trim()
-    if (!trimmed) return
-    // Optimistically update the card; WS event reconciles other clients
-    dispatch(editQueuedMessage({ slot: activeSlot, queue_id: queueId, content: trimmed }))
-    api.editQueuedMessage(activeSlot, queueId, trimmed).catch(() => {})
-  }, [activeSlot, dispatch])
-
-  const handleReorderQueued = useCallback((queueId: string, direction: 'next' | 'later') => {
-    if (!activeSlot) return
-    const slot = activeSlot
-    // Build the order from ALL queued messages (allQueuedMessages includes
-    // hidden system deliveries and recovery continuations), not just the
-    // interactive cards: submitting only visible ids would let the backend
-    // append the omitted ones at the tail, silently demoting automation. The
-    // swap is between adjacent VISIBLE cards, expressed inside the full order.
-    const fullIds = allQueuedMessages.map(m => m.meta?.queueId as string).filter(Boolean)
-    const visibleIds = queuedMessages.map(m => m.meta?.queueId as string).filter(Boolean)
-    const vFrom = visibleIds.indexOf(queueId)
-    const vTo = direction === 'next' ? vFrom - 1 : vFrom + 1
-    if (vFrom < 0 || vTo < 0 || vTo >= visibleIds.length) return
-    const a = fullIds.indexOf(visibleIds[vFrom])
-    const b = fullIds.indexOf(visibleIds[vTo])
-    if (a < 0 || b < 0) return
-    const next = [...fullIds]
-    ;[next[a], next[b]] = [next[b], next[a]]
-    // No optimistic dispatch: the server commits and broadcasts queue_reorder
-    // to every client including this one, and that WS event is the
-    // authoritative store update. A local dispatch with rollback-on-failure
-    // could restore a stale order when the server committed but the HTTP
-    // response was lost, leaving this client in conflict with execution order.
-    api.reorderQueuedMessages(slot, next).catch(() => undefined)
-  }, [activeSlot, allQueuedMessages, queuedMessages])
+  // The queue-card recipe is shared with every other host that draws a
+  // QueueStack over this slot queue (#5891) — see useQueuedMessageActions for
+  // why cancel/edit stay optimistic and what is deliberately left to item 1.
+  //
+  // Restore MERGES, via the same helper every other recovery site in this file
+  // uses (a failed create, a failed send). Assigning was this surface's older
+  // spelling and it destroyed text: cancelling two cards in a row overwrote the
+  // first card's restored draft with the second's, and by then the first card had
+  // already been optimistically retired, so that text existed nowhere else.
+  // Whatever lands here is persisted into this slot's draft by the `[input]`
+  // effect above, so a recovered draft survives a slot switch.
+  const restoreQueuedDraft = useCallback(
+    (text: string) => setInput(prev => mergeRecoveredDraft(prev, text)),
+    [],
+  )
+  const {
+    onCancel: handleCancelQueued,
+    onInterrupt: handleInterruptQueued,
+    onEdit: handleEditQueued,
+    onReorder: handleReorderQueued,
+    pendingIds: queuePendingIds,
+  } = useQueuedMessageActions({
+    slot: activeSlot,
+    allQueued: allQueuedMessages,
+    visibleQueued: queuedMessages,
+    restoreDraft: restoreQueuedDraft,
+  })
 
 
   // Search: map message index → displayItems index for scroll-to-match
@@ -8006,7 +7986,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               {!(activityOpen && !search.isOpen && tabsCtl.tabs.find(t => t.id === tabsCtl.activeId)?.kind === 'subagents') && <SubagentProgressBar slot={activeSlot} />}
               {!(activityOpen && !search.isOpen && tabsCtl.tabs.find(t => t.id === tabsCtl.activeId)?.kind === 'workflows') && <WorkflowProgressBar slot={activeSlot} />}
               <SubagentDeliveryProgress count={systemDeliveryCount} />
-              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} onReorder={handleReorderQueued} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
+              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} onReorder={handleReorderQueued} pendingIds={queuePendingIds} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
               </div>
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={() => setFlyingQuote(null)} />}
               <div ref={inputAreaRef} className="relative z-10">
