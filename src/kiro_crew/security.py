@@ -3225,6 +3225,49 @@ def _is_shell_command_flag(token: str) -> bool:
     return token == "--command" or bool(_SHELL_COMMAND_FLAG_RE.match(token))
 
 
+def _is_shell_command_flag_or_herestring(token: str) -> bool:
+    """True where the shell-program scan in :func:`_nested_shell_payloads` stops.
+
+    Exactly the three conditions that loop broke on, in one predicate: a command
+    flag, the spaced herestring operator, and the glued spelling.  Kept together so
+    the precomputed stop index and the handling at that index cannot drift apart.
+    """
+    return _is_shell_command_flag(token) or token == "<<<" or token.startswith("<<<")
+
+
+def _is_env_split_flag(token: str) -> bool:
+    """True where the ``env -S`` scan in :func:`_nested_shell_payloads` stops."""
+    flag = token.lower()
+    return (
+        flag in {"-s", "--split-string"}
+        or (flag.startswith("-s") and len(token) > 2)
+        or flag.startswith("--split-string=")
+    )
+
+
+def _is_not_double_dash(token: str) -> bool:
+    """True where the ``--`` skip in :func:`_nested_shell_payloads` stops.
+
+    Named for the same reason the other two stop conditions are: the precomputed
+    index and the token the caller then reads must not drift apart.
+    """
+    return token != "--"
+
+
+def _next_stop_indexes(tokens: "list[str]", is_stop: "Callable[[str], bool]") -> "list[int]":
+    """For each index, the first index at or after it where *is_stop* holds.
+
+    One backward pass, so a forward scan per program token becomes a lookup and the
+    caller stays linear in token count.  Position ``len(tokens)`` means "no such
+    token", which reads the same as the original loops running off the end.
+    """
+    limit = len(tokens)
+    table = [limit] * (limit + 1)
+    for index in range(limit - 1, -1, -1):
+        table[index] = index if is_stop(tokens[index]) else table[index + 1]
+    return table
+
+
 def _nested_shell_payloads(tokens: "list[str]") -> "list[str]":
     """Literal shell-script payloads carried as an argument inside *tokens*.
 
@@ -3235,51 +3278,61 @@ def _nested_shell_payloads(tokens: "list[str]") -> "list[str]":
     this function.
     """
     payloads: list[str] = []
+    # Both scans below look for the FIRST token after a program that satisfies a stop
+    # predicate, handle it, and stop.  Walking forward per program made the function
+    # QUADRATIC in token count: in a run of interpreter tokens with no flag among them
+    # every one of them re-walks the whole tail, so a command padded with them stalls
+    # the synchronous permission gate (measured: 13.2 s for 16 000 tokens, ~4x per
+    # doubling).  The first-stop index is precomputed once per predicate in a single
+    # backward pass instead, which makes the whole function O(N) while returning the
+    # identical payload list -- the loops' only exits were that first stop token or the
+    # end of the list, so nothing else can change.
+    shell_stop = _next_stop_indexes(tokens, _is_shell_command_flag_or_herestring)
+    env_stop = _next_stop_indexes(tokens, _is_env_split_flag)
+    # ``--`` runs are precomputed for the same reason: a long run of them after the
+    # command flag is walked once per program token otherwise, which is quadratic even
+    # though the two scans above are not.
+    past_dashes = _next_stop_indexes(tokens, _is_not_double_dash)
+    limit = len(tokens)
     for i, token in enumerate(tokens):
         base = _program_basename(token)
         # A shell reached through a VARIABLE (``$SHELL -c '<payload>'``) runs the
         # payload exactly as a named shell does.  The recognizer already used for the
         # ``| $SHELL`` evaluator sink applies here too.
         if base in _NESTED_SHELL_PROGRAMS or _is_shell_variable_reference(token):
-            for j in range(i + 1, len(tokens)):
+            j = shell_stop[i + 1]
+            if j < limit:
                 if _is_shell_command_flag(tokens[j]):
                     # ``bash -c -- '<script>'`` is legal: ``--`` ends option parsing
                     # and the script is the token AFTER it.  Skip any run of them.
-                    k = j + 1
-                    while k < len(tokens) and tokens[k] == "--":
-                        k += 1
-                    if k < len(tokens):
+                    k = past_dashes[j + 1]
+                    if k < limit:
                         payloads.append(tokens[k])
-                    break
                 # A HERESTRING feeds the script on stdin instead of as an argument
                 # (``bash <<< '<script>'``), so its text is a command just the same.
                 # Both the spaced and glued spellings arrive here.
-                if tokens[j] == "<<<":
-                    if j + 1 < len(tokens):
+                elif tokens[j] == "<<<":
+                    if j + 1 < limit:
                         payloads.append(tokens[j + 1])
-                    break
-                if tokens[j].startswith("<<<"):
+                elif tokens[j].startswith("<<<"):
                     payloads.append(tokens[j][3:])
-                    break
         elif base in _ENV_SPLIT_PROGRAMS:
             # ``env -S '<script>'`` / ``env --split-string '<script>'`` splits the
             # payload into a command and runs it, so its text is a command line.
-            for j in range(i + 1, len(tokens)):
+            j = env_stop[i + 1]
+            if j < limit:
                 # ``is_denied`` lowercases its input, so compare case-insensitively:
                 # the real flag is ``-S`` but it arrives here as ``-s``.
                 flag = tokens[j].lower()
                 if flag in {"-s", "--split-string"}:
-                    if j + 1 < len(tokens):
+                    if j + 1 < limit:
                         payloads.append(tokens[j + 1])
-                    break
-                if flag.startswith("-s") and len(tokens[j]) > 2:
+                elif flag.startswith("-s") and len(tokens[j]) > 2:
                     payloads.append(tokens[j][2:])
-                    break
-                if flag.startswith("--split-string="):
+                elif flag.startswith("--split-string="):
                     payloads.append(tokens[j].split("=", 1)[1])
-                    break
         elif base in _NESTED_SHELL_VERBS or token in _NESTED_SHELL_VERBS:
-            if i + 1 < len(tokens):
+            if i + 1 < limit:
                 payloads.append(tokens[i + 1])
     # ``bash<<<'<payload>'`` glues the program, the operator and the payload into ONE
     # token, so the program never appears as a token of its own for the walk above to

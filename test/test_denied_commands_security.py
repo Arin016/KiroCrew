@@ -4394,3 +4394,126 @@ class TestPythonStdinDetectorStepsOverOutputRedirects:
             "pytest tests/ *> out",
         ):
             assert not security._is_credential_mint(cmd.lower()), cmd
+
+
+class TestNestedPayloadExtractionIsLinear:
+    """``_nested_shell_payloads`` must stay LINEAR in token count.
+
+    It runs inside the synchronous PreToolUse gate, on every command, through the
+    self-protection floor (``_self_token_frames``) and the deny tiers.  Both of its
+    scans used to walk forward per program token looking for the first command flag,
+    so a command padded with interpreter tokens -- none of which is a flag -- made
+    every one of them re-walk the whole tail: quadratic, and measured at 13.2 s for
+    16 000 tokens, growing ~4x per doubling.  At that size the gateway's own loop
+    watchdog fires and the process exits, so this is a denial of service reachable
+    from any agent- or injection-authored command.
+
+    The fix precomputes each scan's first-stop index in one backward pass.  The
+    payload list is unchanged by construction -- the loops' only exits were that
+    first stop token or the end of the list -- and both properties are pinned here:
+    the SET, so the transformation cannot silently drop or invent a payload, and the
+    COMPLEXITY, so a future edit cannot reintroduce a per-program walk.
+    """
+
+    # Every shape the extractor recognises, with the payloads it must produce.
+    SHAPES: "list[tuple[list[str], list[str]]]" = [
+        (["bash"] * 8 + ["-c", "x"], ["x"] * 8),
+        (["bash", "-c", "--", "--", "x"], ["x"]),
+        # A ``--`` run that reaches the end of the list yields NOTHING: there is no
+        # script token after it.  Worth pinning because the scan still has to traverse
+        # the run, so this is the shape whose cost buys no payload at all.
+        (["$0"] * 3 + ["-c"] + ["--"] * 3, []),
+        (["$0"] * 3 + ["-c"] + ["--"] * 3 + ["x"], ["x"] * 3),
+        (["bash", "-c", "--", "x", "--", "y"], ["x"]),
+        (["bash", "--", "-c", "x"], ["x"]),
+        (["bash", "<<<", "x"], ["x"]),
+        (["bash", "<<<x"], ["x"]),
+        (["bash<<<x"], ["x"]),
+        (["env", "-Sx"], ["x"]),
+        (["env", "--split-string=x"], ["x"]),
+        (["env", "--split-string", "x"], ["x"]),
+        (["eval", "x"], ["x"]),
+        (["$SHELL", "-c", "x"], ["x"]),
+        (["bash", "-c"], []),
+        (["bash", "-c", "--"], []),
+        (["a=(rm -rf)", "${a[@]}"], ["rm -rf"]),
+        ([], []),
+    ]
+
+    def test_the_payload_set_is_unchanged(self):
+        from kiro_crew import security
+
+        for tokens, expected in self.SHAPES:
+            assert security._nested_shell_payloads(list(tokens)) == expected, tokens
+
+    def test_the_scan_is_linear_not_quadratic(self):
+        """Asserted two ways, because either alone is weak: a doubling RATIO, which
+        catches the quadratic regardless of machine speed, and an absolute budget a
+        quadratic scan could not meet on any runner.
+        """
+        import time
+
+        from kiro_crew import security
+
+        def elapsed(n: int) -> float:
+            tokens = ["bash", "x"] * (n // 2)
+            start = time.perf_counter()
+            security._nested_shell_payloads(tokens)
+            return time.perf_counter() - start
+
+        # Warm the interpreter so the first call's import/JIT noise is not measured.
+        elapsed(2000)
+        small, large = elapsed(8000), elapsed(16000)
+        # Linear doubles; the old quadratic quadrupled.  The bound is generous
+        # (3x for a 2x input) so scheduler noise on a shared runner cannot red it,
+        # while a quadratic scan's 4x cannot pass.
+        assert large < small * 3, f"{small:.4f}s -> {large:.4f}s looks super-linear"
+        # ...and the absolute floor: the quadratic took ~13 s at this size.
+        assert large < 1.0, f"16k tokens took {large:.3f}s"
+
+    def test_a_long_double_dash_run_is_also_linear(self):
+        """The ``--`` skip after a command flag was a THIRD forward walk, and fixing
+        the two scans did not fix it: every program token found the same flag and then
+        re-walked the whole run, so ``$0 ... -c -- -- ...`` stayed quadratic (measured
+        4x per doubling) even with the scans linear."""
+        import time
+
+        from kiro_crew import security
+
+        def elapsed(n: int) -> float:
+            tokens = ["$0"] * n + ["-c"] + ["--"] * n
+            start = time.perf_counter()
+            security._nested_shell_payloads(tokens)
+            return time.perf_counter() - start
+
+        elapsed(500)
+        small, large = elapsed(4000), elapsed(8000)
+        assert large < small * 3, f"{small:.4f}s -> {large:.4f}s looks super-linear"
+        assert large < 1.0, f"8k+8k tokens took {large:.3f}s"
+
+    def test_the_stop_predicates_match_the_handling(self):
+        """The precomputed index and the branch taken at that index are two places
+        that must agree.  Each predicate is therefore asserted to hold exactly on the
+        tokens its handler knows how to process."""
+        from kiro_crew import security
+
+        for token in ("-c", "<<<", "<<<glued"):
+            assert security._is_shell_command_flag_or_herestring(token), token
+        for token in ("x", "--", "bash", ""):
+            assert not security._is_shell_command_flag_or_herestring(token), token
+
+        for token in ("-s", "--split-string", "-Sx", "--split-string=x"):
+            assert security._is_env_split_flag(token), token
+        for token in ("x", "-c", "--", ""):
+            assert not security._is_env_split_flag(token), token
+
+        assert not security._is_not_double_dash("--")
+        for token in ("x", "-c", "", "---"):
+            assert security._is_not_double_dash(token), token
+
+    def test_the_index_table_reads_as_no_such_token_past_the_end(self):
+        from kiro_crew import security
+
+        table = security._next_stop_indexes(["a", "-c", "b"], lambda t: t == "-c")
+        assert table == [1, 1, 3, 3], table
+        assert security._next_stop_indexes([], lambda t: True) == [0]
