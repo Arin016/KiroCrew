@@ -115,7 +115,6 @@ from kiro_crew.dashboard.cron_inject import (
 )
 from kiro_crew.dashboard.handlers import MAX_PROMPT_BYTES
 from kiro_crew.dashboard.handlers.autonudge import compose_nudge_body
-from kiro_crew.dashboard.handlers.messaging import _rehydrate_slot_from_history
 from kiro_crew.dashboard.handlers.updates import remediation_command as _remediation_command
 from kiro_crew.dashboard.handlers.usage import (
     persist_token_record_async,
@@ -3236,7 +3235,9 @@ class GatewayOrchestrator:
                     slot_key = job.session_key.removeprefix("dashboard:")
                     slot = self.dashboard_state.get_slot(slot_key)
                     if slot is None:
-                        slot = _rehydrate_slot_from_history(self.dashboard_state, slot_key)
+                        slot = await rehydrate_slot_from_history_async(
+                            self.dashboard_state, slot_key
+                        )
                     label = redact(job.name)
                     if slot:
                         wrapped = f'[Cron notification: "{label}"]\n{message}\n[/Cron notification]'
@@ -4578,10 +4579,21 @@ class GatewayOrchestrator:
                             and not job.hide_in_chat
                             and self.dashboard_state.has_slot(f"cron-{job.id}")
                         ):
+                            # Prefetch the transcript off the loop so the inject's
+                            # linked-session read cannot block, matching the creator path.
+                            history = (
+                                await asyncio.to_thread(
+                                    self.dashboard_state.conversation_log.read_messages,
+                                    f"cron:{job.id}",
+                                )
+                                if self.dashboard_state.conversation_log
+                                else []
+                            )
                             inject_cron_result_to_dashboard(
                                 self.dashboard_state,
                                 job,
                                 result_text,
+                                history=history,
                                 context_reading=_ctx_reading,
                             )
                         return result_text
@@ -4602,10 +4614,21 @@ class GatewayOrchestrator:
                         and not job.hide_in_chat
                         and self.dashboard_state.has_slot(f"cron-{job.id}")
                     ):
+                        # Prefetch the transcript off the loop so the inject's
+                        # linked-session read cannot block, matching the creator path.
+                        history = (
+                            await asyncio.to_thread(
+                                self.dashboard_state.conversation_log.read_messages,
+                                f"cron:{job.id}",
+                            )
+                            if self.dashboard_state.conversation_log
+                            else []
+                        )
                         inject_cron_result_to_dashboard(
                             self.dashboard_state,
                             job,
                             result_text,
+                            history=history,
                             context_reading=_ctx_reading,
                         )
                     return result_text

@@ -5874,7 +5874,13 @@ async def _run_chat(
                 history_key = slot_history_key(slot)
                 disk_count = 0
                 if state.conversation_log:
-                    disk_count = len(state.conversation_log.read_messages(history_key))
+                    # The disk read is 100-300ms of blocking IO on a large store; keep
+                    # it off the loop so it cannot stall the prompt-submit path. Only the
+                    # read crosses; the count and prefix build stay loop-affine.
+                    disk_messages = await asyncio.to_thread(
+                        state.conversation_log.read_messages, history_key
+                    )
+                    disk_count = len(disk_messages)
                 mem_count = sum(1 for m in slot.messages if m.get("role") in ("user", "assistant"))
                 if mem_count > disk_count:
                     history = _build_history_prefix(slot)

@@ -607,11 +607,13 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch(
-            "kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock
-        ) as mock_run, patch(
-            "kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history"
-        ) as mock_rehydrate:
+        with (
+            patch("kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock) as mock_run,
+            patch(
+                "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+                new_callable=AsyncMock,
+            ) as mock_rehydrate,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
@@ -655,7 +657,8 @@ class TestSendMessage:
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
         with patch(
-            "kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history"
+            "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+            new_callable=AsyncMock,
         ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -714,12 +717,14 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch(
-            "kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock
-        ) as mock_run, patch(
-            "kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history",
-            return_value=mock_slot,
-        ) as mock_rehydrate:
+        with (
+            patch("kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock) as mock_run,
+            patch(
+                "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+                new_callable=AsyncMock,
+                return_value=mock_slot,
+            ) as mock_rehydrate,
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
@@ -757,7 +762,9 @@ class TestSendMessage:
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
         with patch(
-            "kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history", return_value=None
+            "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+            new_callable=AsyncMock,
+            return_value=None,
         ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -810,9 +817,13 @@ class TestSendMessage:
         mock_job.session_key = "dashboard:chat-1-1712793600"
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
-        with patch(
-            "kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock
-        ) as mock_run, patch("kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history"):
+        with (
+            patch("kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock) as mock_run,
+            patch(
+                "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+                new_callable=AsyncMock,
+            ),
+        ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
                     "/api/send-message",
@@ -835,7 +846,8 @@ class TestSendMessage:
         state.get_slot = MagicMock()
         app = _make_send_app(state)
         with patch(
-            "kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history"
+            "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+            new_callable=AsyncMock,
         ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -873,7 +885,8 @@ class TestSendMessage:
         state.crons.list_jobs = MagicMock(return_value=[mock_job])
         app = _make_send_app(state)
         with patch(
-            "kiro_crew.dashboard.handlers.messaging._rehydrate_slot_from_history"
+            "kiro_crew.dashboard.handlers.messaging.rehydrate_slot_from_history_async",
+            new_callable=AsyncMock,
         ) as mock_rehydrate:
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
