@@ -41,6 +41,7 @@ from kiro_crew.embeddings import (
 from kiro_crew.executors import embed_executor, run_in_embed_pool
 from kiro_crew.history import is_incognito_transcript
 from kiro_crew.loop_lock import LoopBoundLock
+from kiro_crew.platform.context import redact_log_via_context
 from kiro_crew.platform_compat import kill_and_reap
 from kiro_crew.sandbox import (
     SandboxUnavailableError,
@@ -49,7 +50,7 @@ from kiro_crew.sandbox import (
     wrap_argv,
     wrap_argv_async,
 )
-from kiro_crew.security import redact_and_truncate, redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 from ._shared import _get_memory, _is_restricted_session, _redact_memory_field, read_bounded_json
 from .cron import _recognize_session
@@ -72,11 +73,28 @@ _history_write_lock = LoopBoundLock()
 # loader publishes into an embedder we close, and close() is terminal.
 _MODEL_LOAD_TIMEOUT_SECS = 600.0
 
-# Log-line budget for pip/ensurepip stderr in the warnings below. The bound is
-# applied by redact_and_truncate AFTER redaction runs over the FULL decoded
-# stderr, so a credential straddling the boundary cannot survive as an
-# unredacted fragment (the redact-before-bound invariant; see security.py).
+# Log-line budget for pip/ensurepip stderr in the warnings below.
 _PIP_STDERR_LOG_CHARS = 500
+
+
+def _redacted_pip_stderr(stderr: bytes) -> str:
+    """One owner for how this module logs a pip/ensurepip stderr blob.
+
+    ``redact_log_via_context``, not the OSS baseline: this handler runs in the
+    dashboard process, which DOES compose a platform context, so an installer's
+    stderr -- prime territory for a host-specific credential shape, an internal
+    registry cookie or an SSO token in a fetch URL -- must be scanned with a
+    loaded companion's regexes rather than the weaker baseline pass. The ``_log_``
+    spelling is the one that cannot raise, which a boot-time install step needs.
+    Same reasoning and same payload class as ``platform/update_provider.py``'s
+    ``CommandProvider.apply``.
+
+    Redaction runs over the FULL decoded stderr and the bound is applied AFTER
+    it: slicing first can cut a credential in half, and half a token no longer
+    matches the redactors' patterns, so the surviving fragment would reach
+    gateway.log verbatim.
+    """
+    return redact_log_via_context(stderr.decode(errors="replace"))[:_PIP_STDERR_LOG_CHARS]
 
 
 def _sel():
@@ -908,7 +926,7 @@ async def _ensure_pip_available() -> tuple[bool, str]:
         if proc.returncode != 0:
             logger.warning(
                 "ensurepip bootstrap failed: %s",
-                redact_and_truncate(stderr.decode(errors="replace"), _PIP_STDERR_LOG_CHARS),
+                _redacted_pip_stderr(stderr),
             )
             return False, "pip bootstrap (ensurepip) failed"
         importlib.invalidate_caches()
@@ -1062,9 +1080,7 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
                     if proc.returncode != 0:
                         logger.warning(
                             "faiss-cpu install failed: %s",
-                            redact_and_truncate(
-                                stderr.decode(errors="replace"), _PIP_STDERR_LOG_CHARS
-                            ),
+                            _redacted_pip_stderr(stderr),
                         )
                         _embedding_setup_status = {
                             "step": "idle",

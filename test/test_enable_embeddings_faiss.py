@@ -633,3 +633,83 @@ class TestPipStderrRedaction:
             # No prefix of the token may appear (the old slice leaked one).
             for n in range(3, len(self._SECRET) + 1):
                 assert self._SECRET[:n] not in msg
+
+
+class TestPipStderrReadsTheContextRedactor:
+    """Both pip-stderr logs must reach their text through the CONTEXT spelling.
+
+    The behaviour tests above pass under either redactor, because with no
+    platform context installed ``redact_log_via_context`` degrades to the same
+    OSS pass -- which is exactly why the drift these pin against was silent. On a
+    host that DOES load a companion the two spellings differ: only the context
+    one applies that companion's extra credential regexes, and this handler runs
+    in the dashboard process, which composes one.
+
+    Scoped to the two call sites rather than to the module, because
+    ``memory.py`` still reaches the baseline components legitimately for an API
+    error payload (not a gate-side log line), so the module-wide form of this
+    check in ``test_platform_context.CONVERGED_LOG_SITES`` cannot cover it.
+    """
+
+    _MARKER = "<<via-context>>"
+
+    @pytest.mark.asyncio
+    async def test_ensurepip_failure_log_goes_through_the_context_redactor(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        proc = _mock_proc(rc=1, stderr=b"could not fetch index")
+        with patch.dict("sys.modules", {"pip": None}), \
+             patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)), \
+             patch(f"{_MOD}.redact_log_via_context", return_value=self._MARKER), \
+             patch("asyncio.create_subprocess_exec", return_value=proc), \
+             caplog.at_level(logging.WARNING, logger=_MOD):
+            ok, _ = await mem_mod._ensure_pip_available()
+
+        assert ok is False
+        messages = [r.getMessage() for r in caplog.records if "ensurepip bootstrap failed" in r.getMessage()]
+        assert messages
+        assert any(self._MARKER in msg for msg in messages)
+
+    @pytest.mark.asyncio
+    async def test_faiss_install_failure_log_goes_through_the_context_redactor(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cfg_path = tmp_path / "kirocrew.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        patches, _store, _proc, _mgr = _common_patches(
+            cfg_path, faiss_available=False, proc_rc=1, proc_stderr=b"could not fetch index"
+        )
+
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["faiss"], \
+             patches["store"], patches["wrap_argv"], \
+             patch(f"{_MOD}.redact_log_via_context", return_value=self._MARKER), \
+             caplog.at_level(logging.WARNING, logger=_MOD):
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 500
+
+        messages = [r.getMessage() for r in caplog.records if "faiss-cpu install failed" in r.getMessage()]
+        assert messages
+        assert any(self._MARKER in msg for msg in messages)
+
+    def test_the_bound_is_applied_after_redaction_not_before(self) -> None:
+        """The helper slices its OWN output, never the redactor's input.
+
+        Truncating first cuts a credential in half, and half a token no longer
+        matches any redactor's pattern, so the fragment would reach gateway.log
+        verbatim. Proven on the helper directly: the fake redactor records what it
+        was handed, so a bound applied to the INPUT is visible as a short call.
+        """
+        seen: list[str] = []
+
+        def _fake(text: str) -> str:
+            seen.append(text)
+            return text
+
+        long_stderr = ("x" * (mem_mod._PIP_STDERR_LOG_CHARS * 3)).encode()
+        with patch(f"{_MOD}.redact_log_via_context", side_effect=_fake):
+            out = mem_mod._redacted_pip_stderr(long_stderr)
+
+        assert seen == [long_stderr.decode()]  # the FULL text was redacted
+        assert len(out) == mem_mod._PIP_STDERR_LOG_CHARS  # the bound came after
