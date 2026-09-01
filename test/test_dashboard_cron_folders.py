@@ -379,6 +379,36 @@ class TestCronFolderDeleteStateMethod:
         assert result is False
 
 
+class TestCronFolderCreateStateMethod:
+    """DashboardState.create_cron_folder guards against a duplicate folder id."""
+
+    def test_create_rejects_duplicate_id(self, tmp_path, monkeypatch):
+        """A colliding folder_id is refused: rename/delete act on the first id
+        match, so a duplicate would strand the shadowed folder as
+        un-renameable/un-deletable. The guard keeps ids unique."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path, raising=False)
+        state = DashboardState.__new__(DashboardState)
+        state._cron_folders = [{"id": "dup", "name": "Ops", "order": 0}]
+        state.save_cron_folders()
+
+        with pytest.raises(ValueError, match="collision"):
+            state.create_cron_folder("Second", "dup")
+        # No shadow folder appended; the store is untouched
+        assert len(state._cron_folders) == 1
+        assert json.loads((tmp_path / state._CRON_FOLDERS_FILE).read_text()) == [
+            {"id": "dup", "name": "Ops", "order": 0}
+        ]
+
+    def test_create_appends_unique_id(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path, raising=False)
+        state = DashboardState.__new__(DashboardState)
+        state._cron_folders = [{"id": "f1", "name": "Ops", "order": 0}]
+
+        folder = state.create_cron_folder("Keep", "f2")
+        assert folder == {"id": "f2", "name": "Keep", "order": 1}
+        assert [f["id"] for f in state._cron_folders] == ["f1", "f2"]
+
+
 class TestCronFoldersAsyncPersistence:
     """Verify mutations go through asyncio.to_thread (event-loop non-blocking)."""
 

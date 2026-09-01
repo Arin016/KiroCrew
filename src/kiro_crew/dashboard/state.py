@@ -6179,8 +6179,11 @@ class DashboardState:
     def create_cron_folder(self, name: str, folder_id: str) -> dict:
         """Create a new cron folder and persist.
 
-        Returns the created folder dict. Raises on persistence failure
-        (callers should surface a 500).
+        Returns the created folder dict. Raises ValueError if ``folder_id``
+        collides with an existing folder (``rename``/``delete`` act on the
+        first id match, so a duplicate would strand the shadowed folder as
+        un-renameable/un-deletable). Raises on persistence failure (callers
+        should surface a 500).
 
         The folder is persisted BEFORE it is exposed in ``_cron_folders``: a
         concurrent ``GET /api/cron-folders`` reads the live list, so appending
@@ -6190,6 +6193,8 @@ class DashboardState:
         it, and only then committing the reference means a reader sees either
         the pre-create list or the durably-saved one, never an intermediate.
         """
+        if any(f["id"] == folder_id for f in self._cron_folders):
+            raise ValueError("cron folder id collision")
         order = max((f["order"] for f in self._cron_folders), default=-1) + 1
         folder = {"id": folder_id, "name": name, "order": order}
         candidate = [*self._cron_folders, folder]
