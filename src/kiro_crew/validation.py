@@ -2346,6 +2346,12 @@ HOOK_CREATE_SCHEMA = ToolSchema(
         FieldSpec("skills", list, default=[], item_type=str, item_max_len=100),
         FieldSpec("timeout", int, min_val=1, max_val=300, default=30),
         FieldSpec("enabled", bool, default=True),
+        FieldSpec(
+            "on_error",
+            str,
+            default="",
+            allowed=frozenset({"", "fail_closed", "fail_open"}),
+        ),
     ],
     custom_validator=_validate_hook_create,
 )
@@ -2363,6 +2369,9 @@ HOOK_UPDATE_SCHEMA = ToolSchema(
         FieldSpec("skills", list, item_type=str, item_max_len=100),
         FieldSpec("timeout", int, min_val=1, max_val=300),
         FieldSpec("enabled", bool),
+        FieldSpec(
+            "on_error", str, allowed=frozenset({"", "fail_closed", "fail_open"})
+        ),  # optional on update
     ],
     custom_validator=_validate_hook_update,
 )

@@ -1621,6 +1621,51 @@ Windows script hook needs that opt-in (the same one script crons and Papyrus
 need). Without it the hook's `SandboxUnavailableError` surfaces as the result's
 `error`, naming the setting.
 
+### Fail direction of a hook that delivers no verdict (`on_error`)
+
+A script hook's exit code is its verdict: **0 = allow, 2 = deny** (stderr goes to
+the LLM). Any *other* code means the hook rendered no verdict at all —
+`ScriptHookResult.failed_to_run`. The cases are a timeout (`error` = "Timed out
+after Ns", exit `-1`), a spawn/preparation exception including a `wrap_argv` that
+fail-closes because the host has no sandbox backend (exit `-1`), and a
+missing/non-runnable binary (whatever the platform shell answers for "command not
+found" — 127 under `/bin/sh`, 9009 under `cmd.exe`). The governance-denied result
+is *not* one of these: it carries exit 2 plus an `error`, and is a clean denial.
+
+`ScriptHook.on_error` decides what a no-verdict run means. It stores the
+operator's explicit `fail_closed` / `fail_open`, or the sentinel `""` meaning
+"use the event default"; read it only through `effective_on_error()`, never raw.
+The event default is **`fail_closed` for PreToolUse** — the only event that gates
+a tool, and an unheard policy hook must not silently auto-approve — and
+`fail_open` for every other event, which cannot gate, so a failed run there is
+informational. `should_block_pre_tool_use()` is the whole decision: exit 2 blocks,
+exit 0 allows, `failed_to_run` blocks iff the resolved direction is `fail_closed`.
+
+Where that gate actually runs is the **dashboard chat path** (`chat_runner._fire`
+/ `_pre_tool_hooks_should_block`), which consults results before the tool is
+approved; it emits the same `BLOCKED:<name>:<reason>` marker exit 2 does. The
+autonomous `fire_tool_hooks` path cannot gate — kiro-cli emits `EVENT_TOOL_CALL`
+after it has already auto-approved and started the tool — so it instead logs a
+WARNING naming the hook and the tool, making the gap observable where it can no
+longer be prevented.
+
+Operator consequence, on Windows in particular: a host where a script hook cannot
+be confined and `agent.sandbox_allow_unsandboxed_exec` is unset produces no
+verdict, so a matching **PreToolUse** hook now denies the tool rather than being
+ignored. Setting the hook's `on_error` to `fail_open` restores the pass-through
+for that hook alone.
+
+Write paths differ deliberately. `validate_hook_fields` (create/update boundary)
+**raises** on an explicit unrecognized value, so a misspelled fail direction is
+never accepted silently. `from_dict` and `ScriptHookStore.update` **normalize**
+(trim, lowercase) and degrade anything unrecognized to the sentinel, because
+`hooks.json` is hand-editable and older files predate the field — and the sentinel
+resolves to `fail_closed` for PreToolUse, so junk on a policy hook still fails
+toward more protection. Both write paths normalize identically, so the same input
+stores the same value whether it arrives via create or update. The dashboard API
+accepts the field through `HOOK_CREATE_SCHEMA` / `HOOK_UPDATE_SCHEMA`
+(`validation.py`), which reject unknown fields.
+
 ### `safe_read_file(path: str) -> str`
 
 Central guarded file read. Resolves the path via `expanduser().resolve()`, checks against
