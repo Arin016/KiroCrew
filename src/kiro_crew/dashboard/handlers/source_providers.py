@@ -22,7 +22,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Protocol, TypedDict, TypeVar
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -321,6 +321,30 @@ class SourceRef:
     # requests, so an issue ref reaching a pull-request-only path would address a
     # DIFFERENT object with the same number. See :func:`_require_change_ref`.
     kind: str = "change"
+
+    @property
+    def identity(self) -> tuple:
+        """Stable identity of the referenced object, for dedup keying.
+
+        Every field except the canonical URL: a provider whose grammar accepts
+        more than one URL shape for the same change (e.g. an optional revision
+        pin kept in the canonical URL) must collapse to one identity, so the
+        URL cannot participate. Derived from the dataclass fields rather than
+        hand-listed, so a future identity-bearing field is included
+        automatically instead of silently falling out and over-collapsing
+        distinct objects.
+
+        Jira is the one exception that adds the URL back in: a self-hosted
+        instance's context path (the ``/jira`` in
+        ``https://host/jira/browse/PROJ-1``) exists only in the URL, so two
+        instances on one host would otherwise collide on the same issue key.
+        Safe to include because :func:`_jira_ref` emits exactly one canonical
+        URL per issue per instance -- it can never split one object in two.
+        """
+        instance_context = self.url if self.provider == "jira" else ""
+        return tuple(getattr(self, f.name) for f in fields(self) if f.name != "url") + (
+            instance_context,
+        )
 
 
 def source_ref_label(ref: SourceRef) -> str:
