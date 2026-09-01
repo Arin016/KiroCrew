@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -677,6 +678,70 @@ class TestBuildLauncherScript:
         # link=86/linkat=265 (x86_64) and linkat=37 (aarch64) must be gone
         assert "308, 155, 86, 265)" not in script
         assert "268, 41, 37)" not in script
+
+    @_POSIX_ONLY
+    def test_launcher_refuses_when_seccomp_cannot_be_installed(self):
+        """An arch with no syscall table, or a libc without prctl(2), must make
+        the launcher EXIT -- not skip Step 5/6 and exec the agent anyway.
+
+        Skipping leaves ``unshare`` permitted, so the child can enter a nested
+        user namespace, hold CAP_SYS_ADMIN over a copy of this mount tree, and
+        umount every credential mask -- the escape the filter exists to deny.
+        Both ``_inside_kirocrew_sandbox`` and
+        ``docs/system-specs/modules/security.md`` state that a sandboxed tree is
+        confined "by the outer namespace + seccomp", so a silent skip makes that
+        claim false while every caller still reads the spawn as isolated.
+        """
+        script = _build_launcher_script("strict")
+        # The generated launcher must stay valid Python at every tier.
+        for level in ("standard", "cc", "strict"):
+            compile(_build_launcher_script(level), "<launcher-%s>" % level, "exec")
+        assert "no seccomp syscall table for machine" in script
+        assert "libc exposes no prctl(2)" in script
+        # The old fail-open marker must not come back.
+        assert "unknown arch" not in script
+
+        # Execute the arch-dispatch block itself, so this proves the refusal
+        # FIRES rather than that its message is present as text.
+        lines = script.splitlines()
+        start = -1
+        end = -1
+        for index, line in enumerate(lines):
+            if start < 0 and line.strip() == "import platform as _plat":
+                start = index
+            elif start >= 0 and "if _DENY_SYSCALLS:" in line:
+                end = index
+                break
+        assert start >= 0 and end > start, "arch-dispatch block not found"
+        block = textwrap.dedent("\n".join(lines[start:end]))
+        block = block.replace("import platform as _plat", "")
+
+        class _FakePlat:
+            def __init__(self, machine):
+                self._machine = machine
+
+            def machine(self):
+                return self._machine
+
+        supported = (
+            ("x86_64", (165, 166, 272, 308, 155)),
+            ("aarch64", (40, 39, 97, 268, 41)),
+        )
+        for machine, table in supported:
+            namespace = {"sys": sys, "_plat": _FakePlat(machine)}
+            exec(block, namespace)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- runs this repo's OWN generated launcher source, never external input  # noqa: E501  # fmt: skip
+            assert namespace["_DENY_SYSCALLS"] == table
+
+        for machine in ("riscv64", "armv7l", "ppc64le", "s390x"):
+            namespace = {"sys": sys, "_plat": _FakePlat(machine)}
+            with pytest.raises(SystemExit) as excinfo:
+                exec(block, namespace)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- runs this repo's OWN generated launcher source, never external input  # noqa: E501  # fmt: skip
+            message = str(excinfo.value)
+            assert "sandbox: BLOCKED" in message
+            assert repr(machine) in message
+            # The refusal must name the explicit opt-out, or an operator on such
+            # a host is left with no way forward.
+            assert "agent.sandbox_allow_unsandboxed_exec" in message
 
     @_POSIX_ONLY
     def test_standard_script_excludes_aws(self):

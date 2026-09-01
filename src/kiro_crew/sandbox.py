@@ -2505,6 +2505,23 @@ def main():
 
         _PR_SET_NO_NEW_PRIVS = 38
         _PR_CAPBSET_DROP = 24
+        if not _libc.prctl:
+            # prctl(2) is how BOTH remaining controls are applied: the
+            # capability-bounding drop plus NO_NEW_PRIVS here, and the
+            # seccomp-BPF install in Step 6. Without it the child keeps
+            # CAP_SYS_ADMIN over this mount namespace and can umount the
+            # credential masks, so refuse for the same reason the unknown-arch
+            # branch below does.
+            sys.exit(
+                "sandbox: BLOCKED — libc exposes no prctl(2), so neither the "
+                "capability-bounding drop nor the seccomp-BPF namespace-escape "
+                "filter can be applied. The agent would keep CAP_SYS_ADMIN in "
+                "this mount namespace and could unmount the credential masks, "
+                "so this spawn is refused. To run anyway WITHOUT OS-level "
+                "isolation, set agent.sandbox='off' or "
+                "agent.sandbox_allow_unsandboxed_exec=true in "
+                "~/.kiro/crew/config.json."
+            )
         if _libc.prctl:
             # Linux CAP_LAST_CAP is currently 41 (kernel 6.x); iterate 0..63 for
             # forward-compatibility — dropping a non-existent cap just returns -1.
@@ -2582,8 +2599,29 @@ def main():
                 _DENY_SYSCALLS = (40, 39, 97, 268, 41)
                 _KILL_NR = 129
             else:
-                _DENY_SYSCALLS = ()  # unknown arch — skip seccomp
-                _KILL_NR = None
+                # No syscall table for this arch, so the filter that keeps the
+                # child from undoing the credential masks cannot be built.
+                # Refuse rather than skip: with unshare(2) still permitted the
+                # child can enter a nested user namespace, hold CAP_SYS_ADMIN
+                # over a copy of this mount tree, and umount every mask — the
+                # exact escape Step 6 exists to deny. _inside_kirocrew_sandbox()
+                # and docs/system-specs/modules/security.md both state that a
+                # sandboxed tree is confined "by the outer namespace + seccomp",
+                # so a silent skip makes that claim false while every caller
+                # still reads the spawn as isolated. sandbox_level="off" (or
+                # agent.sandbox_allow_unsandboxed_exec) is the explicit opt-out
+                # for a host that cannot be confined; a silent one is not.
+                sys.exit(
+                    "sandbox: BLOCKED — no seccomp syscall table for machine "
+                    "%r, so the namespace-escape filter (mount/umount2/unshare/"
+                    "setns/pivot_root) cannot be installed. The agent would run "
+                    "able to unshare a new namespace and unmount the credential "
+                    "masks, so this spawn is refused. Supported: x86_64, "
+                    "aarch64. To run anyway WITHOUT OS-level isolation, set "
+                    "agent.sandbox='off' or "
+                    "agent.sandbox_allow_unsandboxed_exec=true in "
+                    "~/.kiro/crew/config.json." % _machine
+                )
 
             if _DENY_SYSCALLS:
                 # Architecture constants for seccomp arch validation
