@@ -5053,7 +5053,10 @@ class DashboardState:
         if self.context_builder:
             vs = self.context_builder.memory.vector_store
             if vs:
-                count += len(vs.get_lessons())
+                # COUNT(*) — not get_lessons() — so the status paths that poll
+                # this per client do not materialize the whole lesson corpus
+                # just to len() it.
+                count += vs.count_lessons()
         return count
 
     def status_snapshot(

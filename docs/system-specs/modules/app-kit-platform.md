@@ -778,7 +778,9 @@ Three tiers. Tier 0 (`dashboard`, `refresh`, `update_progress`) carries no
 sensitive payload and always delivers — and that classification is a claim about
 CONTENT, so it has to be maintained: `_push_status` writes the `dashboard` frame
 straight to each socket every few seconds, and its payload is deliberately
-counts-and-environment only. The checkout's `branch`/`commit` are stripped for app
+counts-and-environment only. The `cron_jobs` and `lessons` counts are nullable:
+`null` means the gateway's count refresh has not succeeded yet (unknown), never
+zero — app consumers must treat `null` as "no data", not `0`. The checkout's `branch`/`commit` are stripped for app
 tokens (they say what the operator is working on and have no consumer outside the
 owner surfaces); `/api/status` and the SSE stream run on dashboard-user tokens and
 keep the full snapshot. Moving the whole frame behind a declaration was rejected:

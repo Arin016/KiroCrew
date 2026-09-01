@@ -823,7 +823,6 @@ test/test_lazy_data_home_paths.py
 test/test_learn.py
 test/test_lesson_contradiction.py
 test/test_lesson_ranking.py
-test/test_lessons_count.py
 test/test_lifecycle_hooks.py
 test/test_link_dashboard.py
 test/test_link_unfurl.py
