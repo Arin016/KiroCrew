@@ -25,6 +25,7 @@ from kiro_crew.platform.context import (
 from kiro_crew.platform.defaults import (
     DefaultAgentCatalogProvider,
     DefaultAgentExecutableResolver,
+    DefaultAgentIdentityProvider,
     DefaultAgentRuntime,
     DefaultAppRegistryPolicy,
     DefaultAppsLoader,
@@ -134,6 +135,7 @@ def build_default_context(
         security=PolicyAuthority(),  # _NullOverlay → baseline only
         slack_gate=DefaultSlackEnterpriseGate(),
         identity=DefaultIdentityProvider(),
+        agent_identity=DefaultAgentIdentityProvider(),
         embeddings=DefaultEmbeddingSource(),
         mcp_tooling=DefaultMcpToolingProvider(),
         agent_catalog=DefaultAgentCatalogProvider(),
