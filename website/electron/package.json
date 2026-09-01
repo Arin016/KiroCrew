@@ -159,6 +159,7 @@
       "home-dir.js",
       "local-token.js",
       "local-gateway.js",
+      "wsl-detection.js",
       "mochi-session-token.js",
       "window-state.js",
       "linux-frame.js",

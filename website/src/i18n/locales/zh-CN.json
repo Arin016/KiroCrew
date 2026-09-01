@@ -11168,6 +11168,7 @@
       "connect_error": "连接错误",
       "connected": "已连接",
       "cpu": "CPU 使用率",
+      "default_distro": "默认",
       "discord": "Discord",
       "embeddings": "Embeddings",
       "gateway_process": "网关进程",
@@ -11176,6 +11177,7 @@
       "governance_tip_degraded": "某项治理检查按失败即拒绝处理，检测到完整性不匹配，或准入策略未经验证（缺失或不可读）。排查 SEL 审计日志。",
       "governance_tip_disabled": "未配置强制执行的准入策略（默认宽松）。除明确禁止外，插件均予准入。",
       "governance_tip_unknown": "本次会话尚未确定治理状态。",
+      "host_runtime": "主机运行时",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}}（{{sandbox}} 个沙箱 · {{provider}} 个 {{providerLabel}} · {{mcp}} 个 mcp）",
       "mcp_process_breakdown_unique": "{{total}} 个唯一进程（{{sandbox}} 个沙箱 · {{provider}} 个 {{providerLabel}} · {{mcp}} 个 mcp）",
@@ -11202,7 +11204,10 @@
       "weixin": "微信",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "工作目录"
+      "working_directory": "工作目录",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "未安装任何 WSL2 发行版",
+      "wsl2_unavailable": "WSL2 在此主机上不可用"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "模糊筛选（子串匹配）",

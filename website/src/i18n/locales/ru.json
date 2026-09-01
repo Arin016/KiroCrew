@@ -11660,6 +11660,7 @@
       "connect_error": "Ошибка подключения",
       "connected": "Подключено",
       "cpu": "CPU %",
+      "default_distro": "По умолчанию",
       "discord": "Discord",
       "embeddings": "Embeddings",
       "gateway_process": "Процесс шлюза",
@@ -11668,6 +11669,7 @@
       "governance_tip_degraded": "Проверка управления политиками завершилась отказом, обнаружено несовпадение целостности либо политика допуска не проверена (отсутствует или не читается). Изучи журнал аудита SEL.",
       "governance_tip_disabled": "Принудительная политика допуска не настроена (разрешающий режим по умолчанию). Плагины допускаются, если не запрещены явно.",
       "governance_tip_unknown": "Статус управления политиками в этой сессии пока не определён.",
+      "host_runtime": "Среда выполнения хоста",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}} ({{sandbox}} в песочнице · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
       "mcp_process_breakdown_unique": "Уникальных: {{total}} ({{sandbox}} в песочнице · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
@@ -11694,7 +11696,10 @@
       "weixin": "WeChat",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "Рабочий каталог"
+      "working_directory": "Рабочий каталог",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "Дистрибутивы WSL2 не установлены",
+      "wsl2_unavailable": "WSL2 недоступен на этом компьютере"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Нечёткий фильтр (поиск подстроки)",

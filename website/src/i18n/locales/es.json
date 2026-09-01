@@ -11496,6 +11496,7 @@
       "connect_error": "Error de conexión",
       "connected": "Conectado",
       "cpu": "CPU %",
+      "default_distro": "Predeterminado",
       "discord": "Discord",
       "embeddings": "Embeddings",
       "gateway_process": "Proceso del gateway",
@@ -11504,6 +11505,7 @@
       "governance_tip_degraded": "Una comprobación de gobernanza falló de forma restrictiva, se detectó una discrepancia de integridad o la política de admisión no está verificada (ausente o ilegible). Revisa el registro de auditoría SEL.",
       "governance_tip_disabled": "No hay ninguna política de admisión en modo de aplicación configurada (valor predeterminado permisivo). Los plugins se admiten a menos que se prohíban explícitamente.",
       "governance_tip_unknown": "El estado de gobernanza aún no se ha determinado en esta sesión.",
+      "host_runtime": "Runtime del host",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}} ({{sandbox}} en sandbox · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
       "mcp_process_breakdown_unique": "{{total}} únicos ({{sandbox}} en sandbox · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
@@ -11530,7 +11532,10 @@
       "weixin": "WeChat",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "Directorio de trabajo"
+      "working_directory": "Directorio de trabajo",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "No hay distribuciones WSL2 instaladas",
+      "wsl2_unavailable": "WSL2 no está disponible en este equipo"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtro aproximado (coincidencia parcial)",

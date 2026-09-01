@@ -143,6 +143,10 @@ const { seedRenamedStore } = require("./store-rename");
 
 const { isLocalGatewayEnabled, setLocalGatewayEnabled, classifyStartFailure } = require("./local-gateway");
 
+const {
+  detectWsl2,
+} = require("./wsl-detection");
+
 const { initNativeLogging } = require("./native-logging");
 const { initGpuPolicy } = require("./disable-gpu");
 
@@ -1810,14 +1814,9 @@ function setupWindowContents(win, backendUrl) {
     getGatewayUrl: () => win._mcBackendUrl,
     getSecret: () => readInternalSecret(),
     // The idle host-presence heartbeat must fire ONLY when the gateway is truly
-    // on this machine. A loopback URL is necessary but NOT sufficient: a REMOTE
-    // gateway reached over a tunnel also presents as localhost, so additionally
-    // require that no remote host is configured for THIS window's port (each
-    // window has its own `port` from its backendUrl; the module-global PORT is
-    // only the primary window's, so a secondary remote window would otherwise
-    // read the wrong config and leak the local secret over its tunnel).
-    isGatewayLocal: () =>
-      isLoopbackUrl(win._mcBackendUrl) && !getRemoteHostConfig(store, port)?.host,
+    // on this machine — see isGatewayLocalForWindow for why loopback alone is
+    // not sufficient and why the port must be the window's own.
+    isGatewayLocal: () => isGatewayLocalForWindow(win),
     // Panels that exist PLUS sessions that may host one on demand. Reporting a
     // key is what registers it with the gateway's command bus, so a declared-but-
     // unmounted session must appear here or its first navigate can never arrive.
@@ -2178,6 +2177,20 @@ function windowForWebContents(wc) {
     } catch { /* window mid-teardown */ }
   }
   return null;
+}
+
+// Is this window's gateway genuinely on THIS machine? A loopback URL is
+// necessary but NOT sufficient: a remote gateway reached over a tunnel also
+// presents as localhost, so additionally require that no remote host is
+// configured for the window's OWN port (each window carries its backendUrl;
+// the module-global PORT is only the primary window's, so a secondary remote
+// window must not read the primary's config). Shared by the host-presence
+// heartbeat and the wsl:detect sender gate so the two security decisions
+// cannot drift apart.
+function isGatewayLocalForWindow(win) {
+  if (!win || win.isDestroyed() || !win._mcBackendUrl) return false;
+  const url = win._mcBackendUrl;
+  return isLoopbackUrl(url) && !getRemoteHostConfig(store, new URL(url).port)?.host;
 }
 
 // Keep the injected Linux caption cluster's maximize button in sync with the
@@ -3911,6 +3924,53 @@ app.whenReady().then(async () => {
   // semantics: flipping it never touches the gateway currently running.
   ipcMain.handle("local-gateway:get", () => isLocalGatewayEnabled(store));
   ipcMain.handle("local-gateway:set", (_event, enabled) => setLocalGatewayEnabled(store, enabled));
+
+  // WSL2 host-runtime readout, rendered read-only by the Host runtime card on
+  // the dashboard's System > Services plane. Sender-restricted ON PURPOSE: the
+  // discovery result is a fact about THIS machine, so the handler answers only
+  // WebContents whose document this shell's own local gateway served.
+  // Connection windows pointed at a REMOTE gateway share this preload, and a
+  // page served elsewhere has no business enumerating host WSL state — they
+  // get a rejection, which the card renders as "unavailable".
+  ipcMain.handle("wsl:detect", async (event) => {
+    // Gate 1 — document origin: the page must have been served from this
+    // shell's own local gateway URL.
+    let origin = "";
+    try {
+      origin = new URL(event.senderFrame.url).origin;
+    } catch { /* about:blank / torn-down frame — not the dashboard */ }
+    if (origin !== BACKEND_URL) {
+      // Logged, not silent: a future UI reading "unavailable" in the field can
+      // tell a sender rejection (typically a remote-gateway tab) apart from a
+      // missing WSL install.
+      glog(`wsl:detect rejected for sender origin ${origin || "(unreadable)"}`);
+      throw new Error("wsl:detect is restricted to the local dashboard");
+    }
+
+    // Gate 2 — the sending window's gateway must be genuinely on this machine
+    // (loopback AND no remote host configured for its own port). A window that
+    // is not a dashboard view resolves to no owner and is refused.
+    const owner = windowForWebContents(event.sender);
+    if (!isGatewayLocalForWindow(owner)) {
+      glog("wsl:detect rejected for a sender window without a local gateway");
+      throw new Error("wsl:detect is restricted to the local dashboard");
+    }
+
+    // Gate 3 — positive identification of the port holder. A MANUAL ssh tunnel
+    // on the gateway port also presents as localhost with nothing configured,
+    // so a local LISTENER is not a local GATEWAY: the holder must positively be
+    // this shell's own gateway (directly spawned or service-managed). Foreign
+    // holders, an unbound port, and hosts where ownership cannot be probed all
+    // fail closed. Gate 1 already narrowed the origin to this shell's primary
+    // port, so probing PORT is probing the sender's own gateway port.
+    const portOwner = await probeGatewayPortOwner(PORT);
+    if (portOwner !== "kirocrew" && portOwner !== "service") {
+      glog(`wsl:detect rejected: :${PORT} held by ${portOwner}, not this shell's gateway`);
+      throw new Error("wsl:detect is restricted to the local dashboard");
+    }
+
+    return detectWsl2();
+  });
 
   // Native zoom bridge for the Settings > Display "Zoom Level" stepper.
   // A renderer cannot touch Chromium's per-origin zoom itself, so it

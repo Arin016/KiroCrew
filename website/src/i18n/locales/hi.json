@@ -11332,6 +11332,7 @@
       "connect_error": "कनेक्शन त्रुटि",
       "connected": "कनेक्टेड",
       "cpu": "CPU %",
+      "default_distro": "डिफ़ॉल्ट",
       "discord": "Discord",
       "embeddings": "Embeddings",
       "gateway_process": "गेटवे प्रोसेस",
@@ -11340,6 +11341,7 @@
       "governance_tip_degraded": "कोई गवर्नेंस जाँच फ़ेल-क्लोज़्ड हुई, अखंडता में बेमेल मिला, या प्रवेश नीति असत्यापित है (अनुपलब्ध/अपठनीय)। SEL ऑडिट लॉग की जाँच करें।",
       "governance_tip_disabled": "कोई लागू होने वाली प्रवेश नीति कॉन्फ़िगर नहीं है (अनुमतिपूर्ण डिफ़ॉल्ट)। जब तक स्पष्ट रूप से प्रतिबंधित न हो, प्लगिन को अनुमति मिल जाती है।",
       "governance_tip_unknown": "इस सत्र में गवर्नेंस स्थिति अभी तय नहीं हुई।",
+      "host_runtime": "होस्ट रनटाइम",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}} ({{sandbox}} सैंडबॉक्स · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
       "mcp_process_breakdown_unique": "{{total}} अद्वितीय ({{sandbox}} सैंडबॉक्स · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
@@ -11366,7 +11368,10 @@
       "weixin": "WeChat",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "कार्य डायरेक्टरी"
+      "working_directory": "कार्य डायरेक्टरी",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "कोई WSL2 वितरण स्थापित नहीं है",
+      "wsl2_unavailable": "इस होस्ट पर WSL2 उपलब्ध नहीं है"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "फ़ज़ी फ़िल्टर (सबस्ट्रिंग मैच)",

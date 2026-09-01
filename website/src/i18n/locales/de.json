@@ -11332,6 +11332,7 @@
       "connect_error": "Verbindungsfehler",
       "connected": "Verbunden",
       "cpu": "CPU %",
+      "default_distro": "Standard",
       "discord": "Discord",
       "embeddings": "Embeddings",
       "gateway_process": "Gateway-Prozess",
@@ -11340,6 +11341,7 @@
       "governance_tip_degraded": "Eine Governance-Prüfung ist fehlgeschlagen und hat blockiert, es wurde eine Integritätsabweichung erkannt, oder die Zulassungsrichtlinie ist nicht verifiziert (fehlt/nicht lesbar). Prüfe das SEL-Audit-Protokoll.",
       "governance_tip_disabled": "Es ist keine durchsetzende Zulassungsrichtlinie konfiguriert (permissive Voreinstellung). Plugins werden zugelassen, sofern sie nicht ausdrücklich gesperrt sind.",
       "governance_tip_unknown": "Der Governance-Status wurde in dieser Sitzung noch nicht ermittelt.",
+      "host_runtime": "Laufzeit des Hosts",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}} ({{sandbox}} Sandbox · {{provider}} {{providerLabel}} · {{mcp}} MCP)",
       "mcp_process_breakdown_unique": "{{total}} eindeutig ({{sandbox}} Sandbox · {{provider}} {{providerLabel}} · {{mcp}} MCP)",
@@ -11366,7 +11368,10 @@
       "weixin": "WeChat",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "Arbeitsverzeichnis"
+      "working_directory": "Arbeitsverzeichnis",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "Keine WSL2-Distributionen installiert",
+      "wsl2_unavailable": "WSL2 ist auf diesem Computer nicht verfügbar"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Unscharfer Filter (Teilstring-Übereinstimmung)",

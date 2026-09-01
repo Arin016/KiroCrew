@@ -11168,6 +11168,7 @@
       "connect_error": "接続エラー",
       "connected": "接続済み",
       "cpu": "CPU %",
+      "default_distro": "デフォルト",
       "discord": "Discord",
       "embeddings": "エンベディング",
       "gateway_process": "ゲートウェイプロセス",
@@ -11176,6 +11177,7 @@
       "governance_tip_degraded": "ガバナンスチェックがフェイルクローズで失敗したか、整合性の不一致が検出されたか、受け入れポリシーを検証できませんでした（未設定または読み取り不可）。SEL 監査ログを確認してください。",
       "governance_tip_disabled": "強制適用する受け入れポリシーは設定されていません（許可が既定）。プラグインは明示的に禁止されていない限り受け入れられます。",
       "governance_tip_unknown": "ガバナンスステータスはこのセッションではまだ決定されていません。",
+      "host_runtime": "ホストランタイム",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}}（サンドボックス {{sandbox}} · {{providerLabel}} {{provider}} · MCP {{mcp}}）",
       "mcp_process_breakdown_unique": "一意 {{total}}（サンドボックス {{sandbox}} · {{providerLabel}} {{provider}} · MCP {{mcp}}）",
@@ -11202,7 +11204,10 @@
       "weixin": "WeChat",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "作業ディレクトリ"
+      "working_directory": "作業ディレクトリ",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "WSL2 ディストリビューションがインストールされていません",
+      "wsl2_unavailable": "このホストで WSL2 は利用できません"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "ファジィフィルタ（部分文字列マッチ）",

@@ -25,6 +25,7 @@ test("windowsSystemToolPaths resolves every utility beneath the system root", ()
       "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     wmic: "D:\\Windows\\System32\\wbem\\wmic.exe",
     taskkill: "D:\\Windows\\System32\\taskkill.exe",
+    wsl: "D:\\Windows\\System32\\wsl.exe",
   });
   assert.throws(
     () => windowsSystemToolPaths(".\\hostile"),

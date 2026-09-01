@@ -11496,6 +11496,7 @@
       "connect_error": "Erreur de connexion",
       "connected": "Connecté",
       "cpu": "CPU %",
+      "default_distro": "Par défaut",
       "discord": "Discord",
       "embeddings": "Embeddings",
       "gateway_process": "Processus Gateway",
@@ -11504,6 +11505,7 @@
       "governance_tip_degraded": "Une vérification de gouvernance a échoué en mode fermé, une incohérence d’intégrité a été détectée, ou la politique d’admission n’est pas vérifiée (absente/illisible). Consultez le journal d’audit SEL.",
       "governance_tip_disabled": "Aucune politique d’admission contraignante n’est configurée (valeur par défaut permissive). Les plugins sont admis sauf s’ils sont explicitement bannis.",
       "governance_tip_unknown": "État de la gouvernance pas encore déterminé pour cette session.",
+      "host_runtime": "Runtime de l'hôte",
       "imessage": "iMessage",
       "mcp_process_breakdown": "{{total}} ({{sandbox}} sandbox · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
       "mcp_process_breakdown_unique": "{{total}} uniques ({{sandbox}} sandbox · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
@@ -11530,7 +11532,10 @@
       "weixin": "WeChat",
       "whatsapp": "WhatsApp",
       "feishu": "Feishu",
-      "working_directory": "Répertoire de travail"
+      "working_directory": "Répertoire de travail",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "Aucune distribution WSL2 installée",
+      "wsl2_unavailable": "WSL2 n'est pas disponible sur cette machine"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Filtre approximatif (correspondance de sous-chaîne)",

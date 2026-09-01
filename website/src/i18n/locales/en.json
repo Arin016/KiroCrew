@@ -7345,6 +7345,7 @@
     "servicesTab": {
       "connected": "Connected",
       "cpu": "CPU %",
+      "default_distro": "Default",
       "embeddings": "Embeddings",
       "gateway_process": "Gateway process",
       "governance": "Governance",
@@ -7352,6 +7353,7 @@
       "governance_tip_degraded": "A governance check failed closed, an integrity mismatch was detected, or the admission policy is unverified (absent/unreadable). Investigate the SEL audit log.",
       "governance_tip_disabled": "No enforcing admission policy is configured (permissive default). Plugins are admitted unless explicitly banned.",
       "governance_tip_unknown": "Governance status not yet determined this session.",
+      "host_runtime": "Host runtime",
       "mcp_process_breakdown": "{{total}} ({{sandbox}} sandbox · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
       "mcp_process_breakdown_unique": "{{total}} unique ({{sandbox}} sandbox · {{provider}} {{providerLabel}} · {{mcp}} mcp)",
       "mcp_processes": "MCP Processes",
@@ -7370,7 +7372,10 @@
       "stopped": "Stopped",
       "threads": "Threads",
       "uptime": "Uptime",
-      "working_directory": "Working directory"
+      "working_directory": "Working directory",
+      "wsl2": "WSL2",
+      "wsl2_no_distros": "No WSL2 distributions installed",
+      "wsl2_unavailable": "WSL2 is not available on this host"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Fuzzy filter (substring match)",
