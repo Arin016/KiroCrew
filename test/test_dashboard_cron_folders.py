@@ -80,6 +80,36 @@ class TestCronFoldersList:
         assert len(body) == 1
         assert body[0]["name"] == "Ops"
 
+    @pytest.mark.asyncio
+    async def test_list_serializes_a_snapshot_not_the_live_dicts(self, tmp_path):
+        """The GET must hand the encoder a copy, so a concurrent rename that
+        mutates a folder dict's name in place cannot tear the read."""
+        state = _make_state(tmp_path)
+        live = {"id": "a1", "name": "Ops", "order": 0}
+        state._cron_folders = [live]
+        request = _request(state)
+
+        captured = {}
+
+        def _capture(payload, **kw):
+            captured["payload"] = payload
+            return MagicMock(status=200)
+
+        with patch("kiro_crew.dashboard.handlers.cron.web.json_response", side_effect=_capture):
+            await api_cron_folders(request)
+
+        payload = captured["payload"]
+        # The response list is a fresh object, not the live list...
+        assert payload is not state._cron_folders
+        # ...and each entry is a copy, not the live dict a rename mutates.
+        assert payload[0] is not live
+        assert payload[0] == {"id": "a1", "name": "Ops", "order": 0}
+        # Mutating the returned snapshot must not touch server state.
+        payload[0]["name"] = "Renamed"
+        payload.append({"id": "b2", "name": "Injected", "order": 1})
+        assert live["name"] == "Ops"
+        assert state._cron_folders == [live]
+
 
 class TestCronFoldersCreate:
     """POST /api/cron-folders creates a new folder."""

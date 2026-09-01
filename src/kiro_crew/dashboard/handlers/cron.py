@@ -1433,8 +1433,13 @@ def _get_cron_folders_lock() -> LoopBoundLock:
 async def api_cron_folders(request: web.Request) -> web.Response:
     """GET /api/cron-folders — list all cron folders."""
     state: DashboardState = request.app["state"]
-    # Bare list, matching the chat-folders precedent (api_chat_folders).
-    return web.json_response(state._cron_folders)
+    # Serialize a shallow snapshot, not the live list: rename_cron_folder
+    # mutates a folder dict's "name" in place, so encoding state._cron_folders
+    # by reference could interleave with a concurrent rename and surface a torn
+    # or stale name. Copying each dict gives the encoder a stable read. This
+    # mirrors the chat-folders GET (api_chat_folders), which likewise does not
+    # return the live list — it builds a fresh list off-thread.
+    return web.json_response([dict(f) for f in state._cron_folders])
 
 
 async def api_cron_folders_create(request: web.Request) -> web.Response:
