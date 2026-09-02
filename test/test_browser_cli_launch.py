@@ -241,9 +241,7 @@ def test_launch_config_shell_protection_matches_an_existing_protected_leaf() -> 
         "tee ~/.kiro/crew/{leaf}",
         "cd ~/.kiro/crew && printf x > {leaf}",
     ):
-        assert (
-            security.is_sensitive_bash_command(form.format(leaf=ours)) is not None
-        ) == (
+        assert (security.is_sensitive_bash_command(form.format(leaf=ours)) is not None) == (
             security.is_sensitive_bash_command(form.format(leaf=existing)) is not None
         ), form
 
@@ -486,3 +484,130 @@ def test_browser_socket_env_refuses_relative_configured_roots(
     }
 
     assert mod.browser_socket_env(env) == {}
+
+
+def _stub_socket_prep(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Common lifecycle stubs so the real path math runs unmodified.
+
+    Leaves ``socket_dir``/``daemon_dir`` intact (the fix lives in how their
+    ``base`` is chosen), lifts the AF_UNIX guard, and records prepared dirs.
+    """
+    prepared: list[Path] = []
+    monkeypatch.setattr(mod, "_UNIX_SOCKET_PATH_MAX_BYTES", 10_000)
+    monkeypatch.setattr(mod, "cli_lifecycle_env_supported", lambda: True)
+    monkeypatch.setattr(
+        mod.platform_compat, "make_owner_only_dir", lambda path: prepared.append(Path(path))
+    )
+    monkeypatch.setattr(mod.platform_compat, "restrict_dir_to_owner", lambda _path: None)
+    return prepared
+
+
+def test_browser_socket_env_drops_an_inherited_root_to_stay_a_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inherited root under ``config_dir()/pw`` falls back to the default.
+
+    Both spawn sites build the child env as ``{**os.environ, **browser_env}``,
+    so a gateway started inside an agent process (``./dev-backend.sh``) passes
+    its own ``pw/<hex>/s`` and ``pw/<hex>/d`` roots down. Namespacing under
+    them would nest one level deeper every generation (#7909); the fix drops a
+    root that already lives under our lifecycle dir so the new session sits at
+    depth 1 as a SIBLING -- ``pw/<leaf>/s`` and ``pw/<leaf>/d``, NOT nested.
+    """
+    monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "home"))
+    _stub_socket_prep(monkeypatch)
+    lifecycle_root = mod.config_dir() / mod._LIFECYCLE_DIR
+    # The value a parent gateway would inherit: its own generated subtree.
+    inherited_sockets = lifecycle_root / "deadbeef" / "s"
+    inherited_daemons = lifecycle_root / "deadbeef" / "d"
+
+    env = {
+        mod.SESSION_ENV: "kc-a1b2c3d4",
+        mod.SOCKETS_ENV: str(inherited_sockets),
+        mod.DAEMON_DIR_ENV: str(inherited_daemons),
+    }
+    assert mod.browser_socket_env(env) == {
+        mod.SOCKETS_ENV: str(lifecycle_root / "a1b2c3d4" / "s"),
+        mod.DAEMON_DIR_ENV: str(lifecycle_root / "a1b2c3d4" / "d"),
+    }
+
+
+def test_browser_socket_env_drops_the_lifecycle_root_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ancestry test also matches the lifecycle root exactly, not just below."""
+    monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "home"))
+    _stub_socket_prep(monkeypatch)
+    lifecycle_root = mod.config_dir() / mod._LIFECYCLE_DIR
+
+    env = {
+        mod.SESSION_ENV: "kc-a1b2c3d4",
+        mod.SOCKETS_ENV: str(lifecycle_root),
+        mod.DAEMON_DIR_ENV: str(lifecycle_root),
+    }
+    assert mod.browser_socket_env(env) == {
+        mod.SOCKETS_ENV: str(lifecycle_root / "a1b2c3d4" / "s"),
+        mod.DAEMON_DIR_ENV: str(lifecycle_root / "a1b2c3d4" / "d"),
+    }
+
+
+def test_browser_socket_env_decides_each_inherited_root_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only one of the two variables may be inherited; each is judged alone.
+
+    Here SOCKETS_ENV arrives by inheritance (under ``pw``) and is dropped,
+    while DAEMON_DIR_ENV is a genuine operator root elsewhere and stays a base.
+    """
+    monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "home"))
+    _stub_socket_prep(monkeypatch)
+    lifecycle_root = mod.config_dir() / mod._LIFECYCLE_DIR
+    inherited_sockets = lifecycle_root / "deadbeef" / "s"
+    operator_daemons = tmp_path / "operator-daemons"
+
+    env = {
+        mod.SESSION_ENV: "kc-a1b2c3d4",
+        mod.SOCKETS_ENV: str(inherited_sockets),
+        mod.DAEMON_DIR_ENV: str(operator_daemons),
+    }
+    assert mod.browser_socket_env(env) == {
+        mod.SOCKETS_ENV: str(lifecycle_root / "a1b2c3d4" / "s"),
+        mod.DAEMON_DIR_ENV: str(operator_daemons / "a1b2c3d4" / "d"),
+    }
+
+
+def test_browser_socket_env_nesting_cannot_grow_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: chaining our output back in does not increase depth.
+
+    Mirrors ``test_nesting_cannot_collapse_two_processes_onto_one_browser`` for
+    the socket root. A first session's output, fed back as the inherited env of
+    a gateway spawned inside that process, must produce a socket root at the
+    SAME depth -- both siblings under ``config_dir()/pw`` -- not one deeper.
+    """
+    monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "home"))
+    _stub_socket_prep(monkeypatch)
+    lifecycle_root = mod.config_dir() / mod._LIFECYCLE_DIR
+
+    first = mod.browser_socket_env({mod.SESSION_ENV: "kc-a1b2c3d4"})
+    # A gateway spawned inside that process inherits the first session's env.
+    inherited_env = {
+        mod.SESSION_ENV: "kc-11112222",
+        mod.SOCKETS_ENV: first[mod.SOCKETS_ENV],
+        mod.DAEMON_DIR_ENV: first[mod.DAEMON_DIR_ENV],
+    }
+    second = mod.browser_socket_env(inherited_env)
+
+    assert first == {
+        mod.SOCKETS_ENV: str(lifecycle_root / "a1b2c3d4" / "s"),
+        mod.DAEMON_DIR_ENV: str(lifecycle_root / "a1b2c3d4" / "d"),
+    }
+    assert second == {
+        mod.SOCKETS_ENV: str(lifecycle_root / "11112222" / "s"),
+        mod.DAEMON_DIR_ENV: str(lifecycle_root / "11112222" / "d"),
+    }
+    # Same depth in both generations: siblings, not nested.
+    first_depth = len(Path(first[mod.SOCKETS_ENV]).parts)
+    second_depth = len(Path(second[mod.SOCKETS_ENV]).parts)
+    assert first_depth == second_depth

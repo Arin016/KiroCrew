@@ -127,12 +127,32 @@ def browser_socket_env(env: Mapping[str, str]) -> dict[str, str]:
     executing the user-writable CLI wrapper.
 
     This helper is called only when Kiro Crew generated ``SESSION_ENV``.
-    Existing location variables are treated as operator-selected BASE roots,
-    then namespaced by the generated session; non-generated operator sessions
-    never call this helper. Both final directories are owner-restricted. If
-    validation or preparation fails, no partial additions are returned and the
-    current TMPDIR/default-registry behavior remains. This helper performs
-    filesystem I/O and event-loop callers MUST offload it.
+
+    A configured location variable is treated as an operator-selected BASE
+    root and namespaced by the generated session -- UNLESS it already lives
+    under ``config_dir()/_LIFECYCLE_DIR``, in which case it is one of OURS
+    arriving by INHERITANCE and is dropped in favor of the default root. Both
+    spawn sites build the child env as ``{**os.environ, **browser_env}``, so a
+    gateway started from inside an agent process -- which this repo's own
+    ``kirocrew-worktree-dev`` skill tells an agent to do via
+    ``./dev-backend.sh`` -- passes its own generated ``<8hex>/s`` and
+    ``<8hex>/d`` roots down to every session it hosts. Namespacing under an
+    inherited root would nest each generation one level deeper (``pw/<a>/s``,
+    then ``pw/<a>/s/<b>/s``, ...), growing the socket path toward
+    :data:`_UNIX_SOCKET_PATH_MAX_BYTES` until this very function starts
+    refusing the root, and littering the config dir with unbounded empty
+    namespaces (issue #7909). Dropping an inherited root keeps every session a
+    SIBLING at depth 1. This mirrors the guard in :func:`browser_session_env`,
+    which regenerates a ``kc-`` session name that arrived by the same
+    inheritance vector rather than preserving it. Each of the two variables is
+    decided independently, since only one may be inherited. A genuinely
+    operator-chosen absolute root ANYWHERE ELSE is still honored as a base, and
+    non-generated operator sessions never reach this helper at all.
+
+    Both final directories are owner-restricted. If validation or preparation
+    fails, no partial additions are returned and the current
+    TMPDIR/default-registry behavior remains. This helper performs filesystem
+    I/O and event-loop callers MUST offload it.
     """
     session_name = env.get(SESSION_ENV, "").strip()
     if not _session_leaf(session_name):
@@ -153,12 +173,29 @@ def browser_socket_env(env: Mapping[str, str]) -> dict[str, str]:
     ):
         logger.warning("Playwright lifecycle root overrides must be absolute paths")
         return {}
-    sockets_path = socket_dir(
-        session_name, Path(configured_sockets) if configured_sockets else None
-    )
-    daemons_path = daemon_dir(
-        session_name, Path(configured_daemons) if configured_daemons else None
-    )
+    # A configured root that already lives under our own lifecycle dir is one
+    # of ours arriving by inheritance, not an operator's base (see #7909 and
+    # the docstring). Drop it -- pass base=None -- so the session lands at
+    # depth 1 as a sibling instead of nesting one level deeper each generation.
+    # Resolve both sides so a symlinked data home cannot slip past the ancestry
+    # test, matching :func:`kiro_crew.config.paths._in_ephemeral_tree`. Decided
+    # per variable, since only one of the two may have been inherited.
+    lifecycle_root = (config_dir() / _LIFECYCLE_DIR).resolve()
+
+    def _base_for(configured: str) -> Path | None:
+        if not configured:
+            return None
+        root = Path(configured)
+        try:
+            resolved = root.resolve()
+        except OSError:
+            return root
+        if resolved == lifecycle_root or lifecycle_root in resolved.parents:
+            return None
+        return root
+
+    sockets_path = socket_dir(session_name, _base_for(configured_sockets))
+    daemons_path = daemon_dir(session_name, _base_for(configured_daemons))
     additions: dict[str, str] = {}
     # Upstream builds `<root>/cli/<16-char-workspace>-<11-char-session>.sock`.
     # Check the complete shortest non-trimmed form; if even that cannot fit,
