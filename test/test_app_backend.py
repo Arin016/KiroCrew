@@ -3665,3 +3665,44 @@ class TestEnabledStateDistinguishesUnreadableFromDisabled:
         meta.write_text("{ not json", encoding="utf-8")
 
         assert bmod._app_enabled_state("probe") is None
+
+
+class TestStopRecordedAppBackend:
+    def test_kills_a_pidfile_recorded_backend_from_an_untracked_process(
+        self, tmp_path, monkeypatch
+    ):
+        """The CLI path: nothing in this process's tracking, only the
+        persisted pidfile record.  The record must be read BEFORE the
+        in-process stop (which forgets it) and the recorded process must be
+        confirmed dead."""
+        import subprocess
+        import sys
+        import threading
+
+        import kiro_crew.apps.backend as bk
+
+        monkeypatch.setattr(bk, "config_dir", lambda: tmp_path)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        # Reap concurrently: in production the backend's parent (gateway or
+        # init) reaps it, so death is observable; here WE are the parent and
+        # an unreaped zombie would read as alive forever.
+        reaper = threading.Thread(target=proc.wait, daemon=True)
+        reaper.start()
+        try:
+            bk._record_app_pid("stoprec-app", proc.pid, 0)
+            assert bk.stop_recorded_app_backend("stoprec-app") is True
+            reaper.join(timeout=10)
+            assert proc.poll() is not None
+            assert "stoprec-app" not in bk._read_pidfile()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+    def test_no_record_reads_as_stopped(self, tmp_path, monkeypatch):
+        import kiro_crew.apps.backend as bk
+
+        monkeypatch.setattr(bk, "config_dir", lambda: tmp_path)
+        assert bk.stop_recorded_app_backend("never-ran-app") is True
