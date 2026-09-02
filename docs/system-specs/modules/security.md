@@ -611,7 +611,7 @@ than an automatic readiness failure.
 
 ### Denied Commands (`security.py` + `hooks.py`)
 
-First-class `DeniedCommandRule` records in `BUILTIN_DENIED_RULES` (`security.py`) — each a stable `id`, a Python regex `pattern`, a `category`, and a human `description` — blocking destructive and credential-exfiltrating operations. They are enforced **only** at Kiro Crew's own `hooks.py` PreToolUse gate (`HookManager.on_tool_call` → `PolicyAuthority.is_denied`), never by kiro-cli. They are no longer a raw `deniedCommands` array injected into a kiro agent JSON, so there is no `execute_bash`/`shell` tool-settings copy and no project-dir `agents/defaults.json` override for them. Built-ins are **default-ON but user-DISABLEABLE** from Settings → Security (see "Denied-command rules, opt-out state, and read-only auto-approve" below). Patterns for deployment-specific credential-vending CLIs are NOT in this catalog — a composed edition contributes those itself, either as an un-weakenable `SecurityOverlay` pattern or as a user-disableable rule through the `denied_rules` seam.
+First-class `DeniedCommandRule` records in `BUILTIN_DENIED_RULES` (`security.py`) — each a stable `id`, a Python regex `pattern`, a `category`, a human `description`, and an optional `deny_class` naming which remediation answer the rule needs — blocking destructive and credential-exfiltrating operations. They are enforced **only** at Kiro Crew's own `hooks.py` PreToolUse gate (`HookManager.on_tool_call` → `PolicyAuthority.is_denied`), never by kiro-cli. They are no longer a raw `deniedCommands` array injected into a kiro agent JSON, so there is no `execute_bash`/`shell` tool-settings copy and no project-dir `agents/defaults.json` override for them. Built-ins are **default-ON but user-DISABLEABLE** from Settings → Security (see "Denied-command rules, opt-out state, and read-only auto-approve" below). Patterns for deployment-specific credential-vending CLIs are NOT in this catalog — a composed edition contributes those itself, either as an un-weakenable `SecurityOverlay` pattern or as a user-disableable rule through the `denied_rules` seam.
 
 **Credential exfiltration blocks**:
 - `.*echo.*\$AWS_SECRET.*`, `.*echo.*\$AWS_ACCESS.*`, `.*echo.*\$AWS_SESSION.*` — env var echo
@@ -732,8 +732,18 @@ First-class `DeniedCommandRule` records in `BUILTIN_DENIED_RULES` (`security.py`
 **`DeniedCommandRule` model** — a frozen dataclass in `security.py` with fields
 `id: str` (a stable slug, e.g. `credential-exfil-s3-cp`; the opt-out key AND the
 SEL audit key), `pattern: str` (a Python regex matched via `re.search`,
-case-insensitive), `category: str`, and `description: str` (one human sentence
-for the UI). `BUILTIN_DENIED_RULES: list[DeniedCommandRule]` is the canonical
+case-insensitive), `category: str`, `description: str` (one human sentence
+for the UI), and `deny_class: str | None` (which remediation answer this rule
+needs, as one of `deny_guidance`'s `DENY_CLASS_*` keys — a key, never prose, so
+one module keeps owning the text and one test keeps asserting that every command
+the guidance suggests is itself allowed). `deny_class` is declared rather than
+inferred because a refusal on this tier carries only the rule's own regex source,
+which says what is matched and not what the caller should do instead: an
+outbound-transfer rule whose pattern names a credential environment variable
+reads exactly like a rule about opening a credential file. It is `None` for the
+categories whose refusals are self-explanatory (`aws-destructive`,
+`local-destructive`, `git-publish`, `sql`, `iac-teardown`, `reverse-shell`,
+`pipe-to-shell`), where guidance would bury the classes that need it. `BUILTIN_DENIED_RULES: list[DeniedCommandRule]` is the canonical
 default-ON catalog spanning the categories `aws-destructive`,
 `credential-exfil`, `iac-teardown`, `local-destructive`, `pipe-to-shell`, `sql`,
 `self-protection`, `git-publish`, `reverse-shell`, and `sensitive-file-read`.

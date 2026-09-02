@@ -7,14 +7,22 @@ different reader (``cat`` → ``head`` → ``python open``), each of which the s
 rule family blocks, and then reports that the host has no AWS access at all.
 The sanctioned path was available the whole time — nothing ever told it.
 
-Guidance is keyed by the CLASS of thing the gate refused, not by the individual
-rule. Per-rule text cannot cover the tiers that matter: an edition overlay
-contributes bare fnmatch globs carrying no id, category or description, so for
-exactly the rules an enterprise adds there is nothing to hang text on. The class
-is instead recovered from the refusal text, whose anchor phrases every producer
-in :mod:`kiro_crew.security` already shares. ``test_deny_guidance.py`` drives
-those real producers rather than asserting on copied strings, so an anchor that
-drifts fails there instead of silently degrading to no guidance.
+Guidance is keyed by the deny CLASS rather than written per rule, so one place
+owns the voice and one test can assert that every command it suggests is itself
+allowed. WHICH class applies is DECLARED by the refusing site wherever that site
+has a rule identity to declare it on: a built-in regex rule carries
+``deny_class``, and the class is read from that rather than inferred from the
+rule's own regex source — that source describes what is matched, not what the
+caller should do instead, and the two diverge exactly where it costs most.
+
+The tiers that carry no rule identity fall back to the anchor table below,
+matched against the refusal text: the sensitive-path floor and the
+argv-structural floor are not rules, and an un-weakenable edition overlay
+contributes bare fnmatch globs carrying no id, category or description. Those
+tiers are also where the exfiltration-shape and self-protection prose does most
+of its work. ``test_deny_guidance.py`` drives those real producers rather than
+asserting on copied strings, so an anchor that drifts fails there instead of
+silently degrading to no guidance.
 
 The remediation prose is static, and none of it is interpolated from the command,
 which is what keeps it safe to hand back to a model that may be acting on
@@ -31,6 +39,7 @@ import re
 import time
 from typing import Any, Iterable, Mapping
 
+from kiro_crew import security
 from kiro_crew.platform import context as platform_context
 from kiro_crew.platform.capability_bound import bind_capability_manager
 from kiro_crew.platform.defaults import DefaultCapabilityManager
@@ -293,8 +302,45 @@ _hint_cache: str = ""
 _hint_cache_ts: float = 0.0
 
 
+#: Matched pattern → the class its rule DECLARED. A refusal from the regex tier
+#: carries only the rule's own regex source, so on the wire that source IS the
+#: rule's identity — ids are not threaded through this tier. Reading the class the
+#: rule declared is what stops an answer being inferred from that source: an
+#: outbound-transfer rule whose regex names a credential environment variable
+#: reads exactly like a rule about opening a credential file, and the answer for
+#: one is wrong for the other.
+#:
+#: Built from the BUILT-IN catalog only. An edition's rules reach enforcement
+#: through ``security.edition_denied_rules()``, which reads the composed platform
+#: context and lets ``PlatformCompositionError`` propagate fail-closed; this module
+#: is display-only and cannot fail, so it must not acquire that. An edition's
+#: rules therefore fall through to the anchor table below.
+_DECLARED_CLASS_BY_PATTERN: dict[str, str] = {
+    rule.pattern: rule.deny_class for rule in security.BUILTIN_DENIED_RULES if rule.deny_class
+}
+
+
+def _declared_class(reason: str) -> str:
+    """The class the matched rule declared, or "" when the refusal names none.
+
+    Only the FIRST line is consulted. A refusal may carry an operator note on a
+    second line, and that note is free text — matching against it would let an
+    annotation choose the guidance.
+    """
+    first_line = (reason or "").split("\n", 1)[0]
+    if not first_line.startswith(security.DENY_REASON_PREFIX):
+        return ""
+    return _DECLARED_CLASS_BY_PATTERN.get(first_line[len(security.DENY_REASON_PREFIX) :], "")
+
+
 def classify_deny(reason: str, subject: str = "") -> str:
     """The deny class named by *reason*, or "" when none applies.
+
+    A rule that DECLARED its class wins outright, before any text is inspected.
+    That is the point of declaring it: the anchor table below can only read the
+    words in the refusal, and for the regex tier those words are the rule's own
+    regex source, which describes what is matched rather than what the caller
+    should do instead.
 
     *subject* is the refused thing itself — the tool title, which for a shell
     call carries the command and for a file read is the path. It is needed
@@ -309,6 +355,9 @@ def classify_deny(reason: str, subject: str = "") -> str:
     protected-branch push) are self-explanatory, and inventing guidance for them
     would bury the classes where the agent genuinely cannot infer the next step.
     """
+    declared = _declared_class(reason)
+    if declared:
+        return declared
     text = f"{reason or ''} {subject or ''}".lower().strip()
     if not text:
         return ""

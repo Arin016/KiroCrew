@@ -72,12 +72,24 @@ class DeniedCommandRule:
     ``pattern`` is a Python regex string matched via ``re.search`` with
     ``re.IGNORECASE`` (NOT an fnmatch glob).  ``id`` is a stable slug used as
     the opt-out key in config and as the SEL audit ``rule_id``.
+
+    ``deny_class`` names which remediation answer this rule needs, as one of
+    :mod:`kiro_crew.deny_guidance`'s ``DENY_CLASS_*`` keys — a KEY, never prose.
+    The text stays in that module so one place owns the voice and one test can
+    assert that every command the guidance suggests is itself allowed. Declaring
+    it here is what makes the answer a property of the rule instead of a guess
+    from the rule's own regex source: a refusal on this tier carries only that
+    source, so an outbound-transfer rule whose regex happens to name a credential
+    environment variable would otherwise be read as a credential READ and handed
+    the answer for one. ``None`` means the refusal is self-explanatory and gets no
+    guidance, which is the right answer for the destructive categories.
     """
 
     id: str
     pattern: str
     category: str
     description: str
+    deny_class: str | None = None
 
 
 BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
@@ -89,6 +101,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `aws s3 cp` uploads to an s3:// destination, which can exfiltrate local "
             "files or credentials into an attacker-controlled bucket."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-s3-mv",
@@ -98,6 +111,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `aws s3 mv` moves to an s3:// destination, which can exfiltrate local files "
             "or credentials into an attacker-controlled bucket."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-s3-sync",
@@ -107,6 +121,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `aws s3 sync` to an s3:// destination, which can bulk-exfiltrate a local "
             "directory tree into an attacker-controlled bucket."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-echo-aws-secret",
@@ -116,6 +131,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks echoing the $AWS_SECRET* environment variable, which would print the AWS "
             "secret access key to stdout/logs where it can be captured."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-echo-aws-session",
@@ -125,6 +141,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks echoing the $AWS_SESSION* environment variable, which would print the AWS "
             "session token to stdout/logs where it can be captured."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-echo-aws-access",
@@ -134,6 +151,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks echoing the $AWS_ACCESS* environment variable, which would print the AWS "
             "access key ID to stdout/logs where it can be captured."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-printenv-aws",
@@ -143,6 +161,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `printenv` dumping any AWS_* environment variable, which can leak AWS "
             "credentials held in the environment."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-kirocrew-token",
@@ -174,6 +193,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "floor additionally covers `python -m kiro_crew ... token`, which mints the same "
             "token through the interpreter rather than the console script."
         ),
+        deny_class="trust_root",
     ),
     DeniedCommandRule(
         id="credential-exfil-kirocrew-token-argv",
@@ -232,6 +252,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "single-string spelling is out of reach of command-text matching and is covered by "
             "the sensitive-path floor over the signing key instead."
         ),
+        deny_class="trust_root",
     ),
     DeniedCommandRule(
         id="self-protection-kill-interpreter",
@@ -280,6 +301,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "`os.system(...)` or `execSync(...)`. Sink-qualified so prose, a commit message "
             "or a regex literal naming both is not a kill."
         ),
+        deny_class="self_protection",
     ),
     DeniedCommandRule(
         id="credential-exfil-env-grep-aws",
@@ -289,6 +311,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `env | grep AWS`, which filters the environment for AWS_* variables and "
             "leaks any credentials stored there."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-python-boto3-get-credentials",
@@ -298,6 +321,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a Python/boto3 one-liner calling get_credentials(), which resolves and can "
             "print the active AWS credentials from the credential chain."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="credential-exfil-python-botocore-credentials",
@@ -307,6 +331,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a Python/botocore one-liner accessing the credentials module, which can "
             "resolve and expose the active AWS credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="credential-exfil-curl-imds",
@@ -316,6 +341,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `curl` to the 169.254.169.254 instance metadata service (IMDS), a classic "
             "path to steal EC2 role credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="credential-exfil-wget-imds",
@@ -325,6 +351,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `wget` to the 169.254.169.254 instance metadata service (IMDS), a classic "
             "path to steal EC2 role credentials."
         ),
+        deny_class="aws_credential",
     ),
     # ── Floor-PRIMARY exfil rules ──
     # Enforcement for these seven is the always-on gate
@@ -343,6 +370,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "(decimal, hex, octal, IPv6-mapped, and the fd00:ec2::254 endpoint) — the "
             "curl/wget rules above only cover those two verbs and the literal dotted quad."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="data-exfil-curl-file-body",
@@ -352,6 +380,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a `curl` request whose body is read from a LOCAL FILE (`-d @file` and every "
             "--data variant), the tell-tale shape of pushing local data out to a remote."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="data-exfil-curl-multipart-upload",
@@ -361,6 +390,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a `curl` multipart upload that attaches a local file (`-F field=@file`), "
             "for any field name."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="data-exfil-curl-upload",
@@ -370,6 +400,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a `curl` file upload (`--upload-file` / `-T file`), which sends a local file "
             "to a remote endpoint."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="data-exfil-wget-post-file",
@@ -379,6 +410,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `wget --post-file`, which posts the contents of a local file to a remote "
             "endpoint."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="data-exfil-nc-file-redirect",
@@ -388,6 +420,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks piping a local file into `nc`/`ncat` via input redirection, a plain-socket "
             "way to ship data off the host."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="reverse-shell-devtcp",
@@ -406,6 +439,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `curl` invocations that reference $AWS_SECRET*, which would send the AWS "
             "secret access key to a remote endpoint."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-curl-aws-access",
@@ -415,6 +449,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `curl` invocations that reference $AWS_ACCESS*, which would send the AWS "
             "access key ID to a remote endpoint."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="credential-exfil-curl-aws-session",
@@ -424,6 +459,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `curl` invocations that reference $AWS_SESSION*, which would send the AWS "
             "session token to a remote endpoint."
         ),
+        deny_class="exfil_shape",
     ),
     DeniedCommandRule(
         id="aws-destructive-autoscaling-delete",
@@ -996,6 +1032,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `export AWS_ACCESS...`, which injects an attacker-chosen AWS access key ID "
             "into the environment for later use by AWS tooling."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="credential-exfil-export-aws-secret",
@@ -1005,6 +1042,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks `export AWS_SECRET...`, which injects an attacker-chosen AWS secret access "
             "key into the environment for later use by AWS tooling."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="git-publish-push-bare",
@@ -1190,6 +1228,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read files under ~/.aws, which holds AWS access keys and "
             "session credentials that could be exfiltrated."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-ssh",
@@ -1199,6 +1238,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read files under ~/.ssh, which holds private SSH keys and "
             "known-hosts data granting remote access."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-gnupg",
@@ -1208,6 +1248,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read files under ~/.gnupg, which holds GPG private keyrings "
             "and trust data used to sign or decrypt secrets."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-gpg",
@@ -1217,6 +1258,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read files under ~/.gpg, which holds GPG key material used to "
             "sign or decrypt secrets."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-netrc",
@@ -1226,6 +1268,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read ~/.netrc, which stores plaintext login/password "
             "credentials for FTP, HTTP, and other services."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-git-credentials",
@@ -1235,12 +1278,14 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read ~/.git-credentials, which stores plaintext Git remote "
             "usernames and access tokens."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-npmrc",
         pattern=".*cat.*/\\.npmrc.*",
         category="sensitive-file-read",
         description="Blocks using cat to read ~/.npmrc, which can contain npm registry auth tokens.",
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-pypirc",
@@ -1250,6 +1295,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read ~/.pypirc, which can contain PyPI upload usernames and "
             "API tokens."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-docker-config",
@@ -1259,6 +1305,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read ~/.docker/config.json, which holds base64-encoded "
             "container registry credentials."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-kube-config",
@@ -1268,6 +1315,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using cat to read ~/.kube/config, which holds Kubernetes cluster tokens, "
             "client certs, and API credentials."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cat-kirocrew-env",
@@ -1281,6 +1329,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "or the pre-move ~/.kirocrew/.env), which holds Kiro Crew's own secrets and "
             "environment credentials."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-head-aws",
@@ -1290,6 +1339,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using head to read files under ~/.aws, which holds AWS access keys and "
             "session credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-tail-aws",
@@ -1299,6 +1349,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using tail to read files under ~/.aws, which holds AWS access keys and "
             "session credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-less-aws",
@@ -1308,6 +1359,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using less to read files under ~/.aws, which holds AWS access keys and "
             "session credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-more-aws",
@@ -1317,6 +1369,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using more to read files under ~/.aws, which holds AWS access keys and "
             "session credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-strings-aws",
@@ -1326,6 +1379,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using strings to extract text from files under ~/.aws, which holds AWS "
             "access keys and session credentials."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-base64-aws",
@@ -1335,6 +1389,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using base64 to encode/dump files under ~/.aws, a common way to exfiltrate "
             "AWS credentials past text filters."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-head-ssh",
@@ -1344,6 +1399,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using head to read files under ~/.ssh, which holds private SSH keys "
             "granting remote access."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-tail-ssh",
@@ -1353,6 +1409,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using tail to read files under ~/.ssh, which holds private SSH keys "
             "granting remote access."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-less-ssh",
@@ -1362,6 +1419,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using less to read files under ~/.ssh, which holds private SSH keys "
             "granting remote access."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-more-ssh",
@@ -1371,6 +1429,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using more to read files under ~/.ssh, which holds private SSH keys "
             "granting remote access."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-strings-ssh",
@@ -1380,6 +1439,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using strings to extract text from files under ~/.ssh, which holds private "
             "SSH keys granting remote access."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-base64-ssh",
@@ -1389,6 +1449,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks using base64 to encode/dump files under ~/.ssh, a common way to exfiltrate "
             "private SSH keys past text filters."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cp-aws",
@@ -1398,6 +1459,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks copying files out of ~/.aws, which would duplicate AWS credentials to an "
             "unprotected location for exfiltration."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-cp-ssh",
@@ -1407,6 +1469,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks copying files out of ~/.ssh, which would duplicate private SSH keys to an "
             "unprotected location for exfiltration."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-python-aws",
@@ -1416,6 +1479,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a Python open() of files under ~/.aws, a scripted path to read AWS "
             "credentials past shell-verb filters."
         ),
+        deny_class="aws_credential",
     ),
     DeniedCommandRule(
         id="sensitive-file-read-python-ssh",
@@ -1425,6 +1489,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks a Python open() of files under ~/.ssh, a scripted path to read private SSH "
             "keys past shell-verb filters."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="self-protection-restart",
@@ -1441,6 +1506,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks 'kirocrew restart' so the agent cannot restart its own gateway process and "
             "disrupt the running session or evade in-flight controls."
         ),
+        deny_class="self_protection",
     ),
     DeniedCommandRule(
         id="self-protection-update",
@@ -1450,6 +1516,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks 'kirocrew update' so the agent cannot self-update (git pull + rebuild + "
             "execv restart) and swap out its own running code without operator oversight."
         ),
+        deny_class="self_protection",
     ),
     DeniedCommandRule(
         id="self-protection-cloud",
@@ -1463,6 +1530,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "(destroy/stop/start/launch/connect/tunnel/login/logout) so the agent cannot tear "
             "down, provision, re-authenticate, or sign out its own cloud instance."
         ),
+        deny_class="self_protection",
     ),
     DeniedCommandRule(
         id="self-protection-cron-adopt",
@@ -1481,6 +1549,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "is allowed through because '2>&1' is a redirection, while '&&' still ends the "
             "match: the three words have to belong to ONE simple command."
         ),
+        deny_class="self_protection",
     ),
     DeniedCommandRule(
         id="self-protection-gateway-restart",
@@ -1490,6 +1559,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks 'kirocrew gateway restart' so the agent cannot bounce its own gateway "
             "server and interrupt the active session or supervision."
         ),
+        deny_class="self_protection",
     ),
     DeniedCommandRule(
         id="self-protection-kill",
@@ -1533,6 +1603,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "product in a later command or a comment (a file being restored, a log path) is not "
             "a kill."
         ),
+        deny_class="self_protection",
     ),
     # ── Legacy security.py deny globs (converted to regex) ──
     # These predate the agent-config ``deniedCommands`` list and were NOT part
@@ -1550,6 +1621,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks explicit secret-fetching tool names such as `get_secret_value`, which "
             "read credential material that could be exfiltrated."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="legacy-read-secret",
@@ -1559,6 +1631,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
             "Blocks explicit secret-reading tool names such as `read_secret`, which read "
             "credential material that could be exfiltrated."
         ),
+        deny_class="secret_file",
     ),
     DeniedCommandRule(
         id="legacy-delete-stack-underscore",
