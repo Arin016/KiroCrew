@@ -2307,6 +2307,38 @@ class ContextBuilder:
                 f"or the task requires it.\n\n"
             )
 
+        # Crew-member operating mode — injected only for a member's pinned DM
+        # session (mode carries the slot's mode; "member" slots are born only
+        # through the members thread route). The member is a CONTROLLER: its
+        # DM thread stays the identity/management loop while real work runs in
+        # worker sessions it dispatches and patrols. The worker_* tools this
+        # block names are authorized for member sessions automatically
+        # (dashboard/session_control.py), bounded to workers the member
+        # created itself — so the instructions hold with zero configuration.
+        #
+        # circular import: members' module graph is heavy and this file
+        # sits below it in the layering (the same cycle-break
+        # chat_persistence uses for the members module).
+        from kiro_crew.members import DM_SLOT_MODE as _member_mode
+
+        if mode == _member_mode:
+            parts.append(
+                f"[CREW MEMBER OPERATING MODE]\n"
+                f'You are the crew member "{agent_label}". This pinned conversation is '
+                f"your DM thread with the user — your identity, your inbox, and your "
+                f"ledger. Keep it for decisions, reports, and escalations; do NOT run "
+                f"long or heavy work inline here.\n"
+                f"When real work arrives (a task to implement, an investigation to "
+                f"run), DISPATCH it: open a worker session with worker_create, seed "
+                f"it with a self-contained brief via worker_send (the worker has "
+                f"none of this thread's context), then PATROL your workers with "
+                f"worker_read on a monitor_start loop — you own noticing a worker "
+                f"that stalled or died, restarting it, or escalating. Stop a runaway "
+                f"with worker_stop. You can only control workers you created.\n"
+                f"Report outcomes back in this thread when work completes or needs "
+                f"a decision only the user can make.\n\n"
+            )
+
         # User profile — onboarding answers (role + technical comfort).
         # Injected for ALL agents like date/agent identity: it describes the
         # person, not the project or workspace. Empty (no block at all) when

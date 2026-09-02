@@ -88,7 +88,7 @@ that is out of bounds is visible after the fact even though nothing happened.
 
 | Refusal | Status | Why |
 |---------|--------|-----|
-| Config switch off (`agent.session_control`) | 403 | Operator opted out |
+| Config switch off (`agent.session_control`) | 403 | Operator opted out. **Exception:** a crew-member DM slot (`member-*` caller key) bypasses this switch — see "Member callers" below |
 | Caller session cannot be identified | 403 | An unidentifiable caller makes the self-target guard blind |
 | Caller is an unattended session (`cron-*`, `workflow-*`) | 403 | A scheduled job acting on live conversations is not a handoff |
 | Caller is itself incognito, temporary, or app-scoped | 403 | Caller-side isolation — the direction the target-side checks cannot see |
@@ -106,6 +106,36 @@ that is out of bounds is visible after the fact even though nothing happened.
 | Target is in another workspace | 403 | Workspaces are the memory boundary |
 | Target names no open session | 404 | A mistake, not an authorization failure |
 | Title matches more than one session | 409 | Guessing means acting on the wrong conversation |
+
+### Member callers: switch bypass, bounded by creator ownership
+
+A crew member's pinned DM slot (caller key prefixed `member-`, created only by
+`POST /api/members/{slug}/thread`) is a **conductor by design**: it dispatches
+work into worker sessions it creates, patrols them, and reports back, with no
+operator configuration. Two rules give it that shape:
+
+- **The `agent.session_control` switch does not gate a member caller.** Members
+  work out of the box — this is the zero-configuration contract, and it is a
+  deliberate trade-off: an operator who turned session control off has NOT
+  thereby disabled member dispatch. There is currently no separate switch for
+  it; disabling a member disables its dispatch.
+- **A member caller may only act on sessions it created.** Slot creation records
+  `created_by` (the creator's caller key) in the slot's birth metadata; it is
+  persisted with the session and rehydrated on restart (both restore paths).
+  `authorize_target` refuses a member caller whose key does not match the
+  target's `created_by` (`not_creator`, 403) — and this ownership boundary binds
+  **even when the global switch is enabled**, so a member never widens to the
+  ordinary caller's reach. Every other refusal in the table above still applies
+  to member callers unchanged.
+
+Ordinary (non-member) callers are untouched: they still require the switch.
+The member-facing tool surface is the `worker_create` / `worker_send` /
+`worker_read` / `worker_stop` set on `kirocrew-core` (stateless forwarders to
+the same endpoints), so members need no server assignment either. Those tools
+refuse a non-member caller outright — even with `agent.session_control`
+enabled, an ordinary agent reaches session control only through the assigned
+`kirocrew-dashboard` `session_*` tools, preserving the two-part grant (the
+switch AND the per-agent server assignment).
 
 Two notes on scope:
 

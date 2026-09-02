@@ -2708,6 +2708,44 @@ SESSION_READ_MESSAGE_SCHEMA = ToolSchema(
     ],
 )
 
+# The kirocrew-core spellings of the session-control surface, sized identically
+# to their @kirocrew-dashboard counterparts above: the two servers hit the same
+# gateway endpoints, so a payload one accepts and the other rejects would make
+# the bound depend on which server the caller happened to reach. worker_create
+# deliberately omits `folder`: a member's workers land unfiled in v1, and the
+# folder reference would drag the whole folder-path resolution surface along.
+WORKER_CREATE_SCHEMA = ToolSchema(
+    tool_name="worker_create",
+    fields=[
+        FieldSpec("title", str, required=False, default="", max_len=200),
+        FieldSpec("agent", str, required=False, default="", max_len=MAX_SHORT_STRING),
+    ],
+)
+
+WORKER_SEND_SCHEMA = ToolSchema(
+    tool_name="worker_send",
+    fields=[
+        FieldSpec("target", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("message", str, required=True, max_len=MAX_LONG_STRING),
+    ],
+)
+
+WORKER_READ_SCHEMA = ToolSchema(
+    tool_name="worker_read",
+    fields=[
+        FieldSpec("target", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("limit", int, required=False, min_val=1, max_val=100, default=20),
+        FieldSpec("since", int, required=False, min_val=0),
+    ],
+)
+
+WORKER_STOP_SCHEMA = ToolSchema(
+    tool_name="worker_stop",
+    fields=[
+        FieldSpec("target", str, required=True, max_len=MAX_SHORT_STRING),
+    ],
+)
+
 # ── Schema Registry ──
 
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
@@ -2742,6 +2780,10 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "search_chat_history": SEARCH_CHAT_HISTORY_SCHEMA,
     "get_chat_session": GET_CHAT_SESSION_SCHEMA,
     "list_sessions": LIST_SESSIONS_SCHEMA,
+    "worker_create": WORKER_CREATE_SCHEMA,
+    "worker_send": WORKER_SEND_SCHEMA,
+    "worker_read": WORKER_READ_SCHEMA,
+    "worker_stop": WORKER_STOP_SCHEMA,
     "set_project": SET_PROJECT_SCHEMA,
     "reset_conversation": RESET_CONVERSATION_SCHEMA,
     "suggest_followup": SUGGEST_FOLLOWUP_SCHEMA,

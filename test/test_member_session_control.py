@@ -1,0 +1,343 @@
+"""Member sessions get session control automatically, bounded by ownership.
+
+The crew-member operating model — the DM thread dispatches real work into
+worker sessions it creates and patrols — holds with ZERO configuration: a
+member caller passes the session-control gates without the global
+``agent.session_control`` opt-in, and is bounded to the workers it created
+itself instead. These tests pin the three halves of that contract:
+
+* the gate bypass (member caller passes with the switch off; an ordinary
+  caller still needs it),
+* the ownership boundary (a member cannot touch a slot it did not create,
+  even when the global switch is ON),
+* the persistence of the boundary's input (``created_by`` written at birth
+  and restored on rehydrate — without it every worker a member dispatched
+  would come back unowned after a restart and the fail-closed check would
+  strand them).
+
+The worker_* kirocrew-core tools ride the same server-side authorization, so
+tool-level coverage here is registration only.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from kiro_crew.dashboard import session_control as sc
+from kiro_crew.members import DM_SLOT_KEY_PREFIX
+
+
+class TestMemberCallerPredicate:
+    def test_member_slot_key_is_a_member_caller(self):
+        assert sc._member_caller(DM_SLOT_KEY_PREFIX + "radar")
+
+    def test_ordinary_and_unattended_slots_are_not(self):
+        assert not sc._member_caller("chat-1-abc")
+        assert not sc._member_caller("cron-xyz")
+        assert not sc._member_caller("")
+
+
+def _slot(key: str, *, created_by: str = "", workspace: str = "default") -> SimpleNamespace:
+    return SimpleNamespace(
+        key=key,
+        workspace=workspace,
+        memory_mode="persistent",
+        _app="",
+        linked_session_key="",
+        _created_by=created_by,
+        mode="",
+        running=False,
+        messages=[],
+    )
+
+
+class _State:
+    def __init__(self, slots: dict[str, SimpleNamespace]):
+        self._slots = slots
+
+    def get_slot(self, key: str):
+        return self._slots.get(key)
+
+
+class TestAuthorizeTargetMemberPath:
+    """Drive authorize_target through the real gate order with a fake state."""
+
+    def _authorize(self, state, caller_key, target_key):
+        # caller_slot_key maps a session key to an open slot; the member path
+        # is exercised below the identity resolution, so pin the mapping and
+        # the workspace reads to keep the fixture at the authorization layer.
+        with (
+            patch.object(sc, "caller_slot_key", return_value=caller_key),
+            patch.object(sc, "session_control_enabled", return_value=False),
+            patch.object(sc, "_resolve_slot", return_value=state._slots.get(target_key)),
+        ):
+            return sc.authorize_target(
+                state,
+                caller_session_key="dashboard:whatever",
+                target=target_key,
+                operation="send",
+            )
+
+    def test_member_controls_its_own_worker_with_switch_off(self):
+        member = DM_SLOT_KEY_PREFIX + "radar"
+        worker = _slot("chat-1-w1", created_by=member)
+        state = _State({member: _slot(member), "chat-1-w1": worker})
+        try:
+            self._authorize(state, member, "chat-1-w1")
+        except sc.SessionControlError as exc:
+            # Workspace plumbing differs per deployment; the pin is that the
+            # member path got PAST the config gate and the ownership check.
+            assert exc.code not in ("session_control_disabled", "not_creator"), exc.code
+
+    def test_member_cannot_touch_a_slot_it_did_not_create(self):
+        member = DM_SLOT_KEY_PREFIX + "radar"
+        foreign = _slot("chat-1-user", created_by="")
+        state = _State({member: _slot(member), "chat-1-user": foreign})
+        with pytest.raises(sc.SessionControlError) as exc_info:
+            self._authorize(state, member, "chat-1-user")
+        assert exc_info.value.code == "not_creator"
+
+    def test_ownership_binds_even_when_globally_enabled(self):
+        member = DM_SLOT_KEY_PREFIX + "radar"
+        foreign = _slot("chat-1-user", created_by="")
+        state = _State({member: _slot(member), "chat-1-user": foreign})
+        with (
+            patch.object(sc, "caller_slot_key", return_value=member),
+            patch.object(sc, "session_control_enabled", return_value=True),
+            patch.object(sc, "_resolve_slot", return_value=foreign),
+        ):
+            with pytest.raises(sc.SessionControlError) as exc_info:
+                sc.authorize_target(
+                    _State(state._slots),
+                    caller_session_key="dashboard:whatever",
+                    target="chat-1-user",
+                    operation="send",
+                )
+        assert exc_info.value.code == "not_creator"
+
+    def test_ordinary_caller_still_needs_the_switch(self):
+        state = _State({"chat-1-a": _slot("chat-1-a"), "chat-1-b": _slot("chat-1-b")})
+        with pytest.raises(sc.SessionControlError) as exc_info:
+            self._authorize(state, "chat-1-a", "chat-1-b")
+        assert exc_info.value.code == "session_control_disabled"
+
+
+class TestWorkerToolsRegistered:
+    def test_worker_tools_advertised_on_kirocrew_core(self):
+        from kiro_crew.mcp_tools import build_tool_list
+
+        names = {t["name"] for t in build_tool_list()}
+        assert {"worker_create", "worker_send", "worker_read", "worker_stop"} <= names
+
+    def test_worker_domain_schema_and_handlers_agree(self):
+        from kiro_crew.mcp_tools import workers
+
+        advertised = {t["name"] for t in workers.schemas()}
+        assert advertised == set(workers.HANDLERS)
+
+
+class TestCreatedByRecentSessionRestore:
+    """created_by must survive the bulk recent-session restore path too.
+
+    _rehydrate_slot_from_history restores it, but the startup path is
+    _apply_recent_session — a member-created worker restored there without
+    created_by comes back unowned, and authorize_target then refuses the
+    legitimate creator with not_creator.
+    """
+
+    def test_recent_session_restore_rehydrates_created_by(self, tmp_path, monkeypatch):
+        import json as _json
+        from unittest.mock import AsyncMock, MagicMock
+
+        from kiro_crew.dashboard.chat import restore_recent_sessions
+        from kiro_crew.dashboard.state import DashboardState
+        from kiro_crew.history import ConversationLog
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        meta_line = {
+            "_type": "metadata",
+            "created_at": "2026-03-23T10:00:00",
+            "last_consolidated": 0,
+            "title": "Worker",
+            "agent": "kirocrew",
+            "created_by": "member-autofix",
+        }
+        rows = [
+            _json.dumps(meta_line),
+            _json.dumps({"role": "user", "content": "task", "ts": "2026-03-23T10:00:00"}),
+        ]
+        path = tmp_path / "dashboard_chat-1-worker.jsonl"
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        path.touch()
+
+        sessions = MagicMock(count=0)
+        sessions.get_pid = MagicMock(return_value=None)
+        sessions.remove = AsyncMock()
+        state = DashboardState(
+            sessions=sessions,
+            crons=MagicMock(
+                list_jobs=MagicMock(return_value=[]), status=MagicMock(return_value={})
+            ),
+            lessons=MagicMock(load_all=MagicMock(return_value=[])),
+            start_time=0.0,
+            conversation_log=ConversationLog(base_dir=tmp_path),
+        )
+        assert restore_recent_sessions(state, window_minutes=60) == 1
+        assert state._slots["chat-1-worker"]._created_by == "member-autofix"
+
+
+class TestWorkerHandlers:
+    """Behavioral coverage of the four handlers.
+
+    Handlers reach shared plumbing as call-time attributes of ``mcp_core``
+    (by design -- see workers.py's module docstring), so patching the
+    attributes on the module intercepts every call. Each handler shares the
+    identity/error shape, so those are pinned once on worker_create and the
+    tool-specific reply branches are pinned per tool.
+    """
+
+    def _patch(self, monkeypatch, *, caller="member-autofix", post=None, get=None):
+        from kiro_crew import mcp_core
+
+        monkeypatch.setattr(mcp_core, "_resolve_session_key_strict", lambda: caller)
+        recorded: dict[str, object] = {}
+        if post is not None:
+
+            def _post(path, payload, session_key=""):
+                recorded["path"] = path
+                recorded["payload"] = payload
+                recorded["session_key"] = session_key
+                return post
+
+            monkeypatch.setattr(mcp_core, "_post", _post)
+        if get is not None:
+
+            def _get(path, session_key=""):
+                recorded["path"] = path
+                recorded["session_key"] = session_key
+                return get
+
+            monkeypatch.setattr(mcp_core, "_get", _get)
+        return recorded
+
+    def test_create_success_names_the_worker(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        rec = self._patch(monkeypatch, post={"target": "chat-1-w1", "title": "Fix issue"})
+        out = workers.worker_create("worker_create", {"title": "Fix issue"})
+        assert "chat-1-w1" in out and "worker_send" in out
+        assert rec["path"] == "/api/session-control/create"
+        assert rec["payload"] == {"title": "Fix issue"}
+        assert rec["session_key"] == "member-autofix"
+
+    def test_create_error_is_reported_not_raised(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        self._patch(monkeypatch, post={"error": "forbidden"})
+        out = workers.worker_create("worker_create", {})
+        assert out.startswith("Error:") and "forbidden" in out
+
+    def test_non_member_and_unidentified_callers_are_refused_before_any_request(self, monkeypatch):
+        from kiro_crew import mcp_core
+        from kiro_crew.mcp_tools import workers
+
+        def _boom(*a, **k):  # pragma: no cover - must not be reached
+            raise AssertionError("no request may leave without a member identity")
+
+        monkeypatch.setattr(mcp_core, "_post", _boom)
+        monkeypatch.setattr(mcp_core, "_get", _boom)
+        # An ordinary chat session, a session-key-prefixed ordinary session,
+        # and an unidentifiable caller are all refused with the same pointer
+        # to the assigned session_* surface — worker_* answers only members.
+        for caller in ("chat-1-ordinary", "dashboard_chat-1-ordinary", ""):
+            monkeypatch.setattr(mcp_core, "_resolve_session_key_strict", lambda c=caller: c)
+            for handler, args in (
+                (workers.worker_create, {}),
+                (workers.worker_send, {"target": "t", "message": "m"}),
+                (workers.worker_read, {"target": "t"}),
+                (workers.worker_stop, {"target": "t"}),
+            ):
+                out = handler("x", args)
+                assert "answer only for a crew member" in out
+
+    def test_member_key_accepted_in_both_spellings(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        for caller in ("member-autofix", "dashboard_member-autofix"):
+            rec = self._patch(monkeypatch, caller=caller, post={"target": "w"})
+            workers.worker_stop("worker_stop", {"target": "w"})
+            assert rec["session_key"] == caller
+
+    def test_send_distinguishes_started_from_queued(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        self._patch(monkeypatch, post={"target": "chat-1-w1", "started": True})
+        started = workers.worker_send("worker_send", {"target": "chat-1-w1", "message": "go"})
+        assert "started a turn" in started
+
+        self._patch(monkeypatch, post={"target": "chat-1-w1", "started": False})
+        queued = workers.worker_send("worker_send", {"target": "chat-1-w1", "message": "go"})
+        assert "Queued" in queued
+
+    def test_read_renders_transcript_state_and_cursor(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        rec = self._patch(
+            monkeypatch,
+            get={
+                "target": "chat-1-w1",
+                "title": "Fix issue",
+                "running": True,
+                "queue_depth": 2,
+                "total": 5,
+                "messages": [{"role": "assistant", "content": "done step 1"}],
+                "next_since": 5,
+            },
+        )
+        out = workers.worker_read("worker_read", {"target": "chat-1-w1", "limit": 10, "since": 3})
+        assert "still working" in out and "2 message(s) queued" in out
+        assert "[assistant] done step 1" in out
+        assert "since=5" in out
+        assert "target=chat-1-w1" in str(rec["path"]) and "since=3" in str(rec["path"])
+
+    def test_read_empty_window_and_idle_state(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        self._patch(
+            monkeypatch,
+            get={"target": "chat-1-w1", "title": "t", "running": False, "messages": []},
+        )
+        out = workers.worker_read("worker_read", {"target": "chat-1-w1"})
+        assert "idle" in out and "No messages in that window yet." in out
+
+    def test_read_error_is_reported(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        self._patch(monkeypatch, get={"error": "not_creator"})
+        out = workers.worker_read("worker_read", {"target": "chat-1-x"})
+        assert out.startswith("Error:") and "not_creator" in out
+
+    def test_stop_branches_sent_already_stopping_and_noop(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        self._patch(monkeypatch, post={"target": "chat-1-w1"})
+        assert "Stop sent" in workers.worker_stop("worker_stop", {"target": "chat-1-w1"})
+
+        self._patch(
+            monkeypatch,
+            post={"target": "chat-1-w1", "info": "already stopping", "already_stopping": True},
+        )
+        assert "still stands" in workers.worker_stop("worker_stop", {"target": "chat-1-w1"})
+
+        self._patch(monkeypatch, post={"target": "chat-1-w1", "info": "no turn running"})
+        assert "nothing to stop" in workers.worker_stop("worker_stop", {"target": "chat-1-w1"})
+
+    def test_send_error_is_reported(self, monkeypatch):
+        from kiro_crew.mcp_tools import workers
+
+        self._patch(monkeypatch, post={"error": "workspace_mismatch"})
+        out = workers.worker_send("worker_send", {"target": "t", "message": "m"})
+        assert out.startswith("Error:") and "workspace_mismatch" in out
