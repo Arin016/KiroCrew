@@ -1493,22 +1493,29 @@ async def test_app_owned_region_existence_is_decided_on_disk_on_both_axes(tmp_pa
     single-direction blind spot that let the #7089 present axis slip through
     #6975's absent-only review of #6664.
     """
+    # Bind the two mcpServers maps to locals so the region-level assertion below
+    # derives its name-sets from the very dicts the PUT consumes -- the assertion
+    # ranges and the PUT input cannot drift apart, so a later author adding a name
+    # to either map is swept by the ratchet without editing the loop.
+    on_disk_servers = {
+        "demo:notes": {"command": "notes-mcp"},  # backed app bridge on disk
+        "plainuser": {"url": "u"},  # the client's own, on disk
+    }
+    submitted_servers = {
+        # ABSENT axis: demo:notes is omitted here on purpose.
+        "demo:custom": {"command": "c"},  # PRESENT axis: no backing row
+        "plainuser": {"url": "u"},
+    }
+
     response, written = await _put(
         tmp_path,
         on_disk={
             "name": "kirocrew",
-            "mcpServers": {
-                "demo:notes": {"command": "notes-mcp"},  # backed app bridge on disk
-                "plainuser": {"url": "u"},  # the client's own, on disk
-            },
+            "mcpServers": on_disk_servers,
         },
         submitted={
             "name": "kirocrew",
-            "mcpServers": {
-                # ABSENT axis: demo:notes is omitted here on purpose.
-                "demo:custom": {"command": "c"},  # PRESENT axis: no backing row
-                "plainuser": {"url": "u"},
-            },
+            "mcpServers": submitted_servers,
         },
         apps={"demo": ("notes",)},  # demo:notes is backed; demo:custom is not
     )
@@ -1536,11 +1543,18 @@ async def test_app_owned_region_existence_is_decided_on_disk_on_both_axes(tmp_pa
     # every app-owned key (contains ':', excluding host-owned names) its EXISTENCE
     # after the PUT equals its existence on the on-disk baseline. A new owned region
     # honouring only the absent axis breaks the ``created`` clause below.
+    #
+    # Scope: the sets below are derived from the fixture's own PUT inputs, so the
+    # loop sweeps whatever a later author adds to either map. It still only reaches
+    # the names this fixture actually submits or lands on disk, though -- it does
+    # not conjure an unrelated owned region out of nothing. To make the ratchet
+    # guard a genuinely new owned region, add that region's names to on_disk_servers
+    # / submitted_servers above and the clauses here will cover it automatically.
     from kiro_crew.dashboard.handlers.agents import emission_eligible_mcp_servers
 
     host_owned = emission_eligible_mcp_servers()
-    on_disk_names = {"demo:notes", "plainuser"}
-    submitted_names = {"demo:custom", "plainuser"}
+    on_disk_names = set(on_disk_servers)
+    submitted_names = set(submitted_servers)
     owned = lambda name: ":" in name and name not in host_owned  # noqa: E731
 
     resurrected = {
