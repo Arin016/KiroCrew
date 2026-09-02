@@ -1440,3 +1440,127 @@ async def test_an_unreadable_spec_still_persists_a_namespaced_entry(tmp_path):
         "an unreadable spec deleted what the client submitted: this axis must be "
         "best-effort so the raw editor stays the repair path for a corrupt spec"
     )
+
+
+# ── the region-level two-axis ratchet: existence is on-disk on BOTH axes ───────
+#
+# The gate the #7465 design lanes asked for, worth landing even without the
+# content-axis ruling (#7470): a SINGLE test that holds the app-owned region --
+# the ``mcpServers`` keys that contain ``:`` and are not host-owned -- to on-disk
+# state of *existence* on BOTH axes at once, so the pair reads as complete because
+# it IS complete.
+#
+# The lesson it encodes is #7089's: the absent half alone READS as finished and is
+# not. The absent-axis rule (``_merge_unowned_servers``, #6664) shipped first and
+# its review (#6975) never asked about the mirror direction, so a stale snapshot
+# could still CREATE a namespaced bridge the platform had removed -- the present
+# axis (``_drop_unbacked_app_entries``, #7089) had to be added afterwards. A gate
+# that checks only one direction lets the next owned region repeat that: a future
+# writer's ``:``-keyed region wired into the absent-axis merge but not the
+# present-axis drop would look done and ship a fresh resurrection hole.
+#
+# So this asserts the invariant directly, not a snapshot of today's names: for the
+# app-owned region, EXISTENCE in ``written`` is decided by the on-disk baseline and
+# never by the submission -- an unbacked submitted name is absent (present axis),
+# a backed on-disk name omitted from the submission is present (absent axis). A new
+# owned region that honours only the absent axis makes the present-axis assertion
+# below fail the suite instead of shipping. (Existence only: whether a name PRESENT
+# on both sides may be rewritten is the content axis, deliberately out of scope
+# here and left to #7470's ruling.)
+
+
+@pytest.mark.asyncio
+async def test_app_owned_region_existence_is_decided_on_disk_on_both_axes(tmp_path):
+    """RATCHET: an owned ``:``-region's existence is on-disk on BOTH axes.
+
+    One PUT off one baseline carries both faults an owned region can take on the
+    existence dimension, so neither axis can be satisfied by luck or in isolation:
+
+    * PRESENT axis -- ``demo:custom`` is submitted but has no backing row on disk
+      (``demo`` declares only ``notes``), so the client is trying to CREATE a name
+      in a region it does not author. It must be dropped.
+    * ABSENT axis -- ``demo:notes`` is a backed app bridge on disk that the stale
+      submission OMITS. Its absence from the snapshot is not a deletion the client
+      is entitled to make, so it must be preserved.
+
+    The two verdicts are then re-stated as one region-level rule: after the PUT,
+    every app-owned key in ``written`` (contains ``:``; here ``plainuser`` is the
+    non-namespaced control that both axes must leave alone) exists iff it was on
+    the on-disk baseline -- existence tracks disk, not the submission, in both
+    directions. That whole-region form is the ratchet: a future non-client-owned
+    ``:``-region wired into the absent-axis merge but not the present-axis drop
+    would resurrect an unbacked name here and trip this test, which is exactly the
+    single-direction blind spot that let the #7089 present axis slip through
+    #6975's absent-only review of #6664.
+    """
+    response, written = await _put(
+        tmp_path,
+        on_disk={
+            "name": "kirocrew",
+            "mcpServers": {
+                "demo:notes": {"command": "notes-mcp"},  # backed app bridge on disk
+                "plainuser": {"url": "u"},  # the client's own, on disk
+            },
+        },
+        submitted={
+            "name": "kirocrew",
+            "mcpServers": {
+                # ABSENT axis: demo:notes is omitted here on purpose.
+                "demo:custom": {"command": "c"},  # PRESENT axis: no backing row
+                "plainuser": {"url": "u"},
+            },
+        },
+        apps={"demo": ("notes",)},  # demo:notes is backed; demo:custom is not
+    )
+
+    assert response.status == 200
+
+    written_servers = written["mcpServers"]
+
+    # PRESENT axis: an unbacked submitted namespaced name did not get created.
+    assert "demo:custom" not in written_servers, (
+        "the present axis let a stale snapshot CREATE an unbacked app-owned name "
+        "'demo:custom': existence in the app-namespace region must be decided by "
+        "on-disk state, not by the submission"
+    )
+    # ABSENT axis: a backed on-disk bridge omitted from the submission survived.
+    assert written_servers.get("demo:notes") == {"command": "notes-mcp"}, (
+        "the absent axis dropped a backed on-disk bridge 'demo:notes' the "
+        "submission merely omitted: an app bridge cannot be removed through this "
+        "endpoint"
+    )
+    # The non-namespaced control is untouched by either axis.
+    assert written_servers.get("plainuser") == {"url": "u"}
+
+    # The ratchet, stated once for the whole owned region rather than per name: for
+    # every app-owned key (contains ':', excluding host-owned names) its EXISTENCE
+    # after the PUT equals its existence on the on-disk baseline. A new owned region
+    # honouring only the absent axis breaks the ``created`` clause below.
+    from kiro_crew.dashboard.handlers.agents import emission_eligible_mcp_servers
+
+    host_owned = emission_eligible_mcp_servers()
+    on_disk_names = {"demo:notes", "plainuser"}
+    submitted_names = {"demo:custom", "plainuser"}
+    owned = lambda name: ":" in name and name not in host_owned  # noqa: E731
+
+    resurrected = {
+        name
+        for name in submitted_names
+        if owned(name) and name not in on_disk_names and name in written_servers
+    }
+    assert not resurrected, (
+        "an app-owned name absent from disk survived the PUT, so this region "
+        f"decides existence from the submission on the present axis: {resurrected}. "
+        "A new non-client-owned ':'-region must be wired into "
+        "_drop_unbacked_app_entries, not only _merge_unowned_servers -- the "
+        "absent half alone reads as complete but is not (#7089 vs #6975)."
+    )
+    dropped = {
+        name
+        for name in on_disk_names
+        if owned(name) and name not in submitted_names and name not in written_servers
+    }
+    assert not dropped, (
+        "an app-owned on-disk name the submission merely omitted was deleted, so "
+        f"this region decides existence from the submission on the absent axis: {dropped}"
+    )
