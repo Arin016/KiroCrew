@@ -37,6 +37,7 @@
     "gateway_offline": "Gateway offline",
     "gateway_offline_reconnecting": "Gateway offline — wird neu verbunden",
     "gateway_offline_session_expired_see_banner_above": "Gateway offline — Sitzung abgelaufen, siehe Banner oben",
+    "gateway_restarting_reconnecting": "Gateway startet neu — wird neu verbunden…",
     "hide_full_changelog": "▾ Vollständiges Änderungsprotokoll ausblenden",
     "i_d_like_to_request_a_feature": "Ich möchte eine Funktion vorschlagen!",
     "iam_identity_center": "IAM Identity Center",

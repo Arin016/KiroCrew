@@ -37,6 +37,7 @@
     "gateway_offline": "গেটওয়ে অফলাইন",
     "gateway_offline_reconnecting": "গেটওয়ে অফলাইন — আবার কানেক্ট হচ্ছে",
     "gateway_offline_session_expired_see_banner_above": "গেটওয়ে অফলাইন — সেশনের মেয়াদ শেষ, উপরের ব্যানার দেখো",
+    "gateway_restarting_reconnecting": "গেটওয়ে রিস্টার্ট হচ্ছে — আবার কানেক্ট হচ্ছে…",
     "hide_full_changelog": "▾ পূর্ণ চেঞ্জলগ লুকাও",
     "i_d_like_to_request_a_feature": "আমি একটা ফিচার চাই!",
     "iam_identity_center": "IAM Identity Center",

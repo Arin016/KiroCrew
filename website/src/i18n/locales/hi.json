@@ -37,6 +37,7 @@
     "gateway_offline": "गेटवे ऑफ़लाइन",
     "gateway_offline_reconnecting": "गेटवे ऑफ़लाइन — फिर से कनेक्ट हो रहा है",
     "gateway_offline_session_expired_see_banner_above": "गेटवे ऑफ़लाइन — सत्र समाप्त हो गया, ऊपर दिया बैनर देखें",
+    "gateway_restarting_reconnecting": "गेटवे पुनः शुरू हो रहा है — फिर से कनेक्ट हो रहा है…",
     "hide_full_changelog": "▾ पूरा चेंजलॉग छिपाएँ",
     "i_d_like_to_request_a_feature": "मुझे एक फ़ीचर का अनुरोध करना है!",
     "iam_identity_center": "IAM Identity Center",

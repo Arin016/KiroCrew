@@ -37,6 +37,7 @@
     "gateway_offline": "Gateway offline",
     "gateway_offline_reconnecting": "Gateway offline — riconnessione in corso",
     "gateway_offline_session_expired_see_banner_above": "Gateway offline — sessione scaduta, vedi il banner qui sopra",
+    "gateway_restarting_reconnecting": "Il gateway si sta riavviando — riconnessione in corso…",
     "hide_full_changelog": "▾ Nascondi il changelog completo",
     "i_d_like_to_request_a_feature": "Vorrei richiedere una funzionalità!",
     "iam_identity_center": "IAM Identity Center",

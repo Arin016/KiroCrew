@@ -343,8 +343,17 @@ const REASONING_EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
 // Sent to the backend and compared, never rendered — the picker has its own copy.
 const APPROVAL_MODE_LEVELS = ['normal', 'trust_reads', 'trust', 'yolo']
 
-function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
+// Exported for the isolated capture harness (capture/update-overlay.tsx):
+// the overlay only mounts mid-update, a state a full-shell capture cannot
+// reach without stubbing the update endpoints end to end.
+export function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
   const progress = useAppSelector(s => s.dashboard.updateProgress)
+  // The restart step kills this tab's socket BY DESIGN (the gateway execs
+  // itself), and progress events stop with it. Without naming that state the
+  // overlay freezes on whatever step last arrived — indistinguishable from a
+  // stall. `connected` is what tells "working, gateway is down on purpose"
+  // from "stuck".
+  const connected = useAppSelector(s => s.dashboard.connected)
   const dispatch = useAppDispatch()
   const step = progress?.step || ''
   const detail = progress?.detail || ''
@@ -415,6 +424,16 @@ function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
             <button className="px-4 py-1.5 rounded-lg text-[13px] font-medium cursor-pointer bg-danger/10 border border-danger/30 text-danger hover:bg-danger/20 transition-colors" onClick={handleCancel}>
               {i18nT('app.cancel_update')}
             </button>
+          </div>
+        ) : !connected ? (
+          // The gateway went down mid-update — during the restart step that is
+          // the exec doing its job, and the health probe + WS backoff are
+          // already dialing. Say so, with the live elapsed count, instead of
+          // leaving a frozen step list that reads as a hang. On reconnect the
+          // restart latch (useWebSocket) reloads this tab, which is what
+          // finally clears the overlay.
+          <div className="text-[13px] text-accent flex items-center justify-center gap-1.5" role="status" data-testid="update-reconnecting">
+            <RefreshCw size={13} className="lucide-inline animate-spin" /> {i18nT('app.gateway_restarting_reconnecting')} ({elapsedStr})
           </div>
         ) : (
           <div className="text-[13px] text-muted">{i18nT('app.page_will_reconnect_when_ready')}</div>

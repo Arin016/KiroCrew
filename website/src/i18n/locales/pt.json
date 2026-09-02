@@ -37,6 +37,7 @@
     "gateway_offline": "Gateway offline",
     "gateway_offline_reconnecting": "Gateway offline — reconectando",
     "gateway_offline_session_expired_see_banner_above": "Gateway offline — sessão expirada, veja o banner acima",
+    "gateway_restarting_reconnecting": "O gateway está reiniciando — reconectando…",
     "hide_full_changelog": "▾ Ocultar registro completo de alterações",
     "i_d_like_to_request_a_feature": "Quero sugerir um recurso!",
     "iam_identity_center": "IAM Identity Center",

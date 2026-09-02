@@ -103,6 +103,12 @@ if TYPE_CHECKING:
     from kiro_crew.slack.outbound import PostedOptions  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+#: Cache for :meth:`DashboardState.served_bundle_id` — the served frontend
+#: entry point's ``(mtime_ns, size)`` -> short content hash. One slot: there is
+#: exactly one served bundle per process, and the snapshot that reads it sits
+#: on the hot status path.
+_BUNDLE_ID_CACHE: dict[str, tuple[tuple[int, int], str]] = {}
 _FOLDER_REPOSITORY = FolderRepository(lambda: logger)
 
 
@@ -5196,6 +5202,46 @@ class DashboardState:
 
         self.sessions.on_stuck_turn = _on_stuck_turn
 
+    @staticmethod
+    def served_bundle_id(index: Path | None = None) -> str:
+        """A short content hash of the SERVED frontend bundle's entry point.
+
+        The WS status frame already lets the SPA reload itself across a gateway
+        UPGRADE (it compares ``version`` between pushes), but a rebuild of the
+        same version — the normal state of a git-checkout dev install, whose
+        in-app update pulls, rebuilds, and restarts without the version moving —
+        changes neither ``version`` nor ``commit``-visible fields in a way every
+        open tab observes. This id is the field that does move: it hashes the
+        entry ``index.html`` under ``static/dist`` (whose hashed asset names
+        change on every rebuild), so any tab holding a stale bundle can detect
+        the swap on its next status frame and reload.
+
+        Cached by ``(mtime_ns, size)``: the snapshot sits on the hot status
+        path (every ``/api/status`` poll and WS push), so the file is re-read
+        only when a rebuild actually replaced it. Empty string when there is no
+        served bundle (source tree without a built frontend, unit tests) — the
+        SPA treats empty as UNKNOWN and never reloads over it.
+
+        ``index`` is injectable for tests; the default is the entry point the
+        gateway actually serves (``server.py``'s ``_DIST_DIR``).
+        """
+        if index is None:
+            index = Path(__file__).resolve().parent.parent / "static" / "dist" / "index.html"
+        try:
+            st = index.stat()
+        except OSError:
+            return ""
+        key = (st.st_mtime_ns, st.st_size)
+        cached = _BUNDLE_ID_CACHE.get("v")
+        if cached and cached[0] == key:
+            return cached[1]
+        try:
+            digest = hashlib.sha256(index.read_bytes()).hexdigest()[:16]
+        except OSError:
+            return ""
+        _BUNDLE_ID_CACHE["v"] = (key, digest)
+        return digest
+
     def _count_lessons(self) -> int:
         """Count lessons from JSONL store + vector store (if enabled)."""
         count = len(self.lessons.load_all())
@@ -5325,6 +5371,14 @@ class DashboardState:
             "no_crons": self.no_crons,
             "branch": branch,
             "commit": commit,
+            # Content hash of the SERVED frontend bundle (see
+            # ``served_bundle_id``). The SPA compares it across status pushes
+            # and reloads when it moves — the signal ``version`` cannot give
+            # for a same-version rebuild (a git checkout's in-app update), and
+            # one that reaches every open tab, not just the one that clicked
+            # Update. Empty when no built bundle is served (dev source tree),
+            # which the SPA treats as unknown, never as a change.
+            "bundle_id": self.served_bundle_id(),
             # Which release lane these bytes came from: "nightly", "insider" or
             # "stable". Shipped as a RESOLVED ANSWER rather than leaving the
             # dashboard to parse `version` itself, because the rule is not

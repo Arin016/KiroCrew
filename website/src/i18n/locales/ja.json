@@ -37,6 +37,7 @@
     "gateway_offline": "ゲートウェイがオフライン",
     "gateway_offline_reconnecting": "ゲートウェイがオフライン — 再接続中",
     "gateway_offline_session_expired_see_banner_above": "ゲートウェイがオフライン — セッションの有効期限が切れました。上のバナーを参照してください",
+    "gateway_restarting_reconnecting": "ゲートウェイを再起動中 — 再接続中…",
     "hide_full_changelog": "▾ チェンジログ全文を非表示",
     "i_d_like_to_request_a_feature": "機能をリクエストしたいです！",
     "iam_identity_center": "IAM Identity Center",

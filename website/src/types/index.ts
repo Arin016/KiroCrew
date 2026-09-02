@@ -119,6 +119,14 @@ export interface StatusData {
   release_channel?: 'nightly' | 'insider' | 'stable'
   branch?: string
   commit?: string
+  /**
+   * Short content hash of the SERVED frontend bundle's entry point. The SPA
+   * compares it across status pushes and reloads when it moves — the reload
+   * signal `version` cannot give for a same-version rebuild (a git checkout's
+   * in-app update), and one that reaches every open tab. `""`/absent means no
+   * built bundle / older gateway: unknown, never a change.
+   */
+  bundle_id?: string
   platform?: string
   yolo?: boolean
   /** ISO timestamp when the current timed auto-approve grant expires ("" when none). */
