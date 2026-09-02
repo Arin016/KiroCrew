@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kiro_crew import platform_compat
 from kiro_crew.autonudge import NudgeLoop
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.slack import gateway as gw
@@ -2417,6 +2418,13 @@ class TestInitAutonudge:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+#: A stand-in for a RESOLVED kiro-cli path. Absolute and in a SYSTEM directory on
+#: purpose: the spawn under test is pinned to what `trusted_system_bin` returns,
+#: so a bare ``"kiro-cli"`` here would no longer match and the fakes below would
+#: silently stop covering the step.
+_KIRO_CLI_BIN = str(Path("/usr/bin/kiro-cli"))
+
+
 def _git_exec_fake(
     *,
     branch: bytes = b"mainline\n",
@@ -3435,7 +3443,18 @@ class TestAutoApplyUpdateVenvPath:
                         ):
                             with patch("kiro_crew.slack.gateway.build_frontend_async", new_callable=AsyncMock):
                                 with patch("os.execv", side_effect=OSError("test")):
-                                    with patch("shutil.which", return_value=None):
+                                    # No kiro-cli in a system directory: the
+                                    # optional backend step is skipped. Pinned on
+                                    # the RESOLVER, not on `shutil.which`, which
+                                    # no longer gates it. Name-dispatched so git
+                                    # still resolves (see `_resolver` above).
+                                    with patch.object(
+                                        platform_compat,
+                                        "trusted_system_bin",
+                                        side_effect=(
+                                            TestAutoApplyUpdateKiroCliExecPin._resolver(None)
+                                        ),
+                                    ):
                                         await orch._auto_apply_update()
 
         # The install runs through the shared entry point, which picks a reinstall
@@ -3471,7 +3490,7 @@ class TestAutoApplyUpdateVenvPath:
 
         async def _fake_exec(*args, **kwargs):
             argv = [a for a in args if isinstance(a, str)]
-            if argv and argv[0] == "kiro-cli":
+            if argv and argv[0] == _KIRO_CLI_BIN:
                 proc = AsyncMock()
                 proc.kill = MagicMock()
                 proc.returncode = None
@@ -3504,9 +3523,21 @@ class TestAutoApplyUpdateVenvPath:
                                 new_callable=AsyncMock,
                             ) as mock_build:
                                 with patch("os.execv", side_effect=OSError("test")):
-                                    # Truthy: the optional kiro-cli step runs.
-                                    with patch(
-                                        "shutil.which", return_value="/usr/bin/kiro-cli"
+                                    # Resolved + a trusted env: the optional
+                                    # kiro-cli step runs. Both are now required
+                                    # (the spawn is pinned), and `shutil.which`
+                                    # no longer gates it.
+                                    with patch.object(
+                                        platform_compat,
+                                        "trusted_system_bin",
+                                        side_effect=(
+                                            TestAutoApplyUpdateKiroCliExecPin._resolver(
+                                                _KIRO_CLI_BIN
+                                            )
+                                        ),
+                                    ), patch(
+                                        "kiro_crew.platform.update_provider._trusted_path_env",
+                                        return_value={"PATH": "/usr/bin:/bin"},
                                     ):
                                         # The gateway resolves _kill_and_reap
                                         # function-locally on every call, so
@@ -3524,6 +3555,184 @@ class TestAutoApplyUpdateVenvPath:
         # frontend build and the dependency install exactly as before.
         mock_build.assert_awaited_once()
         assert mock_install.call_count == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tests: _auto_apply_update kiro-cli exec pin
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAutoApplyUpdateKiroCliExecPin:
+    """The optional `kiro-cli update` step resolves off `PATH` and pins its env.
+
+    The seven git spawns in `_auto_apply_update` were pinned to
+    ``trusted_git_bin()`` + ``git_command_env()``; this one was left passing the
+    BARE NAME ``"kiro-cli"`` with ``shutil.which`` used only as an existence
+    check, so ``execvp`` re-resolved it off ``PATH`` at spawn time and no ``env``
+    was pinned. A gateway's ``PATH`` can lead with an agent-writable directory,
+    and this runs unattended with output DEVNULL'd — so a planted shim was
+    arbitrary code execution as the gateway, silently.
+
+    These assert the SPAWN, not the source. A source-string check ("does the file
+    say `resolve_kiro_cli`") executes none of the new code and passes on a call
+    that still hands `create_subprocess_exec` a re-resolvable name.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _permit_update_preconditions(self):
+        """Neutralize the seam preconditions so these tests keep their subject.
+
+        Same reason as ``TestAutoApplyUpdateVenvPath``: the refusals read the
+        REAL git metadata of ``KIROCREW_PROJECT_DIR``, which is not a repo here,
+        so without this every test below would pass vacuously by refusing before
+        it ever reached the reset — let alone the kiro-cli step after it.
+        """
+        with patch(
+            "kiro_crew.slack.gateway.hidden_worktree_edits", return_value=[]
+        ), patch(
+            "kiro_crew.slack.gateway.repo_exec_config_reason",
+            return_value="",
+        ), patch(
+            "kiro_crew.slack.gateway.tracks_upstream", return_value=True
+        ), patch(
+            "kiro_crew.slack.gateway.commits_ahead", return_value=0
+        ):
+            yield
+
+    @staticmethod
+    def _resolver(resolved):
+        """A `trusted_system_bin` stub that answers only for ``kiro-cli``.
+
+        Name-dispatched, not a blanket return: `trusted_git_bin()` resolves git
+        THROUGH `trusted_system_bin`, so a stub that answered every name would
+        also redirect the seven git spawns and the test would stop exercising
+        the path it claims to.
+        """
+        real = platform_compat.trusted_system_bin
+
+        def _stub(name):
+            return resolved if name == "kiro-cli" else real(name)
+
+        return _stub
+
+    @staticmethod
+    async def _drive(*, resolved, trusted_env, spawns, caplog=None):
+        """Run `_auto_apply_update` to completion, recording every spawn.
+
+        *resolved* is what the kiro-cli resolver returns, *trusted_env* what the
+        trusted-PATH builder returns. Everything past the reset (frontend build,
+        dependency install, re-exec) is stubbed so the run reaches — and gets
+        past — the optional backend step under test.
+        """
+        orch = _make_orchestrator()
+        orch.dashboard_state = _mock_dashboard_state()
+        orch.sessions = _mock_sessions()
+        _fake_exec = _git_exec_fake(record=spawns)
+
+        with patch("kiro_crew.env.is_toolbox_install", return_value=False), patch.dict(
+            "os.environ", {"KIROCREW_PROJECT_DIR": "/tmp/proj"}
+        ), patch(
+            "asyncio.create_subprocess_exec", side_effect=_fake_exec
+        ) as mock_spawn, patch(
+            "kiro_crew.dep_sync.sync_or_reinstall", return_value=0
+        ), patch.object(
+            GatewayOrchestrator, "_is_brazil_install", return_value=False
+        ), patch(
+            "kiro_crew.slack.gateway.build_frontend_async", new_callable=AsyncMock
+        ) as mock_build, patch(
+            "os.execv", side_effect=OSError("test")
+        ), patch.object(
+            platform_compat,
+            "trusted_system_bin",
+            side_effect=TestAutoApplyUpdateKiroCliExecPin._resolver(resolved),
+        ), patch(
+            "kiro_crew.platform.update_provider._trusted_path_env",
+            return_value=trusted_env,
+        ):
+            await orch._auto_apply_update()
+        return mock_spawn, mock_build
+
+    @staticmethod
+    def _kiro_calls(mock_spawn, *, needle="kiro-cli"):
+        """Every recorded spawn whose argv[0] names the kiro-cli binary."""
+        return [
+            call
+            for call in mock_spawn.call_args_list
+            if call.args and isinstance(call.args[0], str) and needle in call.args[0]
+        ]
+
+    @pytest.mark.asyncio
+    async def test_spawn_uses_resolved_absolute_path_and_explicit_env(self):
+        """argv[0] is the resolver's ABSOLUTE path and an `env` is passed.
+
+        Both halves are the fix. An absolute argv[0] stops `execvp` re-resolving
+        the name off `PATH` at spawn time; the explicit `env` stops the child
+        resolving its own helper words through the gateway's inherited `PATH`.
+        Asserting only the first would pass on a spawn that still inherits it.
+        """
+        resolved = _KIRO_CLI_BIN
+        pinned_env = {"PATH": "/usr/bin:/bin"}
+        spawns: list = []
+
+        mock_spawn, _ = await self._drive(
+            resolved=resolved, trusted_env=pinned_env, spawns=spawns
+        )
+
+        calls = self._kiro_calls(mock_spawn)
+        assert len(calls) == 1, f"expected one kiro-cli spawn, got {calls}"
+        (call,) = calls
+        # The resolved path, not the bare name: `os.path.isabs` is the property
+        # that matters, and the exact value pins that the RESOLVER's answer is
+        # what is spawned rather than a coincidentally-absolute constant.
+        assert call.args[0] == resolved
+        assert os.path.isabs(call.args[0])
+        assert call.args[1] == "update"
+        # `env` present AND the trusted one. `env=None` means "inherit", which is
+        # the pre-fix behaviour and would satisfy a bare `"env" in kwargs`.
+        assert call.kwargs.get("env") == pinned_env
+
+    @pytest.mark.asyncio
+    async def test_step_skipped_when_resolution_returns_none(self):
+        """No kiro-cli in a trusted directory: skipped, never spawned by name.
+
+        The pre-fix code reached the spawn on a truthy `shutil.which` and handed
+        over a bare name. A resolver returning None must produce NO spawn at all
+        — falling back to `"kiro-cli"` reinstates the hazard — and must leave the
+        rest of the update running, since this step is optional.
+        """
+        spawns: list = []
+
+        mock_spawn, mock_build = await self._drive(
+            resolved=None, trusted_env={"PATH": "/usr/bin:/bin"}, spawns=spawns
+        )
+
+        assert self._kiro_calls(mock_spawn) == []
+        # Skipping is non-fatal: the frontend build after it still ran.
+        mock_build.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_step_skipped_when_no_trusted_env(self, caplog):
+        """A resolved binary but no trusted PATH fails CLOSED, and says so.
+
+        Mirrors the wheel path's `_trusted_path_env() is None` refusal in this
+        same file. Handing the inherited PATH over instead would reopen the
+        second hop the pin exists to close. Logged at WARNING rather than DEBUG
+        so the degradation is not indistinguishable from "no kiro-cli installed".
+        """
+        spawns: list = []
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.slack.gateway"):
+            mock_spawn, mock_build = await self._drive(
+                resolved=_KIRO_CLI_BIN,
+                trusted_env=None,
+                spawns=spawns,
+            )
+
+        assert self._kiro_calls(mock_spawn) == []
+        mock_build.assert_awaited_once()
+        assert any(
+            "kiro-cli backend update" in r.getMessage() for r in caplog.records
+        ), f"no refusal logged: {[r.getMessage() for r in caplog.records]}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -9116,7 +9116,7 @@ class GatewayOrchestrator:
         # kill-the-tree + bounded-reap contract, and there is exactly one
         # implementation of it (issue #4210 exists to close the two-conventions
         # gap, not to add a second helper).
-        from kiro_crew.platform.update_provider import _kill_and_reap
+        from kiro_crew.platform.update_provider import _kill_and_reap, _trusted_path_env
 
         try:
             # Every git call below reads a tree an agent can write, and several of
@@ -9621,13 +9621,58 @@ class GatewayOrchestrator:
                 return
             logger.info("Auto-update: reset to origin/%s, rebuilding", branch)
 
-            # Update the optional kiro-cli backend if present.
-            if shutil.which("kiro-cli"):
+            # Update the optional kiro-cli backend, resolved off `PATH` and
+            # spawned with an explicit `env` for the same reason `_git` above is.
+            # This call site was left out of the pass that hardened the seven git
+            # spawns in this function.
+            #
+            # `shutil.which` was an EXISTENCE check whose answer was discarded:
+            # the spawn passed the bare name `"kiro-cli"`, so `execvp` re-resolved
+            # it off `PATH` at spawn time. A gateway's `PATH` can lead with an
+            # agent-writable directory (a worktree venv's `bin`, `~/.local/bin`),
+            # so anything able to plant a `kiro-cli` there ahead of the real
+            # install ran as the gateway on an UNATTENDED path whose output is
+            # DEVNULL'd and whose failures log at DEBUG.
+            #
+            # `trusted_system_bin` probes the fixed system directories and
+            # nothing else — deliberately NOT `resolve_kiro_cli`, the resolver
+            # the ACP launch path uses. That one reads `KIROCREW_KIRO_BIN` and
+            # `~/.local/bin` FIRST, and both are agent-writable, so it would
+            # close only the PATH-ordering half of this hole and leave the
+            # planted-binary half wide open on the one path that runs unattended.
+            #
+            # The cost is real and accepted: kiro-cli is a per-user install, so
+            # on a host where it lives outside the system directories this step
+            # becomes a logged skip and the operator runs `kiro-cli update`
+            # themselves. That is the same trade `_shell_exec_args` and
+            # `_trusted_path_env` already make in the update path — an
+            # unattended exec does not get to fall back to a lookup an agent can
+            # influence — and it costs an optional backend refresh, never the
+            # gateway's own update.
+            _kiro_cli = platform_compat.trusted_system_bin("kiro-cli")
+            # Pinning the binary is only half of it, exactly as on the wheel path
+            # below: the child resolves its own helper words through the
+            # inherited `PATH`. Narrow that to the trusted system dirs and drop
+            # the interpreter/loader variables, and fail CLOSED when there is no
+            # trusted `PATH` to substitute rather than handing the child an
+            # agent-influenceable lookup.
+            _kiro_env = _trusted_path_env() if _kiro_cli else None
+            if _kiro_cli and _kiro_env is None:
+                # Skipped, not silently unpinned. This step is optional and
+                # non-fatal, so the rest of the update still applies; saying so
+                # keeps the degradation diagnosable instead of looking like "no
+                # kiro-cli installed".
+                logger.warning(
+                    "Auto-update: skipping the kiro-cli backend update — no trusted "
+                    "PATH to hand the child. Run `kiro-cli update` manually."
+                )
+            if _kiro_cli and _kiro_env is not None:
                 kiro_update: asyncio.subprocess.Process | None = None
                 try:
                     kiro_update = await asyncio.create_subprocess_exec(
-                        "kiro-cli",
+                        _kiro_cli,
                         "update",
+                        env=_kiro_env,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                         # Own process group (POSIX; no-op on Windows) so the
