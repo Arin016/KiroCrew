@@ -609,9 +609,11 @@ jobs:
     name: Backend Tests
     needs: [changes]
     runs-on: ubuntu-latest
-    # The slowest 3.12 shard runs ~29 minutes, so a 30-minute cap kills the
-    # job at the coverage step with every test green and Coverage Gate then
-    # reds on the missing shard artifact. Same budget as backend-test-windows.
+    # A budget, not an estimate: at 8 shards the slowest one measures ~14
+    # minutes. The cap stays at 40 so a pathological shard finishes rather than
+    # being killed at the coverage step -- a killed job reds Coverage Gate on
+    # the missing shard artifact, which reads as a coverage fault instead of a
+    # slow test. Same budget as backend-test-windows.
     timeout-minutes: 40
     strategy:
       # Don't cancel sibling shards when one fails -- we want the full failure
@@ -619,13 +621,24 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
-        # Duration-balanced shards (pytest-split). 4 groups x 1 Python = 4
+        # Duration-balanced shards (pytest-split). 8 groups x 1 Python = 8
         # parallel jobs, each on its own runner (4 cores via -n auto). To add
         # shards, extend this list AND bump SHARD_COUNT to match -- mind the
         # ~20 concurrent-job ceiling for public repos.
-        group: [1, 2, 3, 4]
+        #
+        # Why 8 and not 4, measured over 58 full-scope runs: total test time is
+        # 6525s median while the slowest of four shards took ~29.5 minutes, so
+        # the suite ran at a quarter of the parallelism its own runtime affords.
+        # Per-shard fixed overhead is only ~28s (checkout + uv + scope select),
+        # so splitting further is close to free and 8 groups puts the critical
+        # path near 14 minutes. This also re-spends capacity the suite already
+        # had: it ran 8 concurrent test jobs (4 groups x 2 Pythons) until #7780
+        # dropped the 3.10 lane and left those four slots unused, so 8 is a
+        # level this workflow has run at before, inside the ~20 ceiling
+        # alongside backend-test-windows (4) and frontend-test (4).
+        group: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
-      SHARD_COUNT: 4
+      SHARD_COUNT: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
