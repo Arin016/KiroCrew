@@ -3435,7 +3435,10 @@ class TestAutoApplyUpdateVenvPath:
                         ):
                             with patch("kiro_crew.slack.gateway.build_frontend_async", new_callable=AsyncMock):
                                 with patch("os.execv", side_effect=OSError("test")):
-                                    with patch("shutil.which", return_value=None):
+                                    with patch(
+                                        "kiro_crew.slack.gateway.resolve_kiro_cli",
+                                        return_value=None,
+                                    ):
                                         await orch._auto_apply_update()
 
         # The install runs through the shared entry point, which picks a reinstall
@@ -3471,7 +3474,7 @@ class TestAutoApplyUpdateVenvPath:
 
         async def _fake_exec(*args, **kwargs):
             argv = [a for a in args if isinstance(a, str)]
-            if argv and argv[0] == "kiro-cli":
+            if argv and argv[0] == "/opt/kiro/bin/kiro-cli":
                 proc = AsyncMock()
                 proc.kill = MagicMock()
                 proc.returncode = None
@@ -3490,6 +3493,15 @@ class TestAutoApplyUpdateVenvPath:
         async def _fake_kill_and_reap(proc):
             killed.append(proc)
 
+        # The coroutine under test runs on this thread, so anything recorded
+        # as a different thread was genuinely offloaded off the event loop.
+        loop_thread = threading.current_thread()
+        resolve_threads: list = []
+
+        def _fake_resolve():
+            resolve_threads.append(threading.current_thread())
+            return "/opt/kiro/bin/kiro-cli"
+
         with patch("kiro_crew.env.is_toolbox_install", return_value=False):
             with patch.dict("os.environ", {"KIROCREW_PROJECT_DIR": "/tmp/proj"}):
                 with patch("asyncio.create_subprocess_exec", side_effect=_fake_exec):
@@ -3504,9 +3516,13 @@ class TestAutoApplyUpdateVenvPath:
                                 new_callable=AsyncMock,
                             ) as mock_build:
                                 with patch("os.execv", side_effect=OSError("test")):
-                                    # Truthy: the optional kiro-cli step runs.
+                                    # A resolved absolute path makes the
+                                    # optional kiro-cli step run; a fixed-dir
+                                    # install off PATH must not be silently
+                                    # skipped.
                                     with patch(
-                                        "shutil.which", return_value="/usr/bin/kiro-cli"
+                                        "kiro_crew.slack.gateway.resolve_kiro_cli",
+                                        side_effect=_fake_resolve,
                                     ):
                                         # The gateway resolves _kill_and_reap
                                         # function-locally on every call, so
@@ -3524,6 +3540,14 @@ class TestAutoApplyUpdateVenvPath:
         # frontend build and the dependency install exactly as before.
         mock_build.assert_awaited_once()
         assert mock_install.call_count == 1
+        # The resolution stats every candidate dir and globs the tool-manager
+        # version roots, so it must run in a worker thread: on the loop it
+        # would stall every chat and the heartbeat, and past
+        # `dashboard.loop_stall_exit_after_secs` the watchdog kills the
+        # gateway. Asserting the thread pins the offload deterministically,
+        # where a duration assertion would be timing-dependent.
+        assert resolve_threads, "resolve_kiro_cli was never called"
+        assert resolve_threads[0] is not loop_thread
 
 
 # ═══════════════════════════════════════════════════════════════════════════

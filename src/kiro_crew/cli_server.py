@@ -52,6 +52,7 @@ from kiro_crew.git_divergence import (
 from kiro_crew.history import ConversationLog, HistoryConsolidator
 from kiro_crew.hooks import HookManager, hooks_config_from_config_dict
 from kiro_crew.instances import run_marker
+from kiro_crew.kiro_cli import resolve_kiro_cli
 from kiro_crew.learn import LessonStore
 from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.memory import MemoryStore
@@ -1367,12 +1368,18 @@ def _update(force: bool = False) -> None:
         print(f"  ❌ git reset failed:\n{result.stderr.strip()}")
         sys.exit(1)
 
-    # Update the optional kiro-cli backend if present.
-    if shutil.which("kiro-cli"):
+    # Update the optional kiro-cli backend if present. `resolve_kiro_cli` is the
+    # resolver the agent's own spawn goes through, so an install reachable only
+    # through a fixed known_kiro_cli_dirs() entry rather than the inherited PATH
+    # is still found, and the absolute path spawns the same binary the agent
+    # runs. This path is synchronous, so the resolution's stat walk blocks
+    # nothing but the CLI verb the operator invoked.
+    kiro_cli_bin = resolve_kiro_cli()
+    if kiro_cli_bin:
         print("  🔄 kiro-cli update")
         try:
             subprocess.run(
-                ["kiro-cli", "update"],
+                [kiro_cli_bin, "update"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=120,

@@ -167,6 +167,7 @@ from kiro_crew.heartbeat import (
 )
 from kiro_crew.history import ConversationLog, HistoryConsolidator
 from kiro_crew.hooks import HookManager, HooksConfig, hooks_config_from_config_dict
+from kiro_crew.kiro_cli import resolve_kiro_cli
 from kiro_crew.learn import LessonStore
 from kiro_crew.llm_helpers import (
     PromptBusyExhaustedError,
@@ -9622,11 +9623,23 @@ class GatewayOrchestrator:
             logger.info("Auto-update: reset to origin/%s, rebuilding", branch)
 
             # Update the optional kiro-cli backend if present.
-            if shutil.which("kiro-cli"):
+            # `resolve_kiro_cli` is the resolver the agent's own spawn goes
+            # through, so an install reachable only through a fixed
+            # known_kiro_cli_dirs() entry rather than the inherited PATH is
+            # still found, and the absolute path spawns the same binary the
+            # agent runs.
+            #
+            # Offloaded: the resolution stats every fixed candidate dir plus
+            # every augmented-PATH entry, and the augmented PATH globs each
+            # mise/asdf/nvm/fnm version root on a cold cache — an unbounded
+            # filesystem walk that ON THE EVENT LOOP would stall every chat
+            # and the heartbeat (`no-blocking-call-on-event-loop`).
+            kiro_cli_bin = await asyncio.to_thread(resolve_kiro_cli)
+            if kiro_cli_bin:
                 kiro_update: asyncio.subprocess.Process | None = None
                 try:
                     kiro_update = await asyncio.create_subprocess_exec(
-                        "kiro-cli",
+                        kiro_cli_bin,
                         "update",
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,

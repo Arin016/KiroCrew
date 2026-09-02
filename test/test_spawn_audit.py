@@ -859,6 +859,29 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "cli_doctor.py::_linger_enabled",
         "cli_server.py::_logs_cmd",
         "cli_server.py::_spawn_detached_gateway",
+        # `kirocrew update`: git fetch/diff/status/reset against our own
+        # checkout, plus one optional `<kiro-cli> update`. Operator-invoked on a
+        # TTY, no shell, stdin=DEVNULL and a bounded timeout on every call, and
+        # no agent-supplied value reaches any argv.
+        #
+        # The kiro-cli step is the one spawn here whose argv[0] is not a literal:
+        # it is `kiro_cli.resolve_kiro_cli()`'s answer, the SAME resolver
+        # `acp/client.py::_resolve_kiro_bin` launches the agent through. That is
+        # what bounds it — the step can only ever name the binary the agent
+        # itself runs, never a second one, and it cannot gain an argument. A
+        # narrower lookup (a bare name, or `PATH` alone) would not bound it more
+        # tightly; it would update an install the agent does not launch and leave
+        # the launched one stale. `test_kiro_cli_update_spawns_resolve_through_
+        # the_shared_resolver` pins both halves.
+        #
+        # RESIDUAL, and it belongs to the resolver rather than to either call
+        # site: the candidate order includes user-writable install directories
+        # (Kiro CLI's own installer targets `~/.local/bin`), which are fenced
+        # from an agent write by neither `security._SENSITIVE_HOME_DIRS` nor
+        # `_WRITE_PROTECTED_HOME_PATHS`. The ACP session spawn resolves the same
+        # way and reaches the same candidate first and far more often, so the
+        # residual is closed on the WRITE side and at the resolver, not by
+        # narrowing a maintenance spawn.
         "cli_server.py::_update",
         # The agent-only config refresh extracted from _update: a fixed argv
         # (`<this interpreter> -m kiro_crew setup --agent-only`) built from
@@ -1159,6 +1182,14 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "session_pid.py::_our_orphan_pids",
         "session_pid.py::find_orphan_mcp_candidates",
         "session_pid.py::kill_orphan_mcps",
+        # The unattended sibling of `cli_server.py::_update` — same steps, same
+        # bounds, same reasoning for the optional `<kiro-cli> update` argv (see
+        # that entry). Being unattended is why `git` here is resolved OFF `PATH`
+        # through `platform_compat.trusted_git_bin()` and a refusal aborts the
+        # whole apply: on this path what git reports decides which code gets
+        # installed and re-executed. `PATH` is therefore the LESS trusted input
+        # on this function, which is also why the kiro-cli step does not gate on
+        # it.
         "slack/gateway.py::_auto_apply_update",
         # Wheel/cli.sh auto-update: runs the signed installer command
         # (composed locally from a validated channel name and https-pinned
@@ -1532,6 +1563,138 @@ def test_agent_influenced_sites_are_routed():
         assert key not in unrouted, (
             f"{key} must route its spawn through sandboxed_spawn_argv "
             "(security-review 92e24570) but is no longer sandbox-wrapped."
+        )
+
+
+# Every site that execs the user's Kiro CLI, and the resolver all of them must
+# share. ``acp/client.py::_resolve_kiro_bin`` is the agent's own session spawn
+# and is listed so "the same resolver" is pinned rather than assumed.
+_KIRO_CLI_RESOLVER = "resolve_kiro_cli"
+# Spelled literally, like every other token this AST audit matches on; the
+# owning constant is ``kiro_cli.KIRO_CLI_NAME``.
+_KIRO_CLI_NAME = "kiro-cli"
+_KIRO_CLI_EXEC_SITES = (
+    ("cli_server.py", "_update"),
+    ("slack/gateway.py", "_auto_apply_update"),
+    ("acp/client.py", "_resolve_kiro_bin"),
+)
+# The subcommand that identifies the maintenance spawn inside the two update
+# functions. Its argv[0] is the assertion's subject.
+_KIRO_CLI_UPDATE_SUBCOMMAND = "update"
+
+
+def _named_function(rel: str, name: str) -> ast.AST:
+    """Return the ``def``/``async def`` node called *name* in *rel*."""
+    tree = ast.parse((_SRC_ROOT / rel).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"{rel} no longer defines {name}() — update this audit.")
+
+
+def _spawn_argv_nodes(scope: ast.AST) -> list[list[ast.expr]]:
+    """Return one argv element list per spawn call inside *scope*.
+
+    ``subprocess.run([prog, *args])`` passes a list literal; the asyncio spawns
+    pass the elements positionally. Both are flattened to the same shape so a
+    caller can reason about argv[0] without knowing which API a site used.
+    """
+    argvs: list[list[ast.expr]] = []
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in _SPAWN_ATTRS:
+            continue
+        base = node.func.value
+        base_name = (
+            base.id
+            if isinstance(base, ast.Name)
+            else base.attr if isinstance(base, ast.Attribute) else ""
+        )
+        if base_name not in _SPAWN_BASES or not node.args:
+            continue
+        first = node.args[0]
+        argvs.append(list(first.elts) if isinstance(first, ast.List) else list(node.args))
+    return argvs
+
+
+def test_kiro_cli_update_spawns_resolve_through_the_shared_resolver():
+    """Every site that execs the user's Kiro CLI must resolve it the same way.
+
+    The optional ``<kiro-cli> update`` step and the agent's own session spawn
+    have to name the SAME executable. Two failures follow from letting them
+    diverge, and only one is visible: gating the update on the inherited
+    ``PATH`` skips an install reachable only through a fixed
+    ``kiro_cli.known_kiro_cli_dirs()`` entry, and — worse, because nothing
+    reports it — a lookup that resolves differently from the launch path updates
+    an install the agent never runs, leaving the launched one stale forever.
+
+    One resolver is what makes those one question instead of three, so this pins
+    that every site goes through ``kiro_cli.resolve_kiro_cli`` and that the two
+    update sites spawn ITS answer as argv[0] — never a bare name, never
+    ``shutil.which``, and never a second lookup of their own. That is also the
+    whole basis of both sites' ``BENIGN_SPAWNS`` justification: the resolved
+    path is the only non-literal argv element, so no agent-supplied value can
+    reach the argv, and the step cannot name a binary the session spawn would
+    not name.
+    """
+    for rel, func in _KIRO_CLI_EXEC_SITES:
+        node = _named_function(rel, func)
+        body = ast.unparse(node)
+        assert _KIRO_CLI_RESOLVER in body, (
+            f"{rel}::{func} no longer resolves the Kiro CLI through "
+            f"kiro_cli.{_KIRO_CLI_RESOLVER}(). Every site that execs the user's "
+            "CLI shares that resolver so the update target and the launch target "
+            "cannot drift apart."
+        )
+        assert f"which({_KIRO_CLI_NAME!r})" not in body, (
+            f"{rel}::{func} gates on shutil.which({_KIRO_CLI_NAME!r}), which sees "
+            "only the inherited PATH and skips an install reachable through a "
+            f"fixed known_kiro_cli_dirs() entry. Use kiro_cli.{_KIRO_CLI_RESOLVER}()."
+        )
+
+    for rel, func in _KIRO_CLI_EXEC_SITES[:2]:
+        node = _named_function(rel, func)
+        # The resolver's answer must reach the spawn through a local name, so
+        # find what that name is bound to before inspecting the argv.
+        resolved_names = {
+            target.id
+            for assign in ast.walk(node)
+            if isinstance(assign, ast.Assign)
+            for target in assign.targets
+            if isinstance(target, ast.Name) and _KIRO_CLI_RESOLVER in ast.unparse(assign.value)
+        }
+        assert resolved_names, (
+            f"{rel}::{func} calls {_KIRO_CLI_RESOLVER}() without binding its result, "
+            "so the spawn below cannot be using it."
+        )
+        update_argvs = [
+            argv
+            for argv in _spawn_argv_nodes(node)
+            if any(
+                isinstance(element, ast.Constant) and element.value == _KIRO_CLI_UPDATE_SUBCOMMAND
+                for element in argv
+            )
+        ]
+        assert len(update_argvs) == 1, (
+            f"expected exactly one {_KIRO_CLI_NAME} maintenance spawn in {rel}::{func}, "
+            f"found {len(update_argvs)}"
+        )
+        argv = update_argvs[0]
+        program = argv[0]
+        assert isinstance(program, ast.Name) and program.id in resolved_names, (
+            f"{rel}::{func} spawns {ast.unparse(program)!r} rather than the name bound "
+            f"from {_KIRO_CLI_RESOLVER}(). A bare {_KIRO_CLI_NAME!r} resolves through the "
+            "child's PATH, which on a gateway can lead with an agent-writable "
+            "directory — the same hazard trusted_git_bin() exists to avoid on this "
+            "very path."
+        )
+        assert [element.value for element in argv[1:] if isinstance(element, ast.Constant)] == [
+            _KIRO_CLI_UPDATE_SUBCOMMAND
+        ], (
+            f"{rel}::{func}'s {_KIRO_CLI_NAME} argv gained an element beyond the fixed "
+            f"{_KIRO_CLI_UPDATE_SUBCOMMAND!r} subcommand. Its BENIGN_SPAWNS entry rests "
+            "on the resolved path being the only non-literal argv element."
         )
 
 

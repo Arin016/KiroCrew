@@ -884,14 +884,29 @@ Each step checks if the tool is already installed and skips if present.
    edits in another terminal to rescue them is the natural response to the
    prompt, and is exactly what would otherwise be reset away). Only `HEAD` can
    move in that window, so the re-check needs no second fetch.
-2. Rebuilds the dashboard via `build_frontend_sync()` (npm; non-fatal on failure).
+2. Updates the optional Kiro CLI backend with one `<kiro-cli> update`, skipped
+   when no install is found and best-effort when one is (a timeout warns and the
+   update continues). The path comes from the same candidate discovery the ACP
+   launch resolves through — `kiro_cli.resolve_kiro_cli()`, which covers the
+   supported fixed install locations as well as the inherited `PATH` — so an
+   install the invoking shell's `PATH` does not name is updated instead of
+   silently skipped, and the step can only ever target the binary the agent
+   itself runs rather than a second copy of it. The gateway's unattended
+   auto-apply resolves through the same function, off the event loop. Neither
+   site narrows the search: a narrower one would update an install the agent
+   does not launch, leaving the launched one permanently stale. The residual is
+   the resolver's, not either call site's — the search order includes
+   user-writable install directories, which is where Kiro CLI's own installer
+   puts it, and the ACP session spawn carries that residual first and far more
+   often.
+3. Rebuilds the dashboard via `build_frontend_sync()` (npm; non-fatal on failure).
    Non-fatal also means non-destructive: `npm ci` deletes `node_modules` before it
    installs, so the tree is moved aside and restored unless the install succeeds
    (`node_modules_txn.NodeModulesBackup`). A failed install therefore costs the
    rebuild, not the dependency tree -- which matters because the registry needed
    to rebuild one is usually what was unavailable. The gateway's unattended
    auto-apply takes the async sibling and is protected the same way.
-3. Reinstalls backend via `pip install -e .`
+4. Reinstalls backend via `pip install -e .`
 
 ## Client Port Resolution
 
