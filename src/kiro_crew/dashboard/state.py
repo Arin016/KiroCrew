@@ -2169,6 +2169,72 @@ def row_mid(row: Any) -> str | None:
     return mid if isinstance(mid, str) and mid else None
 
 
+def append_and_surface(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    role: str,
+    content: str,
+    cls: str = "",
+    *,
+    meta: dict | None = None,
+    broadcast_user: bool = False,
+    extra: dict | None = None,
+) -> dict[str, Any]:
+    """Append a row and surface it live -- through exactly one identity-carrying door.
+
+    The ONE way to append a window row that must also render in the open chat
+    immediately. ``_ChatSlot.append`` already delivers a live ``chat_message``
+    (via ``_on_message`` -> ``_broadcast_chat_message``, carrying the minted
+    ``meta.mid``) whenever ``not slot._has_reader`` -- so an unconditional
+    manual ``broadcast_ws("chat_message", ...)`` after an append ships the SAME
+    row a second time. Worse, the hand-built frames carried no ``meta.mid``,
+    and the frontend's redelivery guard declines mid-less frames rather than
+    guessing (``isRedeliveredMessage``), so each extra copy rendered as a new
+    bubble (#5981).
+
+    The manual frame is emitted only in the one case append's own callback is
+    suppressed (``slot._has_reader``: an HTTP stream reader is draining
+    ``_pending`` for the actively streaming client, and other windows still
+    need the row) -- mirroring the pattern at ``handlers/files.py`` -- and it
+    carries the appended row's ``ts`` + ``meta`` (mid included), so a client
+    that receives the row through two doors can now recognise "this row again"
+    instead of rendering a duplicate.
+
+    ``user`` rows: ``append`` skips broadcasting them by default because the
+    composer that submitted them already rendered them optimistically -- true
+    only of a message typed in THIS dashboard. Callers surfacing a user row
+    that originated elsewhere (a channel mirror, a Go-button label) pass
+    ``broadcast_user=True`` and get the same single identity-carrying delivery.
+
+    Redaction is the caller's job (unchanged from the sites this replaces):
+    content passed here must already be display-safe. The append path re-redacts
+    non-user content in ``_broadcast_chat_message``; the reader-suppressed frame
+    below does not, matching the manual frames it replaces.
+
+    Returns the appended row (so callers can read ``row_mid`` off it).
+    """
+    if broadcast_user:
+        msg = slot.append(role, content, cls, broadcast_user=True, meta=meta)
+    else:
+        msg = slot.append(role, content, cls, meta=meta)
+    if getattr(slot, "_has_reader", False):
+        frame: dict[str, Any] = {
+            "slot": slot.key,
+            "role": role,
+            "content": content,
+            "ts": msg.get("ts", ""),
+        }
+        if cls:
+            frame["cls"] = cls
+        row_meta = msg.get("meta")
+        if isinstance(row_meta, dict) and row_meta:
+            frame["meta"] = row_meta
+        if extra:
+            frame.update(extra)
+        state.broadcast_ws("chat_message", frame)
+    return msg
+
+
 #: Roles whose LIVE append starts the slot's next turn, and so consumes the answer
 #: channel an unanswered stateless question card was waiting on. Mirrors the
 #: frontend's ``QUESTION_RETIRING_ROLES``: the two must agree, or a session reports

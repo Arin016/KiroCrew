@@ -5791,13 +5791,17 @@ class TestRunChatCompactDeferredWait:
         compaction_msgs = [m for m in assistant_msgs if "Conversation compacted" in m["content"]]
         assert compaction_msgs
         assert all(m.get("meta", {}).get("kind") == "compaction" for m in compaction_msgs)
+        # The appended row carries a minted ``meta.mid``: the live copy is
+        # delivered through append's own identity-carrying door (_on_message),
+        # so no hand-built duplicate ``chat_message`` frame may fire — a
+        # mid-less manual frame rendered the notice twice (#5981 family).
+        assert all(m.get("meta", {}).get("mid") for m in compaction_msgs)
         assistant_broadcasts = [
             c
             for c in state.broadcast_ws.call_args_list
             if c.args and c.args[0] == "chat_message" and c.args[1].get("role") == "assistant"
         ]
-        assert assistant_broadcasts
-        assert all(c.args[1].get("kind") == "compaction" for c in assistant_broadcasts)
+        assert assistant_broadcasts == []
         # Updated context% must be broadcast so the dashboard bar refreshes.
         ws_kinds = [c.args[0] for c in state.broadcast_ws.call_args_list]
         assert "context_usage" in ws_kinds

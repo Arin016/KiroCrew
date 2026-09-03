@@ -139,6 +139,7 @@ from kiro_crew.dashboard.state import (
     DashboardState,
     _ChatSlot,
     _mark_permission_resolved,
+    append_and_surface,
     build_refusal_recovery_prompt,
     build_refusal_steer_notice,
     build_stale_recovery_prompt,
@@ -8464,11 +8465,13 @@ async def _run_chat(
                 assistant_text = ""
                 _wsred.reset()
                 _produced_visible_output = True
-                slot.append("assistant", "🗑️ Conversation cleared.", "msg msg-a")
+                # slot_clear FIRST: it wipes the client's message list, so the
+                # confirmation row must be delivered after it on every path
+                # (append's own broadcast and the reader-suppressed frame alike)
+                # or the wipe erases the confirmation it announces.
                 state.broadcast_ws("slot_clear", {"slot": slot.key})
-                state.broadcast_ws(
-                    "chat_message",
-                    {"slot": slot.key, "role": "assistant", "content": "🗑️ Conversation cleared."},
+                append_and_surface(
+                    state, slot, "assistant", "🗑️ Conversation cleared.", "msg msg-a"
                 )
             elif event.kind == EVENT_AGENT_SWITCHED:
                 new_agent, _ = redact_credentials(event.text)

@@ -95,6 +95,7 @@ from kiro_crew.dashboard.state import (
     _ChatSlot,
     _mark_permission_resolved,
     _normalize_slot_key,
+    append_and_surface,
     durable_row_count,
     is_stop_event_row,
     is_turn_interrupted,
@@ -782,10 +783,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                 if t and not t.done():
                     t.cancel()
         stop_msg = "🛑 [SYSTEM] Orchestration stopped by user."
-        slot.append("assistant", stop_msg, "msg msg-a")
-        state.broadcast_ws(
-            "chat_message", {"slot": slot.key, "role": "assistant", "content": stop_msg}
-        )
+        append_and_surface(state, slot, "assistant", stop_msg, "msg msg-a")
         state.broadcast_ws("chat_done", {"slot": slot.key})
         return web.json_response({"ok": True, "stopped": True})
 

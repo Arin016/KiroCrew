@@ -36,6 +36,7 @@ from kiro_crew.dashboard.state import (
     DashboardState,
     _ChatSlot,
     _normalize_slot_key,
+    append_and_surface,
     parse_cls_meta,
 )
 from kiro_crew.history import transcript_sort_key
@@ -405,16 +406,8 @@ def _append_compaction_notice(
     msg_text, _ = redact_credentials(msg_text)
     msg_text, _ = redact_exfiltration_urls(msg_text)
     meta = {"kind": "compaction"}
-    slot.append("assistant", msg_text, "msg msg-a", meta=meta)
-    state.broadcast_ws(
-        "chat_message",
-        {
-            "slot": slot.key,
-            "role": "assistant",
-            "content": msg_text,
-            "kind": "compaction",
-            "meta": meta,
-        },
+    append_and_surface(
+        state, slot, "assistant", msg_text, "msg msg-a", meta=meta, extra={"kind": "compaction"}
     )
 
 

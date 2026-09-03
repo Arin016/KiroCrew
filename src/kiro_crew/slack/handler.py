@@ -64,6 +64,7 @@ from kiro_crew.dashboard.chat_utils import (
     remember_slack_options,
     run_config_write,
 )
+from kiro_crew.dashboard.state import append_and_surface
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.history import ConversationLog, HistoryConsolidator
 from kiro_crew.hooks import (
@@ -2252,9 +2253,7 @@ async def _handle_compact_command(
                 outcome = "completed"
             elif cr["type"] == "failed":
                 error = cr.get("summary", "")
-                result_text = (
-                    f"❌ Compaction failed: {error}" if error else "❌ Compaction failed."
-                )
+                result_text = f"❌ Compaction failed: {error}" if error else "❌ Compaction failed."
                 outcome = "failed"
             else:
                 result_text = "⚠️ Compaction timed out."
@@ -2534,8 +2533,13 @@ async def maybe_route_linked_thread(
     # context). The LLM's own output is redacted before display.
     _safe_text, _ = redact_exfiltration_urls(text)
     _safe_text, _ = redact_credentials(_safe_text)
-    _linked_slot.append("user", _safe_text, "msg msg-u")
-    _dashboard_state.broadcast_ws("chat_message", {"slot": _linked_slot_key, "role": "user", "content": _safe_text, "cls": "msg msg-u"})  # type: ignore[attr-defined]
+    # Nothing rendered this Slack-typed row optimistically in the dashboard, so
+    # broadcast_user=True: append delivers the ONE identity-carrying frame
+    # (the old manual frame here carried no ``meta.mid``, so a client receiving
+    # the row through a second door rendered a duplicate — #5981 family).
+    append_and_surface(
+        _dashboard_state, _linked_slot, "user", _safe_text, "msg msg-u", broadcast_user=True  # type: ignore[arg-type]
+    )
     if not _linked_slot.running:
         from kiro_crew.dashboard.chat import _run_chat
 

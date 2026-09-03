@@ -41,7 +41,7 @@ from kiro_crew.dashboard.chat_utils import dashboard_slot_key
 from kiro_crew.dashboard.file_index import _SKIP_DIRS as _WALK_SKIP_DIRS
 from kiro_crew.dashboard.handlers._shared import _probe_persisted_session
 from kiro_crew.dashboard.origin import is_direct_local_request
-from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.dashboard.state import DashboardState, append_and_surface
 from kiro_crew.doc_parser import extract_text
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes, safe_read_prefix
 from kiro_crew.messaging.display_safety import redact_for_display
@@ -323,16 +323,11 @@ async def api_outbox_notify(request: web.Request) -> web.Response:
             # extra credential regexes scrub the broadcast file JSON too — the
             # same overlay-aware pass the filename/path/description gates use.
             redacted_file_json = redact(json.dumps(file_data))
-            active.append("file", redacted_file_json)
-            # Only broadcast explicitly when _has_reader suppresses append's
-            # built-in _on_message callback. Avoids duplicate file cards.
-            if getattr(active, "_has_reader", False):
-                state.broadcast_ws("chat_message", {
-                    "slot": active.key,
-                    "role": "file",
-                    "content": redacted_file_json,
-                    "ts": active.messages[-1]["ts"],
-                })
+            # append_and_surface = the same conditional-broadcast pattern this
+            # site pioneered, now also stamping ``ts`` + ``meta.mid`` on the
+            # reader-suppressed frame so a client seeing the row through two
+            # doors recognises it instead of rendering a duplicate card.
+            append_and_surface(state, active, "file", redacted_file_json)
 
     _sel().log_tool_invocation(
         session_key="api",
