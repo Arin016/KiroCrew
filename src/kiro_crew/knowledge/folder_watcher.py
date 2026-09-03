@@ -19,7 +19,7 @@ from kiro_crew.sel import sel
 
 from .chunker import CHUNK_TOKEN_SIZE, MAX_CHUNKS_PER_FILE
 from .dedup import dedup_document
-from .ingestion import DUPLICATE_JOB_STATUS, run_to_completion
+from .ingestion import run_to_completion
 from .kiroignore import KIROIGNORE_FILENAME
 from .kiroignore import load as load_kiroignore
 from .readers import FileReader
@@ -360,8 +360,13 @@ class FolderWatcher:
             discovered = discovered[:max_files]
             logger.warning("Source %s: capped at %d files (%d skipped)", source_id, max_files, capped)
 
-        # 3. Load existing state
-        existing = self._load_state(source_id)
+        # 3. Load existing state. Every ``folder_file_state`` read and write in
+        # this sweep is offloaded: ``store.db`` holds a per-thread autocommit
+        # connection whose busy_timeout is 10s, and a query that waits on the
+        # writer lock (a concurrent import_bundle, a dedup collapse) blocks the
+        # whole event loop for that wait -- past the loop-stall watchdog on a
+        # slow disk. The store's on-loop guard names this exact frame.
+        existing = await asyncio.to_thread(self._load_state, source_id)
         now = datetime.now().isoformat()
 
         stats: dict[str, int] = {"new": 0, "changed": 0, "deleted": 0, "skipped": 0, "capped": capped, "failed": 0}
@@ -382,7 +387,7 @@ class FolderWatcher:
         # once up front, then only every _PAUSE_RECHECK_FILES files: a pause
         # still takes effect within a bounded number of files instead of costing
         # a query per file.
-        paused = self._is_paused(source_id)
+        paused = await asyncio.to_thread(self._is_paused, source_id)
         # ``last_seen`` touches for unchanged files are accumulated and flushed
         # as a single executemany instead of one UPDATE per file. They carry no
         # per-row logic and were already committed in the batch commit below, so
@@ -390,7 +395,7 @@ class FolderWatcher:
         last_seen_batch: list[tuple[str, str, str]] = []
         for idx, (file_path, mtime) in enumerate(discovered):
             if idx and idx % _PAUSE_RECHECK_FILES == 0:
-                paused = self._is_paused(source_id)
+                paused = await asyncio.to_thread(self._is_paused, source_id)
             if paused:
                 await asyncio.to_thread(
                     self._flush_last_seen_and_commit, last_seen_batch)
@@ -450,7 +455,7 @@ class FolderWatcher:
                     # count onto the row would make the user's retry -- which clears
                     # the status but not the count -- re-enter the scan already over
                     # budget and be retired again by the very next sweep.
-                    self._update_state(
+                    await self._persist_state(
                         source_id, file_path, content_hash, mtime,
                         state.get("item_ids", "[]") or "[]", now, "failed",
                         f"ingestion did not complete after {MAX_SCAN_ATTEMPTS} attempts",
@@ -460,7 +465,7 @@ class FolderWatcher:
 
             if state and state.get("status") == "done" and content_hash == state.get("content_hash"):
                 # Touched but content unchanged
-                self._update_state(source_id, file_path, content_hash, mtime, state.get("item_ids", "[]"), now, "done", commit=False)
+                await self._persist_state(source_id, file_path, content_hash, mtime, state.get("item_ids", "[]"), now, "done", commit=False)
                 continue
 
             # A row that owned nothing holds a claim for its PREVIOUS content. The
@@ -489,9 +494,9 @@ class FolderWatcher:
             # The incremented attempt count rides along, so the row itself carries how
             # much of its retry budget is left even though nothing else in this sweep
             # survives an abrupt exit.
-            self._update_state(source_id, file_path, content_hash, mtime,
-                               json.dumps(old_ids), now, "scanning",
-                               attempts=prior_attempts + 1)
+            await self._persist_state(source_id, file_path, content_hash, mtime,
+                                      json.dumps(old_ids), now, "scanning",
+                                      attempts=prior_attempts + 1)
 
             item_ids, outcome = await self._ingest_file(
                 file_path, source_id, namespace, props, old_ids, root=uri,
@@ -504,11 +509,17 @@ class FolderWatcher:
                 # keeps the marker is re-ingested, at full cost, on every later sweep.
                 # Writing it from the caller also restores the content hash and mtime
                 # the marker carried, which is what lets the UI say WHICH version of
-                # the file failed. The reason recorded by _ingest_file is preserved.
-                self._update_state(
-                    source_id, file_path, content_hash, mtime, json.dumps(old_ids),
-                    now, "failed", self._current_error(source_id, file_path),
-                    commit=False)
+                # the file failed. The reason recorded by _ingest_file is preserved:
+                # read and re-written inside ONE worker hop, so the read cannot be
+                # split from the write by a cancellation between two awaits.
+                def _fail_preserving_reason(
+                        _sid=source_id, _fp=file_path, _ch=content_hash, _mt=mtime,
+                        _ids=json.dumps(old_ids), _now=now) -> None:
+                    self._update_state(
+                        _sid, _fp, _ch, _mt, _ids, _now, "failed",
+                        self._current_error(_sid, _fp), commit=False)
+
+                await run_to_completion(_fail_preserving_reason)
                 stats["failed"] += 1
             elif outcome == "deduped":
                 # Refused by the pre-ingest gate: this exact content is already in
@@ -521,7 +532,7 @@ class FolderWatcher:
                 # here would leave that commit unrecorded.
                 stats["skipped"] += 1
             else:
-                self._update_state(source_id, file_path, content_hash, mtime, json.dumps(item_ids), now, "done", commit=False)
+                await self._persist_state(source_id, file_path, content_hash, mtime, json.dumps(item_ids), now, "done", commit=False)
                 ingested_paths.append(file_path)
                 if chunk_budget:
                     chunks_ingested += len(item_ids)
@@ -677,10 +688,27 @@ class FolderWatcher:
         return row["error_message"] if row else None
 
     def _update_state(self, source_id: str, file_path: str, content_hash: str, mtime: float, item_ids: str, now: str, status: str = "done", error_message: str | None = None, *, attempts: int = 0, commit: bool = True):
+        """Write one state row. Synchronous: callers on the event loop use
+        :meth:`_persist_state`, which runs this on a worker thread."""
         self._write_state_row(source_id, file_path, content_hash, mtime, item_ids, now,
                               status, error_message, attempts=attempts)
         if commit:
             self.store.db.commit()
+
+    async def _persist_state(self, *args, **kwargs) -> None:
+        """:meth:`_update_state`, off the event loop and drained under cancellation.
+
+        ``run_to_completion`` rather than a bare ``to_thread``: every row this
+        writes is a marker the NEXT sweep reads to decide whether to re-ingest
+        (``scanning`` = interrupted, retry; ``done``/``failed`` = terminal). A
+        cancellation that dropped the write while it was still queued would
+        leave the previous marker standing over data that has already moved on
+        -- the same orphan window the ingest finalizers close the same way.
+        ``store.db`` is per-thread and autocommit, so the write is complete when
+        the hop returns; the ``commit`` flag is honoured but has nothing left to
+        flush on that connection.
+        """
+        await run_to_completion(lambda: self._update_state(*args, **kwargs))
 
     def _deduped_text_hash(self, content_hash: str) -> str | None:
         """Text hash for a row the pre-ingest gate refused, or ``None``.
@@ -885,9 +913,9 @@ class FolderWatcher:
                                f"reason=outside_root_toctou"),
                 )
                 now = datetime.now().isoformat()
-                self._update_state(source_id, file_path, "", 0,
-                                   json.dumps(old_item_ids), now, "failed",
-                                   "path resolved outside the source root")
+                await self._persist_state(source_id, file_path, "", 0,
+                                          json.dumps(old_item_ids), now, "failed",
+                                          "path resolved outside the source root")
                 return None, "failed"
         if is_sensitive_path(resolved):
             logger.warning("TOCTOU: sensitive path blocked at ingest time: %s -> %s", file_path, resolved)
@@ -898,7 +926,7 @@ class FolderWatcher:
                 resources=f"source_id={source_id} file_path={file_path} reason=sensitive_path_toctou",
             )
             now = datetime.now().isoformat()
-            self._update_state(source_id, file_path, "", 0, json.dumps(old_item_ids), now, "failed", "sensitive path blocked")
+            await self._persist_state(source_id, file_path, "", 0, json.dumps(old_item_ids), now, "failed", "sensitive path blocked")
             return None, "failed"
 
         # The pipeline reports the items it created through `on_committed`, which
@@ -913,13 +941,17 @@ class FolderWatcher:
         #   ~20k rows apiece on a large folder source, measured at >1s each --
         #   synchronously on the event loop, which trips the loop-stall watchdog
         #   and crash-loops the gateway.
-        # * No await after the commit. ANY await between the pipeline's commit
-        #   and this function's return is an orphan window: a shutdown cancelling
-        #   there leaves committed items that no `folder_file_state` row names,
-        #   so the next scan re-ingests the file and duplicates them while the
-        #   first group stays untracked and undeletable. Offloading the reads
-        #   would have introduced exactly that window; not needing them removes
-        #   it. `test_knowledge_ingest_scan_off_loop.py` ratchets both properties.
+        # * No skippable await after the commit. An await between the pipeline's
+        #   commit and this function's return that a cancellation can skip past
+        #   is an orphan window: a shutdown cancelling there leaves committed
+        #   items that no `folder_file_state` row names, so the next scan
+        #   re-ingests the file and duplicates them while the first group stays
+        #   untracked and undeletable. Offloading the reads with a bare
+        #   `to_thread` would have introduced exactly that window; not needing
+        #   them removes it. The failure branches below DO await, but only
+        #   `_persist_state` (`run_to_completion`-backed, so the write drains
+        #   under cancellation) and only where nothing was committed.
+        #   `test_knowledge_ingest_scan_off_loop.py` ratchets both properties.
         #
         # `on_committed` fires only on the fully-successful branch, so it also
         # replaces the `sources.sync_status` read that used to detect a partial
@@ -983,20 +1015,36 @@ class FolderWatcher:
                     "commit callback; deferring to the caller's state write",
                     file_path, exc_info=True)
 
+        # The pre-ingest gate reports a refusal the same way the commit path reports
+        # its ids: through a callback invoked INSIDE the gate's own transaction, on
+        # its worker thread. Latching it here replaces the `get_job_status` read-back
+        # this frame used to do after the pipeline returned -- a synchronous sqlite
+        # round-trip on the event loop for every ingested file, which is exactly
+        # the class of call the store's on-loop guard flags. The callback is the
+        # only place `DUPLICATE_JOB_STATUS` is ever written, so the latch is the
+        # status; nothing has to be read back, and no await is added after the
+        # commit (the ratchet in `test_knowledge_ingest_scan_off_loop.py`).
+        refused = False
+
+        def _record_refused(text_hash: str) -> None:
+            nonlocal refused
+            refused = True
+            if on_duplicate is not None:
+                on_duplicate(text_hash)
+
         try:
             # Hand the pipeline the path that was just validated, not the one that
             # was validated a moment earlier -- re-deriving it there would reopen the
             # window this check closed. The display name still comes from the logical
             # path, so a symlinked document keeps the name the user sees in the folder.
-            job_id = await self.pipeline.ingest_file(
+            await self.pipeline.ingest_file(
                 resolved, source_id=source_id, namespace=namespace,
                 original_name=Path(file_path).name,
                 old_item_ids=old_item_ids,
                 on_committed=_record_committed,
-                on_duplicate=on_duplicate)
+                on_duplicate=_record_refused)
 
-            if job_id and (self.pipeline.get_job_status(job_id) or {}).get(
-                    "status") == DUPLICATE_JOB_STATUS:
+            if refused:
                 return [], "deduped"
 
             # Detect partial failure (pipeline rolls back but doesn't raise): the
@@ -1004,14 +1052,14 @@ class FolderWatcher:
             # commits one, so an unset `committed` IS the rollback signal.
             if committed is None:
                 now = datetime.now().isoformat()
-                self._update_state(source_id, file_path, "", 0, json.dumps(old_item_ids), now, "failed", "partial ingestion failure")
+                await self._persist_state(source_id, file_path, "", 0, json.dumps(old_item_ids), now, "failed", "partial ingestion failure")
                 return None, "failed"
 
             return committed, "done"
         except Exception as e:
             logger.exception("Failed to ingest %s", file_path)
             now = datetime.now().isoformat()
-            self._update_state(source_id, file_path, "", 0, json.dumps(old_item_ids), now, "failed", str(e)[:500])
+            await self._persist_state(source_id, file_path, "", 0, json.dumps(old_item_ids), now, "failed", str(e)[:500])
             return None, "failed"
 
     @staticmethod
