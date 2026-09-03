@@ -631,6 +631,66 @@ def _disabled_app_names() -> frozenset[str]:
         return frozenset()
 
 
+def _skill_content_digest(path: str, cache: dict[str, "bytes | None"]) -> "bytes | None":
+    """SHA-256 of the file at *path*, memoized in *cache*; ``None`` if unreadable.
+
+    Only ever called for rows whose cheap fingerprint already collided, so the
+    read cost is zero on the no-duplicate path and one read per colliding copy
+    otherwise. ``None`` (unreadable) never compares equal — a row that cannot
+    be verified identical is kept, not dropped.
+    """
+    if path in cache:
+        return cache[path]
+    try:
+        digest: bytes | None = hashlib.sha256(Path(path).read_bytes()).digest()
+    except OSError:
+        digest = None
+    cache[path] = digest
+    return digest
+
+
+def _dedupe_identical_skills(skills: list[dict]) -> list[dict]:
+    """Drop later rows that are verified byte-identical copies of an earlier row.
+
+    Two stages, so correctness never rests on a metadata coincidence:
+
+    1. **Candidate fingerprint** — ``(name, description, size_bytes)``, the
+       fields a summary line is rendered from, all already loaded by
+       ``list_skills()``. No collision (the overwhelmingly common case) means
+       no file I/O at all.
+    2. **Content verification** — on a fingerprint collision only, hash the
+       actual file bytes of both rows and drop the later row **only when the
+       digests match**. Equal-metadata skills whose bodies differ (which the
+       pinned path would inject in full) are all kept; an unreadable file is
+       kept, never dropped.
+
+    The first row wins, preserving the walk order's operator-installed
+    precedence. Confined project rows are exempt entirely: their reads are
+    gated through the descriptor-pinned reader, and mirrored-root duplicates
+    only arise from unconfined trees anyway.
+    """
+    seen: dict[tuple[str, str, int], list[dict]] = {}
+    digest_cache: dict[str, bytes | None] = {}
+    out: list[dict] = []
+    for s in skills:
+        if s.get("confine_root"):
+            out.append(s)
+            continue
+        fp = (str(s.get("name", "")), str(s.get("description", "")), int(s.get("size_bytes") or 0))
+        rivals = seen.setdefault(fp, [])
+        this_digest = None
+        if rivals:
+            this_digest = _skill_content_digest(str(s.get("path", "")), digest_cache)
+            if this_digest is not None and any(
+                _skill_content_digest(str(r.get("path", "")), digest_cache) == this_digest
+                for r in rivals
+            ):
+                continue  # verified byte-identical copy of an earlier row
+        rivals.append(s)
+        out.append(s)
+    return out
+
+
 @functools.lru_cache(maxsize=None)
 def _builtin_dir_app_name(pkg_dir: str) -> str | None:
     """The manifest name of the builtin app shipped in *pkg_dir*, or ``None``.
@@ -4708,6 +4768,18 @@ class SkillsLoader:
             if not s.get("repo_scope")
             or self._repo_scope_satisfied(str(s["repo_scope"]), project_dir)
         ]
+        # Collapse verified byte-identical copies of the same skill before
+        # anything is rendered, for the same reason the scope filter above
+        # lives here: this is the single place that covers the index, both
+        # renderers, and the pinned set. Multi-root installs commonly
+        # materialize one skill twice — a package tree and a flat mirror of it
+        # — at different key depths, so `_iter_uncached`'s per-key shadowing
+        # never sees the collision and the injected index carries N identical
+        # summary lines (and, for a pinned skill, N identical full bodies).
+        # Dropping a copy is only safe when the bytes are the same, and
+        # `_dedupe_identical_skills` verifies exactly that: same-metadata rows
+        # whose content differs are all kept.
+        all_skills = _dedupe_identical_skills(all_skills)
         if not all_skills:
             return ""
         if budget is None:
