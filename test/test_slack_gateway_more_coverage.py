@@ -746,6 +746,79 @@ class TestNotifyNudgeExpired:
         orch._notify_nudge_expired(loop)
         assert ds.notify.call_args.args[1] == "Monitoring loop hit its cycle cap"
 
+    def test_a_terminal_subject_outranks_the_wall_clock_budget(self):
+        """Terminal outranks EVERY early-stop reading, not just the cap.
+
+        Removing the cap guard was not enough: the runtime-budget branch is evaluated
+        before the terminal one, so a merge landing after the wall-clock budget expired
+        was reported as "its budget ran out without reporting done, its goal may still be
+        unmet" about a finished subject. The rule is expressed once now, as a ``terminal``
+        flag the earlier branches defer to.
+        """
+        from kiro_crew.autonudge import MONITOR_TERMINAL_REASON
+        from kiro_crew.monitoring.models import MonitorOutcome, MonitorState
+
+        orch = _make_orchestrator()
+        ds = _mock_dashboard_state()
+        orch.dashboard_state = ds
+        loop = NudgeLoop(
+            id="loop-terminal-past-budget",
+            slot_key="chat-4",
+            message="watch https://github.com/acme/widgets/pull/42 until green",
+            max_cycles=0,
+            cycle_count=7,
+            max_runtime_secs=60,
+            created_ts=time.time() - 600,
+            stopped_reason=MONITOR_TERMINAL_REASON,
+            monitor=MonitorState(
+                kind="gh-pr",
+                target="acme/widgets#42",
+                objective="watch until green",
+                created_ts=0.0,
+                outcome=MonitorOutcome.SUCCESS,
+            ),
+        )
+        orch._notify_nudge_expired(loop)
+        title = ds.notify.call_args.args[1]
+        assert "time budget" not in title, "a finished subject is not a spent budget"
+        assert "finished" in title
+
+    def test_a_terminal_subject_outranks_the_cycle_cap(self):
+        """A merge that lands ON the capping delivery must not read as an unmet goal.
+
+        The delivery carrying the terminal news increments ``cycle_count`` before the
+        settlement records ``stopped_reason`` -- deliberately, so a cancelled write
+        cannot lose the turn's accounting. So a pull request merging on the delivery
+        that reaches ``max_cycles`` made ``capped_out`` true, the terminal branch was
+        skipped, and the operator was told the goal was possibly unmet and to restart
+        a watch whose subject had merged.
+        """
+        from kiro_crew.autonudge import MONITOR_TERMINAL_REASON
+        from kiro_crew.monitoring.models import MonitorOutcome, MonitorState
+
+        orch = _make_orchestrator()
+        ds = _mock_dashboard_state()
+        orch.dashboard_state = ds
+        loop = NudgeLoop(
+            id="loop-terminal-at-cap",
+            slot_key="chat-3",
+            message="watch https://github.com/acme/widgets/pull/42 until green",
+            max_cycles=4,
+            cycle_count=4,
+            stopped_reason=MONITOR_TERMINAL_REASON,
+            monitor=MonitorState(
+                kind="gh-pr",
+                target="acme/widgets#42",
+                objective="watch until green",
+                created_ts=0.0,
+                outcome=MonitorOutcome.SUCCESS,
+            ),
+        )
+        orch._notify_nudge_expired(loop)
+        title = ds.notify.call_args.args[1]
+        assert "cycle cap" not in title, "a finished subject is terminal, cap or no cap"
+        assert "finished" in title, "and a merged one is reported as done"
+
     def test_approval_stall_names_its_own_remedy(self):
         """A stalled loop must not be reported as a cap it never reached.
 

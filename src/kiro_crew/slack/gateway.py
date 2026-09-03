@@ -48,6 +48,7 @@ from kiro_crew.agent_sdk import AgentTurnUsage
 from kiro_crew.agents_janitor import sweep_agents_dir
 from kiro_crew.autonudge import (
     APPROVAL_STALL_REASON,
+    MONITOR_TERMINAL_REASON,
     AutoNudgeService,
     NudgeLoop,
 )
@@ -5975,7 +5976,13 @@ class GatewayOrchestrator:
             # get a working jump-to-source slot link.
             meta = None if is_channel_key(key) else self._notif_meta(f"dashboard:{key}")
             capped_out = loop.max_cycles and loop.cycle_count >= loop.max_cycles
-            if not capped_out and runtime_budget_exceeded(loop):
+            # Every branch below except the terminal one explains why the loop stopped
+            # SHORT of its goal. A terminal subject is not short of anything, so it
+            # outranks all of them -- expressed ONCE here rather than as a guard added to
+            # each branch after a reviewer finds it, which is how the cap and then the
+            # wall-clock budget each came to preempt it in turn.
+            terminal = loop.stopped_reason == MONITOR_TERMINAL_REASON
+            if not terminal and not capped_out and runtime_budget_exceeded(loop):
                 title = "Monitoring loop spent its time budget"
                 body = (
                     f"The loop stopped after {loop.cycle_count} cycles because "
@@ -5984,7 +5991,7 @@ class GatewayOrchestrator:
                     "unmet. Restart it from the goal popover, or ask the agent "
                     "to raise the budget (monitor_update)."
                 )
-            elif not capped_out and loop.stopped_reason == APPROVAL_STALL_REASON:
+            elif not terminal and not capped_out and loop.stopped_reason == APPROVAL_STALL_REASON:
                 title = "Monitoring loop stopped — it could not get tool approval"
                 body = (
                     f"The loop stopped after {loop.cycle_count} cycles because a "
@@ -5997,6 +6004,48 @@ class GatewayOrchestrator:
                     "agent.yolo_duration has an 'until_shutdown' option that "
                     "has no timed expiry."
                 )
+            elif terminal:
+                # Reached only when no earlier branch claimed the notice, which the two
+                # ``not terminal`` guards above guarantee. FIRST in effect, ahead of every "why it stopped early" reading. Removing the cap
+                # guard from this branch was not enough: the runtime-budget and
+                # approval-stall branches are evaluated before it, so a terminal
+                # delivery that also exhausted the wall-clock budget still reported
+                # "its budget ran out without reporting done, its goal may still be
+                # unmet" about a finished subject. Every other branch here explains why
+                # the loop stopped SHORT of its goal; a terminal subject is not short of
+                # anything, so it outranks all of them rather than needing a guard added
+                # to each one as that one is found.
+                #
+                # It also cannot depend on ``capped_out``: the delivery that CARRIES the
+                # terminal news increments ``cycle_count`` before the settlement records
+                # the reason -- deliberately, so a cancelled write cannot lose the turn's
+                # accounting -- so a subject merging on the capping delivery would
+                # otherwise be announced as a cap with the goal possibly unmet.
+                #
+                # MERGED and CLOSED-UNMERGED are both terminal but they are not the same
+                # news. "No action needed" is true of the first and false of the second,
+                # which stopped on a question the operator has to answer: reopen, or
+                # abandon. The monitor's outcome carries the distinction (SUCCESS vs
+                # BLOCKED), so the wording follows it rather than lumping both under a
+                # finish.
+                settled = getattr(loop.monitor, "outcome", None) if loop.monitor else None
+                if getattr(settled, "value", settled) == "success":
+                    title = "Monitoring loop finished — what it was watching is done"
+                    body = (
+                        f"The loop stopped after {loop.cycle_count} cycles because "
+                        "the pull request it was watching was merged, so there is "
+                        "nothing left to observe. No action needed; arm a new loop "
+                        "if you want to watch something else."
+                    )
+                else:
+                    title = "Monitoring loop stopped — its subject was closed unmerged"
+                    body = (
+                        f"The loop stopped after {loop.cycle_count} cycles because "
+                        "the pull request it was watching was closed WITHOUT being "
+                        "merged. Nothing is left to observe, but the work is not "
+                        "finished: decide whether to reopen it or abandon it, then "
+                        "arm a new loop if you reopen."
+                    )
             else:
                 title = "Monitoring loop hit its cycle cap"
                 body = (
