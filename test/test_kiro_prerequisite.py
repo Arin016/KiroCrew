@@ -37,12 +37,14 @@ from kiro_crew.dashboard.chat_runner import _run_chat
 from kiro_crew.dashboard.handlers.kiro_prerequisite import (
     api_kiro_prerequisite_repair_specs,
     api_kiro_prerequisite_status,
+    api_kiro_prerequisite_update_cli,
 )
 from kiro_crew.dashboard.kiro_readiness import kiro_session_ready
 from kiro_crew.kiro_cli import resolve_kiro_cli
 from kiro_crew.kiro_prerequisite import (
     KIRO_CLI_LOGIN_COMMAND,
     KIRO_CLI_SSO_LOGIN_COMMAND,
+    KIRO_CLI_UPDATE_COMMAND,
     OFFICIAL_INSTALL_DOCS_URL,
     KiroPrerequisiteService,
     PrerequisiteStatus,
@@ -86,6 +88,11 @@ class _FakeRuntime:
         self.executable = executable
         self.installed = executable.exists()
         self.authenticated = False
+        # Whether this fake CLI exposes the `acp` subcommand the readiness probe
+        # now checks with `acp --help`. Defaults True so an authenticated fake is
+        # `ready` exactly as before this probe existed; a test that exercises the
+        # too-old path flips it to False.
+        self.acp_supported = True
         self.calls: list[tuple[str, list[str]]] = []
         self.kwargs: list[dict[str, Any]] = []
 
@@ -101,6 +108,14 @@ class _FakeRuntime:
             return ProcessResult(ok=self.installed)
         if args == ["whoami"]:
             return ProcessResult(ok=self.authenticated)
+        if args == ["acp", "--help"]:
+            if self.acp_supported:
+                return ProcessResult(ok=True, output="Usage: kiro-cli acp [OPTIONS]")
+            return ProcessResult(
+                ok=False,
+                returncode=2,
+                output="error: unrecognized subcommand 'acp'",
+            )
         return ProcessResult(ok=False)
 
 
@@ -609,6 +624,7 @@ class TestKiroPrerequisiteHelpers:
         assert calls == [
             (str(executable), ["--version"]),
             (str(executable), ["whoami"]),
+            (str(executable), ["acp", "--help"]),
         ]
 
     def test_windows_candidates_include_inherited_path(
@@ -984,6 +1000,8 @@ class TestKiroPrerequisiteWorkflow:
         ) -> ProcessResult:
             if args == ["--version"]:
                 return ProcessResult(ok=True)
+            if args == ["acp", "--help"]:
+                return ProcessResult(ok=True, output="Usage: kiro-cli acp")
             home = kwargs["env"]["HOME"]
             whoami_calls.append(home)
             # Signed-out under a rewritten HOME, signed-in against the real home.
@@ -2265,6 +2283,7 @@ class TestKiroPrerequisiteWorkflow:
         assert calls == [
             (str(planted), ["--version"]),
             (str(planted), ["whoami"]),
+            (str(planted), ["acp", "--help"]),
         ]
 
     @pytest.mark.asyncio
@@ -2304,6 +2323,7 @@ class TestKiroPrerequisiteWorkflow:
         assert calls == [
             (str(planted), ["--version"]),
             (str(planted), ["whoami"]),
+            (str(planted), ["acp", "--help"]),
         ]
 
     @pytest.mark.asyncio
@@ -2339,6 +2359,7 @@ class TestKiroPrerequisiteWorkflow:
         assert calls == [
             (str(official), ["--version"]),
             (str(official), ["whoami"]),
+            (str(official), ["acp", "--help"]),
         ]
 
     @pytest.mark.asyncio
@@ -3441,6 +3462,10 @@ class TestKiroPrerequisiteHandlers:
             "/api/kiro-prerequisite/repair-specs",
             api_kiro_prerequisite_repair_specs,
         )
+        app.router.add_post(
+            "/api/kiro-prerequisite/update-cli",
+            api_kiro_prerequisite_update_cli,
+        )
         return app
 
     @pytest.mark.asyncio
@@ -3488,6 +3513,51 @@ class TestKiroPrerequisiteHandlers:
             assert body["sso_login_command"] == KIRO_CLI_SSO_LOGIN_COMMAND
             assert (await client.post("/api/kiro-prerequisite/login")).status == 404
             assert (await client.post("/api/kiro-prerequisite/install")).status == 404
+
+    @pytest.mark.asyncio
+    async def test_owner_update_cli_runs_self_update_and_returns_snapshot(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The owner may POST update-cli to run the CLI's in-place self-update.
+        # The handler awaits the service, then returns the post-update snapshot
+        # (cli_update_error empty on success) with setup_allowed for the owner.
+        service = KiroPrerequisiteService(
+            platform_name="linux",
+            environ={"HOME": str(tmp_path), "PATH": ""},
+            home=tmp_path,
+            audit_writer=_no_audit,
+        )
+
+        called_with: list[str] = []
+
+        async def fake_update_cli(caller: str) -> dict[str, Any]:
+            called_with.append(caller)
+            return {
+                "platform": "Linux",
+                "installed": True,
+                "authenticated": True,
+                "ready": True,
+                "acp_supported": True,
+                "update_command": KIRO_CLI_UPDATE_COMMAND,
+                "cli_update_error": "",
+            }
+
+        monkeypatch.setattr(service, "update_cli", fake_update_cli)
+
+        async with TestClient(TestServer(self._app(service, app_claim=""))) as client:
+            resp = await client.post("/api/kiro-prerequisite/update-cli")
+            assert resp.status == 200
+            body = await resp.json()
+
+        # The success path re-probes and reports acp support restored with no
+        # update error, and the owner branch stamps setup_allowed.
+        assert body["acp_supported"] is True
+        assert body["cli_update_error"] == ""
+        assert body["setup_allowed"] is True
+        # The handler forwards the resolved caller identity to the service.
+        assert called_with == ["test-user"]
 
     @pytest.mark.asyncio
     async def test_status_endpoint_returns_not_ready_instead_of_500_on_probe_error(
@@ -3910,6 +3980,7 @@ class TestKiroPrerequisiteHandlers:
             for method, path in (
                 ("get", "/api/kiro-prerequisite"),
                 ("post", "/api/kiro-prerequisite/repair-specs"),
+                ("post", "/api/kiro-prerequisite/update-cli"),
             ):
                 response = await getattr(client, method)(path)
                 assert response.status == 403
@@ -3984,9 +4055,11 @@ class TestKiroPrerequisiteHandlers:
             assert body["operation"]["status"] == "idle"
 
             # The repair route is a mutation on the agent home, so it is
-            # owner-gated. It is also the ONLY mutation left on this surface.
+            # owner-gated. The update-cli route spawns the CLI's self-update, an
+            # equally owner-only host mutation.
             for method, path in (
                 ("post", "/api/kiro-prerequisite/repair-specs"),
+                ("post", "/api/kiro-prerequisite/update-cli"),
             ):
                 response = await getattr(client, method)(path)
                 assert response.status == 403
@@ -4665,8 +4738,13 @@ class TestKiroCrewNeverSetsUpKiroCli:
             *(service.snapshot(force=True, coalesce=True) for _ in range(6))
         )
 
-        # Exactly one probe's worth of spawns: --version then whoami.
-        assert [args for _, args in runtime.calls] == [["--version"], ["whoami"]]
+        # Exactly one probe's worth of spawns: --version, whoami, then the
+        # acp-subcommand support check.
+        assert [args for _, args in runtime.calls] == [
+            ["--version"],
+            ["whoami"],
+            ["acp", "--help"],
+        ]
 
     def test_status_names_the_command_the_user_runs(self) -> None:
         # The UI needs the command to show, and the user runs it themselves.
@@ -5862,3 +5940,221 @@ class TestKiroCliApiKeyCountsAsSignedIn:
         assert status["installed"] is True
         assert status["authenticated"] is False
         assert status["ready"] is False
+
+
+class TestAcpSubcommandSupportNarrowsReadiness:
+    """A signed-in CLI too old for the `acp` subcommand cannot start a session.
+
+    It runs and authenticates, so the pre-existing probes both pass — but every
+    session launches as `kiro-cli acp ...`, so a CLI without that subcommand
+    fails at session-create with an opaque error. The readiness probe therefore
+    asks `acp --help` and narrows `ready` when the subcommand is unknown, with
+    an UPDATE (not a reinstall) as the remedy.
+    """
+
+    def _service(
+        self,
+        tmp_path: Path,
+        runner: Any,
+    ) -> KiroPrerequisiteService:
+        executable = tmp_path / ".local" / "bin" / "kiro-cli"
+        _make_executable(executable)
+        return KiroPrerequisiteService(
+            platform_name="linux",
+            environ={"HOME": str(tmp_path), "PATH": str(executable.parent)},
+            home=tmp_path,
+            data_home=tmp_path / "data-home",
+            process_runner=runner,
+            audit_writer=_no_audit,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_acp_subcommand_narrows_ready(self, tmp_path: Path) -> None:
+        async def run(_command: str, args: list[str], **_kwargs: Any) -> ProcessResult:
+            if args == ["--version"]:
+                return ProcessResult(ok=True)
+            if args == ["whoami"]:
+                return ProcessResult(ok=True)
+            if args == ["acp", "--help"]:
+                # A clap CLI too old to have the subcommand exits nonzero here.
+                return ProcessResult(
+                    ok=False,
+                    returncode=2,
+                    output="error: unrecognized subcommand 'acp'",
+                )
+            return ProcessResult(ok=False)
+
+        status = await self._service(tmp_path, run).snapshot(force=True)
+
+        # Installed and authenticated, but not ready: the acp subcommand is the
+        # missing piece, and its remedy is an update.
+        assert status["installed"] is True
+        assert status["authenticated"] is True
+        assert status["acp_supported"] is False
+        assert status["ready"] is False
+        assert status["update_command"] == KIRO_CLI_UPDATE_COMMAND
+
+    @pytest.mark.asyncio
+    async def test_present_acp_subcommand_is_ready(self, tmp_path: Path) -> None:
+        async def run(_command: str, args: list[str], **_kwargs: Any) -> ProcessResult:
+            if args == ["acp", "--help"]:
+                return ProcessResult(ok=True, output="Usage: kiro-cli acp [OPTIONS]")
+            return ProcessResult(ok=True)
+
+        status = await self._service(tmp_path, run).snapshot(force=True)
+
+        assert status["acp_supported"] is True
+        assert status["ready"] is True
+
+    @pytest.mark.asyncio
+    async def test_probe_that_cannot_run_is_treated_as_supported(
+        self, tmp_path: Path
+    ) -> None:
+        """A timeout or unrecognized failure must NOT be reported as too-old.
+
+        Only a clean "unknown subcommand" rejection sets acp_supported False; a
+        probe that merely failed to run leaves a healthy install ready rather
+        than blocking it behind an update card it does not need.
+        """
+
+        async def run(_command: str, args: list[str], **_kwargs: Any) -> ProcessResult:
+            if args == ["acp", "--help"]:
+                # Failed, but with no recognizable rejection wording (e.g. a
+                # transient spawn error captured as generic text).
+                return ProcessResult(ok=False, returncode=1, output="some unrelated error")
+            return ProcessResult(ok=True)
+
+        status = await self._service(tmp_path, run).snapshot(force=True)
+
+        assert status["acp_supported"] is True
+        assert status["ready"] is True
+
+    @pytest.mark.asyncio
+    async def test_acp_probe_is_gated_on_a_successful_whoami(self, tmp_path: Path) -> None:
+        """A signed-out CLI is not asked about acp — one fault, one card."""
+        acp_probed = False
+
+        async def run(_command: str, args: list[str], **_kwargs: Any) -> ProcessResult:
+            nonlocal acp_probed
+            if args == ["--version"]:
+                return ProcessResult(ok=True)
+            if args == ["whoami"]:
+                return ProcessResult(ok=False)
+            if args == ["acp", "--help"]:
+                acp_probed = True
+            return ProcessResult(ok=False)
+
+        status = await self._service(tmp_path, run).snapshot(force=True)
+
+        assert status["authenticated"] is False
+        assert acp_probed is False
+        # acp_supported stays at its safe default when the probe never ran.
+        assert status["acp_supported"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_cli_runs_the_self_update_and_reprobes(
+        self, tmp_path: Path
+    ) -> None:
+        """A successful `kiro-cli update` flips acp_supported and clears ready."""
+        acp_ok = {"value": False}
+
+        async def run(_command: str, args: list[str], **_kwargs: Any) -> ProcessResult:
+            if args == ["--version"] or args == ["whoami"]:
+                return ProcessResult(ok=True)
+            if args == ["acp", "--help"]:
+                if acp_ok["value"]:
+                    return ProcessResult(ok=True, output="Usage: kiro-cli acp")
+                return ProcessResult(ok=False, returncode=2, output="unrecognized subcommand 'acp'")
+            if args == ["update"]:
+                # The update makes the next acp probe succeed.
+                acp_ok["value"] = True
+                return ProcessResult(ok=True, output="updated")
+            return ProcessResult(ok=False)
+
+        service = self._service(tmp_path, run)
+        before = await service.snapshot(force=True)
+        assert before["acp_supported"] is False and before["ready"] is False
+
+        after = await service.update_cli("owner")
+
+        assert after["cli_update_error"] == ""
+        assert after["acp_supported"] is True
+        assert after["ready"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_cli_reports_a_nonzero_update_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed update surfaces its output as cli_update_error, not a crash."""
+
+        async def run(_command: str, args: list[str], **_kwargs: Any) -> ProcessResult:
+            if args == ["--version"] or args == ["whoami"]:
+                return ProcessResult(ok=True)
+            if args == ["acp", "--help"]:
+                return ProcessResult(ok=False, returncode=2, output="unrecognized subcommand 'acp'")
+            if args == ["update"]:
+                return ProcessResult(
+                    ok=False, returncode=1, output="update failed: network unreachable"
+                )
+            return ProcessResult(ok=False)
+
+        service = self._service(tmp_path, run)
+        # The gate probes and finds acp unsupported before offering the update.
+        before = await service.snapshot(force=True)
+        assert before["acp_supported"] is False
+        result = await service.update_cli("owner")
+
+        assert "network unreachable" in result["cli_update_error"]
+        # Still not ready — the update did not fix anything.
+        assert result["acp_supported"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_cli_runs_unverified_binary_under_strict_sandbox(
+        self, tmp_path: Path
+    ) -> None:
+        """The self-update spawn hardens against a planted binary.
+
+        ``candidates[0]`` is whatever sits first on PATH, so the update must run
+        under the strict sandbox (``~/.aws`` / ``~/.ssh`` hidden) — not the
+        standard, real-home posture — and must forward proxy config for network
+        reach WITHOUT handing the unverified binary the Kiro identity credential.
+        """
+        seen: dict[str, Any] = {}
+
+        async def run(_command: str, args: list[str], **kwargs: Any) -> ProcessResult:
+            if args == ["--version"] or args == ["whoami"]:
+                return ProcessResult(ok=True)
+            if args == ["acp", "--help"]:
+                return ProcessResult(
+                    ok=False, returncode=2, output="unrecognized subcommand 'acp'"
+                )
+            if args == ["update"]:
+                seen.update(kwargs)
+                return ProcessResult(ok=True, output="updated")
+            return ProcessResult(ok=False)
+
+        executable = tmp_path / ".local" / "bin" / "kiro-cli"
+        _make_executable(executable)
+        service = KiroPrerequisiteService(
+            platform_name="linux",
+            environ={
+                "HOME": str(tmp_path),
+                "PATH": str(executable.parent),
+                "HTTPS_PROXY": "http://proxy.example:8080",
+                prerequisite_module.CRED_KIRO_API_KEY: "secret-token",
+            },
+            home=tmp_path,
+            data_home=tmp_path / "data-home",
+            process_runner=run,
+            audit_writer=_no_audit,
+        )
+        await service.snapshot(force=True)
+        await service.update_cli("owner")
+
+        assert seen.get("sandbox_mode") == prerequisite_module._UNVERIFIED_SANDBOX_MODE
+        # The identity token store must be hidden from the unverified binary too —
+        # same isolation the read-only probe applies, not the weaker crew-only set.
+        assert seen.get("extra_hidden_dirs") == service._hidden_probe_dirs
+        env = seen.get("env") or {}
+        assert env.get("HTTPS_PROXY") == "http://proxy.example:8080"
+        assert prerequisite_module.CRED_KIRO_API_KEY not in env

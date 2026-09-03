@@ -1793,6 +1793,26 @@ export interface KiroPrerequisiteStatus {
    * verbatim and untranslated: it names the file and the construct refused.
    */
   agent_spec_rejection_detail?: string
+  /**
+   * Whether the installed kiro-cli exposes the `acp` subcommand every Kiro Crew
+   * session is launched through. False means the CLI runs and is signed in but
+   * is too OLD to start a session, so `ready` is forced false. The remedy is an
+   * update, not a reinstall. Optional because a gateway older than this field
+   * does not send it — treat a missing value as `true` (supported).
+   */
+  acp_supported?: boolean
+  /**
+   * The command that updates the CLI in place (`kiro-cli update`). Unlike
+   * `login_command`, Kiro Crew also runs this FOR the owner via the update-cli
+   * POST — it is the CLI's own self-update. Rendered verbatim in a `<code>`.
+   */
+  update_command?: string
+  /**
+   * Failure text from an update-cli attempt. Empty when none was attempted or it
+   * succeeded. Shown verbatim and untranslated: it names why the self-update did
+   * not complete.
+   */
+  cli_update_error?: string
 }
 
 export interface KiroBonusCreditGrantPayload {
@@ -2158,6 +2178,11 @@ export const api = {
   // cross-site triggerable and would leave no audit record.
   repairKiroPrerequisiteSpecs: () =>
     post('/api/kiro-prerequisite/repair-specs').then(j) as Promise<KiroPrerequisiteStatus>,
+  // A POST for the same CSRF/audit reasons as the spec repair above. Runs the
+  // CLI's own in-place self-update on the gateway host and returns the
+  // post-update snapshot; `cli_update_error` is empty on success.
+  updateKiroPrerequisiteCli: () =>
+    post('/api/kiro-prerequisite/update-cli').then(j) as Promise<KiroPrerequisiteStatus>,
   // KAS-mode in-product sign-in (no kiro-cli, no terminal). Status is a cheap
   // read; every step that changes sign-in state is a POST for the same
   // CSRF/audit reasons as the spec repair above. Error responses carry a
