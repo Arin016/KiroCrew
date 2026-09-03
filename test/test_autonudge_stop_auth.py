@@ -254,6 +254,15 @@ class _FakeLoop:
         self.stopped_reason = stopped_reason
         self.slot_key = slot_key
         self.monitor = monitor
+        # Mirror production: probe state only ever exists on a GATED prompt loop
+        # (the probe runs behind ``if not loop.gate`` in autonudge.py, and
+        # ``is_structured_monitor_loop`` reads ``monitor and not gate`` as a
+        # structured controller record). A fake carrying ``monitor`` without
+        # ``gate=True`` is a shape production never stores, and it misroutes
+        # ``monitor_update`` into the structured branch, which rejects legacy
+        # fields -- exactly how these tests broke on main when #8201 (branched
+        # before #5184's dispatcher landed) merged with green-but-stale CI.
+        self.gate = monitor is not None
 
 
 class _FakeMonitor:
