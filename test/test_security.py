@@ -2132,16 +2132,69 @@ class TestOAuthAuthorizationUrlRedaction:
         assert diagnostic.shape.digits == 64
         assert diagnostic.shape.symbols == 64
 
-    def test_diagnostic_identifies_standard_param_bare_secret_rule(self) -> None:
-        url = self.NOTION_URL.replace(self.STATE, self.BARE_AWS_SECRET_ALNUM, 1)
+    def test_diagnostic_identifies_nonstandard_param_bare_secret_rule(self) -> None:
+        url = self.NOTION_URL + f"&session_blob={self.BARE_AWS_SECRET_ALNUM}"
 
         diagnostic = security.diagnose_oauth_url_credential(url)
 
         assert diagnostic is not None
         assert diagnostic.rule == "credential_scan_bare_secret_raw"
         assert diagnostic.component == "query_parameter"
-        assert diagnostic.parameter == "state"
+        assert diagnostic.parameter is None
         assert diagnostic.shape.length == len(self.BARE_AWS_SECRET_ALNUM)
+
+    @pytest.mark.parametrize("parameter", ["state", "code_challenge"])
+    def test_recognized_oauth_entropy_does_not_hit_bare_secret_lottery(
+        self, parameter: str
+    ) -> None:
+        digest = hashlib.sha256(b"synthetic-oauth-entropy-regression").digest()
+        if parameter == "state":
+            entropy = base64.b64encode(digest).decode()[:40]
+            url = self.NOTION_URL.replace(self.STATE, entropy, 1)
+        else:
+            entropy = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+            url = self.NOTION_URL.replace(self.CHALLENGE, entropy, 1)
+
+        # The fixed digest is deliberately one whose shape reaches the generic
+        # bare-secret heuristic. OAuth entropy at an approved endpoint must not
+        # inherit that probabilistic verdict.
+        assert security._text_contains_bare_secret(entropy)
+        assert security.diagnose_oauth_url_credential(url) is None
+        assert oauth_url_contains_credential(url) is False
+
+    @pytest.mark.parametrize("parameter", ["redirect_uri", "client_id"])
+    def test_non_entropy_oauth_parameter_keeps_markerless_secret_scan(self, parameter: str) -> None:
+        secret = self.BARE_AWS_SECRET_ALNUM
+        url = self.NOTION_URL + f"&{parameter}={secret}"
+
+        assert len(secret) == 40
+        assert security._text_contains_bare_secret(secret)
+        assert oauth_url_contains_credential(url) is True
+
+    def test_entropy_exemption_does_not_cover_adversarial_url_shapes(self) -> None:
+        digest = hashlib.sha256(b"synthetic-oauth-entropy-regression").digest()
+        entropy = base64.b64encode(digest).decode()[:40]
+        approved = self.NOTION_URL.replace(self.STATE, entropy, 1)
+        adversarial_urls = {
+            "http": approved.replace("https://", "http://", 1),
+            "explicit-port": approved.replace("api.notion.com", "api.notion.com:443", 1),
+            "host-suffix": approved.replace("api.notion.com", "api.notion.com.attacker.example", 1),
+            "path-suffix": approved.replace("/v1/oauth/authorize", "/v1/oauth/authorize/extra", 1),
+            "userinfo": self.NOTION_URL.replace("https://", f"https://{entropy}@", 1),
+            "path": self.NOTION_URL.replace(
+                "/v1/oauth/authorize", f"/v1/oauth/{entropy}/authorize", 1
+            ),
+            "path-params": self.NOTION_URL.replace(
+                "/v1/oauth/authorize", "/v1/oauth/authorize;session=ok", 1
+            ),
+            "fragment": self.NOTION_URL + f"#{entropy}",
+            "backslash": rf"https://evil.example\@api.notion.com/v1/oauth/authorize?state={entropy}",
+            "unknown-param": self.NOTION_URL + f"&session_blob={entropy}",
+        }
+
+        for shape, url in adversarial_urls.items():
+            assert security.diagnose_oauth_url_credential(url) is not None, shape
+            assert oauth_url_contains_credential(url) is True, shape
 
     def test_credential_shaped_parameter_name_is_omitted(self) -> None:
         raw_name = self.GITHUB_TOKEN
@@ -2261,6 +2314,7 @@ class TestOAuthAuthorizationUrlRedaction:
         assert cleaned != url
         assert warnings
 
+    @pytest.mark.parametrize("parameter", ["state", "code_challenge"])
     @pytest.mark.parametrize(
         "credential",
         [
@@ -2269,8 +2323,11 @@ class TestOAuthAuthorizationUrlRedaction:
         ],
         ids=["aws-access-key", "github-token"],
     )
-    def test_fixed_credential_inside_state_fails_closed(self, credential: str) -> None:
-        url = self.NOTION_URL.replace(self.STATE, f"prefix{credential}suffix", 1)
+    def test_fixed_credential_inside_recognized_param_fails_closed(
+        self, parameter: str, credential: str
+    ) -> None:
+        original = self.STATE if parameter == "state" else self.CHALLENGE
+        url = self.NOTION_URL.replace(original, f"prefix{credential}suffix", 1)
         assert oauth_url_contains_credential(url) is True
         self._assert_general_redactors_remove_secret(url, credential)
 
@@ -2285,21 +2342,23 @@ class TestOAuthAuthorizationUrlRedaction:
         assert oauth_url_contains_credential(url) is True
         self._assert_general_redactors_remove_secret(url, encoded)
 
-    def test_bare_aws_secret_inside_state_fails_closed_everywhere(self) -> None:
-        assert len(self.BARE_AWS_SECRET) == 40
-        url = self.NOTION_URL.replace(self.STATE, self.BARE_AWS_SECRET, 1)
-        assert oauth_url_contains_credential(url) is True
-        self._assert_general_redactors_remove_secret(url, self.BARE_AWS_SECRET)
+    @pytest.mark.parametrize("parameter", ["state", "code_challenge"])
+    def test_markerless_secret_shape_is_banner_exempt_but_generically_redacted(
+        self, parameter: str
+    ) -> None:
+        if parameter == "state":
+            value = self.BARE_AWS_SECRET
+            original = self.STATE
+        else:
+            value = self.BARE_AWS_SECRET_ALNUM + "abc"
+            original = self.CHALLENGE
+        url = self.NOTION_URL.replace(original, value, 1)
 
-    def test_pkce_challenge_wrapping_bare_aws_secret_fails_closed(self) -> None:
-        alphanumeric_secret = "wJalrXUtnFEMIxK7MDENGybPxRfiCYEXAMPLEKEY"
-        challenge = alphanumeric_secret + "abc"
-        assert len(alphanumeric_secret) == 40
-        assert len(challenge) == 43
-        assert challenge.isalnum()
-
-        url = self.NOTION_URL.replace(self.CHALLENGE, challenge, 1)
-        assert oauth_url_contains_credential(url) is True
+        # A markerless value is indistinguishable from normal OAuth entropy at
+        # this approved parameter boundary. General output redactors keep the
+        # heuristic because they do not inherit the banner-only exemption.
+        assert oauth_url_contains_credential(url) is False
+        self._assert_general_redactors_remove_secret(url, value)
 
     def test_bare_aws_secret_in_path_without_query_fails_closed(self) -> None:
         url = f"https://attacker.example/-{self.BARE_AWS_SECRET}"

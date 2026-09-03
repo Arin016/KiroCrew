@@ -12248,9 +12248,6 @@ def _contains_fixed_credential(text: str) -> bool:
     return bool(_CREDENTIAL_PATTERNS.search(text) or _decode_b64_safe(text))
 
 
-_PKCE_S256_CHALLENGE_RE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
-
-
 def _text_contains_bare_secret(text: str) -> bool:
     """Return True when *text* contains an isolated bare AWS-secret run."""
     return any(
@@ -12259,37 +12256,35 @@ def _text_contains_bare_secret(text: str) -> bool:
     )
 
 
+# Markerless 40-character values collide with OAuth entropy only for these
+# authorization-request fields. ``code_verifier`` is intentionally absent: it
+# is sent to the token endpoint, not on this front channel.
+_OAUTH_ENTROPY_QUERY_PARAMS = frozenset({"code_challenge", "nonce", "state"})
+
+
 def _oauth_credential_scan_target(
     url: str,
     query: str,
     *,
     approved_endpoint: bool,
 ) -> str:
-    """Blank only structurally approved OAuth values from a whole-URL scan."""
+    """Blank entropy-bearing OAuth values before the markerless URL scan.
+
+    Fixed credential signatures are checked against the raw and decoded URL
+    before this target is built. At an exact approved endpoint, only the
+    code-owned state, nonce, and PKCE challenge fields are omitted from the
+    markerless bare-secret heuristic. Other recognized values, parameter names,
+    unknown parameters, and every non-query URL component remain in the scan
+    target.
+    """
     if not approved_endpoint or not query:
         return url
 
-    segments = [segment.partition("=") for segment in query.split("&")]
-    s256_methods = [
-        unquote(value)
-        for key, separator, value in segments
-        if separator and key == "code_challenge_method"
-    ]
     sanitized_segments: list[str] = []
-    for key, separator, value in segments:
-        decoded_value = unquote(value)
-        approved_value = (
-            bool(separator)
-            and key in _OAUTH_QUERY_PARAMS
-            and key == "code_challenge"
-            and s256_methods == ["S256"]
-            and bool(_PKCE_S256_CHALLENGE_RE.fullmatch(decoded_value))
-            and not _contains_fixed_credential(value)
-            and not _contains_fixed_credential(decoded_value)
-            and not _text_contains_bare_secret(decoded_value)
-        )
-        # A value is omitted because it was explicitly approved, never because
-        # its URL component was forgotten by the credential scan.
+    for key, separator, value in (
+        segment.partition("=") for segment in query.split("&")
+    ):
+        approved_value = bool(separator) and key in _OAUTH_ENTROPY_QUERY_PARAMS
         sanitized_segments.append(
             f"{key}{separator}" if approved_value else f"{key}{separator}{value}"
         )
