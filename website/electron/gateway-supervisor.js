@@ -423,7 +423,20 @@ function createGatewaySupervisor({
         }
         glog(`no gateway on :${PORT} and local gateway is off — not starting one`);
         sendStatus("No gateway is answering…");
-        gatewayStartFailure = { disabled: true, port: PORT };
+        // The host is part of the state, not decoration: on a remote crew's port
+        // a local gateway would shadow that crew's identity, so the dialog needs
+        // to name the target and withhold the start-one-here offer. `remotePort`
+        // travels with it because the crew binds THAT port on its own machine
+        // (see effectivePort in fetchRemoteToken) while PORT is only the local
+        // end of the connection -- naming the local one sends the user to check
+        // a port nothing was ever expected to serve over there.
+        const remoteConfig = getRemoteHostConfig(store, PORT);
+        gatewayStartFailure = {
+          disabled: true,
+          port: PORT,
+          remoteHost: remoteConfig?.host || "",
+          remotePort: remoteConfig?.remotePort || "",
+        };
         resolve(false);
       };
 
@@ -837,20 +850,27 @@ function createGatewaySupervisor({
       portConflict,
       noRetry = false,
       localGatewayOff = false,
+      offerLocalStart = false,
       primaryAction: configuredPrimaryAction,
       primaryLabel: configuredPrimaryLabel,
       showQuitButton: configuredShowQuitButton,
     } = options;
     const showQuitButton = configuredShowQuitButton ?? !noRetry;
+    // Client-only mode launched nothing, so there is no launch to diagnose:
+    // the log on disk belongs to earlier runs, and rendering that tail is what
+    // made a state the user asked for read as a crash report.
+    const showLog = !localGatewayOff;
 
     return new Promise((resolve) => {
       const dark = nativeTheme.shouldUseDarkColors;
       const hasParent = parentWindow && !parentWindow.isDestroyed();
       const errorWindow = new BrowserWindow({
         width: 620,
-        height: 460,
+        // Without the log pane there is nothing to scroll, so the tall window
+        // would open mostly empty under a two-line message.
+        height: showLog ? 460 : 260,
         minWidth: 460,
-        minHeight: 320,
+        minHeight: showLog ? 320 : 200,
         resizable: true,
         useContentSize: true,
         parent: hasParent ? parentWindow : undefined,
@@ -869,12 +889,22 @@ function createGatewaySupervisor({
       const primaryLabel = configuredPrimaryLabel
         || (noRetry ? "Quit" : (portConflict ? "Force-stop & Retry" : "Retry"));
       // Client-only mode cannot reach dashboard Settings to reverse the choice.
-      // Keep the explicit local-gateway escape hatch in this pre-dashboard UI.
-      const enableButton = localGatewayOff && !noRetry
+      // Keep the explicit local-gateway escape hatch in this pre-dashboard UI --
+      // but only where starting one here is coherent. The spawn binds THIS
+      // port, so on a remote crew's port the button would stand up a local
+      // gateway shadowing that crew's identity on a port the user never chose.
+      const enableButton = offerLocalStart && !noRetry
         ? "<button class=\"cancel\" onclick=\"act('enable-retry')\">Start Local Gateway</button>"
         : "";
       const foreground = dark ? "#e2e8f0" : "#1e293b";
       const muted = dark ? "#94a3b8" : "#64748b";
+      const logPane = showLog
+        ? `<div class="pathline">${escapeHtml(displayedLogPath)}</div>`
+          + `<pre class="log">${escapeHtml(logTail || "(launch log is empty)")}</pre>`
+        : "";
+      const revealButton = showLog
+        ? "<button class=\"cancel\" onclick=\"act('reveal')\">Reveal Log</button>"
+        : "";
       const html = `<!DOCTYPE html><html><head><style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family:-apple-system,sans-serif; padding:20px; background:${dark ? "#1e293b" : "#f8fafc"}; color:${foreground};
@@ -894,12 +924,11 @@ function createGatewaySupervisor({
       </style></head><body>
         <div class="title">${escapeHtml(title)}</div>
         <div class="msg">${escapeHtml(message)}</div>
-        <div class="pathline">${escapeHtml(displayedLogPath)}</div>
-        <pre class="log">${escapeHtml(logTail || "(launch log is empty)")}</pre>
+        ${logPane}
         <div class="row">
           <button class="ok" onclick="act('${primaryAction}')">${escapeHtml(primaryLabel)}</button>
           ${enableButton}
-          <button class="cancel" onclick="act('reveal')">Reveal Log</button>
+          ${revealButton}
           ${showQuitButton ? "<button class=\"cancel\" onclick=\"act('quit')\">Quit</button>" : ""}
         </div>
         <script>
@@ -1340,6 +1369,9 @@ function createGatewaySupervisor({
         portInUseInLog: isPortInUse(logTail),
       });
       const localGatewayOff = failureKind === "client-only";
+      const remoteTarget = localGatewayOff ? (failureRecord?.remoteHost || "") : "";
+      // The crew's own port when it has one; PORT is only this end of the link.
+      const remoteTargetPort = (localGatewayOff && failureRecord?.remotePort) || PORT;
       const portConflict = failureKind === "port-conflict";
 
       let title;
@@ -1350,7 +1382,9 @@ function createGatewaySupervisor({
           ? error.message
           : describeIncompleteBundle([]);
       } else if (localGatewayOff) {
-        title = `Kiro Crew — no gateway on port ${PORT}`;
+        title = remoteTarget
+          ? `Kiro Crew — nothing answering at ${remoteTarget}:${remoteTargetPort}`
+          : `Kiro Crew — no gateway on port ${PORT}`;
         message = error.message;
       } else if (portConflict) {
         title = `Kiro Crew — port ${PORT} already in use`;
@@ -1378,6 +1412,7 @@ function createGatewaySupervisor({
           portConflict,
           port: PORT,
           localGatewayOff,
+          offerLocalStart: localGatewayOff && !remoteTarget,
         });
         if (window.isDestroyed()) return;
         if (action === "reveal") {
