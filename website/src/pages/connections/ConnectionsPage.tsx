@@ -988,19 +988,29 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
     // Decided BEFORE any setState: a state updater runs on a later render, so
     // collecting side-effect targets inside one leaves them empty at read time.
     const cleared: string[] = []
-    const failedMints: string[] = []
+    const mintFailures: Array<{ slug: string; reason?: string }> = []
     const grantedMints: string[] = []
     for (const provider of CONNECTION_PROVIDERS) {
       const pending = locallyWaiting[provider.slug]
       if (!pending) continue
       const server = serverForConnection(provider, servers)
       const fresh = effectiveOAuth(oauthByServer[provider.slug], pending)
-      const outcome = mintOutcome(mintByServer[provider.slug], pending)
+      const mint = mintByServer[provider.slug]
+      const outcome = mintOutcome(mint, pending)
       if (!(server?.status === 'ok' || fresh?.completed || fresh?.failed || outcome.clearWait)) {
         continue
       }
       cleared.push(provider.slug)
-      if (outcome.error) failedMints.push(provider.slug)
+      if (
+        outcome.error
+        || (
+          mintRowIsOurs(mint, pending)
+          && mint?.state === 'expired'
+          && mint.reason
+        )
+      ) {
+        mintFailures.push({ slug: provider.slug, reason: mint.reason })
+      }
       if (outcome.probe) grantedMints.push(provider.slug)
     }
     if (!cleared.length) return
@@ -1023,18 +1033,30 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       // setQueryData: the fresh verdict is the backend's to compute.
       void queryClient.invalidateQueries({ queryKey: ['connections-status'] })
     }
-    if (failedMints.length) {
+    if (mintFailures.length) {
       setFeedback(current => {
         const next = { ...current }
-        for (const slug of failedMints) {
-          // Existing strings only. The mint's reason is a coarse machine code and
-          // is deliberately not shown; the dedicated copy lands with the
-          // connections-copy slice, which carries the 14-locale pass.
+        for (const { slug, reason } of mintFailures) {
+          let error: string
+          switch (reason) {
+            case 'mint_timeouterror':
+              error = t('pages.connectionsPage.mint_failure_timed_out')
+              break
+            case 'mint_process_gone':
+              error = t('pages.connectionsPage.mint_failure_process_gone')
+              break
+            case 'mint_server_absent':
+              error = t('pages.connectionsPage.mint_failure_server_absent')
+              break
+            case 'mint_url_rejected':
+              error = t('pages.connectionsPage.mint_failure_url_rejected')
+              break
+            default:
+              error = t('pages.connectionsPage.mint_failure_unknown')
+          }
           next[slug] = {
             kind: 'error',
-            text: t('pages.connectionsPage.action_failed', {
-              error: t('pages.connectionsPage.unknown_error'),
-            }),
+            text: t('pages.connectionsPage.action_failed', { error }),
           }
         }
         return next

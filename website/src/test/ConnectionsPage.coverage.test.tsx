@@ -878,6 +878,61 @@ describe('connecting a new provider', () => {
     )
   }, 15000)
 
+  it.each([
+    {
+      reason: 'mint_timeouterror',
+      state: 'failed',
+      expected: 'Action failed: Authorization setup timed out before an approval address was ready. Try connecting again.',
+    },
+    {
+      reason: 'mint_process_gone',
+      state: 'expired',
+      expected: 'Action failed: The authorization process stopped before approval finished. Try connecting again.',
+    },
+    {
+      reason: 'mint_server_absent',
+      state: 'failed',
+      expected: 'Action failed: The MCP server entry disappeared before authorization could start. Try connecting again.',
+    },
+    {
+      reason: 'mint_url_rejected',
+      state: 'failed',
+      expected: 'Action failed: The provider returned an approval address containing credential-like data, so it was not displayed.',
+    },
+    {
+      reason: 'mint_future_reason',
+      state: 'failed',
+      expected: 'Action failed: Authorization setup failed before an approval address was ready. Try connecting again.',
+    },
+  ])('explains $state mint reason $reason', async ({ reason, state, expected }) => {
+    connectionsMintState.mockResolvedValue({ slug: 'notion', state, reason, token: 'tok1' })
+    mount()
+
+    fireEvent.click(await waitFor(() => within(card('notion')).getByRole('button', { name: 'Connect' })))
+
+    await waitFor(() => {
+      expect(within(card('notion')).getByRole('alert')).toHaveTextContent(expected)
+    })
+  })
+
+  it("does not surface another tab's expired mint reason", async () => {
+    connectionsMintState.mockResolvedValue({ slug: 'notion', state: 'minting', token: 'tok1' })
+    mount()
+
+    fireEvent.click(await waitFor(() => within(card('notion')).getByRole('button', { name: 'Connect' })))
+    await waitFor(() => expect(card('notion')).toHaveAttribute('data-state', 'waiting-for-approval'))
+
+    connectionsMintState.mockResolvedValue({
+      slug: 'notion', state: 'expired', reason: 'mint_process_gone', token: 'tok2',
+    })
+
+    await waitFor(
+      () => expect(card('notion')).not.toHaveAttribute('data-state', 'waiting-for-approval'),
+      { timeout: 8000 },
+    )
+    expect(within(card('notion')).queryByRole('alert')).toBeNull()
+  }, 15000)
+
   it('probes for fresh status when the mint reports granted', async () => {
     connectionsMintState.mockResolvedValue({ slug: 'notion', state: 'minting' })
     mount()
