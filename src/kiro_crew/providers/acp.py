@@ -1282,6 +1282,32 @@ class AcpProvider(LLMProvider):
           exception during the restart it rolls the thresholds back to their
           pre-call snapshot, re-applies the overlay, and re-raises so a failed
           reload does not strand poisoned thresholds. Returns True on success.
+
+        Threshold override lifetime (intended, not a gap): a SUCCESSFUL reload
+        with ``min_pct`` / ``min_tokens`` keeps the overridden thresholds as
+        the session's standing policy - every later respawn re-applies them via
+        :meth:`_apply_tool_search_overlay` in :meth:`start`. This is deliberate
+        for the escape-hatch use case: an operator lowers the threshold to force
+        deferred tools back, and that intent should hold for the rest of the
+        session rather than silently revert on the next model swap or reload.
+        There is intentionally no companion "reset to configured defaults" path
+        (the way ``clear_effort`` complements ``change_effort``): the caller
+        that owns the override (the dashboard handler) recreates the session
+        from the configured defaults when the operator wants the original
+        thresholds back, so a dedicated reset lever would be redundant surface
+        for a rarely-hit case. Only the rollback-on-failure snapshot above is a
+        reset, and it exists solely so a FAILED restart cannot poison future
+        respawns.
+
+        Concurrency (caller's responsibility): the :meth:`has_active_turn`
+        refusal is a check-then-act with no lock held across the restart, so a
+        prompt that begins between the check and ``shutdown()`` would still be
+        interrupted. This method does NOT serialize itself against turn start;
+        the caller must, exactly as the effort lever does. The dashboard
+        entry point (``api_chat_slot_reload_tool_search``) runs the whole
+        sequence under the slot's ``_lock`` and re-checks ``has_active_turn``
+        under that lock, which is the same serialization ``change_effort``
+        relies on. Any other caller must provide equivalent serialization.
         """
         if self._client.backend not in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
             logger.info(

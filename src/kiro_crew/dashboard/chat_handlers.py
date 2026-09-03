@@ -5209,6 +5209,115 @@ async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "reasoning_effort": effort})
 
 
+async def api_chat_slot_reload_tool_search(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/{slot}/reload-tool-search — recompute Tool Search.
+
+    The manual escape hatch for the compaction hole in issue #8082: once
+    kiro-cli defers an MCP tool spec (context grew past ``toolSearch.minPct`` /
+    ``minTokens``), a later ``/compact`` shrinks context back under the
+    threshold but never re-injects the deferred specs, so those tools stay
+    invisible for the rest of the session. The deferral engine lives in
+    kiro-cli on the far side of the ACP boundary and cannot recompute in place,
+    so the only lever KiroCrew has is
+    :meth:`AcpProvider.reload_tool_search` — rewrite the per-session overlay and
+    restart the backend so kiro-cli re-reads it and recomputes deferral against
+    the current (post-``/compact``) context.
+
+    Body (all optional): ``{"min_pct": int, "min_tokens": int}`` — a per-session
+    threshold override for the restarted session. Omit both to reload with the
+    session's current thresholds.
+
+    Returns 200 ``{"ok": True, "reloaded": bool}`` — ``reloaded`` is False when
+    the provider declined (non-kiro backend, Tool Search unmanaged or disabled)
+    so nothing was restarted. Returns 409 ``turn_in_flight`` when a turn is
+    running: a restart mid-turn would kill the streaming prompt, exactly the
+    hazard :meth:`AcpProvider.reload_tool_search` refuses internally, but we
+    surface it as a retryable 409 here rather than a silent no-op.
+    """
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    # App isolation, same policy as the effort route: an app token must own the
+    # slot before it can mutate the live session, and a denial is
+    # indistinguishable from a missing slot.
+    denied = _deny_cross_app_slot_access(request, slot, name, "slot_reload_tool_search")
+    if denied is not None:
+        return denied
+    # Threshold overrides are optional; when present they must be positive ints
+    # (the provider clamps to valid ranges, but reject obvious garbage early so
+    # a typo does not silently restart the backend with a bad override).
+    min_pct: object = None
+    min_tokens: object = None
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict):
+        raw_pct = body.get("min_pct")
+        raw_tokens = body.get("min_tokens")
+        if raw_pct is not None:
+            if not isinstance(raw_pct, int) or isinstance(raw_pct, bool) or raw_pct < 0:
+                return web.json_response(
+                    {"error": "min_pct must be a non-negative integer"}, status=400
+                )
+            min_pct = raw_pct
+        if raw_tokens is not None:
+            if not isinstance(raw_tokens, int) or isinstance(raw_tokens, bool) or raw_tokens < 0:
+                return web.json_response(
+                    {"error": "min_tokens must be a non-negative integer"}, status=400
+                )
+            min_tokens = raw_tokens
+    # The session the reload restarts. ``effective_session_key``, never
+    # ``_history_key_for``: a channel- or cron-born slot runs its turns under
+    # its linked key, so the dashboard-prefixed spelling would fetch the wrong
+    # provider (or none) and reload nothing while the live process kept its
+    # stale, tool-deferred state.
+    session_key = effective_session_key(slot)
+    # Serialize the whole reload under the slot lock and re-check the turn
+    # guard under it: reload_tool_search's own has_active_turn() refusal is a
+    # check-then-act with no lock across shutdown()/start(), so it relies on
+    # the caller to fence out a prompt that could start in that window. Holding
+    # _lock here (the awaits below yield the loop) is the same serialization
+    # the effort route uses — a turn cannot begin between our check and the
+    # provider's restart because starting one takes the same lock.
+    async with slot._lock:
+        provider = state.sessions.get_provider(session_key)
+        if not isinstance(provider, AcpProvider):
+            # No live ACP session (cold slot, or a non-ACP provider): there is
+            # no deferred-tool state to recompute. Report reloaded=False rather
+            # than 404 so the caller can treat "nothing to do" uniformly.
+            return web.json_response({"ok": True, "reloaded": False})
+        if provider.has_active_turn():
+            return web.json_response(
+                {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
+            )
+        try:
+            reloaded = await provider.reload_tool_search(min_pct=min_pct, min_tokens=min_tokens)
+        except Exception as exc:
+            # reload_tool_search rolls its own thresholds back before re-raising
+            # on a failed restart, so the provider is left consistent; surface a
+            # 500 so the operator knows the reload did not take effect.
+            logger.warning(
+                "reload_tool_search failed for slot %s: %s: %s",
+                name,
+                type(exc).__name__,
+                exc,
+            )
+            return web.json_response(
+                {"error": "tool search reload failed", "code": "reload_failed"}, status=500
+            )
+    if reloaded:
+        logger.info(
+            "Slot %s Tool Search reloaded (min_pct=%s min_tokens=%s)",
+            name,
+            min_pct,
+            min_tokens,
+        )
+    return web.json_response({"ok": True, "reloaded": bool(reloaded)})
+
+
 async def api_chat_slot_reload(request: web.Request) -> web.Response:
     """POST /api/chat/slots/{slot}/reload -- relaunch the slot's agent process.
 

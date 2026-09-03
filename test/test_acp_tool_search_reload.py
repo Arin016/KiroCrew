@@ -72,10 +72,28 @@ async def test_kiro_reload_rewrites_overlay_and_restarts(tmp_path):
 @pytest.mark.asyncio
 async def test_threshold_override_written_before_restart(tmp_path):
     # (2) a per-call threshold override lands in cli.json and updates the
-    # provider instance, and the overlay is written before start() runs.
+    # provider instance, AND the overlay carrying that override is written
+    # BEFORE start() is awaited. The ordering matters: start() re-applies the
+    # overlay too, but reload_tool_search writes it explicitly first so the
+    # override is authoritative regardless of start()'s internal ordering. We
+    # enforce it by recording an ordering token from BOTH the overlay-write
+    # path (wrapping _apply_tool_search_overlay to snapshot what actually
+    # reached disk) and from start(), then asserting the sequence.
     provider = _kiro_provider(tmp_path)
     order: list[str] = []
-    provider.start.side_effect = lambda: order.append("start")
+
+    real_apply = provider._apply_tool_search_overlay
+
+    def _record_overlay():
+        real_apply()
+        # Record the override values as they exist on disk at write time, so
+        # the assertion proves the OVERRIDDEN overlay (not a later default
+        # re-write) preceded the restart.
+        on_disk = json.loads(_cli_json(tmp_path).read_text(encoding="utf-8"))
+        order.append(("overlay", on_disk["toolSearch.minPct"], on_disk["toolSearch.minTokens"]))
+
+    provider._apply_tool_search_overlay = _record_overlay
+    provider.start.side_effect = lambda: order.append(("start",))
 
     result = await provider.reload_tool_search(min_pct=12, min_tokens=1234)
 
@@ -85,6 +103,9 @@ async def test_threshold_override_written_before_restart(tmp_path):
     data = json.loads(_cli_json(tmp_path).read_text(encoding="utf-8"))
     assert data["toolSearch.minPct"] == 12
     assert data["toolSearch.minTokens"] == 1234
+    # The override overlay was written, carried the override, and did so before
+    # start() ran.
+    assert order == [("overlay", 12, 1234), ("start",)]
 
 
 @pytest.mark.asyncio
