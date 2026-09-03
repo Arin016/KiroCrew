@@ -252,6 +252,27 @@ describe('the provider gallery', () => {
     expect(screen.getByText(`${CONNECTION_PROVIDERS.length} available`)).toBeInTheDocument()
   })
 
+  it('keeps feedback slots out of the compact gallery until feedback exists', async () => {
+    mount()
+
+    await waitFor(() => expect(cards()).toHaveLength(CONNECTION_PROVIDERS.length))
+    expect(document.querySelectorAll('[data-slot="connection-feedback"]')).toHaveLength(0)
+  })
+
+  it('reserves a feedback slot on every displayed card when one card has feedback', async () => {
+    mcpServers.mockResolvedValue([server()])
+    mcpProbe.mockResolvedValue([server()])
+    mount()
+
+    await waitFor(() => expect(cards()).toHaveLength(CONNECTION_PROVIDERS.length))
+    fireEvent.click(within(card('notion')).getByRole('button', { name: 'Test' }))
+    await screen.findByText('Connection is healthy.')
+
+    const slots = document.querySelectorAll('[data-slot="connection-feedback"]')
+    expect(slots).toHaveLength(CONNECTION_PROVIDERS.length)
+    expect(Array.from(slots).filter(slot => slot.querySelector('[role="status"]'))).toHaveLength(1)
+  })
+
   it('shows an unconnected provider its docs link and a Connect button', async () => {
     mount()
 

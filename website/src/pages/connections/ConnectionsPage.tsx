@@ -364,7 +364,7 @@ interface ConnectionCardProps {
    *  can name itself, while an unknowable one must keep the honest hedge. */
   grantPresent?: boolean
   busy?: ConnectionAction
-  feedback?: Feedback
+  feedbackSlots: ReadonlyArray<{ slug: string; value: Feedback }>
   highlighted: boolean
   onConnect: () => Promise<unknown>
   onCancel: () => Promise<unknown>
@@ -397,7 +397,7 @@ function ConnectionCard({
   connectedSince,
   grantPresent,
   busy,
-  feedback,
+  feedbackSlots,
   highlighted,
   onConnect,
   onCancel,
@@ -806,25 +806,58 @@ function ConnectionCard({
         )}
       </div>
 
-      {feedback && (
-        <div role={feedback.kind === 'success' ? 'status' : 'alert'} className={`mt-3 text-[11px] ${feedback.kind === 'error' ? 'text-danger' : feedback.kind === 'warning' ? 'text-warn' : 'text-ok'}`}>
-          {feedback.text}
-          {feedback.revoke && (
-            <>
-              {' '}
-              <a href={feedback.revoke.href} target="_blank" rel="noopener noreferrer" className="font-medium text-accent hover:text-accent-hover">
-                {t('pages.connectionsPage.revoke_at_provider', { provider: feedback.revoke.provider })} <ExternalLink className="lucide-inline" aria-hidden="true" />
-              </a>
-            </>
-          )}
-          {feedback.help && (
-            <>
-              {' '}
-              <a href={feedback.help.href} target="_blank" rel="noopener noreferrer" className="font-medium text-accent hover:text-accent-hover">
-                {t('pages.connectionsPage.documentation')} <ExternalLink className="lucide-inline" aria-hidden="true" />
-              </a>
-            </>
-          )}
+      {feedbackSlots.length > 0 && (
+        <div data-slot="connection-feedback" className="mt-3 grid text-[11px]">
+          {feedbackSlots.map(slot => {
+            const visible = slot.slug === provider.slug
+            if (!visible) {
+              const revokeLabel = slot.value.revoke
+                ? t('pages.connectionsPage.revoke_at_provider', { provider: slot.value.revoke.provider })
+                : ''
+              const helpLabel = slot.value.help
+                ? t('pages.connectionsPage.documentation')
+                : ''
+              return (
+                <div
+                  key={slot.slug}
+                  aria-hidden="true"
+                  data-placeholder={[slot.value.text, revokeLabel, helpLabel].filter(Boolean).join(' ')}
+                  className="invisible col-start-1 row-start-1 before:content-[attr(data-placeholder)]"
+                />
+              )
+            }
+            return (
+              <div
+                key={slot.slug}
+                role={slot.value.kind === 'success' ? 'status' : 'alert'}
+                className={`col-start-1 row-start-1 ${
+                  slot.value.kind === 'error'
+                    ? 'text-danger'
+                    : slot.value.kind === 'warning'
+                      ? 'text-warn'
+                      : 'text-ok'
+                }`}
+              >
+                {slot.value.text}
+                {slot.value.revoke && (
+                  <>
+                    {' '}
+                    <a href={slot.value.revoke.href} target="_blank" rel="noopener noreferrer" className="font-medium text-accent hover:text-accent-hover">
+                      {t('pages.connectionsPage.revoke_at_provider', { provider: slot.value.revoke.provider })} <ExternalLink className="lucide-inline" aria-hidden="true" />
+                    </a>
+                  </>
+                )}
+                {slot.value.help && (
+                  <>
+                    {' '}
+                    <a href={slot.value.help.href} target="_blank" rel="noopener noreferrer" className="font-medium text-accent hover:text-accent-hover">
+                      {t('pages.connectionsPage.documentation')} <ExternalLink className="lucide-inline" aria-hidden="true" />
+                    </a>
+                  </>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
     </article>
@@ -1021,6 +1054,10 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       `${provider.name} ${provider.slug} ${provider.mcp_url}`.toLowerCase().includes(needle),
     )
   }, [search, servicesEnabled])
+  const feedbackSlots = filteredProviders.flatMap(provider => {
+    const value = feedback[provider.slug]
+    return value ? [{ slug: provider.slug, value }] : []
+  })
 
   useEffect(() => {
     if (activeTab !== 'services' || !highlightedSlug) return
@@ -1397,7 +1434,7 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
                     // indeterminate stays undefined so the card keeps the hedge.
                     grantPresent={confirmedGrantPresent(status)}
                     busy={cardBusy}
-                    feedback={feedback[provider.slug]}
+                    feedbackSlots={feedbackSlots}
                     highlighted={highlightedSlug === provider.slug}
                     onConnect={() => connect(provider)}
                     onCancel={() => cancelConnection(provider, server)}
