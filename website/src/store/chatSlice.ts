@@ -99,6 +99,45 @@ function isRedeliveredMessage(
   return false
 }
 
+/** Remove duplicate messages that share the same delivery identity —
+ *  `meta.mid` plus `role` plus `ts`.
+ *
+ *  On non-streaming channels (e.g. Weixin/iLink), the slot's turn-complete
+ *  broadcast and a concurrent `refreshSlot` HTTP fetch can race — each
+ *  delivering the same assistant row with the same server-minted `mid` — and
+ *  the merge helpers (`mergePreservedClientTs`, `mergePreservedThinking`) do
+ *  not collapse rows by `mid` because their contracts are narrower (timestamp
+ *  preservation, reasoning re-injection). This final pass keeps the LAST
+ *  occurrence of each identity (the freshest merge outcome) and drops earlier
+ *  duplicates, making the dedup idempotent and safe on already-clean arrays.
+ *
+ *  Identity is deliberately mid AND role AND ts, not mid alone: the same row
+ *  delivered through both doors carries an identical role and server `ts`, so
+ *  the legitimate race duplicates still collapse — while a DISTINCT row that
+ *  illegitimately reuses a mid (e.g. a crafted `meta.mid` in a POST /api/chat
+ *  body, which `_ChatSlot.append` preserves rather than re-minting) is
+ *  appended at a different time and therefore never hides an earlier
+ *  legitimate transcript row. */
+function deduplicateByMid(msgs: ChatMessage[]): ChatMessage[] {
+  const seen = new Set<string>()
+  // Walk backwards so the LAST (newest) occurrence wins.
+  const result: ChatMessage[] = []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const mid = msgs[i].meta?.mid
+    if (typeof mid === 'string' && mid) {
+      // JSON-array key rather than a delimiter-joined template: no delimiter
+      // can collide with field content, and no string literal trips the
+      // zero-tolerance i18n added-lines gate on this internal identity key.
+      const key = JSON.stringify([mid, msgs[i].role, msgs[i].ts ?? null])
+      if (seen.has(key)) continue
+      seen.add(key)
+    }
+    result.push(msgs[i])
+  }
+  result.reverse()
+  return result
+}
+
 /** Tail window (rows) for a backward `sendId` scan. Shared by the echo
  *  reconcile and the response-confirm path so the two cannot drift into
  *  disagreeing about which bubbles are still addressable by their send id. */
@@ -5184,6 +5223,7 @@ const chatSlice = createSlice({
         next = reseated.list
         parked[safeKey(key)] = [...reseated.remaining, ...orphaned]
         next = hydrateQueuedBubbles(next, queue)
+        next = deduplicateByMid(next)
         // Switching back to an already-loaded slot re-fetches a history that is
         // usually identical; skipping the write keeps every existing reference.
         if (!sameTranscript(existing, next)) state.messages = next
@@ -5332,9 +5372,12 @@ const chatSlice = createSlice({
          * Same value as the `reinsertThinkingOrphans` call below and as
          * `switchSlot.fulfilled` -- the retained head is part of the loaded window,
          * so raw `hasMore` would park reasoning whose anchor is already on screen. */
-        state.messages = mergePreservedThinking(state.messages, mergePreservedClientTs(state.messages, sorted), messages, !keptCursor.hasMore)
+        state.messages = deduplicateByMid(mergePreservedThinking(state.messages, mergePreservedClientTs(state.messages, sorted), messages, !keptCursor.hasMore))
         // A refresh rebuilds `messages` wholesale, so parked reasoning has to be re-seated
         // here too — otherwise it stays invisible until the next slot switch.
+        // (Re-seating only ADDS client-only thinking rows, which by contract
+        // never carry a server-minted mid, so the deduplicateByMid pass above
+        // stays authoritative for the rebuilt history.)
         const parkedOnRefresh = (state.thinkingOrphans ??= {})
         // `windowComplete` describes the LOADED window, not the fetch: `messages`
         // now carries the retained head, so a raw `hasMore` would park reasoning
