@@ -94,6 +94,17 @@
         "typed": "Typed"
       }
     },
+    "guide": {
+      "title": "{{productName}} Guide",
+      "searchPlaceholder": "Search by symptom, error, or keyword…",
+      "loading": "Loading…",
+      "noResults": "No matching entries",
+      "errorLoading": "Could not load the guide",
+      "selectPrompt": "Select an entry to see the full fix",
+      "symptomLabel": "Symptom",
+      "stepsLabel": "Steps",
+      "crewPromptLabel": "Ask your crew"
+    },
     "autoResearch": {
       "grillTree": {
         "collapse": "Collapse",

@@ -134,6 +134,17 @@
     }
   },
   "apps": {
+    "guide": {
+      "title": "Guide {{productName}}",
+      "searchPlaceholder": "Rechercher par symptôme, erreur ou mot-clé…",
+      "loading": "Chargement…",
+      "noResults": "Aucune entrée correspondante",
+      "errorLoading": "Impossible de charger le guide",
+      "selectPrompt": "Sélectionne une entrée pour voir la solution complète",
+      "symptomLabel": "Symptôme",
+      "stepsLabel": "Étapes",
+      "crewPromptLabel": "Demander à ton équipe"
+    },
     "agentWorlds": {
       "manifest": {
         "description": "Transforme tes agents en cours d’exécution en personnages d’une scène animée en pixel art : un coup d’œil suffit pour savoir à quel point Kiro Crew est occupé. Chaque agent actif apparaît sous forme de sprite qui réagit quand une tâche démarre et quand elle se termine, dans des scènes thématiques allant du bureau classique à la tour du magicien ou au laboratoire sous-marin. Détache la scène dans sa propre fenêtre pour la garder sur un second écran pendant que tu travailles.",

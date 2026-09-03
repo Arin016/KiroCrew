@@ -128,6 +128,17 @@
     }
   },
   "apps": {
+    "guide": {
+      "title": "{{productName}} 指南",
+      "searchPlaceholder": "按现象、报错或关键词搜索…",
+      "loading": "加载中…",
+      "noResults": "没有匹配的条目",
+      "errorLoading": "无法加载指南",
+      "selectPrompt": "选择一个条目以查看完整修法",
+      "symptomLabel": "现象",
+      "stepsLabel": "步骤",
+      "crewPromptLabel": "交给你的团队"
+    },
     "agentWorlds": {
       "manifest": {
         "use_case_1": "在 crew 工作时，通过第二块屏幕上的概览视图实时查看代理、定时任务和子代理。",
