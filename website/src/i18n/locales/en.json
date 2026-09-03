@@ -6092,6 +6092,7 @@
         "hours_ago": "{{count}}h ago",
         "days_ago": "{{count}}d ago",
         "copy_preview": "Copy text",
+        "copied": "Copied",
         "copy_link": "Copy link to message",
         "unpin": "Unpin",
         "jump_to_message": "Jump to message"

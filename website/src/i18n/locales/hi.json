@@ -9057,6 +9057,7 @@
         "hours_ago": "{{count}} घंटे पहले",
         "days_ago": "{{count}} दिन पहले",
         "copy_preview": "टेक्स्ट कॉपी करें",
+        "copied": "कॉपी किया गया",
         "copy_link": "संदेश का लिंक कॉपी करें",
         "unpin": "अनपिन",
         "jump_to_message": "संदेश पर जाएं"

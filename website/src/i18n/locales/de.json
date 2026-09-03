@@ -9057,6 +9057,7 @@
         "hours_ago": "vor {{count}} Std.",
         "days_ago": "vor {{count}} T.",
         "copy_preview": "Text kopieren",
+        "copied": "Kopiert",
         "copy_link": "Link zur Nachricht kopieren",
         "unpin": "Loslösen",
         "jump_to_message": "Zur Nachricht springen"

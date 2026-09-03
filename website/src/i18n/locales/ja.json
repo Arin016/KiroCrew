@@ -8925,6 +8925,7 @@
         "hours_ago": "{{count}}時間前",
         "days_ago": "{{count}}日前",
         "copy_preview": "テキストをコピー",
+        "copied": "コピーしました",
         "copy_link": "メッセージへのリンクをコピー",
         "unpin": "ピン留めを解除",
         "jump_to_message": "メッセージに移動"

@@ -9189,6 +9189,7 @@
         "hours_ago": "il y a {{count}} h",
         "days_ago": "il y a {{count}} j",
         "copy_preview": "Copier le texte",
+        "copied": "Copié",
         "copy_link": "Copier le lien vers le message",
         "unpin": "Désépingler",
         "jump_to_message": "Aller au message"
