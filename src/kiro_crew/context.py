@@ -2726,9 +2726,20 @@ class ContextBuilder:
 
         # Session context on first message only
         if is_new_session:
+            # Resumed sessions (ACP ``session/load`` restored the full native
+            # transcript) already carry the original session-start injection —
+            # agent prompt, memory, lessons, and skills are all preserved in
+            # the restored history. Re-injecting the full session context on
+            # every idle-expire → resume cycle stacks ~40K duplicate tokens
+            # into the same window and accelerates compaction. Inject only the
+            # minimal header (fresh date/time + identity) plus a resume marker
+            # so the model knows where the full context lives.
+            slim_resume = resumed and not minimal_context
             # Agent prompt goes BEFORE session context wrapper
             # so the LLM treats it as its identity, not background info.
-            if is_cc:
+            if slim_resume:
+                agent_prompt = ""
+            elif is_cc:
                 # CC gets the SAME KiroCrew persona prompt as kiro — including
                 # the Output Format rules (diff blocks, image embeds, OPTIONS)
                 # which are dashboard UI contracts, not kiro-specific. Only the
@@ -2769,7 +2780,7 @@ class ContextBuilder:
                 mode=mode,
                 blocks_reads=blocks_reads,
                 provider_type=provider_type,
-                minimal_context=minimal_context,
+                minimal_context=minimal_context or slim_resume,
                 runtime_source=runtime_source,
                 exclude_last_n=exclude_last_n,
                 model_window=model_window,
@@ -2802,7 +2813,27 @@ class ContextBuilder:
                     )
                 else:
                     session_ctx = _neutralize_structural_markers(session_ctx)
-                if minimal_context:
+                if slim_resume:
+                    # Re-anchor the critical rules (dashboard/Slack UI
+                    # contracts: diff blocks, [OPTIONS:] buttons, absolute
+                    # paths). They were injected at the original session start
+                    # but sit deep in — and may be compacted out of — the
+                    # restored transcript; at ~1.5K chars they are cheap
+                    # insurance against output-format drift. Same variant
+                    # selection and per-agent opt-out gate as session start.
+                    _resume_rules = (
+                        _critical_rules_for(session_key, runtime_source)
+                        if _agent_includes_crew_context(agent)
+                        else ""
+                    )
+                    parts.append(
+                        "[SESSION RESUMED — the full session context (agent "
+                        "system prompt, memory, lessons, skills) was injected "
+                        "at the original session start and is preserved in the "
+                        "restored conversation history above. Refreshed rules "
+                        "and date/identity follow.]\n" + _resume_rules + session_ctx
+                    )
+                elif minimal_context:
                     parts.append(session_ctx)
                 else:
                     parts.append(
