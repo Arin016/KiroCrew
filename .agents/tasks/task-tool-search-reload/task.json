@@ -1,0 +1,7 @@
+{
+  "task_id": "task-tool-search-reload",
+  "task_description": "Address KiroCrew issue #8082: MCP Tool Search deferred tools stay permanently unavailable in a session even after /compact reduces context below the deferral threshold. The deferral engine is upstream in kiro-cli (far side of the ACP boundary); KiroCrew's only lever is the per-session Tool Search overlay it writes into <work_dir>/.kiro/settings/cli.json. Implement the achievable in-repo fix: a per-session escape hatch (AcpProvider.reload_tool_search) that rewrites the overlay and restarts the kiro-cli backend so deferral is recomputed against the current post-compact context, re-injecting previously deferred specs. Document the remaining upstream-only work for a maintainer.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}

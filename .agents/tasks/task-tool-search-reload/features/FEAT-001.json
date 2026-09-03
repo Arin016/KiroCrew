@@ -1,0 +1,22 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Establish a green baseline. Provision the >=3.12 Python venv the project requires (the sandbox system python3 is 3.9), install KiroCrew in editable mode, and confirm the existing Tool Search tests pass before any change is made. This de-risks the real work in FEAT-002 by proving the toolchain and the affected test module run.",
+  "status": "completed",
+  "steps": [
+    "From repo root /projects/sandbox/KiroCrew, provision the project interpreter and venv. Prefer `make backend` (it runs ensure-python.sh to get a >=3.12 interpreter and installs the backend). If `make` is unavailable or too slow, run `./ensure-python.sh` and then install with that interpreter: `<venv>/bin/pip install -e '.[dev]'`. Network is OPEN_INTERNET so installs are permitted.",
+    "Confirm the package imports in the provisioned venv: `<venv>/bin/python -c 'import kiro_crew.providers.acp'` must succeed (system python3 3.9 will NOT work; use the venv interpreter).",
+    "Run the affected test module to establish the baseline: `<venv>/bin/python -m pytest test/test_acp_tool_search.py -q` and confirm all tests pass.",
+    "Record in findings the exact venv path / interpreter and the exact pytest invocation that works, so FEAT-002 reuses it verbatim."
+  ],
+  "acceptance_criteria": [
+    "A Python >=3.12 venv exists with kiro_crew installed in editable mode.",
+    "`<venv>/bin/python -c 'import kiro_crew.providers.acp'` exits 0.",
+    "`<venv>/bin/python -m pytest test/test_acp_tool_search.py -q` passes with no failures."
+  ],
+  "verification": [
+    "Run `<venv>/bin/python -m pytest test/test_acp_tool_search.py -q` and confirm exit code 0."
+  ],
+  "blocked_reason": null,
+  "findings": "BASELINE ESTABLISHED. Provisioned via `make backend` from repo root /projects/sandbox/KiroCrew (ran ensure-python.sh, created .venv on Python 3.12.13, installed kiro_crew editable with .[dev] plus PEP 735 dev group). Network was OPEN_INTERNET.\n\nEXACT PATHS FOR FEAT-002 (reuse verbatim):\n- venv interpreter: /projects/sandbox/KiroCrew/.venv/bin/python  (Python 3.12.13). Relative form: .venv/bin/python\n- pytest invocation (PASSES, exit 0): from repo root run `.venv/bin/python -m pytest test/test_acp_tool_search.py -q`  -> 36 passed. Uses pytest-xdist (8 workers) automatically via root conftest/addopts.\n\nIMPORT-CHECK NOTE (important for FEAT-002): the acceptance-criterion command `.venv/bin/python -c 'import kiro_crew.providers.acp'` FAILS on a COLD interpreter with a PRE-EXISTING circular import: providers.__init__ -> providers.base -> acp.types -> acp.__init__ -> acp.runtime -> session_pid -> providers.base (partially initialized). This is NOT caused by any change in this task (git shows zero source/test edits; only .agents/ is untracked) and it does NOT affect pytest, which imports kiro_crew.acp first via the root conftest, breaking the cycle. To smoke-check the import outside pytest, import acp first: `.venv/bin/python -c 'import kiro_crew.acp, kiro_crew.providers.acp'` exits 0. FEAT-002 should verify through pytest (`.venv/bin/python -m pytest ...`) which is unaffected, and when editing acp.py be aware of this existing import-order sensitivity.\n\nLint tools available in the venv: black (line length 100), isort, flake8, mypy. black baseline at .github/black-baseline.txt."
+}
