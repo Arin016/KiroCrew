@@ -250,6 +250,340 @@ _CREW_HIDDEN_DIRS: list[str] = _crew_home_entries(_CREW_HIDDEN_LEAVES)
 #: Exposed read-only in every mode.
 _CREW_READONLY_TARGETS: list[str] = _crew_home_entries(_CREW_READONLY_LEAVES)
 
+#: The subset of ``_CREW_READONLY_LEAVES`` the launcher may CREATE in order to seal.
+#:
+#: ``mount(2)`` cannot target a path that does not exist, so the READONLY seal below
+#: skips an absent ceiling and leaves the data home writable at that name — which is
+#: the whole hole on a default install, where none of these has been written yet.
+#: Materialising the path first closes it, and that is only sound for a leaf that
+#: clears BOTH of the following.
+#:
+#: 1. An EMPTY document must mean what an ABSENT file means to the reader:
+#:
+#:    * ``profiles`` — an empty dir yields no profile, same as no dir;
+#:    * ``computer_use.json`` — ``computer_use.enable_state.load_state`` reads ``{}``
+#:      as DISABLED, which is what an absent keystone means;
+#:    * ``oauth_endpoints.json`` — ``security._validate_operator_oauth_entries``
+#:      extends trust by nothing for ``{}``;
+#:    * ``aws_service_consent.json`` — ``aws_consent._read_all`` returns ``{}`` for
+#:      both absent and empty, so every service stays unconfirmed.
+#:
+#: 2. A STALE read of that empty document must fail toward refusal. The seal is a
+#:    bind mount, which pins the INODE for the sandbox's lifetime, while every
+#:    dashboard writer publishes through ``atomic_write`` (temp + rename), i.e. a NEW
+#:    inode. So a sandboxed reader keeps seeing the empty document even after the
+#:    operator writes the real one. For the three files above that freezes them at
+#:    "disabled" / "no consent" / "no extra endpoints" — narrower than the truth. The
+#:    empty ``profiles`` dir is exempt from the concern entirely: a directory bind
+#:    shows live contents, so a profile added later is visible.
+#:
+#: DELIBERATELY EXCLUDED, and each for a different one of those two reasons:
+#:
+#:   * ``denied_commands.json`` — clears (1) but fails (2), which is the direction
+#:     that matters: in-sandbox ``mcp_cron`` reads it to decide whether a command is
+#:     denied, so a pinned ``{}`` would report "nothing is denied" for the rest of the
+#:     sandbox's life even after the operator denies a command. Sealing it would trade
+#:     an agent-authored deny list for a stale one, so it keeps the pre-existing gap;
+#:   * ``security_policy.json`` — fails (1). ``governance.load_security_policy`` reads
+#:     the file whenever it exists and fails CLOSED on a parse or version mismatch, so
+#:     a ``{}`` stub raises ``PlatformCompositionError`` out of a function that runs at
+#:     boot AND per app callback;
+#:   * ``app_admission.json`` — fails (1). Absent means ``open_default()`` (admit),
+#:     while present-but-unreadable means deny-all; a stub would refuse every app;
+#:   * ``admission_policy.json`` — already seeded at first run by
+#:     ``platform.admission.seed_default_policy``, so it is not absent to begin with.
+#:
+#: The same ``mount(2)`` limit leaves the ``SENSITIVE_DIRS`` / ``SENSITIVE_FILES``
+#: mask loops skipping their own absent targets. That is a real sibling gap, not one
+#: this list closes: a mask needs the opposite treatment (an empty bind OVER the
+#: name), and ``_CREW_HIDDEN_LEAVES`` has no reader to prove an empty document is
+#: absent-equivalent, so each leaf needs its own argument.
+_CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = ("profiles",)
+_CREW_PRECREATE_READONLY_FILE_LEAVES: tuple[str, ...] = (
+    "computer_use.json",
+    "oauth_endpoints.json",
+    "aws_service_consent.json",
+)
+
+#: What a materialised ceiling holds — the empty JSON object every reader above
+#: already treats as its absent default. NOT a zero-byte file, which is not valid
+#: JSON and would read as CORRUPT rather than as absent.
+_EMPTY_CEILING_DOCUMENT: bytes = b"{}\n"
+
+
+def _sealable_absent_ceilings() -> tuple[list[str], list[str]]:
+    """Resolved (dir, file) ceiling paths that may be created so the seal can apply.
+
+    Resolved through ``config_dir()`` — the LIVE data home — rather than expanded over
+    both ``_CREW_HOME_PREFIXES`` the way the deny lists are. A deny rule covers both
+    spellings because either tree may still hold bytes; creation has the opposite
+    requirement, since a stub in the deprecated ``~/.kirocrew`` of a migrated host is a
+    file nothing will ever read. Whichever spelling ``config_dir()`` resolves to is
+    already in the launcher's ``READONLY_DIRS``: both ``$HOME``-relative prefixes are
+    listed there, and ``_relocated_crew_targets`` adds a data home that escapes
+    ``$HOME``.
+
+    Never raises: an unresolvable data home yields nothing and the seal behaves exactly
+    as it did before this function existed.
+    """
+    try:
+        root = str(config_dir())
+    except Exception:  # pragma: no cover - defensive; a spawn must not fail on this
+        logger.debug("could not resolve the crew data home for ceiling sealing", exc_info=True)
+        return ([], [])
+    return (
+        [os.path.join(root, leaf) for leaf in _CREW_PRECREATE_READONLY_DIR_LEAVES],
+        [os.path.join(root, leaf) for leaf in _CREW_PRECREATE_READONLY_FILE_LEAVES],
+    )
+
+
+class SandboxCeilingUnsealable(RuntimeError):
+    """A governance ceiling could not be made sealable, so the sandbox refuses to launch.
+
+    The seal exists because an unsealed ceiling is a self-elevation hole: a sandboxed
+    process that can write ``computer_use.json`` turns on desktop control for itself.
+    Launching anyway would run the agent with that hole open while every log line said
+    the ceiling was protected, so this is the ``_mount_or_die`` case rather than the
+    best-effort one — a control was requested and could not be established.
+
+    Raised out of ``namespace_argv``, so it surfaces to whichever ``wrap_argv`` caller
+    asked for the spawn. Those callers report a failed operation; none of them falls back
+    to running the command unconfined, which is what makes refusing safe here.
+
+    The two states that reach it are both actionable by an operator, and the message
+    names the path for that reason: a DANGLING SYMLINK squatting a ceiling path (either
+    tampering, or a link whose destination went away), and a data home where creation
+    itself fails (a read-only mount, or a filesystem with no hardlink support).
+    """
+
+
+def _warn_unsealed_ceiling(target: str, exc: "OSError | None") -> None:
+    """Say WHY the spawn is being refused: this ceiling could not be made sealable.
+
+    Called immediately before :class:`SandboxCeilingUnsealable` is raised, so the spawn
+    does NOT proceed — the log line carries the path and the errno that the exception
+    message alone would not, and an operator reading it is the only one who can fix the
+    data home. ``warning`` rather than ``debug`` for that reason: a refused spawn with no
+    explanation is indistinguishable from an unrelated failure.
+
+    Per spawn rather than once per process, matching the launcher's own ``EXPOSE_FILES``
+    pre-read warning — a host where this keeps happening has a real problem, and
+    de-duplicating it would hide how often the control cannot be established.
+    """
+    logger.warning(
+        "sandbox: REFUSING to launch — could not create the governance ceiling %s (%s). "
+        "mount(2) cannot seal a path that does not exist, so proceeding would leave it "
+        "writable inside the sandbox",
+        target,
+        exc if exc is not None else "publish failed",
+    )
+
+
+def _warn_if_alias_backed(target: str) -> None:
+    """Warn when an ALREADY-PRESENT ceiling is reachable under a second name.
+
+    ``MS_RDONLY`` binds a MOUNT, not an inode, so the seal only covers the path it was
+    established on. Two shapes therefore survive it, and both are invisible to the seal
+    loop because the path resolves and reads as present:
+
+    * the ceiling is a **symlink**. The launcher seals the inode it resolves to, but the
+      link NAME lives in the writable data home, so a sandboxed process can unlink it and
+      put a real file of its own there instead;
+    * the ceiling is a **regular file with another hardlink**. The alias is a different
+      path, so it is outside the read-only mount, and a write through it changes the very
+      inode the ceiling exposes.
+
+    Reported, not refused, and deliberately so. Refusing would break the ordinary reasons
+    a config file has a second name — a dotfile manager such as chezmoi or GNU stow, or a
+    snapshot tool holding a hardlink — by turning them into a hard spawn failure, which is
+    a much wider blast radius than the exposure. Neither shape is introduced here either:
+    the ceilings this module publishes end at ``st_nlink == 1`` and are never symlinks, so
+    this is a PRE-EXISTING property of every entry in ``READONLY_DIRS``, reachable only on
+    a host where something else already created the ceiling that way. Closing it needs the
+    data-home root sealed, which is a different change.
+
+    The warning exists because the alternative is worse than the hole: without it the log
+    says the ceiling is sealed while it is writable under another name.
+    """
+    try:
+        info = os.lstat(target)
+    except OSError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        logger.warning(
+            "sandbox: the governance ceiling %s is a SYMLINK. The seal covers the file it "
+            "resolves to, but the link itself sits in a writable directory, so a sandboxed "
+            "process can replace the name. Make it a regular file to close that.",
+            target,
+        )
+    elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        logger.warning(
+            "sandbox: the governance ceiling %s has %d hardlinks. The seal covers this "
+            "path only, so a write through another name reaches the same inode. Remove the "
+            "extra link to close that.",
+            target,
+            info.st_nlink,
+        )
+
+
+def _refuse_if_dangling_symlink(target: str) -> None:
+    """Refuse the spawn when *target* is a symlink that resolves to nothing.
+
+    A RESOLVING symlink is left alone deliberately: it reads as present, so the launcher
+    seals the inode it resolves to. The residual exposure there — the link NAME stays
+    replaceable in a writable parent — is pre-existing for every ceiling, not specific to
+    one this function materialises, and closing it needs the data-home root sealed.
+    """
+    if not os.path.islink(target) or os.path.exists(target):
+        return
+    pointed_at = "(unreadable)"
+    with contextlib.suppress(OSError):
+        pointed_at = os.readlink(target)
+    raise SandboxCeilingUnsealable(
+        f"the governance ceiling {target} is a DANGLING symlink -> {pointed_at}. "
+        "mount(2) cannot seal it and it would leave the path writable inside the "
+        "sandbox. Remove or repoint it, or lower sandbox_level to run without the seal "
+        "deliberately."
+    )
+
+
+def _publish_empty_ceiling(target: str, parent: str) -> bool:
+    """Write the empty document to a sibling temp file, then link it into place.
+
+    Two steps rather than ``open(target, O_CREAT | O_EXCL)`` followed by a write,
+    because the one-step form publishes the NAME before the BYTES: a crash, a full
+    disk, or a signal in between leaves a zero-length file at the ceiling path, and
+    zero length is not valid JSON — the reader would see corrupt where this function
+    means absent. Here the target only ever appears once its content is complete.
+
+    ``os.link`` is the publish because it is the no-clobber one: unlike ``os.replace``
+    it fails with ``EEXIST`` instead of overwriting, so a racing spawn — or an operator
+    writing the real document in the same instant — keeps its file. That is also why
+    the ``os.path.exists`` pre-check upstream is an optimisation and not the guard.
+
+    ``mkstemp`` creates the temp file 0o600 before the first byte, so no separate
+    lockdown call is needed (and none may be added: a lockdown applied after content
+    reaches a published path is the defect ``scripts/check_lockdown_before_publish.py``
+    refuses). The mode needs no reassertion either — a umask can only clear bits, never
+    add them.
+
+    Returns ``False`` on any failure, having published nothing. The caller decides what
+    a failure means; this function's only contract is that the ceiling path is either
+    absent or holds the complete document.
+    """
+    fd = -1
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".kirocrew-ceiling-", suffix=".tmp")
+        # ``os.write`` is not obliged to consume the whole buffer, and a short write is
+        # not an error — it returns a count. Taking that count for success would link a
+        # TRUNCATED document, which reads as corrupt rather than as absent and is the
+        # exact outcome the temp-then-link shape exists to prevent. Loop, and treat zero
+        # progress as an error so a filesystem that accepts nothing cannot spin here.
+        view = memoryview(_EMPTY_CEILING_DOCUMENT)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError(errno.EIO, "short write to a ceiling temp file", tmp)
+            view = view[written:]
+        os.close(fd)
+        fd = -1
+        os.link(tmp, target)
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _materialize_sealable_ceilings() -> list[str]:
+    """Create every absent sealable ceiling; return the paths actually created.
+
+    Runs on the Linux spawn path only, immediately before the launcher builds its
+    ``READONLY_DIRS`` mount sequence, so a ceiling that did not exist a moment ago is
+    a read-only mountpoint by the time the sandboxed command runs.
+
+    **Fail-closed.** If a ceiling cannot be made sealable this raises
+    :class:`SandboxCeilingUnsealable` and the spawn does not happen. That is a
+    deliberate reversal of an earlier best-effort version, which warned and continued:
+    continuing means the launcher's ``os.path.exists`` guard skips the path, so the
+    sandboxed process runs with a writable governance keystone and nothing downstream
+    notices. An unsealed ceiling is the one thing this function exists to prevent, so it
+    refuses for the same reason ``_mount_or_die`` refuses a failed hiding mount.
+
+    Two states trigger it:
+
+    * a **dangling symlink** squatting a ceiling path. ``os.path.exists`` follows
+      symlinks, so it reads as absent to this function AND to the launcher's guard,
+      while ``os.link`` refuses the name as ``EEXIST`` — the sandboxed process's write
+      then follows the link and the host reads the result back through the ceiling path.
+      It is not removed here: ``islink`` followed by ``unlink`` is not atomic, and the
+      dashboard publishes a real keystone over that same name with ``atomic_write``, so
+      a removal racing a validated operator write would delete the operator's new
+      settings. POSIX offers no unlink-only-if-still-a-symlink, so the safe answer is to
+      refuse and let a human resolve it;
+    * a **creation failure** other than ``EEXIST`` — a read-only mount, or a filesystem
+      with no hardlink support.
+
+    ``EEXIST`` is the one benign outcome, in both loops: the racing spawn that got there
+    first, or the operator's real document. Either way the path now exists, so the
+    launcher seals it and there is nothing to report.
+
+    Never TRUNCATES and never REMOVES: an existing ceiling is left byte-for-byte alone,
+    so this can only ever add the absent default.
+    """
+    created: list[str] = []
+    dir_targets, file_targets = _sealable_absent_ceilings()
+
+    for target in dir_targets:
+        _refuse_if_dangling_symlink(target)
+        if os.path.exists(target):
+            # Present, so the launcher will seal it -- but say so when the seal is
+            # reachable around rather than through this path.
+            _warn_if_alias_backed(target)
+            continue
+        if not os.path.isdir(os.path.dirname(target)):
+            continue
+        try:
+            # 0o700 needs no reassertion: a umask can only clear bits, never add them.
+            os.mkdir(target, 0o700)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            _warn_unsealed_ceiling(target, exc)
+            raise SandboxCeilingUnsealable(
+                f"cannot create the governance ceiling {target}: {exc}"
+            ) from exc
+        created.append(target)
+
+    for target in file_targets:
+        parent = os.path.dirname(target)
+        _refuse_if_dangling_symlink(target)
+        if os.path.exists(target):
+            _warn_if_alias_backed(target)
+            continue
+        if not os.path.isdir(parent):
+            continue
+        if _publish_empty_ceiling(target, parent):
+            created.append(target)
+        elif not os.path.exists(target):
+            # Absent after a failed publish, so nothing won the race: the seal really
+            # did not apply. ``exists`` rather than a plumbed-through errno because the
+            # publish is two syscalls and only the OUTCOME decides whether this matters.
+            _warn_unsealed_ceiling(target, None)
+            raise SandboxCeilingUnsealable(
+                f"cannot publish the governance ceiling {target}; it would stay writable "
+                "inside the sandbox"
+            )
+
+    return created
+
+
 _STRICT_DIRS: list[str] = [
     ".kiro/crew-auth-staging",
     ".aws",
@@ -3227,6 +3561,17 @@ def namespace_argv(
     resolved_argv = list(argv)
     if resolved_argv:
         resolved_argv[0] = _resolve_agent_executable(resolved_argv[0])
+
+    # Give the seal something to mount ON, or refuse the spawn. ``READONLY_DIRS`` is
+    # guarded on
+    # ``os.path.exists`` in the launcher (a ceiling may be a plain file, so the guard
+    # cannot be ``isdir``), and an absent ceiling therefore gets no bind + remount pair
+    # at all — leaving the data home writable at that name for the whole sandbox.
+    # Materialising the sealable subset first is what makes the seal non-vacuous on a
+    # default install. Runs before the script is built so the paths exist by the time
+    # the child mounts, and raises ``SandboxCeilingUnsealable`` rather than launching
+    # with a keystone the seal could not cover.
+    _materialize_sealable_ceilings()
 
     script = _build_launcher_script(
         sandbox_level,
