@@ -5385,7 +5385,9 @@
       "redaction_failed_retry": "脱敏失败 — 重试",
       "send_selection_to_chat": "发送所选内容到聊天",
       "send_to_chat": "发送到聊天",
-      "sending": "发送中…"
+      "sending": "发送中…",
+      "touch_select_anchor": "已设第一点 — 点按另一端",
+      "touch_select_done": "已选择范围 — 点按复制"
     },
     "codeBlock": {
       "copied": "已复制！",
@@ -7037,7 +7039,7 @@
       "copy": "复制",
       "copy_failed": "复制失败",
       "copy_needs_https": "复制需要安全 (HTTPS) 连接",
-      "copy_no_selection": "点按“选择”，然后“复制”",
+      "copy_no_selection": "长按某一行或点按“选择”，然后点按“复制”",
       "copy_done": "已复制",
       "copy_permission_needed": "允许访问剪贴板",
       "paste": "粘贴",

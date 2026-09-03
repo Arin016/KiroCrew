@@ -5563,7 +5563,9 @@
       "redaction_failed_retry": "Échec du masquage — réessayer",
       "send_selection_to_chat": "Envoyer la sélection au chat",
       "send_to_chat": "Envoyer au chat",
-      "sending": "Envoi…"
+      "sending": "Envoi…",
+      "touch_select_anchor": "Premier point défini — touchez l'autre extrémité",
+      "touch_select_done": "Plage sélectionnée — touchez Copier"
     },
     "codeBlock": {
       "copied": "Copié !",
@@ -7247,7 +7249,7 @@
       "copy": "Copier",
       "copy_failed": "Échec de la copie",
       "copy_needs_https": "La copie nécessite une connexion sécurisée (HTTPS)",
-      "copy_no_selection": "Touchez Sélectionner, puis Copier",
+      "copy_no_selection": "Appuyez longuement sur une ligne ou touchez Sélectionner, puis Copier",
       "copy_done": "Copié",
       "copy_permission_needed": "Autoriser l'accès au presse-papiers",
       "paste": "Coller",

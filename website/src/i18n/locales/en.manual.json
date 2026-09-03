@@ -1482,7 +1482,9 @@
       "redaction_failed_retry": "Redaction failed — retry",
       "send_selection_to_chat": "Send selection to chat",
       "send_to_chat": "Send to chat",
-      "sending": "Sending…"
+      "sending": "Sending…",
+      "touch_select_anchor": "First point set — tap the other end",
+      "touch_select_done": "Range selected — tap Copy"
     },
     "codeBlock": {
       "copied": "Copied!",
@@ -2250,7 +2252,7 @@
       "copy": "Copy",
       "copy_failed": "Copy failed",
       "copy_needs_https": "Copy needs a secure (HTTPS) connection",
-      "copy_no_selection": "Tap Select, then Copy",
+      "copy_no_selection": "Long-press a line or tap Select, then Copy",
       "copy_done": "Copied",
       "copy_permission_needed": "Allow clipboard access",
       "paste": "Paste",

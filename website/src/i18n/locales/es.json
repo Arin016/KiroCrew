@@ -5563,7 +5563,9 @@
       "redaction_failed_retry": "Error al censurar — reintentar",
       "send_selection_to_chat": "Enviar la selección al chat",
       "send_to_chat": "Enviar al chat",
-      "sending": "Enviando…"
+      "sending": "Enviando…",
+      "touch_select_anchor": "Primer punto fijado: toca el otro extremo",
+      "touch_select_done": "Rango seleccionado: toca Copiar"
     },
     "codeBlock": {
       "copied": "¡Copiado!",
@@ -7247,7 +7249,7 @@
       "copy": "Copiar",
       "copy_failed": "Error al copiar",
       "copy_needs_https": "Copiar requiere una conexión segura (HTTPS)",
-      "copy_no_selection": "Toca Seleccionar y luego Copiar",
+      "copy_no_selection": "Mantén pulsada una línea o toca Seleccionar, luego Copiar",
       "copy_done": "Copiado",
       "copy_permission_needed": "Permitir el acceso al portapapeles",
       "paste": "Pegar",

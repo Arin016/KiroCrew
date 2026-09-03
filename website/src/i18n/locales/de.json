@@ -5474,7 +5474,9 @@
       "redaction_failed_retry": "Redigieren fehlgeschlagen — wiederholen",
       "send_selection_to_chat": "Auswahl an den Chat senden",
       "send_to_chat": "An den Chat senden",
-      "sending": "Wird gesendet…"
+      "sending": "Wird gesendet…",
+      "touch_select_anchor": "Erster Punkt gesetzt — tippe das andere Ende an",
+      "touch_select_done": "Bereich ausgewählt — tippe auf Kopieren"
     },
     "codeBlock": {
       "copied": "Kopiert!",
@@ -7142,7 +7144,7 @@
       "copy": "Kopieren",
       "copy_failed": "Kopieren fehlgeschlagen",
       "copy_needs_https": "Kopieren erfordert eine sichere (HTTPS) Verbindung",
-      "copy_no_selection": "Auswählen tippen, dann Kopieren",
+      "copy_no_selection": "Zeile lang gedrückt halten oder Auswählen antippen, dann Kopieren",
       "copy_done": "Kopiert",
       "copy_permission_needed": "Zugriff auf die Zwischenablage erlauben",
       "paste": "Einfügen",

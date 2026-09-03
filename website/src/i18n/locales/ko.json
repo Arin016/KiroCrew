@@ -5385,7 +5385,9 @@
       "redaction_failed_retry": "마스킹 실패 — 다시 시도",
       "send_selection_to_chat": "선택 항목을 채팅으로 전송",
       "send_to_chat": "채팅으로 전송",
-      "sending": "전송 중…"
+      "sending": "전송 중…",
+      "touch_select_anchor": "첫 지점 설정됨 — 반대쪽 끝을 탭하세요",
+      "touch_select_done": "범위 선택됨 — 복사를 탭하세요"
     },
     "codeBlock": {
       "copied": "복사했습니다!",
@@ -7037,7 +7039,7 @@
       "copy": "복사",
       "copy_failed": "복사 실패",
       "copy_needs_https": "복사하려면 보안(HTTPS) 연결이 필요합니다",
-      "copy_no_selection": "선택을 누른 다음 복사하세요",
+      "copy_no_selection": "줄을 길게 누르거나 선택을 탭한 다음 복사하세요",
       "copy_done": "복사됨",
       "copy_permission_needed": "클립보드 액세스를 허용하세요",
       "paste": "붙여넣기",

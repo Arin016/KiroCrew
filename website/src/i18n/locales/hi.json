@@ -5474,7 +5474,9 @@
       "redaction_failed_retry": "रिडैक्शन विफल — फिर कोशिश करें",
       "send_selection_to_chat": "चयन चैट में भेजें",
       "send_to_chat": "चैट में भेजें",
-      "sending": "भेजा जा रहा है…"
+      "sending": "भेजा जा रहा है…",
+      "touch_select_anchor": "पहला बिंदु सेट — दूसरा सिरा टैप करें",
+      "touch_select_done": "श्रेणी चयनित — कॉपी टैप करें"
     },
     "codeBlock": {
       "copied": "कॉपी हो गया!",
@@ -7142,7 +7144,7 @@
       "copy": "कॉपी करें",
       "copy_failed": "कॉपी विफल",
       "copy_needs_https": "कॉपी करने के लिए एक सुरक्षित (HTTPS) कनेक्शन आवश्यक है",
-      "copy_no_selection": "चुनें टैप करें, फिर कॉपी करें",
+      "copy_no_selection": "किसी पंक्ति को देर तक दबाएँ या “चुनें” टैप करें, फिर “कॉपी”",
       "copy_done": "कॉपी हो गया",
       "copy_permission_needed": "क्लिपबोर्ड एक्सेस की अनुमति दें",
       "paste": "चिपकाएँ",
