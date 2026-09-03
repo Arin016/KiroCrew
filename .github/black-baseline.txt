@@ -340,7 +340,6 @@ src/kiro_crew/pod/config.py
 src/kiro_crew/pod/launchd.py
 src/kiro_crew/pod/provision.py
 src/kiro_crew/pod/unit.py
-src/kiro_crew/providers/acp.py
 src/kiro_crew/publish_governance.py
 src/kiro_crew/publish_sync.py
 src/kiro_crew/resource_status.py
@@ -464,7 +463,6 @@ test/test_auto_approve.py
 test/test_auto_research.py
 test/test_auto_research_handlers_coverage.py
 test/test_auto_research_onloop_db.py
-test/test_autonudge_dashboard_fire.py
 test/test_background_approval_routing.py
 test/test_bang_command_catchall.py
 test/test_beacon.py
@@ -1067,7 +1065,6 @@ test/test_skills.py
 test/test_slack_agent_passthrough.py
 test/test_slack_dashboard_live_sync.py
 test/test_slack_gateway.py
-test/test_slack_gateway_coverage.py
 test/test_slack_handler_coverage_branches.py
 test/test_slack_home_tab.py
 test/test_slack_inline_stop.py
