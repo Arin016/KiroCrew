@@ -107,6 +107,12 @@ warms is :func:`adopt_shared_mint`, which ``POST /api/connections/mint`` tries B
 a row of its own -- without it that endpoint's ``reserve_mint_row`` popped the shared row and
 disposed the very URL the click had been warmed for. A table miss re-drains the newest live
 shared session that activated the provider and retries adoption before the dedicated cold path.
+
+RESILIENCE is lifecycle-owned by the same reaper that detects process death. An explicit page
+warm arms ONE automatic replacement. The dead generation reserves one single-flight re-arm task,
+which reuses the ordinary tri-state candidate scan and ``warm_mint_all`` path without granting
+itself another attempt. Concurrent observers share that task; deliberate shutdown disarms and
+cancels it before retiring the process. No provider-level recovery state crosses the API.
 Proactive refresh attaches in :func:`_warm_mint_reaper` when its dependent slice lands.
 
 TWO AXES, and conflating them is what the handoff had to separate. ``shared`` is OWNERSHIP: an
@@ -131,6 +137,7 @@ from pathlib import Path
 from typing import Any
 
 from kiro_crew import agent as _agent
+from kiro_crew import hooks
 from kiro_crew.agent_discovery import _read_agent_spec
 from kiro_crew.agent_files import AGENT_FILENAME
 from kiro_crew.config.loader import data_home
@@ -196,6 +203,9 @@ _WARM_IDLE_GRACE_SECONDS = _MINT_TTL_SECONDS / 10
 #: One respawn, then the cold path -- a second death means the process cannot stay
 #: up, and a Connect is better served by its own dedicated spawn.
 _WARM_ACTIVATION_ATTEMPTS = 2
+#: One automatic replacement per explicit page warm. The replacement does not re-arm this
+#: budget, so a repeatedly dying process cannot turn the reaper into a restart loop.
+_WARM_REARM_ATTEMPTS = 1
 #: Generation key for a process that never became ``self._runtime`` -- an abandoned spawn,
 #: which owns no rows. NEGATIVE because generations only ever increment from zero, so no row
 #: can carry it: ``_generation_holds_live_rows`` reads it as needed by nobody, and the sweep
@@ -401,9 +411,26 @@ def _current_warm_redrain_entry(slug: str) -> dict[str, Any] | None:
     return _warm_spec_plan([provider]).entries.get(mcp_server_alias(slug))
 
 
+_GRANT_PRESENCE_READ_ID = "connections_premint.oauth_grant_presence"
+
+
 def mintable_providers() -> list[Provider]:
     """Providers an activation should warm right now, registry order."""
     return _warm_candidate_scan()[1]
+
+
+def _audited_mintable_providers() -> tuple[list[Provider], bool]:
+    """Return candidates and whether their acted-on grant scan was SEL-audited.
+
+    The explicit page warm and its one automatic replacement are one page-owned
+    lifecycle, so both use the premint read id. An empty scan drives no action and
+    therefore owes no event.
+    """
+    candidates = mintable_providers()
+    if not candidates:
+        return candidates, True
+    recorded = hooks.emit_internal_read_audit(_GRANT_PRESENCE_READ_ID, "success")
+    return candidates, recorded
 
 
 def _wanted_aliases(providers: list[Provider]) -> frozenset[str]:
@@ -855,6 +882,14 @@ class _WarmMintRuntime:
         self._activation_seq = 0
         self._lock = asyncio.Lock()
         self._reaper: Any = None
+        #: Armed only by an explicit page warm. A replacement inherits the lifecycle but not
+        #: another attempt, which bounds unattended recovery to one process per page request.
+        self._supervision_armed = False
+        self._rearms_remaining = 0
+        #: Strong reference and single-flight identity for a replacement activation. The
+        #: reaper can cancel itself while the child replaces its dead generation, so the task
+        #: cannot be owned only by the awaiting reaper.
+        self._rearm_task: asyncio.Task[list[str]] | None = None
 
     def is_alive(self) -> bool:
         return _runtime_alive(self._runtime)
@@ -892,6 +927,58 @@ class _WarmMintRuntime:
         current process is gone and no new mint will sweep them.
         """
         return len(self._retiring)
+
+    def arm_supervision(self) -> None:
+        """Allow one automatic replacement for the current explicit page warm."""
+        self._supervision_armed = True
+        self._rearms_remaining = _WARM_REARM_ATTEMPTS
+
+    def start_rearm(self, generation: int) -> asyncio.Task[list[str]] | None:
+        """Return the one replacement task for ``generation``, or decline recovery.
+
+        The state transition is synchronous, so concurrent observers on the event loop either
+        receive the same task or see the budget already consumed. A generation mismatch means
+        another path already replaced the dead process; a held runtime lock means an explicit
+        warm is already deciding the replacement and must not be followed by a second session.
+        """
+        task = self._rearm_task
+        if task is not None and not task.done():
+            return task
+        if task is not None:
+            self._rearm_task = None
+        if (
+            not self._supervision_armed
+            or self._rearms_remaining <= 0
+            or generation != self._generation
+            or self.is_alive()
+            or self._lock.locked()
+        ):
+            return None
+        self._rearms_remaining -= 1
+        task = asyncio.get_running_loop().create_task(_rearm_dead_warm_mint(generation))
+        self._rearm_task = task
+        task.add_done_callback(self._finish_rearm)
+        return task
+
+    def _finish_rearm(self, task: asyncio.Task[list[str]]) -> None:
+        """Release the single-flight slot and surface an otherwise-unobserved failure."""
+        if self._rearm_task is task:
+            self._rearm_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.debug(
+                "warm mint automatic re-arm failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def _disarm_supervision(self) -> asyncio.Task[list[str]] | None:
+        """Prevent resurrection and detach the task shutdown must settle."""
+        self._supervision_armed = False
+        self._rearms_remaining = 0
+        task, self._rearm_task = self._rearm_task, None
+        return task
 
     async def settle_activation(self, activation: int, in_use: set[int]) -> None:
         """Mark ``activation`` absorbed, then collect the sessions nothing needs."""
@@ -1257,8 +1344,17 @@ class _WarmMintRuntime:
         return None
 
     async def shutdown(self) -> None:
-        async with self._lock:
-            await self._retire_locked()
+        """Disarm recovery, settle its task, then retire every owned process."""
+        rearm = self._disarm_supervision()
+        try:
+            if rearm is not None and rearm is not asyncio.current_task() and not rearm.done():
+                rearm.cancel()
+                # ``return_exceptions`` consumes the CHILD cancellation. Cancellation of this
+                # shutdown still raises from gather and reaches the hard teardown in finally.
+                await asyncio.gather(rearm, return_exceptions=True)
+        finally:
+            async with self._lock:
+                await self._retire_locked()
 
     async def sweep_retiring(self) -> None:
         """Kill parked generations nothing is waiting on any more."""
@@ -1565,6 +1661,37 @@ async def _drain_parked_generations() -> None:
         await _warm_mint.sweep_sessions(in_use)
 
 
+async def _rearm_dead_warm_mint(generation: int) -> list[str]:
+    """Re-warm the still-unconnected eligible roster after one process death.
+
+    Candidate selection reuses the ordinary tri-state grant scan: only a confirmed absence
+    initiates consent, while a present or unreadable grant is skipped. ``arm_supervision`` is
+    false so this replacement cannot recursively earn another automatic replacement.
+    """
+    try:
+        candidates, audit_recorded = await asyncio.to_thread(_audited_mintable_providers)
+    except Exception:  # noqa: BLE001 -- the cold path remains available to every Connect
+        logger.debug("warm mint re-arm candidate scan failed", exc_info=True)
+        return []
+    if not candidates:
+        logger.info(
+            "Shared mint generation %d died; no confirmed-unconnected providers need re-arm",
+            generation,
+        )
+        return []
+    if not audit_recorded:
+        logger.warning(
+            "grant-presence audit for the automatic re-arm scan could not be recorded; "
+            "proceeding unaudited"
+        )
+    logger.warning(
+        "Shared mint generation %d died; re-arming %d eligible provider(s)",
+        generation,
+        len(candidates),
+    )
+    return await warm_mint_all(candidates, arm_supervision=False)
+
+
 async def _warm_mint_reaper(generation: int) -> None:
     """Retire the shared process once no card is waiting on it.
 
@@ -1587,6 +1714,19 @@ async def _warm_mint_reaper(generation: int) -> None:
             await _warm_mint.sweep_sessions(in_use)
             if not _warm_mint.is_alive():
                 await _expire_shared_mints("mint_process_gone", generation=generation)
+                rearm = _warm_mint.start_rearm(generation)
+                if rearm is not None:
+                    # Shielded because replacing the dead generation cancels THIS reaper.
+                    # The runtime owns the strong reference, and the replacement must finish
+                    # even after the obsolete observer exits.
+                    try:
+                        await asyncio.shield(rearm)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001 -- the cold path remains the fallback
+                        logger.debug("warm mint automatic re-arm failed", exc_info=True)
+                    if _warm_mint.is_alive():
+                        return
                 await _drain_parked_generations()
                 return
             if _shared_mints_pending():
@@ -1898,7 +2038,9 @@ async def _recover_redrained_requests(result: _WarmMintResult) -> list[str]:
     return minted
 
 
-async def warm_mint_all(providers: list[Provider] | None = None) -> list[str]:
+async def warm_mint_all(
+    providers: list[Provider] | None = None, *, arm_supervision: bool = True
+) -> list[str]:
     """Warm every mintable provider's approval URL in ONE activation.
 
     Returns the slugs now holding a URL. Never raises for a mint failure -- that leaves the
@@ -1913,13 +2055,22 @@ async def warm_mint_all(providers: list[Provider] | None = None) -> list[str]:
 
     ``POST /api/connections/premint`` passes the candidates it scanned, so an explicit
     ``providers`` is the ordinary call shape; ``None`` re-scans for a caller that has no
-    list of its own.
+    list of its own. ``arm_supervision`` is false only for the automatic replacement: the
+    replacement inherits the page-owned lifecycle without recursively earning another retry.
     """
-    candidates = (
-        await asyncio.to_thread(mintable_providers) if providers is None else list(providers)
-    )
+    if providers is None:
+        candidates, audit_recorded = await asyncio.to_thread(_audited_mintable_providers)
+        if candidates and not audit_recorded:
+            logger.warning(
+                "grant-presence audit for the implicit warm scan could not be recorded; "
+                "proceeding unaudited"
+            )
+    else:
+        candidates = list(providers)
     if not candidates:
         return []
+    if arm_supervision:
+        _warm_mint.arm_supervision()
 
     claims, displaced = await _claim_shared_mints([provider["slug"] for provider in candidates])
     if not claims:

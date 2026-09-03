@@ -210,11 +210,21 @@ quietly drop the filesystem work the guard's coverage rests on without failing i
 gone rather than on a cause, which is what covers a process that went away by a route no expiry
 path anticipated. PR #5899 is a different cause and a different table: it owns
 **Disconnect-driven grant revocation**, and the two meet only where a revoke should re-warm.
-**Proactive refresh** attaches to `_warm_mint_reaper`, which now exists. The dependent
-resilience slice remains deliberately absent: a mid-visit supervisor must detect a shared
-session that dies after the page's initial warm and re-arm a replacement activation without a
-Connect click. This slice only re-drains a session that is still live; it neither supervises nor
-re-arms one.
+
+**Mid-visit resilience** is owned by the reaper and the runtime it already supervises. Every
+explicit page premint arms one automatic replacement. When that generation dies, the reaper
+reserves a single-flight task and reuses the ordinary `mintable_providers` scan plus
+`warm_mint_all`, so the replacement covers only providers whose grant absence is confirmed by
+the existing tri-state eligibility check. A present grant and an unreadable grant cache are both
+skipped. The replacement call does not re-arm the budget, so a second death cannot form a
+restart loop; another explicit page premint is the only thing that grants a fresh attempt.
+Concurrent observers receive the same task, while a generation mismatch, a live replacement, or
+an explicit warm already holding the lifecycle lock suppresses duplicate work. Hard shutdown
+disarms recovery, cancels and settles an in-flight task, then retires the process. This is all
+internal lifecycle state -- the card and status APIs expose no provider-level warming status.
+
+**Proactive refresh** remains deferred and attaches to `_warm_mint_reaper` independently of the
+death-only replacement.
 
 Three residuals the lifecycle slice was required to close, and did:
 

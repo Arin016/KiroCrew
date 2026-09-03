@@ -62,18 +62,23 @@ def _clean_warm_runtime():
         "_sessions",
         "_activation_seq",
         "_reaper",
+        "_supervision_armed",
+        "_rearms_remaining",
+        "_rearm_task",
     )
     saved: dict[str, Any] = {name: getattr(warm._warm_mint, name) for name in tracked}
     saved["_retiring"] = list(saved["_retiring"])
     saved["_sessions"] = dict(saved["_sessions"])
     warm._warm_mint._lock = asyncio.Lock()
     yield
-    reaper = warm._warm_mint._reaper
-    if reaper is not None and reaper is not saved["_reaper"] and not reaper.done():
+    for task_name in ("_reaper", "_rearm_task"):
+        task = getattr(warm._warm_mint, task_name)
+        if task is None or task is saved[task_name] or task.done():
+            continue
         try:
             # Cancelled HERE, while the loop that owns it is still this test's. Cancelling it
             # from a later test's loop is the "Event loop is closed" face above, not the cure.
-            reaper.cancel()
+            task.cancel()
         except RuntimeError:
             # The loop is already gone; dropping the reference below is what matters.
             pass
@@ -247,6 +252,7 @@ def test_no_coroutine_in_the_warm_module_touches_the_filesystem_directly():
     fs_helpers = {name for name, hit in touches.items() if hit}
     # The known set, so a helper silently losing its filesystem work -- and with it
     # this guard's coverage -- is visible rather than a quietly weaker test.
+    # `_audited_mintable_providers` couples that filesystem scan to its SEL event.
     assert fs_helpers == {
         "_log_warm_event",
         "_disabled_provider_slugs",
@@ -255,6 +261,7 @@ def test_no_coroutine_in_the_warm_module_touches_the_filesystem_directly():
         "_warm_candidate_scan",
         "_current_warm_redrain_entry",
         "mintable_providers",
+        "_audited_mintable_providers",
         "_warm_spec_plan",
         "_warm_spec_is_foreign",
         "_unowned_plan_specs",
@@ -1290,6 +1297,193 @@ async def test_the_reaper_drains_parked_generations_after_the_current_process_di
     assert warm._warm_mint._sessions == {}, "its sessions own the loopback servers"
 
 
+# ── a dead shared process is re-armed once during the page-owned lifecycle ──
+
+
+@pytest.mark.asyncio
+async def test_the_reaper_rearms_a_dead_generation_once(monkeypatch: pytest.MonkeyPatch):
+    """The page already paid for warming, so a mid-visit death is replaced without a click."""
+    rearmed: list[int] = []
+
+    async def _record_rearm(generation: int) -> list[str]:
+        rearmed.append(generation)
+        return ["linear"]
+
+    monkeypatch.setattr(warm, "_MINT_GRANT_POLL_SECONDS", 0)
+    monkeypatch.setattr(warm, "_rearm_dead_warm_mint", _record_rearm)
+    monkeypatch.setattr(warm._warm_mint, "_runtime", _Runtime(False))
+    monkeypatch.setattr(warm._warm_mint, "_generation", 6)
+    monkeypatch.setattr(warm._warm_mint, "_retiring", [])
+    monkeypatch.setattr(warm._warm_mint, "_sessions", {})
+    warm._warm_mint.arm_supervision()
+
+    await asyncio.wait_for(warm._warm_mint_reaper(6), timeout=5)
+
+    assert rearmed == [6]
+    assert warm._warm_mint._rearms_remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_reaper_audits_the_grant_scan_before_replacement_warm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A page-owned re-arm acts on the same credential observation as premint."""
+    from kiro_crew import hooks
+
+    assert warm._GRANT_PRESENCE_READ_ID in hooks._AUDIT_ONLY_READ_IDS
+    provider = _provider("linear")
+    events: list[tuple[Any, ...]] = []
+
+    def _audit(read_id: str, outcome: str) -> bool:
+        events.append(("audit", read_id, outcome))
+        return True
+
+    async def _record_warm(
+        providers: list[Provider] | None = None, *, arm_supervision: bool = True
+    ) -> list[str]:
+        events.append(("warm", [item["slug"] for item in providers or []], arm_supervision))
+        warm._warm_mint._runtime = _Runtime(True)
+        return ["linear"]
+
+    monkeypatch.setattr(hooks, "emit_internal_read_audit", _audit)
+    monkeypatch.setattr(warm, "mintable_providers", lambda: [provider])
+    monkeypatch.setattr(warm, "warm_mint_all", _record_warm)
+    monkeypatch.setattr(warm, "_MINT_GRANT_POLL_SECONDS", 0)
+    monkeypatch.setattr(warm._warm_mint, "_runtime", _Runtime(False))
+    monkeypatch.setattr(warm._warm_mint, "_generation", 6)
+    monkeypatch.setattr(warm._warm_mint, "_retiring", [])
+    monkeypatch.setattr(warm._warm_mint, "_sessions", {})
+    warm._warm_mint.arm_supervision()
+
+    await asyncio.wait_for(warm._warm_mint_reaper(6), timeout=5)
+
+    assert events == [
+        ("audit", "connections_premint.oauth_grant_presence", "success"),
+        ("warm", ["linear"], False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rearm_is_single_flight_and_cannot_form_a_restart_loop(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Concurrent observers share one replacement, and its death spends no hidden retry."""
+    gate = asyncio.Event()
+    calls: list[int] = []
+
+    async def _gated_rearm(generation: int) -> list[str]:
+        calls.append(generation)
+        await gate.wait()
+        return []
+
+    monkeypatch.setattr(warm, "_rearm_dead_warm_mint", _gated_rearm)
+    monkeypatch.setattr(warm._warm_mint, "_runtime", _Runtime(False))
+    monkeypatch.setattr(warm._warm_mint, "_generation", 3)
+    warm._warm_mint.arm_supervision()
+
+    first = warm._warm_mint.start_rearm(3)
+    second = warm._warm_mint.start_rearm(3)
+
+    assert first is not None and second is first
+    await asyncio.sleep(0)
+    assert calls == [3]
+    gate.set()
+    await first
+    await asyncio.sleep(0)
+
+    assert warm._warm_mint.start_rearm(3) is None
+    assert calls == [3], "one automatic replacement must not recursively earn another"
+
+
+@pytest.mark.asyncio
+async def test_rearm_skips_connected_and_indeterminate_providers(
+    monkeypatch: pytest.MonkeyPatch, _stub_activation: None
+):
+    """Recovery initiates consent only for a grant whose absence was confirmed."""
+    universe = [_provider("fresh"), _provider("granted"), _provider("unreadable")]
+    reads: list[str] = []
+
+    def _presence(url: str) -> bool | None:
+        reads.append(url)
+        if "unreadable" in url:
+            return None
+        return "granted" in url
+
+    monkeypatch.setattr(warm, "warm_spec_providers", lambda: universe)
+    monkeypatch.setattr(warm, "grant_present", _presence)
+    monkeypatch.setattr(
+        warm,
+        "_warm_activate",
+        _returns(
+            _result(
+                [universe[0]],
+                [{"serverName": "fresh", "oauthUrl": "https://fresh.example/consent"}],
+                generation=5,
+                activation=7,
+            )
+        ),
+    )
+    monkeypatch.setattr(warm._warm_mint, "_supervision_armed", True)
+    monkeypatch.setattr(warm._warm_mint, "_rearms_remaining", 0)
+
+    assert await warm._rearm_dead_warm_mint(4) == ["fresh"]
+
+    assert list(_mints) == ["fresh"]
+    assert _mints["fresh"]["state"] == "waiting"
+    assert _mints["fresh"]["generation"] == 5
+    assert warm._warm_mint._rearms_remaining == 0
+    assert sorted(reads) == sorted(provider["mcp_url"] for provider in universe)
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_page_warm_arms_one_replacement(
+    monkeypatch: pytest.MonkeyPatch, _stub_activation: None
+):
+    monkeypatch.setattr(warm, "_warm_activate", _returns(None))
+
+    assert await warm.warm_mint_all([_provider("linear")]) == []
+    assert warm._warm_mint._supervision_armed is True
+    assert warm._warm_mint._rearms_remaining == warm._WARM_REARM_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_an_inflight_rearm_and_disarms_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _blocked_rearm(generation: int) -> list[str]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def _kill(runtime: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(warm, "_rearm_dead_warm_mint", _blocked_rearm)
+    monkeypatch.setattr(warm, "_kill_quietly", _kill)
+    monkeypatch.setattr(warm, "_remove_warm_mint_specs", lambda: None)
+    monkeypatch.setattr(warm._warm_mint, "_runtime", _Runtime(False))
+    monkeypatch.setattr(warm._warm_mint, "_generation", 8)
+    warm._warm_mint.arm_supervision()
+    task = warm._warm_mint.start_rearm(8)
+    assert task is not None
+    await started.wait()
+
+    await warm._warm_mint.shutdown()
+
+    assert cancelled.is_set()
+    assert task.cancelled()
+    assert warm._warm_mint._rearm_task is None
+    assert warm._warm_mint._supervision_armed is False
+    assert warm._warm_mint._rearms_remaining == 0
+    assert warm._warm_mint.start_rearm(8) is None
+
+
 @pytest.mark.asyncio
 async def test_a_failed_respawn_still_drains_the_generation_it_parked(
     monkeypatch: pytest.MonkeyPatch,
@@ -1780,6 +1974,7 @@ _MUST_BE_PROTECTED = [
     ),
     ("_ensure_locked", "_write_warm_mint_specs", warm._WarmMintRuntime._ensure_locked),
     ("_ensure_locked", "runtime.spawn()", warm._WarmMintRuntime._ensure_locked),
+    ("shutdown", "asyncio.gather(rearm", warm._WarmMintRuntime.shutdown),
     ("_sweep_retiring_locked", "_kill_generation", warm._WarmMintRuntime._sweep_retiring_locked),
     ("_park_or_kill_locked", "_kill_generation", warm._WarmMintRuntime._park_or_kill_locked),
     ("_retire_locked", "_kill_quietly", warm._WarmMintRuntime._retire_locked),

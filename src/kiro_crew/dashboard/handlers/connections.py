@@ -12,7 +12,6 @@ from urllib.parse import parse_qs, urlsplit
 
 from aiohttp import web
 
-from kiro_crew import hooks
 from kiro_crew.connections import get_provider
 from kiro_crew.connections.ownership import remove_provider_entry
 from kiro_crew.connections.registry import Provider
@@ -700,13 +699,13 @@ async def api_connections_premint(request: web.Request) -> web.Response:
     # scope then adds the ACP runtime and the MCP inventory on top -- the heaviest
     # half of Connections. test_the_handlers_package_does_not_import_the_warm_engine
     # enforces it in a subprocess; hoisting this to module scope turns that red.
-    from kiro_crew.connections.warm import mintable_providers, warm_mint_all
+    from kiro_crew.connections.warm import _audited_mintable_providers, warm_mint_all
 
     # Off the loop: the scan reads the user's MCP config and stats kiro-cli's OAuth
     # artifact directory, either of which can sit on a network mount where a stat is
     # unbounded. warm.py routes the same call through a thread for this reason and
     # pins it with a drift guard.
-    candidates = await asyncio.to_thread(mintable_providers)
+    candidates, audit_recorded = await asyncio.to_thread(_audited_mintable_providers)
     slugs = [str(provider["slug"]) for provider in candidates]
     if not slugs:
         # Nothing to warm: an activation with an empty claim set would spawn a
@@ -728,9 +727,7 @@ async def api_connections_premint(request: web.Request) -> web.Response:
     # opened, so no credential material crosses this boundary, and refusing to warm on
     # an SEL outage would make every Connect pay a cold spawn instead. An unaudited
     # boolean is the lesser failure, and it leaves a warning behind.
-    if not await asyncio.to_thread(
-        hooks.emit_internal_read_audit, _GRANT_PRESENCE_READ_ID, "success"
-    ):
+    if not audit_recorded:
         logger.warning(
             "grant-presence audit for the premint scan could not be recorded; "
             "proceeding unaudited"
