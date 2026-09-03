@@ -38,6 +38,7 @@ from kiro_crew.acp.types import (
     STOP_REASON_STALE_RECOVER,
     STOP_REASON_TOOL_STALL,
 )
+from kiro_crew.acp_backends import ACP_BACKENDS_COMPACT
 from kiro_crew.agent_discovery import warm_project_agent_names
 from kiro_crew.agent_sdk.provider_identity import is_claude_code
 from kiro_crew.autonudge import get_instance
@@ -5612,6 +5613,72 @@ async def _run_chat(
         state.push_slots_update()
         slot.append("done", "", "done")
         return
+
+    # ── Manual /compact capability gate (#7800) ──
+    # KAS never answers the /compact prompt with a compaction status (its
+    # summarization_* frames fire only for KAS-initiated auto-summarization),
+    # so dispatching the command would strand the deferred
+    # wait_for_compaction() for the full COMPACT_WAIT_TIMEOUT_SECS. KAS manages
+    # compaction itself — the same relationship the cc_managed decline encodes
+    # for Claude-Code sessions — so answer informationally, as a LOCAL command.
+    #
+    # Placed HERE, above the OPTIONS-expiry boundary and before any session is
+    # acquired, so a refused /compact behaves as if the turn never started:
+    # no pending Slack OPTIONS control is struck through, no session is
+    # created, and no one-shot first-turn state (history replay, resume sid,
+    # session-map binding, compaction override) can be consumed or destroyed.
+    # The live session's provider is authoritative when one exists (peeked,
+    # never created); otherwise the answer comes from the same config field
+    # (`agent.acp_backend`) the provider factory would build a new session
+    # with, so the pre-turn answer cannot diverge from the session the
+    # dispatch would have created.
+    if first_word == "/compact":
+        _live_sessions = getattr(state.sessions, "_sessions", None)
+        _live_provider = (
+            getattr(_live_sessions.get(session_key), "provider", None)
+            if isinstance(_live_sessions, dict)
+            else None
+        )
+        if _live_provider is not None:
+            # Declared on the LLMProvider ABC with a None default (H14); the
+            # ACP implementations answer from ACP_BACKENDS_COMPACT membership.
+            _compact_unsupported = getattr(
+                _live_provider, "manual_compact_unsupported_backend", None
+            )
+        elif _is_cc_provider:
+            # Claude Code compacts natively in-prompt (cc_managed).
+            _compact_unsupported = None
+        else:
+            _cfg_backend = getattr(KiroCrewConfig.load().agent, "acp_backend", "")
+            _compact_unsupported = (
+                _cfg_backend
+                if isinstance(_cfg_backend, str) and _cfg_backend not in ACP_BACKENDS_COMPACT
+                else None
+            )
+        # The isinstance guard means only a positively named unsupported
+        # backend id is refused — a mocked provider's truthy attribute never
+        # reads as one.
+        if isinstance(_compact_unsupported, str) and _compact_unsupported:
+            sel().log_tool_invocation(
+                session_key=session_key,
+                agent=slot.agent or "kirocrew",
+                source="dashboard",
+                tool_name=first_word,
+                tool_kind="slash_command",
+                outcome="auto_managed_backend",
+                metadata={"backend": _compact_unsupported, "slot": slot.key},
+            )
+            slot.append(
+                "assistant",
+                f"ℹ️ The `{_compact_unsupported}` backend manages compaction "
+                "automatically — it summarizes the conversation on its own as "
+                "context fills, so manual `/compact` isn't needed (and isn't "
+                "supported) here.",
+                "msg msg-a",
+            )
+            state.push_slots_update()
+            slot.append("done", "", "done")
+            return
 
     # A new turn supersedes whatever question the previous one ended on, so any
     # OPTIONS control still live in this session's Slack thread stops being
