@@ -1242,6 +1242,100 @@ class AcpProvider(LLMProvider):
         logger.info("ACP effort cleared (kiro); session reset needed for built-in default")
         return False
 
+    async def reload_tool_search(
+        self, *, min_pct: object = None, min_tokens: object = None
+    ) -> bool:
+        """Recompute kiro-cli Tool Search deferral for the CURRENT context.
+
+        This is the manual per-session escape hatch for the compaction hole in
+        issue #8082: once kiro-cli defers an MCP tool spec (it grew past
+        ``toolSearch.minPct`` / ``minTokens``), a later ``/compact`` shrinks the
+        context back below the threshold but does NOT re-inject the deferred
+        specs, so those tools stay invisible to the model for the rest of the
+        session. The deferral engine - deciding to defer a spec and re-injecting
+        it after context shrinks - lives in kiro-cli, on the FAR side of the ACP
+        boundary, and is not reachable from this repo. Automatic re-injection
+        after ``/compact`` (with no explicit reload) is therefore kiro-cli
+        behaviour we cannot fix here; this method is the one lever KiroCrew can
+        offer: rewrite the Tool Search overlay and RESTART the backend so
+        kiro-cli re-reads ``<work_dir>/.kiro/settings/cli.json`` on the fresh
+        spawn and recomputes deferral against the current (post-``/compact``)
+        context, re-injecting the specs that now fit.
+
+        Shape mirrors :meth:`change_effort` / :meth:`clear_effort`: gated on
+        ``ACP_BACKENDS_KIRO_SLASH_COMMANDS`` membership (only the kiro family
+        reads the overlay), snapshot + rollback so a failed restart never leaves
+        poisoned thresholds behind, and structured logging.
+
+        Behaviour:
+        - Returns False without restarting when the backend is not in
+          ``ACP_BACKENDS_KIRO_SLASH_COMMANDS`` (e.g. claude), when
+          ``self._tool_search`` is None (caller expressed no preference, so the
+          overlay is untouched), or when it is False (KiroCrew is not deferring
+          anything, so a reload restores nothing).
+        - Returns False without restarting when a turn is active
+          (:meth:`has_active_turn`), matching the mid-turn hazard change_effort
+          documents: the restart must never race a streaming prompt.
+        - Otherwise applies any ``min_pct`` / ``min_tokens`` override onto the
+          provider thresholds, rewrites the overlay, and restarts the backend
+          (``await self.shutdown()`` then ``await self.start()``). On any
+          exception during the restart it rolls the thresholds back to their
+          pre-call snapshot, re-applies the overlay, and re-raises so a failed
+          reload does not strand poisoned thresholds. Returns True on success.
+        """
+        if self._client.backend not in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
+            logger.info(
+                "reload_tool_search skipped - backend %r reads no Tool Search overlay",
+                POLICY_ID_BY_BACKEND.get(self._client.backend, self._client.backend),
+            )
+            return False
+        if self._tool_search is None:
+            logger.info("reload_tool_search skipped - Tool Search overlay is unmanaged (None)")
+            return False
+        if self._tool_search is False:
+            logger.info("reload_tool_search skipped - Tool Search disabled, nothing to restore")
+            return False
+        if self.has_active_turn():
+            # A restart mid-turn would kill the streaming prompt and leave the
+            # native turn open (its session lock held) - the same hazard the
+            # effort/model-switch levers refuse. Report unsupported so the
+            # caller retries once the turn is at a safe boundary.
+            logger.info("reload_tool_search skipped - a turn is active")
+            return False
+        # Snapshot so a failed restart doesn't leave overridden thresholds that
+        # would re-apply the wrong deferral on every later respawn.
+        prev_min_pct = self._tool_search_min_pct
+        prev_min_tokens = self._tool_search_min_tokens
+        if min_pct is not None:
+            self._tool_search_min_pct = min_pct
+        if min_tokens is not None:
+            self._tool_search_min_tokens = min_tokens
+        # Rewrite the overlay explicitly so it reflects any threshold override
+        # even though start() also re-applies it before (re)spawn; the write is
+        # idempotent, so the duplicate call is harmless and keeps the override
+        # authoritative regardless of start()'s internal ordering.
+        self._apply_tool_search_overlay()
+        try:
+            await self.shutdown()
+            await self.start()
+        except Exception:
+            # Roll back the thresholds and re-write the overlay so a failed
+            # reload does not poison future respawns with the override.
+            self._tool_search_min_pct = prev_min_pct
+            self._tool_search_min_tokens = prev_min_tokens
+            self._apply_tool_search_overlay()
+            logger.warning(
+                "reload_tool_search restart failed - rolled back thresholds", exc_info=True
+            )
+            raise
+        logger.info(
+            "ACP Tool Search reloaded via restart: minPct=%s minTokens=%s backend=%s",
+            self._tool_search_min_pct,
+            self._tool_search_min_tokens,
+            POLICY_ID_BY_BACKEND.get(self._client.backend, self._client.backend),
+        )
+        return True
+
     async def start(self) -> None:
         # Re-apply the overlay on every (re)start to cover resume / model swap.
         # (no-op for claude backend — that path applies effort live below.)
