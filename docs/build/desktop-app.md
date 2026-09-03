@@ -849,9 +849,31 @@ About panel:
 `managedBy` names the owning system in the "updates are managed by …"
 message; `updateCommand` renders as a copyable command. An empty or
 unparsable body still counts as managed — an operator who dropped the file
-gets the safe behavior even when the metadata is wrong. For local testing,
-the `KIROCREW_EXTERNALLY_MANAGED` env var points at a marker file (any other
-non-empty value marks the install managed with no metadata).
+gets the safe behavior even when the metadata is wrong.
+
+The body is only read when the marker's **provenance** can be established:
+neither the marker nor its directory may be owned by the account the app runs
+as, and neither may be group- or world-writable. Ownership rather than current
+mode bits, because a POSIX owner can always `chmod +w` back — a marker the app's
+own user owns is one a prompt-injected agent shell could have planted and then
+made read-only. `updateCommand`/`checkCommand` are executed through a shell on
+the managed auto-update path, so a marker in a user-owned resources directory
+(Homebrew, `pip --user`, `~/Applications`) is treated as a bare marker: managed,
+updater off, no metadata and nothing to run. Packagers that want the managed
+commands honored must install the resources directory root-owned.
+
+The commands run with a **constructed environment**, not the app's own. Only an explicit pass-through set reaches them — `USER`, `LOGNAME`, `TZ`, `TMPDIR`, the `LANG`/`LC_*` locale vars, and the proxy vars — plus a narrowed system-only `PATH` and `cwd=/`. `HOME` is deliberately excluded: Python derives its user-site directory from it, so passing it through would let a planted `sitecustomize.py` run on every `python` start. Everything else is absent by construction, because `shell: true` means a shell interprets the command and a shell reads its environment as code: the loader family (`LD_*`/`DYLD_*`), the interpreter family (`PYTHON*`, `NODE_OPTIONS`), the startup files (`BASH_ENV`, `ENV`), the tracing pair (`SHELLOPTS` plus a command-substituting `PS4`), word splitting (`IFS`), and exported shell functions (`BASH_FUNC_*`, which shadow a command name outright). A packager whose updater needs any other variable must set it inside its own command rather than relying on inheritance.
+
+**On Windows the marker's commands are never honored.** There is no POSIX owner
+to read and `access(W_OK)` does not model ACLs, so no honest provenance verdict
+exists; the check fails closed by declaration and every Windows marker is
+treated as bare (managed, updater off). A Windows packager drives updates with
+its own installer, not through this marker.
+
+For local testing, the `KIROCREW_EXTERNALLY_MANAGED` env var points at a marker
+file (any other non-empty value marks the install managed with no metadata).
+It is honored on unpackaged builds only — a packaged app ignores it, because
+its launch environment is user-writable.
 
 The gateway has the matching seam for its own surfaces: an operator's
 `security_policy.json` `updates` block (`check_command` / `apply_command`)
