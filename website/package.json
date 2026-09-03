@@ -50,7 +50,9 @@
     "verify:tool-blocked-cause": "node scripts/capture-tool-blocked-cause.mjs",
     "verify:topbar-badge-overhang": "node scripts/capture-topbar-badge-overhang.mjs",
     "verify:user-bubble-mobile-overflow": "node scripts/capture-user-bubble-mobile-overflow.mjs",
-    "pretest": "npm run jscpd"
+    "pretest": "npm run jscpd",
+    "mutation:scroll-shell": "node scripts/mutation-check-scroll-shell.mjs",
+    "golden:scroll-shell": "node scripts/capture-chatpage-scroll-shell.mjs"
   },
   "files": [
     "dist/"

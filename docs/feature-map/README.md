@@ -60,7 +60,7 @@ this area is reached from inside it unless stated otherwise.
 
 | Feature | What it is | Reach it | Page | Handler | Endpoints |
 |---|---|---|---|---|---|
-| Sessions | Multi-slot agent chat, one slot per conversation | `/chat/:slug?` — rail **Sessions** | `pages/ChatPage.tsx`, `pages/ChatSidebar.tsx` | `chat_handlers.py`, `ws.py` | `POST /api/chat`, `GET,POST /api/chat/slots`, `GET /api/ws` |
+| Sessions | Multi-slot agent chat, one slot per conversation | `/chat/:slug?` — rail **Sessions** | `pages/ChatPage.tsx`, `pages/ChatSidebar.tsx`, `pages/chat/TranscriptScrollShell.tsx` (internal split of ChatPage — the transcript scroller skeleton, no new user-facing feature) | `chat_handlers.py`, `ws.py` | `POST /api/chat`, `GET,POST /api/chat/slots`, `GET /api/ws` |
 | Session folders | User-defined folders grouping session rows | Sidebar folder header → drag a row | `pages/chat/FolderPanel.tsx` | `chat_folders.py` | `GET,POST /api/chat/folders`, `PATCH /api/chat/slots/{slot}/folder` |
 | Session tags | Colored labels on sessions, filterable | Sidebar row context menu → Tags | `pages/chat/SessionFlyout.tsx` | `chat_tags.py` | `GET,POST /api/chat/tags`, `PUT /api/chat/slots/{slot}/tags` |
 | Pinned messages | Pin a message; pins panel per session | Message hover → pin; header pin count | `pages/chat/PinnedMessagesPanel.tsx` | `chat_pins.py` | `GET,POST /api/chat/pins`, `DELETE /api/chat/pins/{id}` |

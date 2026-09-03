@@ -73,6 +73,7 @@ import { useScrollManager } from './chat/useScrollManager'
 import { useBubbleVanishProbe } from './chat/useBubbleVanishProbe'
 import { shouldPaginateOlder, canForkAtWindow, searchScopeIsLimited } from './chat/pagination'
 import EarlierMessagesBar from './chat/EarlierMessagesBar'
+import TranscriptScrollShell from './chat/TranscriptScrollShell'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
 import { addPendingFile, parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, buildRelMap, findUnreferencedAttachments, hasExactRelMention, normalizeWindowsPath, parseDirTokens, serializeDirTokens, parseDirs, resolveDirSegment, spliceDirTokens, VIDEO_EXT } from '../utils/fileTokens'
 import { classifyDrop } from '../utils/dropClassify'
@@ -8122,74 +8123,64 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 />
               </motion.div>
             ) : (
-            <div
-              ref={scrollerRef}
-              // -1 so the bar can hand focus here on unmount without adding a tab stop.
-              tabIndex={-1}
-              // stable theming hook 'chat-container' — see website/docs/theming-contract.md
-              className="chat-container"
-              style={{
-                flex: 1,
-                // Second half of the fade-band clearance, alongside
-                // TRANSCRIPT_TAIL_SPACER_PX. Unlike the tail spacer this one also
-                // applies to a transcript short enough not to scroll, so both are
-                // needed for the last line to clear the band in every state.
-                paddingBottom: 16,
-                overflowY: 'auto',
-                // overflow-x must be pinned, not left to default `visible`: with
-                // overflowY `auto`, CSS forces the `visible` axis to compute to
-                // `auto`, so one over-wide child (a long path, a wide code block,
-                // a widget) gives the whole list a draggable horizontal scrollbar
-                // above the composer. The conversation never pans sideways —
-                // wide children scroll within themselves.
-                overflowX: 'hidden',
-                // Reserve a stable scrollbar gutter so the 6px scrollbar always
-                // occupies the same right-edge column the title overlay is inset
-                // from (see the right-1.5 inset above) — keeps the thumb visible
-                // and grabbable at the top instead of hidden behind the header.
-                scrollbarGutter: 'stable',
-                // Native scroll anchoring: when items above the viewport
-                // resize (e.g. widget iframes loading async), the browser
-                // adjusts scrollTop to keep the user's content stable.
-                // This is more precise than item-level anchoring because
-                // it works at the DOM-element granularity.
-                overflowAnchor: 'auto',
-                // Keep wheel/touch momentum inside the message list. Without
-                // this, a delta that arrives at the top or bottom edge chains
-                // to the nearest scrollable ancestor — the document, which
-                // `body{overflow-y:auto}` leaves scrollable — and drags the
-                // whole app shell by however many pixels of slack exist
-                // (a browser-extension node parked past the shell is enough).
-                overscrollBehavior: 'contain',
-              } as React.CSSProperties}
-              aria-label={i18nT('pages.chatPage.chat_messages')}
-              aria-live="polite"
+            <TranscriptScrollShell
+              scrollerRef={scrollerRef}
               onScroll={onScrollPin}
-            >
-              {/* Header spacer */}
-              <div className="h-16" />
+              virt={virt}
+              loadingOlder={loadingOlder}
+              // Second half of the fade-band clearance, alongside
+              // TRANSCRIPT_TAIL_SPACER_PX. Unlike the tail spacer this one also
+              // applies to a transcript short enough not to scroll, so both are
+              // needed for the last line to clear the band in every state.
+              scrollerStyle={{ paddingBottom: 16 }}
+              aboveRows={<>
               {/* Mid-switch `slotHasMore` still describes the outgoing chat, so the cursor
                   key gates the bar to match the paging thunk's own precondition. */}
               {slotHasMore && cursorIsForActiveSlot && (
                 <EarlierMessagesBar loading={loadingOlder} failed={olderFailed} onLoad={handleLoadEarlier} onFocusRelease={() => scrollerRef.current?.focus()} />
               )}
-              {/* Top sentinel: drives upward window expansion via virtualizer's IO. */}
-              <div ref={virt.topSentinelRef} aria-hidden style={{ height: 1 }} />
-              {/* top-16 matches the h-16 header spacer above, so the pinned spinner
-                  clears the overlay header instead of sitting under it.
-                  overflow-anchor:none so appearing/vanishing here cannot become the
-                  browser's scroll anchor and jump the list mid-fetch. */}
-              {loadingOlder && (
-                <div className="sticky top-16 z-[1] flex justify-center py-2" data-testid="older-messages-loading" role="status" aria-label={i18nT('pages.chatPage.loading_earlier_messages')} style={{ overflowAnchor: 'none', background: 'var(--bg)' }}>
-                  <Loader size={16} className="animate-spin text-muted" />
+              </>}
+              belowRows={<>
+              {/* Footer */}
+              <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} streamTick={streamTick} regenerating={regenerating} stopState={currentSlot?.stop_state} />
+              {activeSlot && !slotLoading && !embedded && !popout && slotSwitchTarget !== activeSlot && (
+                <div className="px-4 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
+                  <SessionPulseSurveyCard
+                    // Remount on session switch: without this, React reuses
+                    // the same component instance across sessions, so an
+                    // in-progress rating/feedback/email from session A would
+                    // still be sitting in state when the user switches to
+                    // session B and hits Submit — attributing A's answers to
+                    // B's sessionId prop, which had already updated.
+                    //
+                    // Gated on !slotLoading: the card captures its baseline
+                    // turn count on FIRST MOUNT (see the component's own
+                    // comment), so mounting before history finishes loading
+                    // would baseline at 0 and then count every loaded
+                    // historical turn as "live" once the fetch resolves —
+                    // reintroducing the exact reopened-session bug the
+                    // baseline exists to prevent, just via a race instead of
+                    // a missing check.
+                    key={activeSlot}
+                    sessionId={activeSlot}
+                    kiroCrewVersion={kiroCrewVersion}
+                    turnCount={completedTurnCount}
+                    slotOrigin={currentSlot?.origin}
+                    onLayoutChange={handleSurveyLayoutChange}
+                  />
                 </div>
               )}
-              {/* Top spacer — reserves the height of all items above the mounted
-                  window so the scrollbar stays accurate while only the window
-                  renders real DOM (keeps fast scroll cheap — O(window) nodes).
-                  overflow-anchor:none so the browser anchors on real content,
-                  not on this spacer (which resizes as the window moves). */}
-              <div aria-hidden style={{ height: virt.offsetBefore, overflowAnchor: 'none' }} />
+              {/* Tail spacer, in px rather than vh. It plus the scroller's own
+                  bottom padding is the clearance between the last line of the
+                  transcript and the FIXED-height fade band below, so expressing it
+                  in `vh` made that clearance viewport-dependent: at 2vh + 8px it
+                  cleared a 24px band by 1px at 844px tall and cut INTO the last
+                  line on anything shorter (−1px at 740, −2px at 700, −5px at 560),
+                  which is the sliced-glyph hairline reported from a phone and the
+                  reason it looked mobile-only. */}
+              <div style={{ height: TRANSCRIPT_TAIL_SPACER_PX }} />
+              </>}
+            >
               {/* Message items — only the mounted window renders; everything
                   else is represented by the top/bottom spacers. */}
               {visibleDisplayItems.map((vi) => {
@@ -8255,50 +8246,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 >{item.msgs.map((m, j) => <div key={msgIdentityKey(m, stableMsgKey)}>{renderMessage(item.startIdx + j, m)}</div>)}</CollapsibleToolGroup>)
               })() : renderMessage(item.idx, item.msg)}</div>
               })}
-              {/* Bottom spacer — reserves the height of all items below the
-                  mounted window. overflow-anchor:none (see top spacer). */}
-              <div aria-hidden style={{ height: virt.offsetAfter, overflowAnchor: 'none' }} />
-              {/* Bottom sentinel: drives downward window expansion when in jump mode. */}
-              <div ref={virt.bottomSentinelRef} aria-hidden style={{ height: 1 }} />
-              {/* Footer */}
-              <ChatFooter running={slotRunning} stopping={slotStopping} state={slotState} lastRole={lastRole} streamTick={streamTick} regenerating={regenerating} stopState={currentSlot?.stop_state} />
-              {activeSlot && !slotLoading && !embedded && !popout && slotSwitchTarget !== activeSlot && (
-                <div className="px-4 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
-                  <SessionPulseSurveyCard
-                    // Remount on session switch: without this, React reuses
-                    // the same component instance across sessions, so an
-                    // in-progress rating/feedback/email from session A would
-                    // still be sitting in state when the user switches to
-                    // session B and hits Submit — attributing A's answers to
-                    // B's sessionId prop, which had already updated.
-                    //
-                    // Gated on !slotLoading: the card captures its baseline
-                    // turn count on FIRST MOUNT (see the component's own
-                    // comment), so mounting before history finishes loading
-                    // would baseline at 0 and then count every loaded
-                    // historical turn as "live" once the fetch resolves —
-                    // reintroducing the exact reopened-session bug the
-                    // baseline exists to prevent, just via a race instead of
-                    // a missing check.
-                    key={activeSlot}
-                    sessionId={activeSlot}
-                    kiroCrewVersion={kiroCrewVersion}
-                    turnCount={completedTurnCount}
-                    slotOrigin={currentSlot?.origin}
-                    onLayoutChange={handleSurveyLayoutChange}
-                  />
-                </div>
-              )}
-              {/* Tail spacer, in px rather than vh. It plus the scroller's own
-                  bottom padding is the clearance between the last line of the
-                  transcript and the FIXED-height fade band below, so expressing it
-                  in `vh` made that clearance viewport-dependent: at 2vh + 8px it
-                  cleared a 24px band by 1px at 844px tall and cut INTO the last
-                  line on anything shorter (−1px at 740, −2px at 700, −5px at 560),
-                  which is the sliced-glyph hairline reported from a phone and the
-                  reason it looked mobile-only. */}
-              <div style={{ height: TRANSCRIPT_TAIL_SPACER_PX }} />
-            </div>
+              
+            </TranscriptScrollShell>
             )}
             {/* Transcript bottom mask. Its box deliberately does NOT stop at the
                 scrollport's bottom edge — it reaches DOWN to the composer box, and
