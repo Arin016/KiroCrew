@@ -2,7 +2,7 @@
   "name": "guide",
   "version": "0.1.0",
   "displayName": "Kiro Crew Guide",
-  "description": "A searchable troubleshooting and how-to knowledge base for Kiro Crew. Look up symptoms and fixes by keyword, platform, or topic — and let any agent query the same guide over MCP so it answers from the official fix instead of guessing.",
+  "description": "A searchable troubleshooting and how-to knowledge base for Kiro Crew: find a fix by symptom or keyword, and let any agent query the same entries over MCP instead of guessing.",
   "author": "kirocrew",
   "tags": [
     "guide",
@@ -12,10 +12,10 @@
     "knowledge-base"
   ],
   "highlights": [
-    "Keyword-scored search over titles, symptoms, and keywords — filter by platform or topic",
-    "Every agent can query the guide over MCP (guide_search / guide_get) and answer from the official fix",
-    "Internal editions overlay their own entries on top of the public base with zero code branches",
-    "Read-only and self-contained: the search logic behind the UI, the HTTP API, and the MCP tools is one function"
+    "Search a curated troubleshooting and how-to knowledge base by symptom or keyword",
+    "Every entry lays out the exact commands to run and what to expect at each step",
+    "Agents look up the same fixes over MCP (guide_search / guide_get) instead of guessing",
+    "Internal editions add their own entries without changing what ships publicly"
   ],
   "defaultEnabled": false,
   "backend": {
@@ -51,7 +51,7 @@
     ]
   },
   "useCases": [
-    "Search Kiro Crew's troubleshooting guide by symptom, platform, or topic, and let agents look up the official fix over MCP."
+    "Look up the fix for a Kiro Crew problem by symptom or keyword, in the dashboard or from an agent over MCP."
   ],
   "configuration": [
     "Enable the app from the App Store; the public guide entries ship with it, and internal editions add their own via a data overlay."

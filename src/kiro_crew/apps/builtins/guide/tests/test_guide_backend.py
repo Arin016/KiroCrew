@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -23,7 +24,7 @@ _WINDOWS = "install-windows-unsupported"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache() -> None:
+def _fresh_cache() -> Iterator[None]:
     search.reset_cache()
     yield
     search.reset_cache()
@@ -92,13 +93,26 @@ def test_get_unknown_entry_is_none() -> None:
     assert search.get_entry("nope-not-real") is None
 
 
+def test_index_lists_ids_and_distinct_facets() -> None:
+    idx = search.index()
+    assert len(idx["ids"]) == 129
+    assert _TERMINAL in idx["ids"] and _WINDOWS in idx["ids"]
+    # Distinct, sorted platform/topic values for the filter chips.
+    assert "macos" in idx["platforms"] and "windows" in idx["platforms"]
+    assert idx["platforms"] == sorted(idx["platforms"])
+    assert "gateway" in idx["topics"]
+    assert idx["topics"] == sorted(idx["topics"])
+
+
 # ── overlay: canonical {entries, patches, excluded_both_entries} ───────────────
 
 
 def test_overlay_patch_replaces_fields_wholesale() -> None:
     # A patch's field value is authoritative: keywords is REPLACED, not merged,
     # so a base keyword must disappear.
-    base_kw = search.get_entry(_TERMINAL)["keywords"]
+    base_entry = search.get_entry(_TERMINAL)
+    assert base_entry is not None
+    base_kw = base_entry["keywords"]
     assert "terminal" in base_kw
     _write_overlay(
         {
@@ -136,7 +150,11 @@ def test_overlay_entries_and_excluded_are_appended() -> None:
 
 def test_overlay_patch_for_unknown_id_is_skipped() -> None:
     _write_overlay(
-        {"entries": [], "patches": [{"id": "ghost-id", "patch": {"trust": "x"}}], "excluded_both_entries": []}
+        {
+            "entries": [],
+            "patches": [{"id": "ghost-id", "patch": {"trust": "x"}}],
+            "excluded_both_entries": [],
+        }
     )
     assert search.get_entry("ghost-id") is None
     assert len(search.all_entries()) == 129  # nothing dropped, nothing added
@@ -178,9 +196,11 @@ def test_media_traversal_is_rejected() -> None:
 
 
 def _call(method: str, params: dict | None = None, req_id: int = 1) -> dict:
-    return mcp_server.handle(
+    reply = mcp_server.handle(
         {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
     )
+    assert reply is not None
+    return reply
 
 
 def test_mcp_tools_list_advertises_both_tools() -> None:
@@ -190,7 +210,9 @@ def test_mcp_tools_list_advertises_both_tools() -> None:
 
 
 def test_mcp_guide_search_returns_real_entries() -> None:
-    reply = _call("tools/call", {"name": "guide_search", "arguments": {"query": "terminal", "limit": 10}})
+    reply = _call(
+        "tools/call", {"name": "guide_search", "arguments": {"query": "terminal", "limit": 10}}
+    )
     payload = json.loads(reply["result"]["content"][0]["text"])
     ids = [r["id"] for r in payload["results"]]
     assert _TERMINAL in ids

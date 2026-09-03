@@ -69,9 +69,7 @@ async def handle_list_entries(request: web.Request) -> web.StreamResponse:
     platform = request.query.get("platform") or None
     topic = request.query.get("topic") or None
     limit = _query_int(request, "limit", default=25, low=1, high=50)
-    results = await asyncio.to_thread(
-        search.search, q, platform=platform, topic=topic, limit=limit
-    )
+    results = await asyncio.to_thread(search.search, q, platform=platform, topic=topic, limit=limit)
     return web.json_response({"entries": results, "total": len(results)})
 
 
@@ -93,11 +91,17 @@ async def handle_get_media(request: web.Request) -> web.StreamResponse:
     key = request.match_info["key"]
     path = await asyncio.to_thread(search.resolve_media, key)
     if path is None:
-        return web.json_response(
-            {"error": "media not found", "code": "not_found"}, status=404
-        )
+        return web.json_response({"error": "media not found", "code": "not_found"}, status=404)
     ctype, _ = mimetypes.guess_type(str(path))
     return web.FileResponse(path, headers={"Content-Type": ctype or "application/octet-stream"})
+
+
+@_require_enabled
+async def handle_index(request: web.Request) -> web.StreamResponse:
+    """GET /index — the id set (for in-text entry autolinking) plus the distinct
+    platform and topic values (for the filter chips), computed from the merged data.
+    """
+    return web.json_response(await asyncio.to_thread(search.index))
 
 
 def register_routes(app: web.Application) -> None:
@@ -107,6 +111,7 @@ def register_routes(app: web.Application) -> None:
     """
     router = app.router
     router.add_get(f"{API_BASE}/entries", handle_list_entries)
+    router.add_get(f"{API_BASE}/index", handle_index)
     router.add_get(API_BASE + "/entries/{entry_id}", handle_get_entry)
     # ``{key:.*}`` so a media key may contain slashes (e.g. a subdir).
     router.add_get(API_BASE + "/media/{key:.*}", handle_get_media)

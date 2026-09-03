@@ -77,7 +77,9 @@ def _tool_guide_get(args: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-TOOLS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], str, dict[str, Any], list[str]]] = {
+TOOLS: dict[
+    str, tuple[Callable[[dict[str, Any]], dict[str, Any]], str, dict[str, Any], list[str]]
+] = {
     "guide_search": (
         _tool_guide_search,
         "Search the Kiro Crew guide by symptom, error text, or topic. Returns "
