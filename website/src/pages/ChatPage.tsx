@@ -461,7 +461,12 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: 
                 <span className="flex-1">{i18nT('pages.chatPage.mcp_servers')}</span>
                 <ChevronRight size={12} className="text-muted" />
               </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="min-w-[240px] max-w-[300px] max-h-[340px] overflow-y-auto px-3 py-2">
+              {/* Intentional tighter cap composed via min() with the primitive's
+                  available-height var: 340px keeps the MCP tools submenu compact
+                  while preserving the viewport never-clip floor (a bare max-h
+                  would override the primitive, since cn()'s tailwind-merge dedupes
+                  max-h-*). overflow is left to the primitive. */}
+              <DropdownMenuSubContent className="min-w-[240px] max-w-[300px] max-h-[min(340px,var(--radix-dropdown-menu-content-available-height))] px-3 py-2">
                 <McpToolsPanel
                   servers={servers}
                   toolsByServer={toolsByServer}

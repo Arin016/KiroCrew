@@ -5431,7 +5431,13 @@ function ChatSidebar({
                       <Folder size={14} className="text-muted" /> {i18nT('pages.chatSidebar.new_chat_in_folder')}
                       <ChevronRight size={13} className="ml-auto text-muted" />
                     </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="max-h-[300px] overflow-y-auto">
+                    {/* Intentional tighter cap composed via min() with the
+                        primitive's available-height var: 300px keeps the folder
+                        list submenu compact while preserving the viewport
+                        never-clip floor (a bare max-h would override the
+                        primitive, since cn()'s tailwind-merge dedupes max-h-*).
+                        overflow is left to the primitive. */}
+                    <DropdownMenuSubContent className="max-h-[min(300px,var(--radix-dropdown-menu-content-available-height))]">
                       {folderRows}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
@@ -5475,7 +5481,13 @@ function ChatSidebar({
                         <Server size={14} className="text-info" /> {i18nT('pages.chatSidebar.new_chat_on_crew')}
                         <ChevronRight size={13} className="ml-auto text-muted" />
                       </DropdownMenuSubTrigger>
-                      <DropdownMenuSubContent className="max-h-[300px] overflow-y-auto">
+                      {/* Intentional tighter cap composed via min() with the
+                          primitive's available-height var: 300px keeps the crew
+                          list submenu compact while preserving the viewport
+                          never-clip floor (a bare max-h would override the
+                          primitive, since cn()'s tailwind-merge dedupes max-h-*).
+                          overflow is left to the primitive. */}
+                      <DropdownMenuSubContent className="max-h-[min(300px,var(--radix-dropdown-menu-content-available-height))]">
                         {crewRows}
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
@@ -5641,7 +5653,7 @@ function ChatSidebar({
                   popper wrapper to `max-content`, so the inline pickers' caption
                   sentences (a phone renders them here instead of in a flyout)
                   would otherwise stretch the menu past the screen edge. */}
-              <DropdownMenuContent align="end" className="min-w-[180px] max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto">
+              <DropdownMenuContent align="end" className="min-w-[180px] max-w-[calc(100vw-1rem)]">
                 <DropdownMenuLabel className="text-[11px] uppercase tracking-[.04em]">{i18nT('pages.chatSidebar.filter')}</DropdownMenuLabel>
                 {SESSION_FILTERS.map(filterDef => {
                   const active = activeFilters.has(filterDef.key)
@@ -5940,8 +5952,9 @@ function ChatSidebar({
                 {/* Folders sit LAST on purpose: the list grows with the user's
                     folder count, so anything below it would get pushed out of
                     easy reach. Being last, it can simply overflow into the
-                    menu's own scroll (max-h on DropdownMenuContent) with no
-                    inner scroll region of its own. */}
+                    menu's own scroll (the DropdownMenuContent primitive caps to
+                    the available viewport height and scrolls) with no inner
+                    scroll region of its own. */}
                 {!boardLaneActive && folderFilterRows.length > 0 && (
                   <>
                     <DropdownMenuSeparator />
