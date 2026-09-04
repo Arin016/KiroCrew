@@ -39,6 +39,7 @@ from kiro_crew.cron import (
 )
 from kiro_crew.cron_script import resolve_script_path
 from kiro_crew.cron_trigger import _JOB_ID_RE, trigger_cron_job
+from kiro_crew.identity_stores import IDENTITY_STORE_ROOTS, Platform
 from kiro_crew.mcp_caller import current_caller
 from kiro_crew.mcp_core import (
     _resolve_session_key,
@@ -98,6 +99,64 @@ _CRON_CRED_PATH_RE = re.compile(
     r"(?:/|\s|['\"]|$)",
     re.IGNORECASE,
 )
+
+
+def _win_identity_store_access_re() -> re.Pattern[str]:
+    """Compile the Windows env-var identity-store ACCESS pattern.
+
+    Windows env-var spelling of the kiro-cli / amazon-q identity stores, e.g.
+    ``%LOCALAPPDATA%\\kiro-cli\\data.sqlite3`` or ``%APPDATA%\\amazon-q\\data.sqlite3``.
+    ``_CRON_CRED_PATH_RE`` only anchors POSIX ``/``-separated paths (via
+    ``_SENSITIVE_HOME_DIRS``), so the ``%VAR%``-plus-backslash form was
+    previously caught for a SCRIPT BODY only by the whole-body shell-grammar scan
+    (``is_sensitive_bash_command``, security.py's %LOCALAPPDATA%/!LOCALAPPDATA!
+    alternation ~L7568). Scoping that scan to non-parsing bodies dropped this one
+    spelling for a parseable Python body, so this source-side detector restores
+    it WITHOUT re-enabling the fail-open shell scan over source.
+
+    Derived from the single canonical store table (``identity_stores``) so it
+    cannot drift from the fence the shell tier enforces: the SAME Windows env
+    vars (LOCALAPPDATA / APPDATA) and the SAME product store names (kiro-cli /
+    amazon-q), mirroring security.py's own table-derived pattern. The var
+    alternation matches ``%VAR%`` / ``%VAR:mod%``, cmd.exe delayed expansion
+    ``!VAR!`` / ``!VAR:mod!``, and the PowerShell ``$env:VAR`` / ``${env:VAR}``
+    spellings, exactly as the shell tier does.
+
+    Crucially this matches an ACCESS (a path segment UNDER the store: at least
+    one more ``\\``-separated component after the product dir), NOT a bare
+    mention of the store directory. That distinction is deliberate and
+    load-bearing: the original #7912 false positive this whole change fixed was a
+    benign REDACTION regex ``re.compile(r"%LOCALAPPDATA%\\kiro-cli")`` that NAMES
+    the store dir without reading anything under it, and it must stay allowed.
+    Requiring a trailing segment reads a store-dir mention as benign and a read
+    of a file inside the store as the credential access it is. Backslash RUNS
+    (``\\+``) absorb the doubled backslash a raw-string source literal carries,
+    so both the source spelling and the resolved single-backslash spelling match.
+    """
+    win_rows = [r for r in IDENTITY_STORE_ROOTS if r.platform is Platform.WIN32]
+    env_vars = sorted({r.env_var for r in win_rows if r.env_var})
+    products = sorted({r.home_relative_dir.rsplit("/", 1)[-1] for r in win_rows})
+    var_alt = "|".join(
+        (
+            rf"%{name}(?::[^%\s]*)?%"
+            rf"|!{name}(?::[^!\s]*)?!"
+            rf"|{re.escape('$env:' + name)}"
+            rf"|{re.escape('${env:' + name + '}')}"
+        )
+        for name in env_vars
+    )
+    prod_alt = "|".join(re.escape(p) for p in products)
+    return re.compile(
+        r"(?:" + var_alt + r")"
+        r"\\+"  # backslash run: absorbs a raw-string source escape's doubled ``\``
+        r"(?:" + prod_alt + r")"
+        r"\\+"  # a SEPARATOR + ...
+        r"\S",  # ... at least one more segment char: an ACCESS, not a bare mention
+        re.IGNORECASE,
+    )
+
+
+_CRON_WIN_IDENTITY_STORE_RE = _win_identity_store_access_re()
 # Protected secret env vars a cron command must not read by name. Union of the
 # sandbox-scrubbed agent keys (Slack tokens, owner id) and well-known cloud /
 # source-control credential env vars. The sandbox strips _AGENT_DENIED_ENV_KEYS
@@ -772,7 +831,7 @@ def _vet_script_contents(text: str) -> str | None:
     credential/secret/exfil detectors, because the shell-grammar passes
     false-positive on Python source (see the inline comment on the scan below).
     """
-    if _CRON_CRED_PATH_RE.search(text):
+    if _CRON_CRED_PATH_RE.search(text) or _CRON_WIN_IDENTITY_STORE_RE.search(text):
         return (
             "Error: cron script blocked: references a credential path "
             "(e.g. .aws/.ssh/.netrc). Cron scripts may not read credential files."
@@ -791,7 +850,8 @@ def _vet_script_contents(text: str) -> str | None:
     # is the same category error the docstring above rejects for is_denied: a
     # shell-grammar heuristic is wrong for a source subject. A parseable body is
     # instead covered by the source-appropriate detectors run above
-    # (_CRON_CRED_PATH_RE / _CRON_SECRET_ENV_RE / _CRON_SECRET_NAME_RE) and the
+    # (_CRON_CRED_PATH_RE / _CRON_WIN_IDENTITY_STORE_RE / _CRON_SECRET_ENV_RE /
+    # _CRON_SECRET_NAME_RE) and the
     # exfil scan below, which independently catch the credential-read /
     # secret-env / exfiltration threats this gate exists to close. We keep the
     # raw-text shell-grammar scan ONLY as a fail-CLOSED fallback for a body that

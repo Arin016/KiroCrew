@@ -266,9 +266,18 @@ for credential exfiltration by `mcp_cron._vet_script_contents`, because
 `mode="standard"` (which does not hide `~/.aws`). The body is scanned with
 **source-appropriate detectors**: `_CRON_CRED_PATH_RE` (a credential-file path
 such as `~/.aws/credentials`, `.ssh/id_rsa`, `/home/u/.netrc`),
+`_CRON_WIN_IDENTITY_STORE_RE` (the Windows env-var spelling of the kiro-cli /
+amazon-q identity stores, e.g. `%LOCALAPPDATA%\kiro-cli\data.sqlite3` /
+`%APPDATA%\amazon-q\...`, which `_CRON_CRED_PATH_RE`'s POSIX `/`-anchored form
+does not reach — derived from the canonical `identity_stores` table so it stays
+in sync with the shell tier's fence),
 `_CRON_SECRET_ENV_RE` / `_CRON_SECRET_NAME_RE` (a protected secret env var,
 including bare-name `os.environ["AWS_SECRET_ACCESS_KEY"]` access), and
-`scan_exfiltration_urls`. The shell-grammar heuristic (`is_sensitive_bash_command`)
+`scan_exfiltration_urls`. `_CRON_WIN_IDENTITY_STORE_RE` matches an ACCESS (a
+path segment UNDER the store) and NOT a bare mention of the store directory, so
+a benign redaction regex naming the store (`re.compile(r"%LOCALAPPDATA%\kiro-cli")`
+— the original #7912 false positive) stays allowed while a read of a file inside
+the store is blocked. The shell-grammar heuristic (`is_sensitive_bash_command`)
 is deliberately **scoped**: it runs only over a body that does NOT parse as
 Python (`ast.parse` raises `SyntaxError`, or any other unexpected parse error —
 fail-CLOSED), so a raw shell script masquerading as a script file is still

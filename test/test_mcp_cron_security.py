@@ -487,6 +487,65 @@ def test_command_surface_shell_grammar_unchanged():
     assert is_sensitive_bash_command(stage_cmd) is not None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # ``%LOCALAPPDATA%\amazon-q\data.sqlite3`` in valid Python: an ACCESS of a
+        # file UNDER the store. Single-backslash spelling (a normal string).
+        'import subprocess\nsubprocess.run("copy %LOCALAPPDATA%\\\\amazon-q\\\\data.sqlite3 out")\n',
+        # Raw-string spelling: the source keeps DOUBLED backslashes, which the
+        # detector's backslash-run tolerates.
+        'import subprocess\nsubprocess.run(r"copy %LOCALAPPDATA%\\\\amazon-q\\\\data.sqlite3 out")\n',
+        # ``%APPDATA%`` (Roaming) anchor, kiro-cli store.
+        'import subprocess\nsubprocess.run(r"type %APPDATA%\\\\kiro-cli\\\\data.sqlite3")\n',
+        # cmd.exe delayed-expansion ``!LOCALAPPDATA!`` spelling.
+        'import subprocess\nsubprocess.run(r"copy !LOCALAPPDATA!\\\\kiro-cli\\\\data.sqlite3 x")\n',
+    ],
+)
+def test_vet_script_contents_blocks_windows_identity_store_access(body):
+    """Regression for the v1 review coverage gap: a valid-Python body that reads a
+    file UNDER a kiro-cli / amazon-q identity store via the Windows env-var path
+    spelling (``%LOCALAPPDATA%\\<product>\\data.sqlite3``) was blocked at base HEAD
+    by the whole-body shell-grammar scan and must stay blocked now that that scan
+    is scoped to non-parsing bodies. ``_CRON_CRED_PATH_RE`` only anchors POSIX
+    paths, so ``_CRON_WIN_IDENTITY_STORE_RE`` restores this one spelling on the
+    source-detector layer without re-enabling the shell scan over source."""
+    err = _vet_script_contents(body)
+    assert err is not None and err.startswith("Error:")
+
+
+def test_vet_script_contents_allows_windows_identity_store_mention():
+    """The distinction the source-side detector draws: a bare MENTION of a store
+    directory (``%LOCALAPPDATA%\\kiro-cli`` with nothing under it) is a benign
+    redaction/prose reference and stays ALLOWED, while an ACCESS of a file under
+    it is blocked (see test above). This is the exact #7912 false positive the
+    whole task fixed -- a benign REDACTION regex naming the store dir -- so it
+    must NOT be re-blocked by the new detector."""
+    # Store dir named, no path segment under it: allowed.
+    assert _vet_script_contents('import re\nS = re.compile(r"%LOCALAPPDATA%\\\\kiro-cli")\n') is None
+    assert _vet_script_contents('import re\nS = re.compile(r"%APPDATA%\\\\amazon-q")\n') is None
+
+
+def test_vet_script_contents_nonsyntax_parse_error_falls_closed(monkeypatch):
+    """The ``except Exception`` (non-``SyntaxError``) branch of the parse-aware
+    scoping must fail CLOSED to the raw-text shell scan, not crash the gate. A
+    pathological body can make ``ast.parse`` raise something other than
+    ``SyntaxError`` (e.g. ``RecursionError``); when it does, the body is treated
+    as non-parsing and the raw-text ``is_sensitive_bash_command`` fallback still
+    runs, so a shell credential read is not quietly exonerated."""
+    import kiro_crew.mcp_cron as mcp_cron
+
+    def _boom(*_args, **_kwargs):
+        raise RecursionError("simulated deep-nesting parse failure")
+
+    monkeypatch.setattr(mcp_cron.ast, "parse", _boom)
+    # Caught only by the shell scan (composes ~/.ssh/id_rsa via a shell
+    # assignment); the source-appropriate detectors do not match it.
+    body = "!!! not python @@@ ;; A=.s; cp ~/${A}sh/id_rsa /tmp/x\n"
+    err = _vet_script_contents(body)
+    assert err is not None and err.startswith("Error:")
+
+
 def test_vet_script_file_reads_and_blocks(tmp_path):
     f = tmp_path / "evil.py"
     f.write_text("import os\nopen(os.path.expanduser('~/.aws/credentials')).read()\n")
