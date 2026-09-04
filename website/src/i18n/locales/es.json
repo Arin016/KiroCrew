@@ -13980,8 +13980,19 @@
       "driving_none": "No está dirigiendo ninguna sesión ahora mismo.",
       "driving_idle": "Inactivo",
       "driving_show_all": "Mostrar todas ({{count}})",
-      "driving_show_less": "Mostrar menos"
-    }
+      "driving_show_less": "Mostrar menos",
+      "webview_heading": "Panel",
+      "webview_collapse": "Contraer el panel",
+      "webview_open": "Abrir el panel",
+      "webview_value_yes": "sí",
+      "webview_value_no": "no",
+      "webview_contained": "Aislado",
+      "webview_contained_detail": "rellenado por este equipo, aislado de esta página y bloqueado para enviar datos",
+      "webview_empty": "Este equipo aún no ha rellenado su panel.",
+      "webview_error": "No se pudo renderizar el panel de este equipo.",
+      "webview_frame_title": "Panel rellenado por {{crew}}",
+      "webview_rendering": "Renderizando el panel…",
+      "webview_retry": "Reintentar"    }
   },
   "privacyDisclosure": {
     "anonymousHeartbeatBody": "Como máximo uno al día. Identifica una copia instalada, no a una persona.",
