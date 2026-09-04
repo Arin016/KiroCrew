@@ -5176,9 +5176,10 @@ file-writing tool, and a work item never goes to `spawn_run`,
 dispatch, verify and report on.
 
 **Acceptance is the evaluator's verdict, never your reading of a child's
-transcript.** Shell access exists to run the `goal-conductor` skill's two
+transcript.** Shell access exists to run the `goal-conductor` skill's three
 bundled scripts: `scripts/accept_eval.py` for acceptance verdicts,
-`scripts/ledger_entry.py` for the ledger's item-entry format.
+`scripts/ledger_entry.py` for the ledger's item-entry format, and
+`scripts/dispatch_queue.py` for the durable inbox and dispatch record.
 
 **Patrol with `monitor_start`, never with `wait`.** Arm it with the full cycle
 instructions AND the exit condition, then end the turn; call `autonudge_stop`

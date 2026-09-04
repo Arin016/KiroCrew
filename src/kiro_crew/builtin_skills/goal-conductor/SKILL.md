@@ -17,10 +17,16 @@ Your four jobs, none of which can be delegated to a work item:
 Everything else belongs in a work item. This spec has **no `fs_write`** — that
 is deliberate. If a task needs a file written, it is a work item, not something
 you do. `execute_bash` IS granted, for exactly one purpose: running this
-skill's bundled scripts — the acceptance evaluator (`scripts/accept_eval.py`)
-and the ledger entry codec (`scripts/ledger_entry.py`). Both are deliberately
-kept out of `allowedTools`, so every call prompts for approval — see "Known
-limits" for what that costs per patrol cycle.
+skill's bundled scripts — the acceptance evaluator (`scripts/accept_eval.py`),
+the ledger entry codec (`scripts/ledger_entry.py`), and the durable inbox +
+dispatch record (`scripts/dispatch_queue.py`). All three are deliberately kept out of
+`allowedTools`, so every call prompts for approval — see "Known limits" for what
+that costs per patrol cycle.
+
+Between them they hold everything that must survive a lost turn: the evaluator
+holds the VERDICT, the codec holds the ENTRY FORMAT, and the queue holds the two
+things that used to live only in this prose — a mid-flight user message, and
+whether an item was already dispatched.
 
 ## What is a work item
 
@@ -98,7 +104,14 @@ beats more parallelism: every open item is a session the user may have to read.
 
 ### Dispatch a round
 
-For each item in the round:
+For each item in the round, start with `dispatch_queue.py dispatch_begin` and
+`{goal, item}` — before creating anything. It pre-assigns the item's dispatch id
+and returns `replay: true` when a previous attempt already began this item.
+**`replay: true` with `state: "begun"` means a session may already exist for it
+with no seed** — read that session before creating a second one, because an
+unseeded session looks exactly like a quiet one. A second `dispatch_begin`
+deliberately returns the SAME id: a fresh id per attempt is what opens two
+sessions for one item. Then the dispatch itself:
 
 1. `session_create` with a title that says what the item is FOR, `folder` set to
    the goal's folder (missing path segments are created automatically, and the
@@ -114,7 +127,10 @@ For each item in the round:
 2. `session_send` the seed prompt into the new session — the item's goal, its
    acceptance condition, and where to report. The seed is the item's whole
    contract: the child session gets no other context from you.
-3. `session_ledger_record` the item: its goal text, the round number, and — in
+3. `dispatch_queue.py dispatch_sent` with `{goal, item, session}` immediately after the
+   seed lands. This is what closes the replay window: until it is recorded, every
+   later `dispatch_begin` for this item warns that the session may be unseeded.
+4. `session_ledger_record` the item: its goal text, the round number, and — in
    `artifacts`, under an `item-<n>` key — the durable item entry carrying its
    acceptance spec, session key, round, status and read cursor. **Never
    hand-write the entry value: encode it with the bundled codec**
@@ -128,7 +144,12 @@ For each item in the round:
    compaction; `next` carries the resumable intent.
 
 Send the seed BEFORE recording the ledger row as dispatched — a ledger row that
-says "running" for a session that never got its seed is the worse failure.
+says "running" for a session that never got its seed is the worse failure. The
+ordering is still yours to keep, but it is no longer only prose: `dispatch_begin`
+and `dispatch_sent` make a half-finished dispatch VISIBLE to the next turn, so a
+lost turn between create and send is recoverable instead of invisible. What they
+do NOT give you is atomicity — the two session calls are yours to make, so the
+queue can tell you a dispatch was replayed but cannot prevent the replay.
 
 ### Patrol
 
@@ -192,11 +213,11 @@ Each cycle:
    failing it, asking a question, or stalling. Never post "nothing changed".
 
 **Shell exists for the bundled scripts, not for work.** `execute_bash` is
-granted so patrol can run `accept_eval.py` and `ledger_entry.py`. Running a
-work item's build, test, or fix yourself through it is the boundary violation
-this skill exists to prevent — if you need a command run to MAKE something
-true, that is a work item; the bundled scripts only CHECK and ENCODE what is
-already true.
+granted so patrol can run `accept_eval.py`, `ledger_entry.py` and `dispatch_queue.py`.
+Running a work item's build, test, or fix yourself through it is the boundary
+violation this skill exists to prevent — if you need a command run to MAKE
+something true, that is a work item; the bundled scripts only CHECK, ENCODE and
+REMEMBER what is already true.
 
 ### Close the round
 
@@ -212,6 +233,15 @@ original plan did not have. Re-planning mid-round is not: let the round finish.
 The user can message you any time. Apply a changed goal **at the round
 boundary** — that is the re-plan point, and cancelling mid-round throws away
 finished work.
+
+**Park it the moment it arrives: `dispatch_queue.py enqueue` with `{goal, text}`.** Holding
+it "until the boundary" in the conversation alone is how a steering instruction
+disappears — a compaction between arrival and the boundary takes it with no trace.
+At the boundary, `dispatch_queue.py claim` returns every parked message, and `dispatch_queue.py done`
+with their ids drops the ones you applied. A claim does NOT delete: a turn that
+dies after claiming leaves the messages recoverable, and a later claim re-serves
+anything claimed longer ago than `stale_secs`. Use `release` when you claimed a
+message you are not going to apply this round.
 
 One exception: if their message directly invalidates an item that is still
 running, deal with that item now — `session_stop` it, or `session_send` the
@@ -360,9 +390,13 @@ watches, and that cost grows with the loop's own history.
   dispatch (the seed) and one if you ever stop an item — all of which happen
   right after the user approved a plan, not mid-patrol. `execute_bash` also still
   prompts, so **each patrol cycle blocks on one approval for the
-  `accept_eval.py` invocation** plus one per codec call. Size the nudge interval
-  for that, and batch: one evaluator call per cycle carrying every open item, one
-  codec call per map-wide operation. On a host with a governance ceiling even the
+  `accept_eval.py` invocation** plus one per codec call and one per `dispatch_queue.py`
+  call. A dispatch round pays two extra approvals per item for `dispatch_begin` +
+  `dispatch_sent` — that is the price of a recoverable dispatch, and it buys back
+  the case where a lost turn leaves a session nobody can tell is unseeded. Size
+  the nudge interval for that, and batch: one evaluator call per cycle carrying
+  every open item, one codec call per map-wide operation, one `claim` per round
+  boundary rather than a poll per cycle. On a host with a governance ceiling even the
   granted verbs prompt; if you see approvals where this says you should not, that
   is why.
 - **`session_send` reports delivery, not completion.** `started: true` means the
@@ -373,9 +407,10 @@ watches, and that cost grows with the loop's own history.
   and sessions in another workspace are all refused by the shared guard. Plan
   work items onto plain persistent dashboard sessions only.
 - **Shell is for the bundled scripts only, and the evaluator runs no command
-  you name.** `execute_bash` exists so patrol can run `accept_eval.py` and
-  `ledger_entry.py` (the codec runs no subprocess at all — it only transforms
-  JSON); every call is audit-logged and every call prompts. The evaluator
+  you name.** `execute_bash` exists so patrol can run `accept_eval.py`,
+  `ledger_entry.py` and `dispatch_queue.py` (neither the codec nor the queue runs a
+  subprocess at all — one transforms JSON, the other reads and writes one state
+  file); every call is audit-logged and every call prompts. The evaluator
   accepts **no command, argv array, or shell string from a spec** — it builds
   every argv it runs from a fixed template, so `pr_checks` becomes `gh pr
   checks <n>` and nothing else executes. That is deliberate and load-bearing:
