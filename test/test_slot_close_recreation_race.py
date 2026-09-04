@@ -41,6 +41,7 @@ and the three predicate tests are that pin.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -73,12 +74,20 @@ class _Req:
     interleaving of the concurrent recreate has to be scheduled deterministically
     inside the teardown window, and a client's own awaits would let it run before
     the handler even reached the pop.
+
+    The handlers under test read their body through ``read_bounded_json``
+    (``_shared.py``), whose docstring requires stand-ins to feed
+    ``content``/``content_length`` rather than mocking ``json`` — so this stub
+    carries the full quartet it touches: ``can_read_body``, ``content_length``,
+    ``charset``, and a ``content`` stream serving the serialized body.
+    ``json()`` is kept for any direct callers.
     """
 
     def __init__(self, state, slot: str = NAME, body: dict | None = None) -> None:
         self.app = {"state": state}
         self.match_info = {"slot": slot}
         self._body = body if body is not None else {}
+        self._raw = json.dumps(self._body).encode() if body is not None else b""
 
     def get(self, key: str, default: str = "") -> str:
         del key
@@ -86,6 +95,34 @@ class _Req:
 
     async def json(self) -> dict:
         return self._body
+
+    @property
+    def can_read_body(self) -> bool:
+        return bool(self._raw)
+
+    @property
+    def content_length(self) -> int | None:
+        return len(self._raw) if self._raw else None
+
+    charset: str | None = None
+
+    @property
+    def content(self) -> "_ReqStream":
+        return _ReqStream(self._raw)
+
+
+class _ReqStream:
+    """The slice of aiohttp's StreamReader that ``read_bounded_json`` iterates."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    async def _gen(self, n: int):
+        for i in range(0, len(self._raw), n):
+            yield self._raw[i : i + n]
+
+    def iter_chunked(self, n: int):
+        return self._gen(n)
 
 
 def _state_with_slot(tmp_path, name: str = NAME):
