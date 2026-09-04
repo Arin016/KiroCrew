@@ -258,6 +258,32 @@ Deterministic cron jobs that bypass the LLM entirely:
 - **Safety**: scripts must live under `~/.kiro/crew/crons/`. `is_sensitive_path()` blocks credential file access. SEL audit on every invocation. Auto-pause after 5 consecutive failures (`_AUTO_PAUSE_THRESHOLD`, single-sourced in `CronJob.record_failure`/`record_success`). The auto-pause is **persistent**: an execution-owned `auto_paused` flag (distinct from `user_paused`) is written by `_save`, propagated by `_merge_job_result`, and folded into the effective `enabled` derivation in `_load` — so a failing job stays paused across a daemon restart; `enable_job(True)` or a later success clears it (SEL-audited transitions). Concurrent execution guard prevents double-fire.
 - **Kind tag**: `cron_list` labels each job as `script`, `command`, or `agent` based on which mode is configured.
 
+#### Script-body credential scan (`_vet_script_contents`)
+
+At authoring time (and re-checked at fire time) a `script` job's BODY is scanned
+for credential exfiltration by `mcp_cron._vet_script_contents`, because
+`resolve_script_path` validates only the *path* and the script runs under
+`mode="standard"` (which does not hide `~/.aws`). The body is scanned with
+**source-appropriate detectors**: `_CRON_CRED_PATH_RE` (a credential-file path
+such as `~/.aws/credentials`, `.ssh/id_rsa`, `/home/u/.netrc`),
+`_CRON_SECRET_ENV_RE` / `_CRON_SECRET_NAME_RE` (a protected secret env var,
+including bare-name `os.environ["AWS_SECRET_ACCESS_KEY"]` access), and
+`scan_exfiltration_urls`. The shell-grammar heuristic (`is_sensitive_bash_command`)
+is deliberately **scoped**: it runs only over a body that does NOT parse as
+Python (`ast.parse` raises `SyntaxError`, or any other unexpected parse error —
+fail-CLOSED), so a raw shell script masquerading as a script file is still
+covered. It is NOT run over a body that parses as Python, because its shell-word
+grammar false-positives on ordinary source two ways: pass 1b's separator-run
+collapse turns a Python backslash ESCAPE (e.g. the raw-string regex
+`r"%LOCALAPPDATA%\kiro-cli"`) into a manufactured credential path, and its
+fail-closed stage/substitution budgets (`_ALT_MAX_STAGES`,
+`_FIND_SUBSTITUTION_BUDGET`) trip on file SIZE because every source line is
+counted as a pipeline stage. A parseable Python body is fully covered by the
+source-appropriate detectors above (which independently catch every credential
+read / secret-env / exfil case). The command-line surface
+(`is_sensitive_bash_command` over a real shell `command`) keeps the collapse and
+the budgets unchanged.
+
 #### Auto-pause applies to `agent` (message) crons too
 
 Auto-pause is not script/command-only. An `agent` cron's turn signals failure

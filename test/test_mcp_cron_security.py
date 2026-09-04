@@ -32,6 +32,7 @@ from kiro_crew.mcp_cron import (
     _vet_script_file,
     _vet_shell_command,
 )
+from kiro_crew.security import is_sensitive_bash_command
 
 # ── Fix 1: command deny-list (pure function) ──────────────────────────────
 
@@ -432,6 +433,21 @@ BENIGN_SCRIPTS = [
     "import subprocess\ndef run(ctx):\n    subprocess.run(['git','push'])\n",
     "import os\nr=os.environ.get('AWS_REGION','us-east-1')\n",
     "import urllib.request\nurllib.request.urlopen('https://api.example.com/status')\n",
+    # Issue #7912 reproduction bodies. These are all valid Python source that the
+    # old whole-file shell-grammar scan (is_sensitive_bash_command) falsely
+    # denied:
+    #   - a long-but-benign body tripped the fail-closed stage budget
+    #     (_ALT_MAX_STAGES=512) on file SIZE because every source line was
+    #     counted as a pipeline stage;
+    #   - a raw-string regex whose backslash ESCAPE was collapsed by pass 1b's
+    #     separator-run collapse into a manufactured credential path;
+    #   - a docstring whose prose spells the fenced-store path directly.
+    # A parseable Python body is now left to the source-appropriate detectors,
+    # so all four are allowed.
+    "x = 1\n" * 600,
+    'import re\nSCRUB = re.compile(r"%LOCALAPPDATA%\\\\kiro-cli")\n',
+    'import re\nSCRUB = re.compile(r"/home/\\S*/\\.kiro/crew/security_policy.json")\n',
+    'def run(ctx):\n    """Never touch %LOCALAPPDATA%\\\\kiro-cli -- it is the keystone."""\n',
 ]
 
 
@@ -444,6 +460,31 @@ def test_vet_script_contents_blocks_malicious(body):
 @pytest.mark.parametrize("body", BENIGN_SCRIPTS)
 def test_vet_script_contents_allows_benign(body):
     assert _vet_script_contents(body) is None
+
+
+def test_vet_script_contents_nonparsing_body_uses_shell_fallback():
+    """A body that does not parse as Python still runs the raw-text shell-grammar
+    scan, so a non-Python body (e.g. a raw shell script) is not exonerated by the
+    parse-aware scoping. This body is invalid Python and is caught ONLY by
+    is_sensitive_bash_command (it composes ~/.ssh/id_rsa via a shell assignment),
+    not by the source-appropriate credential-path detector."""
+    body = "!!! not python @@@ ;; A=.s; cp ~/${A}sh/id_rsa /tmp/x\n"
+    err = _vet_script_contents(body)
+    assert err is not None and err.startswith("Error:")
+
+
+def test_command_surface_shell_grammar_unchanged():
+    """Regression: the fix scopes only the SCRIPT-BODY scan. A direct
+    is_sensitive_bash_command call on a real shell command that trips the pass-1b
+    separator collapse or the >512-stage budget must still return its block, so
+    the command-line surface is byte-for-byte unchanged."""
+    # pass-1b separator collapse on a real command spelling.
+    collapse_cmd = r"type %LOCALAPPDATA%\kiro-cli\config"
+    assert is_sensitive_bash_command(collapse_cmd) is not None
+    # >512 pipeline stages trips the fail-closed stage budget on the command
+    # surface (a real pipeline, not source lines).
+    stage_cmd = "cat x" + " | cat" * 600
+    assert is_sensitive_bash_command(stage_cmd) is not None
 
 
 def test_vet_script_file_reads_and_blocks(tmp_path):

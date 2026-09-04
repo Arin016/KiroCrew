@@ -14,6 +14,7 @@ Tools:
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import logging
 import os
@@ -765,7 +766,11 @@ def _vet_script_contents(text: str) -> str | None:
     that false-positive on ordinary Python source, and destructive-op risk is
     covered by the now-required ``cron_add`` approval prompt. Credential
     exfiltration — which a human rubber-stamping the prompt would not catch — is
-    the threat this gate closes.
+    the threat this gate closes. For the same reason the shell-grammar scan
+    (``is_sensitive_bash_command``) is applied only to a body that does NOT parse
+    as Python; a parseable Python body is left to the source-appropriate
+    credential/secret/exfil detectors, because the shell-grammar passes
+    false-positive on Python source (see the inline comment on the scan below).
     """
     if _CRON_CRED_PATH_RE.search(text):
         return (
@@ -774,10 +779,40 @@ def _vet_script_contents(text: str) -> str | None:
         )
     if _CRON_SECRET_ENV_RE.search(text) or _CRON_SECRET_NAME_RE.search(text):
         return "Error: cron script blocked: references a protected secret environment variable"
-    reason = is_sensitive_bash_command(text)
-    if reason:
-        safe_reason = redact(reason)
-        return f"Error: cron script blocked by security policy: {safe_reason}"
+    # Scope the shell-grammar scan (is_sensitive_bash_command) to bodies that do
+    # NOT parse as Python. is_sensitive_bash_command applies shell-word grammar:
+    # pass 1b collapses separator RUNS (correct for a Win32 shell path, but a
+    # backslash run in Python source is an ESCAPE, so the collapse manufactures a
+    # credential path out of e.g. a raw-string regex r"%LOCALAPPDATA%\kiro-cli"),
+    # and its fail-closed structural budgets (_ALT_MAX_STAGES / _FIND_SUBSTITUTION
+    # _BUDGET) stage the text on newline/;/| so a long-but-benign source file is
+    # refused on SIZE alone (every line counted as a pipeline stage). None of
+    # that grammar describes Python source, so running it over a parseable body
+    # is the same category error the docstring above rejects for is_denied: a
+    # shell-grammar heuristic is wrong for a source subject. A parseable body is
+    # instead covered by the source-appropriate detectors run above
+    # (_CRON_CRED_PATH_RE / _CRON_SECRET_ENV_RE / _CRON_SECRET_NAME_RE) and the
+    # exfil scan below, which independently catch the credential-read /
+    # secret-env / exfiltration threats this gate exists to close. We keep the
+    # raw-text shell-grammar scan ONLY as a fail-CLOSED fallback for a body that
+    # does not parse as Python (ast.parse SyntaxError) or that trips any other
+    # unexpected parse error — so a non-Python body (e.g. a raw shell script) is
+    # never quietly exonerated.
+    try:
+        ast.parse(text)
+        parses_as_python = True
+    except SyntaxError:
+        parses_as_python = False
+    except Exception:
+        # Any non-SyntaxError parse failure (e.g. a pathological RecursionError
+        # from a deeply nested body) fails CLOSED to the raw-text scan rather
+        # than crashing the vetting gate / MCP call.
+        parses_as_python = False
+    if not parses_as_python:
+        reason = is_sensitive_bash_command(text)
+        if reason:
+            safe_reason = redact(reason)
+            return f"Error: cron script blocked by security policy: {safe_reason}"
     exfil = scan_exfiltration_urls(text)
     if exfil:
         safe = redact("; ".join(exfil))
