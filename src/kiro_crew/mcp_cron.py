@@ -123,15 +123,31 @@ def _win_identity_store_access_re() -> re.Pattern[str]:
     spellings, exactly as the shell tier does.
 
     Crucially this matches an ACCESS (a path segment UNDER the store: at least
-    one more ``\\``-separated component after the product dir), NOT a bare
+    one more separator-delimited component after the product dir), NOT a bare
     mention of the store directory. That distinction is deliberate and
     load-bearing: the original #7912 false positive this whole change fixed was a
     benign REDACTION regex ``re.compile(r"%LOCALAPPDATA%\\kiro-cli")`` that NAMES
     the store dir without reading anything under it, and it must stay allowed.
     Requiring a trailing segment reads a store-dir mention as benign and a read
-    of a file inside the store as the credential access it is. Backslash RUNS
-    (``\\+``) absorb the doubled backslash a raw-string source literal carries,
-    so both the source spelling and the resolved single-backslash spelling match.
+    of a file inside the store as the credential access it is. The separator
+    runs (``[\\/]+``) absorb the doubled backslash a raw-string source literal
+    carries, a resolved single ``\\``, and a POSIX/mixed ``/`` spelling, so every
+    separator form the base-HEAD shell tier blocked is matched here.
+
+    DELIBERATE LIMITATION (v2 review ISSUE 2): the ACCESS-vs-mention line is
+    drawn on SYNTAX (is there a trailing segment after the product dir?), not on
+    intent. A static source-side pattern cannot reliably tell a benign redaction
+    regex that ANCHORS under the store (e.g. ``re.compile(r"%LOCALAPPDATA%\\
+    kiro-cli\\S+")``) from an actual read of a file under the store. We keep
+    blocking the access-shaped spelling: the task's PRIMARY invariant is that the
+    #7912 false positive (a redaction/mention of the store DIR itself) is not
+    re-blocked, and that plain-mention case (no trailing segment) stays allowed
+    here. A redaction regex that reaches UNDER a Windows store is a rare body,
+    and it has a safe rewrite: anchor the redaction on the POSIX spelling of the
+    store path, or drop the trailing metacharacter. Narrowing the detector to let
+    such an under-store regex through would also let a real ``%VAR%\\product\\
+    file`` read through, giving up the coverage that closed the v1 gap. So the
+    conservative (block) direction is chosen and pinned by a test.
     """
     win_rows = [r for r in IDENTITY_STORE_ROOTS if r.platform is Platform.WIN32]
     env_vars = sorted({r.env_var for r in win_rows if r.env_var})
@@ -148,9 +164,15 @@ def _win_identity_store_access_re() -> re.Pattern[str]:
     prod_alt = "|".join(re.escape(p) for p in products)
     return re.compile(
         r"(?:" + var_alt + r")"
-        r"\\+"  # backslash run: absorbs a raw-string source escape's doubled ``\``
+        # Separator run accepts BOTH ``\`` and ``/``: a raw-string source escape
+        # carries a doubled backslash, a Win32 path uses ``\``, and the shell
+        # tier at base HEAD (security.py's generalized win_gsep) also blocked the
+        # forward-slash and mixed-separator spellings of the SAME store read
+        # (``%LOCALAPPDATA%/kiro-cli/data.sqlite3`` and ``\kiro-cli/...``). Using
+        # ``[\\/]+`` on both separators fully restores that base-HEAD coverage.
+        r"[\\/]+"
         r"(?:" + prod_alt + r")"
-        r"\\+"  # a SEPARATOR + ...
+        r"[\\/]+"  # a SEPARATOR + ...
         r"\S",  # ... at least one more segment char: an ACCESS, not a bare mention
         re.IGNORECASE,
     )

@@ -277,7 +277,21 @@ including bare-name `os.environ["AWS_SECRET_ACCESS_KEY"]` access), and
 path segment UNDER the store) and NOT a bare mention of the store directory, so
 a benign redaction regex naming the store (`re.compile(r"%LOCALAPPDATA%\kiro-cli")`
 — the original #7912 false positive) stays allowed while a read of a file inside
-the store is blocked. The shell-grammar heuristic (`is_sensitive_bash_command`)
+the store is blocked. Its separator runs accept both `\` and `/`
+(`[\\/]+`), so the forward-slash and mixed-separator spellings of the same
+store read (`%LOCALAPPDATA%/kiro-cli/data.sqlite3`, `%LOCALAPPDATA%\kiro-cli/...`)
+are caught too, matching every separator form the base-HEAD shell tier blocked.
+Two limitations are deliberate. The ACCESS-vs-mention line is drawn on **syntax**
+(is there a trailing segment after the product dir?), not intent: a benign
+redaction regex that anchors *under* the store
+(`re.compile(r"%LOCALAPPDATA%\kiro-cli\S+")`) reads as an access and is blocked,
+because a static source-side pattern cannot distinguish a subtree-matching
+redaction regex from a real read without also letting a genuine
+`%VAR%\product\file` read through; a body that needs to redact under the store
+should anchor on the POSIX store spelling or omit the trailing metacharacter. And
+the detector recognizes only the `%VAR%` / `!VAR!` / `$env:VAR` env-var spellings
+of these two stores — a read of the store via an already-resolved absolute
+Windows path is out of scope for this source detector. The shell-grammar heuristic (`is_sensitive_bash_command`)
 is deliberately **scoped**: it runs only over a body that does NOT parse as
 Python (`ast.parse` raises `SyntaxError`, or any other unexpected parse error —
 fail-CLOSED), so a raw shell script masquerading as a script file is still
@@ -287,9 +301,13 @@ collapse turns a Python backslash ESCAPE (e.g. the raw-string regex
 `r"%LOCALAPPDATA%\kiro-cli"`) into a manufactured credential path, and its
 fail-closed stage/substitution budgets (`_ALT_MAX_STAGES`,
 `_FIND_SUBSTITUTION_BUDGET`) trip on file SIZE because every source line is
-counted as a pipeline stage. A parseable Python body is fully covered by the
-source-appropriate detectors above (which independently catch every credential
-read / secret-env / exfil case). The command-line surface
+counted as a pipeline stage. A parseable Python body is covered by the
+source-appropriate detectors above: they independently catch the credential-file
+reads, the protected secret-env references, the exfiltration URLs, and — after
+the `[\\/]+` separator generalization — every separator spelling of the Windows
+env-var identity-store read that the base-HEAD shell scan blocked. The coverage
+is scoped to those source-appropriate detectors, not the full shell-word grammar
+(see the ACCESS-vs-mention limitation above). The command-line surface
 (`is_sensitive_bash_command` over a real shell `command`) keeps the collapse and
 the budgets unchanged.
 

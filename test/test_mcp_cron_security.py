@@ -500,6 +500,19 @@ def test_command_surface_shell_grammar_unchanged():
         'import subprocess\nsubprocess.run(r"type %APPDATA%\\\\kiro-cli\\\\data.sqlite3")\n',
         # cmd.exe delayed-expansion ``!LOCALAPPDATA!`` spelling.
         'import subprocess\nsubprocess.run(r"copy !LOCALAPPDATA!\\\\kiro-cli\\\\data.sqlite3 x")\n',
+        # v2 review ISSUE 1: FORWARD-SLASH separator spelling. The base-HEAD shell
+        # tier blocked ``%LOCALAPPDATA%/kiro-cli/data.sqlite3`` too, so the source
+        # detector must accept ``/`` as well as ``\`` to fully restore coverage.
+        'import subprocess\nsubprocess.run("cat %LOCALAPPDATA%/kiro-cli/data.sqlite3")\n',
+        # v2 review ISSUE 1: MIXED separator spelling (``\kiro-cli/...``).
+        'import subprocess\nsubprocess.run("cat %LOCALAPPDATA%\\\\kiro-cli/data.sqlite3")\n',
+        # v2 review ISSUE 2 (chosen direction: block): a redaction regex that
+        # ANCHORS under the store reads as an ACCESS to this syntactic rule and is
+        # blocked. This is deliberate — a static pattern cannot distinguish a
+        # subtree-matching redaction regex from a real read; the workaround is to
+        # anchor the redaction on the POSIX store spelling. The plain store-DIR
+        # mention (no trailing segment) stays allowed (see the mention test).
+        'import re\nS = re.compile(r"%LOCALAPPDATA%\\\\kiro-cli\\\\S+")\n',
     ],
 )
 def test_vet_script_contents_blocks_windows_identity_store_access(body):
@@ -524,6 +537,10 @@ def test_vet_script_contents_allows_windows_identity_store_mention():
     # Store dir named, no path segment under it: allowed.
     assert _vet_script_contents('import re\nS = re.compile(r"%LOCALAPPDATA%\\\\kiro-cli")\n') is None
     assert _vet_script_contents('import re\nS = re.compile(r"%APPDATA%\\\\amazon-q")\n') is None
+    # v2 review ISSUE 1: a FORWARD-SLASH bare mention (no segment under the store)
+    # must also stay allowed — generalizing the separator to ``[\\/]+`` must not
+    # re-block a plain store-dir reference spelled with ``/``.
+    assert _vet_script_contents('import re\nS = re.compile(r"%LOCALAPPDATA%/kiro-cli")\n') is None
 
 
 def test_vet_script_contents_nonsyntax_parse_error_falls_closed(monkeypatch):
