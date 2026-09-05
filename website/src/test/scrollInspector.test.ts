@@ -17,7 +17,7 @@ describe('scroll inspector: disabled costs nothing', () => {
   beforeEach(() => {
     vi.resetModules()
     localStorage.clear()
-    document.body.innerHTML = ''
+    document.body.replaceChildren()
   })
 
   it('creates no element and arms no timer while off', async () => {
@@ -68,10 +68,10 @@ describe('scroll inspector: enabling and disabling', () => {
   beforeEach(() => {
     vi.resetModules()
     localStorage.clear()
-    document.body.innerHTML = ''
+    document.body.replaceChildren()
   })
   afterEach(() => {
-    document.body.innerHTML = ''
+    document.body.replaceChildren()
   })
 
   it('paints a line only once there is something to show', async () => {

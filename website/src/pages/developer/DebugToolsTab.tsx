@@ -2,7 +2,7 @@ import { useState } from 'react'
 
 import { SettingsCard, SettingsToggle } from '../../components/settings'
 import { INSPECTOR_KEYS } from '../../dev/scrollInspector'
-import { safeSetItem } from '../../utils/safeStorage'
+import { safeGetItem, safeSetItem } from '../../utils/safeStorage'
 import { i18nT } from '../../i18n/t'
 
 /**
@@ -24,7 +24,7 @@ import { i18nT } from '../../i18n/t'
  */
 export function DebugToolsTab() {
   const [scrollInspector, setScrollInspector] = useState(
-    () => localStorage.getItem(INSPECTOR_KEYS.ENABLED_KEY) === '1',
+    () => safeGetItem(INSPECTOR_KEYS.ENABLED_KEY) === '1',
   )
 
   const toggleScrollInspector = (v: boolean) => {
