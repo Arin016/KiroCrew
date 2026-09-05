@@ -41,14 +41,15 @@ vi.mock('react-virtuoso', () => ({ Virtuoso: ({ data, itemContent }: VirtuosoMoc
  * story or the transcript this test clicks on would be silently blanked.
  */
 type Msg = { role: string; content: string; variants?: { content: string; ts?: string }[]; variant_idx?: number; meta?: Record<string, unknown> }
-const detail = vi.hoisted(() => ({ messages: [] as Msg[] }))
+const detail = vi.hoisted(() => ({ messages: [] as Msg[], running: false }))
 const regenerateSlot = vi.hoisted(() => vi.fn())
 const switchVariant = vi.hoisted(() => vi.fn())
 const continueSlot = vi.hoisted(() => vi.fn())
+const steerChat = vi.hoisted(() => vi.fn())
 vi.mock('../api/client', () => ({
   api: {
     chatSlots: vi.fn().mockResolvedValue([]),
-    chatSlotDetail: vi.fn(async () => ({ messages: detail.messages, running: false, has_more: false, total: detail.messages.length })),
+    chatSlotDetail: vi.fn(async () => ({ messages: detail.messages, running: detail.running, has_more: false, total: detail.messages.length })),
     chatHistory: vi.fn().mockResolvedValue({ sessions: [] }),
     models: vi.fn().mockResolvedValue([]),
     agents: vi.fn().mockResolvedValue([]),
@@ -59,6 +60,7 @@ vi.mock('../api/client', () => ({
     regenerateSlot: (...a: unknown[]) => regenerateSlot(...a),
     switchVariant: (...a: unknown[]) => switchVariant(...a),
     continueSlot: (...a: unknown[]) => continueSlot(...a),
+    steerChat: (...a: unknown[]) => steerChat(...a),
   },
   SEARCH_MIN_CHARS: 2,
 }))
@@ -79,19 +81,19 @@ Object.defineProperty(window, 'matchMedia', {
 
 import ChatPage from '../pages/ChatPage'
 
-function makeStore(messages: Msg[]) {
+function makeStore(messages: Msg[], running = false) {
   return configureStore({
     reducer: { dashboard: dashboardReducer, chat: chatReducer, notifications: notificationsReducer },
     preloadedState: {
       dashboard: {
         status: null,
-        slots: [{ key: 'slot-a', messages: messages.length, running: false, mode: '', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }],
+        slots: [{ key: 'slot-a', messages: messages.length, running, mode: '', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }],
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
       } as unknown as RootState['dashboard'],
       chat: {
         activeSlot: 'slot-a', messages,
-        slotRunning: false, slotStopping: false, slotState: 'idle',
+        slotRunning: running, slotStopping: false, slotState: 'idle',
         history: [], historyHasMore: false, pendingInput: null,
         subagents: {}, toolLog: [], activityOpen: false, activityTab: 'tools',
         slotHasMore: false, slotOldestIndex: 0, loadingOlder: false,
@@ -104,9 +106,10 @@ function makeStore(messages: Msg[]) {
   })
 }
 
-async function renderWith(messages: Msg[]) {
+async function renderWith(messages: Msg[], running = false) {
   detail.messages = messages
-  const store = makeStore(messages)
+  detail.running = running
+  const store = makeStore(messages, running)
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   await act(async () => {
     render(
@@ -143,6 +146,7 @@ beforeEach(() => {
   regenerateSlot.mockReset()
   switchVariant.mockReset()
   continueSlot.mockReset()
+  steerChat.mockReset()
 })
 
 describe('refused presses render the notice above the composer', () => {
@@ -187,6 +191,70 @@ describe('refused presses render the notice above the composer', () => {
     const notice = await screen.findByTestId('refused-press-error')
     expect(notice.textContent).toContain("Couldn't continue")
     expect(notice.textContent).toContain('sub-agents are running')
+  })
+
+  it('a rejected steer shows the server reason above the composer (#8625)', async () => {
+    // Steer is the fourth press on the surface, and it was the most silent of
+    // all: steer() clears the composer before the POST settles, so a rejection
+    // left the user with no text, no bubble follow-up, and nothing on screen —
+    // console.error was the only trace. Mid-turn (slotRunning) Enter routes to
+    // steer, which is exactly the state this drives.
+    steerChat.mockRejectedValue(new Error('no live turn to steer into'))
+    const store = await renderWith(plainTurn, true)
+
+    const input = await waitFor(() => screen.getByLabelText('Message input') as HTMLTextAreaElement)
+    fireEvent.change(input, { target: { value: 'change course now' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(steerChat).toHaveBeenCalled())
+
+    const notice = await screen.findByTestId('refused-press-error')
+    expect(notice.textContent).toContain("Couldn't steer")
+    expect(notice.textContent).toContain('no live turn to steer into')
+    // The notice carries the agent hand-off: the hand-off stages a prompt for
+    // a fresh session and per-slot drafts persist across the switch, so it
+    // destroys nothing here (AGENTS.md errors-use-error-notice).
+    expect(screen.getByRole('button', { name: /Ask the agent/ })).toBeInTheDocument()
+    // The optimistic bubble is gone from the transcript: nothing reached the
+    // turn, so a row with a steer badge would assert delivery right above the
+    // refusal notice. Asserted on store state (the composer's sizing mirror
+    // also carries the text, so a DOM text query is ambiguous). The text
+    // itself is NOT lost — it is restored into the composer (steer() cleared
+    // it at send time, and with the bubble gone the restore is the user's
+    // only remaining copy).
+    await waitFor(() => {
+      expect((screen.getByLabelText('Message input') as HTMLTextAreaElement).value).toContain('change course now')
+    })
+    const rows = (store.getState().chat.messages as { role: string; content: string }[])
+      .filter(m => m.role === 'user' && m.content === 'change course now')
+    expect(rows).toHaveLength(0)
+  })
+
+  it('a stale steer success does not clear a newer steer refusal (#8625)', async () => {
+    // Steers are independent messages, not retries: when an older steer
+    // settles successfully AFTER a newer one already failed, the failure
+    // notice must survive — the old success proves nothing about the new
+    // message. (Ordering is per-slot attempt counters; see steerMutation.)
+    let resolveFirst!: (v: unknown) => void
+    steerChat
+      .mockImplementationOnce(() => new Promise(res => { resolveFirst = res }))
+      .mockImplementationOnce(() => Promise.reject(new Error('steer channel closed')))
+    await renderWith(plainTurn, true)
+
+    const input = await waitFor(() => screen.getByLabelText('Message input') as HTMLTextAreaElement)
+    // Steer 1: stays pending.
+    fireEvent.change(input, { target: { value: 'first steer' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); await Promise.resolve() })
+    // Steer 2: rejects and raises the notice.
+    fireEvent.change(input, { target: { value: 'second steer' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); await Promise.resolve() })
+    await screen.findByTestId('refused-press-error')
+
+    // Steer 1 now settles successfully — the notice must stay.
+    await act(async () => { resolveFirst({ ok: true, steered: true }); await Promise.resolve(); await Promise.resolve() })
+    expect(screen.getByTestId('refused-press-error').textContent).toContain('steer channel closed')
   })
 
   it('a turn taking over retires the refusal', async () => {

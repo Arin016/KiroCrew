@@ -210,6 +210,8 @@ import {
   handoffToChat,
   persistClaimedChatHandoffs,
   subscribeChatHandoff,
+  findReport,
+  type ErrorReport,
 } from '../utils/errorReport'
 import WelcomeView from '../components/WelcomeView'
 import { usePanelTabs, openPanelView, clearInlineDraft, getInlineDraft, claimAppAutoOpen, useAnyLiveAppTab } from '../hooks/usePanelTabs'
@@ -1113,6 +1115,7 @@ const EMPTY_APP_ID_SET: ReadonlySet<string> = new Set()
 const REFUSED_PRESS_TITLE_KEYS = {
   continue: 'pages.chatPage.could_not_continue',
   regenerate: 'pages.chatPage.could_not_regenerate',
+  steer: 'pages.chatPage.could_not_steer',
   switch_variant: 'pages.chatPage.could_not_switch_variant',
 } as const
 type RefusedPressAction = keyof typeof REFUSED_PRESS_TITLE_KEYS
@@ -1635,11 +1638,72 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const [modelBtnRect, setModelBtnRect] = useState<DOMRect | null>(null)
   // NOT fire-and-forget: the receipt is the only thing that knows whether the
   // text reached the running turn, and the optimistic bubble asserts that it did.
+  // Monotonic PER-SLOT steer-attempt counters. Steers are INDEPENDENT
+  // messages, not retries of one intent, so the counter is NOT used to
+  // suppress a genuine rejection's notice — every same-slot rejection
+  // reports (the latest settle owns the single surface). It exists to ORDER
+  // successes against refusals: a success may only retire a refusal raised
+  // by an earlier-or-same attempt in ITS OWN slot, so a stale success (an
+  // older steer settling late) cannot clear a newer failure's notice, and a
+  // success in slot A cannot clear slot B's. Per slot, not page-wide, so a
+  // steer in B does not reorder A's in-flight attempts.
+  const steerAttemptsRef = useRef<Record<string, number>>({})
   const steerMutation = useMutation({
-    mutationFn: ({ text, sendId, slot }: { text: string; sendId?: string; slot: string }) => api.steerChat(text, slot, sendId),
-    // eslint-disable-next-line no-console -- no toast for a rejected steer, which is otherwise indistinguishable from one the agent ignored
-    onError: (e) => { console.error('steer failed', e) },
-    onSuccess: (body, { sendId, slot }) => {
+    mutationFn: ({ text, sendId, slot }: { text: string; sendId?: string; slot: string; attempt: number }) => api.steerChat(text, slot, sendId),
+    onError: (e, { text, sendId, slot, attempt }) => {
+      // eslint-disable-next-line no-console -- keep the raw error alongside the notice for diagnostics
+      console.error('steer failed', e)
+      // The POST rejected, so nothing reached the turn: drop the optimistic
+      // bubble unconditionally (it lives in the ORIGIN slot's transcript,
+      // whatever slot the user looks at now) — leaving it would assert
+      // delivery right above a notice saying the opposite.
+      if (sendId) dispatch(resolveOptimisticSteer({ slot, sendId, outcome: 'failed' }))
+      // Restore the text: steer() cleared the composer at send time and the
+      // bubble was just retracted, so without this the rejection destroys the
+      // user's only remaining copy. Merged into the ORIGIN slot's composer or
+      // persisted draft (same shape as the failed slash-command restore in
+      // steer() below), so it survives a slot switch and is waiting when the
+      // user returns — which also gives the background-slot rejection a
+      // durable trace even though the notice below only renders for the slot
+      // on screen. Restores the LLM-expanded text: the backing paste blocks
+      // were cleared with the composer, so a bare `[ Paste #N ]` token could
+      // no longer be expanded on the next send.
+      if (text) {
+        const onScreen = slot === activeSlotRef.current && composerSlotRef.current === slot
+        if (onScreen) {
+          setInput(mergeIntoDraft(inputRef.current, text))
+        } else {
+          const merged = mergeIntoDraft(drafts.current[slot], text)
+          setDraft(drafts.current, slot, merged)
+          // Mid-switch guard (same as the slash-command restore): if the
+          // composer still belongs to the origin slot, the outgoing-slot
+          // persist effect would flush inputRef.current over the merge.
+          if (composerSlotRef.current === slot) inputRef.current = merged
+          saveDrafts()
+        }
+      }
+      // A rejected steer is a press the server refused, so it lands on the
+      // shared refused-press surface above the composer (AUTOSDE
+      // errors-use-error-notice). Left in the console it was indistinguishable
+      // from a steer the agent ignored. Only the slot gates DISPLAY: the
+      // surface belongs to the slot the user is looking at (it already clears
+      // on slot switch), and a rejection is a real event however many newer
+      // steers exist — suppressing it would recreate the silent failure.
+      if (slot !== activeSlotRef.current) return
+      showRefusedPress('steer', e, { slot, attempt })
+    },
+    onSuccess: (body, { sendId, slot, attempt }) => {
+      // A steer that went through retires a refusal raised by an
+      // earlier-or-same attempt in the SAME slot — the channel that refusal
+      // complained about has since accepted input. A refusal from a NEWER
+      // attempt stays (this success proves nothing about it), and another
+      // slot's refusal is never this success's to clear. Other actions'
+      // refusals are untouched.
+      setRefusedPress(prev => (
+        prev && prev.action === 'steer' && prev.slot === slot && (prev.attempt ?? 0) <= attempt
+          ? null
+          : prev
+      ))
       if (!sendId || !slot) return
       const receipt = (body ?? {}) as { ok?: boolean; steered?: boolean; queued?: boolean }
       // `steered` is the one shape the badge's claim is true for; an unreadable
@@ -6241,9 +6305,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // the surface by calling `showRefusedPress` instead of re-discovering
   // console.warn. The title map is `as const` so the key gate resolves every
   // member from the single render-site call.
-  const [refusedPress, setRefusedPress] = useState<{ action: RefusedPressAction; message: string } | null>(null)
-  const showRefusedPress = useCallback((action: RefusedPressAction, e: unknown) => {
-    setRefusedPress({ action, message: e instanceof Error && e.message ? e.message : String(e) })
+  const [refusedPress, setRefusedPress] = useState<{ action: RefusedPressAction; message: string; report?: ErrorReport; slot?: string; attempt?: number } | null>(null)
+  const showRefusedPress = useCallback((action: RefusedPressAction, e: unknown, scope?: { slot: string; attempt: number }) => {
+    const message = e instanceof Error && e.message ? e.message : String(e)
+    // Resolve the journal report from the RAW error text at capture time: the
+    // journal keys entries on the transport-level string, so looking it up here
+    // (not at render, where the entry may have been pushed out of the bounded
+    // journal) is what lets the agent hand-off carry the structured
+    // endpoint/status context instead of just the sentence on screen.
+    // `scope` (slot + attempt) is what lets an action's success path retire
+    // ONLY the refusals it actually supersedes — see the steer mutation.
+    setRefusedPress({ action, message, report: findReport(message), ...scope })
   }, [])
   useEffect(() => { setRefusedPress(null) }, [activeSlot])
   // A turn that actually starts retires the refusal: whatever the slot was busy
@@ -7241,11 +7313,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // whichever path the server took (#6075).
     const steerSendId = mintSendId()
     dispatch(appendMessage({ role: 'user', content: llmTxt, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { steer: true, optimistic: true, sendId: steerSendId } }))
-    steerMutation.mutate({ text: llmTxt, sendId: steerSendId, slot: activeSlot })
+    const steerAttempt = (steerAttemptsRef.current[activeSlot] ?? 0) + 1
+    steerAttemptsRef.current[activeSlot] = steerAttempt
+    steerMutation.mutate({ text: llmTxt, sendId: steerSendId, slot: activeSlot, attempt: steerAttempt })
     // Staged session references are deliberately NOT part of steering: neither
-    // carried into the payload nor cleared. `steerMutation`'s onError only logs,
-    // so anything cleared here is gone for good — text, attachments and pastes
-    // have always been discarded on a failed steer, and adding refs to that set
+    // carried into the payload nor cleared. A failed steer surfaces on the
+    // refused-press notice and restores the TEXT into the origin slot's draft
+    // (steerMutation's onError); attachments and pastes are still discarded —
+    // adding refs to that set
     // would lose a reference the user cannot recover except by dragging again.
     // Leaving them staged is lossless and predictable: the chip stays in the
     // composer and rides the next real send, which does have a restore path.
@@ -9277,7 +9352,15 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   The title names the refused action. Without it the notice
                   reads as a generic error rather than "this is the answer to
                   the button you just pressed" — a first-time reader then
-                  concludes the click did nothing and presses again. */}
+                  concludes the click did nothing and presses again.
+
+                  askAgent is on because the hand-off destroys nothing here:
+                  it stages a prompt for a FRESH session (handoffToChat), and
+                  the composer draft below is persisted per-slot across the
+                  slot switch, so whatever the user typed survives the
+                  navigation and is restored when they come back. `report`
+                  carries the journal's endpoint/status context, resolved from
+                  the raw error text when the refusal was captured. */}
               {refusedPress && (
                 <div
                   className="px-4 mb-1.5 mx-auto w-full"
@@ -9287,7 +9370,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   <ErrorNotice
                     title={i18nT(REFUSED_PRESS_TITLE_KEYS[refusedPress.action])}
                     message={refusedPress.message}
+                    report={refusedPress.report}
                     onDismiss={() => setRefusedPress(null)}
+                    askAgent
                   />
                 </div>
               )}
