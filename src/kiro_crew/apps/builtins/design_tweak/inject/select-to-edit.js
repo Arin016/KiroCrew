@@ -337,7 +337,7 @@
       // covers a panel that never answers at all.
       showComposerSending();
       _pendingCreate[clientRef].timer = setTimeout(function () {
-        onCreateFailed(clientRef, NO_REPLY);
+        onCreateFailed(clientRef, NO_REPLY, /* unanswered */ true);
       }, CREATE_TIMEOUT_MS);
     } else if (CFG.backend) {
       showComposerSending();
@@ -363,7 +363,7 @@
   var _pendingCreate = Object.create(null);
   var CREATE_TIMEOUT_MS = 20000;
   var NOT_CONNECTED = "Not connected to the Design Tweak panel — comment not sent.";
-  var NO_REPLY = "No reply from the Design Tweak panel — comment not sent.";
+  var NO_REPLY = "No reply from the Design Tweak panel yet — it may still land. Your comment is kept here; sending again could add it twice.";
 
   function showComposerSending() {
     if (!input) return;
@@ -373,19 +373,37 @@
     input.appendChild(m);
   }
 
-  // A capture that did not land. The comment goes back into an editable
-  // composer on its element with the reason above it, so nothing typed is lost
-  // and the send can be retried. A stale ref (already acked, or already
-  // reported) is ignored: the ack and the timeout can race, and the ack wins.
-  function onCreateFailed(clientRef, error) {
+  // What the open composer currently holds, or null when there is no editable
+  // composer (none open, or it is in the "Adding to request…" state).
+  function composerText() {
+    var ta = input && input.querySelector("textarea");
+    return ta ? ta.value : null;
+  }
+
+  // A capture that did not land (or has not been answered). The comment goes
+  // back into an editable composer on its element with the reason above it, so
+  // nothing typed is lost and the send can be retried.
+  //
+  // `unanswered` is the timeout: the panel may still ack, so the entry is KEPT —
+  // a late `created` then finalises it (see onCreated) instead of colliding with
+  // a retry. A definitive failure (`create_failed`, a dropped post, a rejected
+  // fetch) removes the entry, because the retry is a fresh request. A ref the
+  // panel already acked is ignored: the ack and the timeout can race, and the
+  // ack wins.
+  function onCreateFailed(clientRef, error, unanswered) {
     var pend = _pendingCreate[clientRef];
     if (!pend) return;
-    delete _pendingCreate[clientRef];
-    if (pend.timer) clearTimeout(pend.timer);
-    if (!pend.el || !document.contains(pend.el)) return;
+    if (pend.timer) { clearTimeout(pend.timer); pend.timer = null; }
+    if (unanswered) pend.unanswered = true;
+    else delete _pendingCreate[clientRef];
+    if (!pend.el) return;
+    // The element may have left the DOM since (a re-render, a route change in
+    // the preview). The draft is still the user's — anchor to the element if it
+    // is on screen, else fall back to the viewport corner rather than dropping it.
+    var attached = document.contains(pend.el);
     state.selected = pend.el;
-    selBox.style.display = "block";
-    positionBox(selBox, pend.el);
+    if (attached) { selBox.style.display = "block"; positionBox(selBox, pend.el); }
+    else selBox.style.display = "none";
     openComposer(pend.el, { text: pend.comment, error: error || "Comment not sent." });
   }
 
@@ -395,7 +413,11 @@
     var el = pend && pend.el;
     if (pend && pend.timer) clearTimeout(pend.timer);
     delete _pendingCreate[d.clientRef];
-    clearSelection();
+    // A late ack after the timeout reopened the composer: the comment did land,
+    // so the composer closes only if it still holds exactly that comment. Text
+    // the user has since edited (or a newer comment being sent) stays put.
+    var keepComposer = pend && pend.unanswered && composerText() !== null && composerText() !== pend.comment;
+    if (!keepComposer) clearSelection();
     if (!d.id) return;
     var item = {
       id: d.id, number: d.number, status: d.status || "sent",
@@ -715,7 +737,11 @@
       if (bubbles[i].getAttribute("data-ste-pending") === text) { bubbles[i].remove(); break; }
     }
     var ta = popover.querySelector("textarea");
-    if (ta && !ta.value) ta.value = text || "";
+    // Merge, never overwrite: the user may have typed the next reply already.
+    if (ta && text) {
+      if (!ta.value) ta.value = text;
+      else if (ta.value !== text && ta.value.indexOf(text) === -1) ta.value = text + "\n" + ta.value;
+    }
     var line = popover.querySelector("[data-ste-error]");
     if (line) {
       line.textContent = error || "Follow-up not sent.";
