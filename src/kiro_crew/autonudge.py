@@ -123,6 +123,19 @@ _MONITOR_RETRY_MAX_BACKOFF_SECS = 300
 # to cancel the pending fire again if they are still actively conversing.
 _OVERDUE_REARM_SECS = 10
 
+# Cadence of the periodic reconciler: the backstop that walks every loop and
+# re-arms any active one that has no armed timer. The invariant it defends --
+# an active loop always has an armed timer -- is otherwise enforced only by the
+# arm paths, and two ways of losing a timer originate OUTSIDE this module and so
+# cannot be closed here: a nudge turn that never emits HOOK_EVENT_STOP (so
+# notify_turn_complete never re-arms the dashboard slot), and a deferred re-arm
+# dropped by a mid-fire notify_user_input. A dead loop is byte-identical to a
+# calm one in its persisted record, so nothing surfaces the gap. This is a slow
+# poll, not a hot loop: the failure is rare and the cure (one _arm_from_deadline
+# call, which self-heals a 0.0 deadline) is cheap, so a few minutes of latency
+# before a stuck loop is revived is an acceptable price for near-zero overhead.
+_RECONCILE_INTERVAL_SECS = 300  # 5m
+
 # Persisted source category for a deliberate ``autonudge_stop`` directive.
 # The caller's free-form explanation is intentionally not stored: it is
 # model-authored text and the watchdog only needs the deterministic source.
@@ -705,6 +718,10 @@ class AutoNudgeService:
         # after the dispatcher returns or the process restarts.
         self._accepted_monitor_turns: dict[str, str] = {}
         self._observers: list[Callable[[str, NudgeLoop | None], None]] = []
+        # Supervisor task for the periodic reconciler (see _reconcile_forever).
+        # Started in start(), cancelled and cleared in stop(); guarded against a
+        # double-start so a restart never leaks a second poller onto the loop.
+        self._reconcile_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
     # ── Persistence ──
@@ -1106,6 +1123,11 @@ class AutoNudgeService:
                     self._arm_from_deadline(loop)
             global _INSTANCE
             _INSTANCE = self
+        # Backstop poller for the "active loop lost its timer" failure mode.
+        # Guarded against a double-start so a second start() (e.g. a restart that
+        # never called stop()) does not leak a second poller onto the loop.
+        if self._reconcile_task is None or self._reconcile_task.done():
+            self._reconcile_task = asyncio.create_task(self._reconcile_forever())
         logger.info("AutoNudge started")
 
     def stop(self) -> None:
@@ -1116,6 +1138,11 @@ class AutoNudgeService:
         for loop_id in list(self._timers):
             self._cancel_timer(loop_id)
         self._timers.clear()
+        # Cancel and drop the reconciler so it does not outlive the service and
+        # re-arm loops after shutdown (nor leak across a stop()/start() cycle).
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            self._reconcile_task = None
         self._accepted_monitor_turns.clear()
         self._maintenance_quiescing.clear()
         self._maintenance_quiesce_events.clear()
@@ -3002,6 +3029,86 @@ class AutoNudgeService:
 
         task.add_done_callback(_finish)
 
+    def _timer_is_missing_or_done(self, loop_id: str) -> bool:
+        """True when *loop_id* has no live armed timer task.
+
+        Absent OR finished both count: the delivered dashboard path returns
+        without re-arming and without popping its own ``self._timers`` entry, so
+        a done task is exactly the residue of the silent-death failure mode.
+        """
+        t = self._timers.get(loop_id)
+        return t is None or t.done()
+
+    async def _reconcile_forever(self) -> None:
+        """Slow poll that re-arms any active loop found without an armed timer.
+
+        The general backstop for the invariant "an active loop always has an
+        armed timer". Two ways of breaking it originate outside this module and
+        cannot be closed at their source here: a nudge turn that never emits
+        HOOK_EVENT_STOP (so notify_turn_complete never re-arms the dashboard
+        slot), and a deferred re-arm dropped by a mid-fire notify_user_input.
+        Both leave a loop with active=true, stopped_reason="" and no task in
+        self._timers -- indistinguishable in the store from a calm loop.
+
+        Sleeps on shutdown_event so it wakes immediately on shutdown rather than
+        finishing a full interval, and swallows its own errors so one bad pass
+        never kills the poller (which would silently reopen the very gap it
+        guards).
+        """
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=_RECONCILE_INTERVAL_SECS)
+                return  # shutdown signalled
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                return
+            try:
+                await self._reconcile_loops()
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 - one bad pass must not kill the poller
+                logger.exception("AutoNudge: reconciler pass failed")
+
+    async def _reconcile_loops(self) -> None:
+        """Re-arm every active loop that has lost its timer.
+
+        Reuses ``_arm_from_deadline`` for the actual arming -- it already
+        self-heals a 0.0 deadline and already refuses a monitor record whose
+        version this gateway does not implement -- so no scheduling math lives
+        here. A loop mid-fire (in ``self._firing``) is skipped: its timer is
+        legitimately absent while the fire cycle owns it, and the fire cycle's
+        own exit re-arms it. Snapshot the values so a mutation during the pass
+        does not race the walk.
+
+        A FINISHED timer task counts as "no armed timer": the delivered path for
+        a dashboard slot returns without re-arming and without popping its own
+        entry from ``self._timers``, so a loop whose fire never draws a
+        ``notify_turn_complete`` is left holding a done task, not a missing one.
+        ``_arm_timer`` (via ``_arm_from_deadline``) cancels-then-replaces that
+        stale entry, so re-arming here is safe.
+        """
+        async with self._lock:
+            candidates = [
+                loop
+                for loop in self._loops.values()
+                if loop.active
+                and loop.id not in self._firing
+                and self._timer_is_missing_or_done(loop.id)
+            ]
+            for loop in candidates:
+                # An active loop with no armed timer would otherwise stay silent
+                # forever -- log the rescue at INFO so both the failure and its
+                # cure are visible in the journal (a dead loop and a calm one are
+                # otherwise byte-identical in the store).
+                logger.info(
+                    "AutoNudge: reconciler re-arming active loop %s (slot %s) "
+                    "found with no armed timer",
+                    loop.id,
+                    loop.slot_key,
+                )
+                self._arm_from_deadline(loop)
+
     async def _monitor_tick_is_quiet(self, loop: NudgeLoop) -> bool:
         """Observe this loop's subject cheaply; say whether to skip the turn.
 
@@ -3589,7 +3696,28 @@ class AutoNudgeService:
         # bounds, which is what the user pays for. A watch can still sit on a pull
         # request for days inside a small cap, which is the intended reading of the
         # number, and monitor_start's own description says so at the arming surface.
-        if await self._monitor_tick_is_quiet(loop):
+        try:
+            quiet = await self._monitor_tick_is_quiet(loop)
+        except asyncio.CancelledError:
+            # Cancellation is a deliberate teardown (stop/re-arm cancels the
+            # task), NOT a failure to recover from. Return without re-arming,
+            # matching the CancelledError guard at the top of _timer -- re-arming
+            # here would resurrect a loop the caller just cancelled.
+            raise
+        except Exception:
+            # The gate raised. Left here, an exception would kill this timer task
+            # with no re-arm and no state change, leaving a live loop with no
+            # armed timer -- the exact silent death the quiet-tick branch below
+            # names as "the exact silent failure this gate is otherwise built to
+            # avoid". Recover by re-arming the live loop just as that branch does
+            # (the reconciler is the slower backstop; this closes the gap now).
+            logger.exception("AutoNudge: observation gate raised for loop %s -- re-arming", loop.id)
+            if loop.active and loop.id in self._loops:
+                loop.next_due_ts = time.time() + loop.idle_secs
+                self._persist_soon()
+                self._arm_from_deadline(loop)
+            return
+        if quiet:
             # A quiet tick MUST re-arm itself. Nothing else will: the delivered
             # paths re-arm through notify_turn_complete (dashboard slots) or
             # through the fire cycle's own exit (channel keys), and a quiet tick
@@ -3960,6 +4088,17 @@ class AutoNudgeService:
         # cannot be clobbered by a concurrent update()'s snapshot (and so the
         # fsync stays off the event loop).
         await self._persist_locked()
+        # Log the delivered fire at INFO. Without it, a fire leaves no journal
+        # trace at all, so a loop that has silently stopped firing and one that
+        # is quietly on schedule are indistinguishable from outside the process.
+        # Only a confirmed delivery is logged (this is past the ``delivered``
+        # guard), so a skipped or undelivered tick stays quiet.
+        logger.info(
+            "AutoNudge: fired loop %s (slot %s) cycle %d",
+            loop.id,
+            loop.slot_key,
+            loop.cycle_count,
+        )
         self._emit("fired", loop)
         # POST-DELIVERY budget check: the budget gates when turns START, so a
         # slow in-flight turn can overshoot it (bounded by the transport's

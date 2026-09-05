@@ -345,7 +345,10 @@ next turn into the same slot:
   bypass the PreToolUse governance gate. Same fail-closed posture as cron.
 - Loops persist to `autonudge.json` under the data home and are re-armed on gateway
   restart. A slot that is unreachable (no history, deleted, or closed) has its loop
-  removed.
+  removed. A periodic reconciler also re-arms any active loop found without an armed
+  timer, the backstop for a re-arm lost outside the service (a nudge turn that never
+  completed its turn-lifecycle hook, or a deferred re-arm dropped mid-fire); a
+  delivered fire and a reconciler rescue are both logged so a stalled loop is visible.
 - Structured monitor action accounting is a separate internal completion
   callback, not a new injected-message envelope. Until the probe dispatcher is
   attached, structured records remain fail-closed. The dormant adapters do not
