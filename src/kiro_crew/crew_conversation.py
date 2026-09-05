@@ -39,6 +39,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from kiro_crew.atomic_write import atomic_write
@@ -488,6 +489,23 @@ def mark_answered(
         if candidates is not None:
             allowed = set(candidates)
             pending = [e for e in pending if e.get("id") in allowed]
+        else:
+            # Unprimed fallback (no on-loop snapshot): stand in transcript
+            # order by hand. A record CREATED after the reply row — a second
+            # escalation that landed on the executor during the forced save —
+            # was not pending when the human replied, so the free-text rule
+            # must not count it: otherwise the reply that should answer the
+            # one open record sees two pending and answers neither, leaving the
+            # first permanently pending. Mirrors ``reconcile_with_transcript``
+            # (pending AT that point of the transcript). A record with no
+            # ``created_ts`` predates this field and is kept.
+            reply_cutoff = now or datetime.now(timezone.utc)
+
+            def _created_at_or_before(entry: dict[str, Any]) -> bool:
+                made = parse_ts(entry.get("created_ts"))
+                return made is None or made <= reply_cutoff
+
+            pending = [e for e in pending if _created_at_or_before(e)]
         targets: list[dict[str, Any]]
         named = [
             i for i in ([escalation_id] if escalation_id else []) + list(escalation_ids or []) if i
@@ -530,6 +548,135 @@ def retract_escalation(slug: str, escalation_id: str) -> bool:
         return True
 
 
+#: How old a pending record must be before a missing transcript row makes it an
+#: orphan. The escalation path writes the index BEFORE it appends the card, and
+#: the append is a loop hop away from that write; a record younger than this is
+#: presumed in flight, never swept — it is *deferred*, and the caller keeps
+#: coming back until nothing is deferred.
+ORPHAN_GRACE_SECS = 120
+
+
+def _row_named_ids(meta: Any) -> list[str]:
+    if not isinstance(meta, dict):
+        return []
+    out: list[str] = []
+    one = meta.get("escalation_id")
+    if isinstance(one, str) and one:
+        out.append(one)
+    many = meta.get("escalation_ids")
+    if isinstance(many, list):
+        out.extend(i for i in many if isinstance(i, str) and i)
+    return out
+
+
+def reconcile_with_transcript(
+    slug: str, rows: Sequence[Mapping[str, Any]], *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Recovery: make the index agree with the member's transcript, both ways.
+
+    Consistency between this index and the transcript runs in one direction —
+    the transcript is the truth, the index a thin projection of it — so on
+    restore the projection is re-derived from *rows* (the transcript in order,
+    persisted rows plus any live rows not yet flushed):
+
+    * **orphans** — a pending record whose card row is not in *rows* and that is
+      older than :data:`ORPHAN_GRACE_SECS` (the gateway exited between the index
+      write and the slot's flush) moves to ``retracted`` (``retracted_reason:
+      orphan``). A younger one is *deferred*: its append may simply not have
+      happened yet.
+    * **durable answers** — a pending record whose card row IS present and that
+      a later ``user`` row with ``meta.human_reply`` answers under the same rule
+      :func:`mark_answered` applies live (a named ``escalation_id`` /
+      ``escalation_ids`` answers those records; free text answers the record
+      only when it is the ONLY one pending at that point of the transcript)
+      moves to ``answered`` — covering a gateway exit between the reply's
+      transcript save and the live hook's index write.
+
+    Replies are replayed first, each judged against the deadline as of its own
+    row timestamp; only then are still-unresolved deadlines swept. Returns ``{"retracted":
+    [...], "answered": [...], "deferred": n}``; the caller treats ``deferred >
+    0`` as "not done yet" and reconciles again on its next read.
+    """
+    current = now or datetime.now(timezone.utc)
+    position: dict[str, int] = {}
+    for i, row in enumerate(rows):
+        mid = (row.get("meta") or {}).get("mid") if isinstance(row.get("meta"), dict) else None
+        if isinstance(mid, str) and mid and mid not in position:
+            position[mid] = i
+    with _lock_for(slug):
+        record = read_conversation(slug)
+        # Order matters: transcript replies are replayed FIRST, each judged
+        # against its record's deadline as of the reply's own timestamp, and
+        # only then are the deadlines of whatever is still unresolved swept. A
+        # timely reply the crash kept out of the index must never be recorded as
+        # ``defaulted`` because recovery happened to run after the deadline.
+        changed = False
+        retracted: list[str] = []
+        deferred = 0
+        pending: list[dict[str, Any]] = []
+        for entry in record.get("entries", []):
+            if entry.get("type") != "escalation" or entry.get("state") != "pending":
+                continue
+            if entry.get("mid") in position:
+                pending.append(entry)
+                continue
+            created = parse_ts(entry.get("created_ts"))
+            if created is not None and (current - created).total_seconds() < ORPHAN_GRACE_SECS:
+                deferred += 1
+                continue
+            entry["state"] = "retracted"
+            entry["retracted_reason"] = "orphan"
+            retracted.append(str(entry.get("id", "")))
+            changed = True
+        answered: list[str] = []
+        if pending:
+            for i, row in enumerate(rows):
+                if row.get("role") != "user":
+                    continue
+                meta = row.get("meta")
+                if not isinstance(meta, dict) or meta.get("human_reply") is not True:
+                    continue
+                stamp = row.get("ts") if isinstance(row.get("ts"), str) and row.get("ts") else None
+                at = parse_ts(stamp) or current
+                # Pending at THAT point of the transcript, and not yet past its
+                # deadline as of the reply — a late reply answers nothing, the
+                # same rule the live path applies.
+                candidates = []
+                for e in pending:
+                    if e.get("state") != "pending" or position[e["mid"]] >= i:
+                        continue
+                    due = parse_ts(e.get("deadline"))
+                    if due is not None and due <= at:
+                        continue
+                    candidates.append(e)
+                if not candidates:
+                    continue
+                named = set(_row_named_ids(meta))
+                if named:
+                    targets = [e for e in candidates if e.get("id") in named]
+                elif len(candidates) == 1:
+                    targets = candidates
+                else:
+                    targets = []
+                for entry in targets:
+                    entry["state"] = "answered"
+                    entry["answered_ts"] = stamp or _now_iso(current)
+                    answered.append(str(entry.get("id", "")))
+                    changed = True
+        if sweep_deadlines(record, now=current):
+            changed = True
+        if changed:
+            _write_conversation(slug, record)
+        return {"retracted": retracted, "answered": answered, "deferred": deferred}
+
+
+def is_primed(slug: str) -> bool:
+    """Whether :func:`prime` (or a writer) has loaded *slug*'s pending view into
+    memory. An unprimed view is not an EMPTY view: a reader that would treat
+    "nothing cached" as "nothing pending" must fall back to the file instead."""
+    return _cache_key(slug) in _PENDING_CACHE
+
+
 def public_view(record: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """The index as the dashboard reads it: swept, with ``needs_you`` derived."""
     pending = pending_escalations(record, now=now)
@@ -557,9 +704,11 @@ __all__ = [
     "MAX_DEADLINE_SECS",
     "MAX_ESCALATION_OPTIONS",
     "MIN_DEADLINE_SECS",
+    "ORPHAN_GRACE_SECS",
     "append_ref",
     "conversation_id",
     "conversation_path",
+    "is_primed",
     "mark_answered",
     "needs_you",
     "new_escalation_id",
@@ -568,6 +717,7 @@ __all__ = [
     "prime",
     "public_view",
     "read_conversation",
+    "reconcile_with_transcript",
     "record_escalation",
     "resolve_deadline",
     "sweep_deadlines",
