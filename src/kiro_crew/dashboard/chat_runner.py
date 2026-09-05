@@ -7688,19 +7688,22 @@ async def _run_chat(
                         _dir_args = session_directive.decode(_out, _dir_tool)
                         if _dir_args is None and event.tool_final:
                             if session_directive.is_refusal(_out):
-                                # encode() refused to emit a marker because the
-                                # VALIDATED payload exceeded the delivery limit.
-                                # Nothing was applied and the result text already
-                                # told the model so, so this is the by-design
-                                # loud failure — it must not fire the warning
-                                # below, which exists to surface a lost marker.
+                                # The tool DECLINED and said so in its own result
+                                # text: an oversized payload encode() would not
+                                # deliver, a schema rejection ahead of the
+                                # handler, or a session this effect can never
+                                # apply to. Nothing was applied and the model was
+                                # told, so this is the by-design loud failure —
+                                # it must not fire the warning below, which
+                                # exists to surface a LOST marker.
                                 logger.info(
                                     "session-directive REFUSED for %r "
-                                    "(tool_call_id=%s): payload over the %d-char "
-                                    "delivery limit; nothing applied",
+                                    "(tool_call_id=%s, out_len=%d): the tool "
+                                    "returned a tagged refusal instead of a "
+                                    "directive; nothing applied",
                                     _dir_tool,
                                     event.tool_call_id,
-                                    session_directive.MAX_DIRECTIVE_CHARS,
+                                    len(_out or ""),
                                 )
                                 # SINGLE-CONSUME + strip: a refusal is terminal,
                                 # so release the mapping and cache the
@@ -7720,9 +7723,22 @@ async def _run_chat(
                                 # rawOutput-envelope escaping bug.
                                 # Mid-stream frames legitimately decode to None
                                 # and are excluded by the tool_final guard.
+                                # TWO causes reach here now that every by-design
+                                # decline is tagged: the marker was mangled in
+                                # transport, or the tool CRASHED past its own
+                                # return (an exception the JSON-RPC layer turned
+                                # into text, which never passes
+                                # refuse_if_markerless). Name both — a line that
+                                # asserts one cause sends an operator hunting an
+                                # escaping bug that is not there.
                                 logger.warning(
                                     "session-directive decode FAILED for %r "
-                                    "(tool_call_id=%s, out_len=%d) — effect dropped",
+                                    "(tool_call_id=%s, out_len=%d) — effect "
+                                    "dropped. Either the marker was lost in "
+                                    "transport (a rawOutput-envelope escaping "
+                                    "regression) or the tool raised past its own "
+                                    "return, so its decline was never tagged a "
+                                    "refusal",
                                     _dir_tool,
                                     event.tool_call_id,
                                     len(_out or ""),
