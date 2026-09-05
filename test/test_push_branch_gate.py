@@ -1212,6 +1212,102 @@ class TestUnrecognisedOptionsReadProtectively:
         # holds and nothing over-denies.
         assert not security._git_publish_floor_tags("git push origin 'feat<x'")
 
+    def test_a_pid_expansion_quote_cannot_hide_the_anchor(self):
+        # GPT 5.6 on the reconciliation, verified real: ``$$`` is the PID
+        # expansion, so in ``$$'x\'`` the quote is a PLAIN single quote and
+        # the backslash inside it is literal — the one-char lookback read it
+        # as ANSI-C, kept the quote state open past its real closing quote,
+        # and the anchor walk (which skips a ``git`` inside an open quote)
+        # then skipped the segment's EXECUTING git. The trailing quoted
+        # decoy is what the misread anchor would land on instead.
+        cmd = "x=$$'x\\' git push origin main -o eval -o 'git push origin feature'"
+        tags = security._git_publish_floor_tags(cmd)
+        assert "git-publish-push-protected-branch-name" in tags, set(tags)
+        # Parity, not presence: a real ANSI-C string (odd $ run) still reads
+        # as ANSI — its \' is an escaped quote, not a close, so the word ends
+        # still open and the split is poisoned protectively rather than
+        # trusted.
+        assert security._push_token_shell_read("$'x\\'")[1] is True
+        # And the even-run PLAIN quote closes exactly where bash closes it.
+        assert security._push_token_shell_read("$$'x\\'")[1] is False
+
+    def test_a_quoted_paren_cannot_extend_a_process_substitution(self):
+        # GPT 5.6 on the reconciliation, verified real: a quoted ``(`` inside
+        # the substitution body is DATA, but a bare character count read it as
+        # nesting and swallowed every following word — dropping a trailing
+        # protected refspec from the scan, the under-protective direction.
+        tags = security._git_publish_floor_tags("git push origin feature > >(printf '(') main")
+        assert "git-publish-push-protected-branch-name" in tags, set(tags)
+        # The balanced case keeps its precise allowed reading.
+        assert not security._git_publish_floor_tags("git push origin feature > >(printf '(')")
+        # A substitution that NEVER balances cannot say where arguments
+        # resume, so the segment fails closed rather than guessing.
+        assert security._git_publish_floor_tags(
+            "git push origin feature > >(printf '(' main"
+        ), "an unbalanced substitution must not read as a clean feature push"
+
+    def test_an_ansi_string_cannot_hide_a_segment_separator(self):
+        # GPT 5.6 on the reconciliation, verified real: in ``$'x\';y'`` the
+        # ``\'`` is an ESCAPED quote (ANSI-C), so the string runs to the later
+        # quote and the ``;`` after it is a real separator. A plain-single
+        # reading closed at the escaped quote, drifted one quote out of phase,
+        # and swallowed the real ``;`` — hiding the protected push from the
+        # split while a quoted decoy pacified the payload reading.
+        cmd = "echo $'x\\';y'; git push origin main; eval 'git push origin feature'"
+        tags = security._git_publish_floor_tags(cmd)
+        assert "git-publish-push-protected-branch-name" in tags, set(tags)
+
+    def test_compound_grammar_in_a_substitution_cannot_split_away_a_refspec(self):
+        # GPT 5.6 on the reconciliation, verified real: ``case``'s ``x)``
+        # closes NOTHING, so paren counting inside ``>(case x in x) cat;;
+        # esac)`` drifts and the splitter's cut point lands mid-substitution —
+        # dropping the trailing ``main`` into a phantom segment nothing scans.
+        # Bash compound grammar is not modelled; the split fails closed to ONE
+        # segment and the protective readers keep every word visible.
+        tags = security._git_publish_floor_tags(
+            "git push origin feature > >(case x in x) cat;; esac) main"
+        )
+        assert tags, "a protected refspec vanished behind compound grammar"
+        # A word-initial ``#`` inside the substitution comments out its real
+        # ``)``, a backtick opens grammar of its own, and ``$((`` is
+        # arithmetic: each makes every later cut point a guess, so the split
+        # fails closed the same way.
+        for cmd in (
+            "git push origin feature > >(echo x # )\necho y) main",
+            "git push origin feature > >(echo `x`) main; echo done",
+            "git push origin feature > >(echo $((1)) ) main",
+        ):
+            assert security._git_publish_floor_tags(cmd), (
+                f"{cmd!r}: an unmodellable substitution body read as a clean " "feature push"
+            )
+
+    def test_the_anchor_walk_is_linear_in_the_command_length(self):
+        # GPT 5.6 on the reconciliation, verified real: the entry-state walk
+        # re-scanned the joined prefix per word — quadratic — and this runs
+        # inside the PreToolUse gate, so a ~25 KB pasted command stalled the
+        # event loop past the watchdog and took the GATEWAY down. A tight
+        # timed ratio false-reds on shared runners (testing-conventions §
+        # Determinism), so the bound is generous: a 2x input may cost 3x plus
+        # jitter, which still rejects the 4x-and-up a quadratic rescan
+        # produces at this size.
+        import time
+
+        base = "git push origin feature " + ("word " * 512)
+        doubled = "git push origin feature " + ("word " * 1024)
+        security._git_push_args(base)  # warm any lazy imports/caches
+        t0 = time.perf_counter()
+        for _ in range(5):
+            security._git_push_args(base)
+        t_base = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        for _ in range(5):
+            security._git_push_args(doubled)
+        t_doubled = time.perf_counter() - t0
+        assert t_doubled < t_base * 3 + 0.05, (
+            f"anchor walk scaling looks superlinear: {t_base:.4f}s -> "
+            f"{t_doubled:.4f}s for a 2x input"
+        )
+
     def test_a_line_continuation_lands_on_the_ungated_branch(self):
         # GPT 5.6 round 6, verified real: backslash-newline VANISHES in bash,
         # so `origin ma\` + newline + `in` splices to a push of MAIN — while
@@ -1287,9 +1383,12 @@ class TestUnrecognisedOptionsReadProtectively:
         assert "git-publish-push-bare" in floor("git push origin & echo x")
         # Quoting and escapes — the shared walk: fragments poison the split.
         assert "git-publish-push-bare" in floor("git push --repo=origin -o 'a b'")
-        # Subshell parens glue onto the verb token, so no clean ``git`` token
-        # survives and the unparseable fallback ungates the segment.
-        assert floor("(git push origin main)") == {UNGATED}
+        # Subshell parens are GLUE the paren-cut walk removes: the wrapper
+        # parses precisely, so a protected target keeps its own catalog row
+        # (and a feature push inside a subshell stays allowed — the sibling
+        # suite in test_security.py pins both directions). The unparseable
+        # fallback would deny the feature case too and hide the rule identity.
+        assert floor("(git push origin main)") == {"git-publish-push-protected-branch-name"}
         # Benign by bash semantics, deliberately NOT flagged: a comma-free
         # brace passes through LITERALLY (a ref named ``{main}`` is not
         # ``main``); ``!`` history expansion does not run in non-interactive
