@@ -118,6 +118,16 @@ def _masked_config_dict(cfg: KiroCrewConfig) -> dict:
     is ever added it MUST treat ``_SENSITIVE_MASK`` as "unchanged" and keep the
     stored value. Sensitivity is schema-driven (``sensitive=True`` field
     metadata), so newly added sensitive fields are masked automatically.
+
+    In addition to the schema-``sensitive`` values, the agent-writable free-text
+    fields ``description`` and ``triggers`` on every agent record are redacted
+    in this browser-facing view. They are agent- and package-writable and are
+    NOT schema-sensitive, so the schema-driven ``_walk`` below leaves them
+    untouched. PR #8472 already masks this same class of strings on the roster
+    path (GET /api/agents); masking them here closes the config path so the
+    ``backend-security-controls`` redaction rule holds across the whole surface
+    rather than on one endpoint. As with everything else in this function, the
+    redaction lives only in the returned copy and never feeds to_dict()/save().
     """
     from kiro_crew.config.schema import JSON_SCHEMA
     from kiro_crew.config.validation import _is_sensitive_path
@@ -150,6 +160,20 @@ def _masked_config_dict(cfg: KiroCrewConfig) -> dict:
                     node[key] = _SENSITIVE_MASK
 
     _walk(masked, "")
+
+    # Redact the agent-writable free-text fields that are not schema-sensitive
+    # and so slip past the schema-driven walk above. Mirror the walk's non-empty
+    # guard (isinstance(val, str) and val) so an empty/absent value renders
+    # as-is rather than as a fake "set (hidden)" placeholder. Operates on the
+    # deep-copied `masked` dict, so the real cfg (to_dict()/save()) is untouched.
+    for _agent in masked.get("agents", {}).values():
+        if not isinstance(_agent, dict):
+            continue
+        for _field in ("description", "triggers"):
+            _val = _agent.get(_field)
+            if isinstance(_val, str) and _val:
+                _agent[_field] = _SENSITIVE_MASK
+
     return masked
 
 
