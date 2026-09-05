@@ -193,6 +193,51 @@ def test_every_stable_lane_consumes_the_verified_handoff() -> None:
     assert mac_inputs["promote"] == PROMOTE_EXPRESSION
 
 
+def test_release_page_offers_every_platform_that_publishes() -> None:
+    """The asset whitelist must cover every platform with a publish lane.
+
+    ``Assemble release assets`` collects by extension, so a platform whose
+    extension is missing is simply absent from the release page -- no job fails,
+    nothing goes red. ``*.exe`` was missing from v0.2.0 through v0.5.0: each of
+    those releases published a Windows installer to the CDN and the update feed
+    while the GitHub Release page offered none.
+
+    Derived from the publish lanes rather than restating the list, so adding a
+    lane for a new package format fails here until the release page collects it
+    too.
+    """
+    jobs = _workflow(RELEASE)["jobs"]
+    assemble = _step(
+        RELEASE, "github-release", "Assemble release assets (require gated macOS artifacts)"
+    )["run"]
+
+    #: The extension each publish lane's format lands on. macOS is deliberately
+    #: absent: its assets come only from the gated notarized handoff, never from
+    #: this glob, which is what the sibling test pins.
+    lane_extension = {
+        "publish-cli": (".whl", ".tar.gz"),
+        "publish-linux-appimage-x64": (".AppImage",),
+        "publish-linux-appimage-arm64": (".AppImage",),
+        "publish-linux-deb-x64": (".deb",),
+        "publish-linux-deb-arm64": (".deb",),
+        "publish-linux-rpm-x64": (".rpm",),
+        "publish-linux-rpm-arm64": (".rpm",),
+        "publish-windows-x64": (".exe",),
+    }
+    for lane, extensions in lane_extension.items():
+        assert lane in jobs, f"{lane} is gone; update this mapping deliberately"
+        for extension in extensions:
+            assert f'-name "*{extension}"' in assemble, (
+                f"{lane} publishes {extension} but the release page does not collect it"
+            )
+
+    # Sidecars and feed pointers are NOT downloadable assets. The blockmap is a
+    # differential-update input and latest*.yml are channel pointers published
+    # by their own lanes.
+    assert '-name "*.exe.blockmap"' not in assemble
+    assert '-name "latest' not in assemble
+
+
 def test_github_release_selects_explicit_versioned_macos_handoff() -> None:
     verify = _step(RELEASE, "github-release", "Verify promoted release bytes")["run"]
     assert f'--bundle-dir "artifacts/{PROMOTION_ARTIFACT}"' in verify

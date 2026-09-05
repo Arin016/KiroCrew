@@ -811,11 +811,24 @@ jobs:
       # only from the exact gated artifact emitted after notarization, stapling,
       # and Gatekeeper verification. The unsigned electron-builder zip/DMG are
       # inter-job inputs only and must never become GitHub Release assets.
+      #
+      # The name list is a WHITELIST, so a platform whose extension is missing
+      # is silently absent from the release page rather than failing anything.
+      # `*.exe` was omitted from v0.2.0 through v0.5.0: every one of those
+      # releases published a Windows installer to the CDN and to the update
+      # feed, while the GitHub Release page offered none, and nothing went red.
+      # `test_release_promotion_contract.py` now pins this list against the
+      # publishing lanes so a new platform cannot be forgotten the same way.
+      #
+      # Deliberately NOT collected: `*.exe.blockmap` (a differential-update
+      # sidecar the feed consumes, not something a human downloads) and
+      # `latest*.yml` (channel feed pointers, which are published to the CDN by
+      # their own lanes and would be misleading as release assets).
       - name: Assemble release assets (require gated macOS artifacts)
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" -o -name "*.exe" \) -exec cp {} release/ \;
 
           NOTARIZED_DIR="artifacts/KiroCrew-notarized-${{ needs.version.outputs.channel }}-${{ needs.version.outputs.version }}"
           NOTARIZED_ZIP="${NOTARIZED_DIR}/notarized.zip"
