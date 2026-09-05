@@ -21,6 +21,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from chat_test_helpers import _make_state
 
+from kiro_crew.dashboard import chat_persistence
 from kiro_crew.dashboard.chat_regenerate import (
     api_chat_slot_edit_resend,
     api_chat_slot_regenerate,
@@ -659,7 +660,9 @@ async def test_edit_resend_success_ordering(state, monkeypatch) -> None:
     state.sessions.discard_conversation = AsyncMock(side_effect=_discard)
     state.sessions.aflush = AsyncMock(side_effect=_flush)
 
-    def _record_save(_state, saved_slot, messages, *, expected_history_key):
+    def _record_save(
+        _state, saved_slot, messages, *, expected_history_key, expected_disk_older_count
+    ):
         order.append("save")
         # The save goes through the LIVE slot object (so its own
         # expected_history_key guard can see a concurrent rebind), but the
@@ -668,6 +671,10 @@ async def test_edit_resend_success_ordering(state, monkeypatch) -> None:
         assert saved_slot.messages == original_messages
         assert [m["content"] for m in messages] == ["edited"]
         assert expected_history_key
+        # The frozen snapshot travels with the frozen-prefix boundary it was
+        # taken against, so a cap-trim landing mid-save cannot write a row into
+        # both the prefix and the snapshot.
+        assert expected_disk_older_count == slot._disk_older_count
         return True
 
     monkeypatch.setattr(
@@ -851,7 +858,9 @@ async def test_edit_resend_commit_keeps_the_post_save_persistence_witnesses(
     slot._pending_rewrite = True  # pre-save: a rewrite is owed
     slot._disk_tail_ts = "2026-05-21T15:00:00Z"
 
-    def _save_stamps_witnesses(_state, saved_slot, msgs, *, expected_history_key):
+    def _save_stamps_witnesses(
+        _state, saved_slot, msgs, *, expected_history_key, expected_disk_older_count
+    ):
         # Emulate the real save's post-write bookkeeping on the live slot.
         saved_slot._pending_rewrite = False
         saved_slot._disk_window_len = len(msgs)
@@ -1199,6 +1208,266 @@ async def test_edit_resend_keeps_an_arrival_when_the_window_is_at_cap(
             await _wait_for_dispatch(run)
 
     assert [m["content"] for m in slot.messages] == ["u0", "a0", "edited", "workflow result"]
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_refuses_when_a_cap_trim_moves_the_frozen_prefix(
+    state, monkeypatch
+) -> None:
+    """A trim that re-credits rows to the frozen prefix must refuse the save.
+
+    The window snapshot is frozen on the event loop; the file it is written into
+    is ``frozen_prefix + snapshot``, and the prefix boundary is
+    ``_disk_older_count``. An ``append`` at the cap trims the front and credits
+    the trimmed rows to that counter, so a save that read the counter AFTER the
+    trim writes those rows twice -- once in the prefix it now claims, once at the
+    head of the still-frozen snapshot. The snapshot travels with the boundary it
+    was taken against so the drift refuses instead: nothing written, retryable
+    503, and the transcript on disk is untouched.
+    """
+    monkeypatch.setattr("kiro_crew.dashboard.state._MAX_SLOT_MESSAGES", 4)
+    slot = state.get_or_create_slot("s1")
+    slot.append("user", "u0")
+    slot.append("assistant", "a0")
+    slot.append("user", "u1")
+    slot.append("assistant", "a1")
+    slot.drain()
+    # The rows must be ON DISK for a trim to credit them to the frozen prefix:
+    # ``append`` only counts the persisted portion of the evicted slice.
+    await asyncio.to_thread(state.flush_slot_now, slot)
+    assert slot._disk_window_len == 4
+    assert slot._disk_older_count == 0
+    persisted_before = [
+        (m["role"], m["content"]) for m in state.conversation_log.read_messages("dashboard:s1")
+    ]
+    assert persisted_before == [
+        ("user", "u0"),
+        ("assistant", "a0"),
+        ("user", "u1"),
+        ("assistant", "a1"),
+    ]
+
+    async def _flush_with_cap_arrival():
+        # Runs after the native discard and BEFORE the history rewrite, so the
+        # boundary moves while the snapshot is already frozen.
+        slot.append("assistant", "workflow result", "msg msg-a")
+        assert slot._disk_older_count == 1
+
+    state.sessions.discard_conversation = AsyncMock(return_value=True)
+    state.sessions.aflush = AsyncMock(side_effect=_flush_with_cap_arrival)
+
+    with patch("kiro_crew.dashboard.chat_regenerate._run_chat", new=AsyncMock()) as run:
+        async with _client(state) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/edit-resend",
+                json={"index": 2, "content": "edited"},
+            )
+            assert resp.status == 503
+            assert (await resp.json())["code"] == "rewind_save_failed"
+
+    run.assert_not_awaited()
+    # A bare live-counter read writes prefix ["u0"] + snapshot
+    # ["u0", "a0", "edited"], i.e. "u0" twice.
+    assert [
+        (m["role"], m["content"]) for m in state.conversation_log.read_messages("dashboard:s1")
+    ] == persisted_before
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_commit_readopts_the_frozen_prefix_boundary(
+    state, monkeypatch
+) -> None:
+    """A trim landing after the save read the boundary must not survive the commit.
+
+    The refusal above covers a trim the save can still SEE. One landing after it
+    read ``_disk_older_count`` cannot be refused -- the correct file is already
+    written -- and the commit then puts the trimmed rows back in the live window
+    (the prospective list was frozen pre-trim) while the counter still credits
+    them to the frozen prefix. The commit re-adopts the boundary the file was
+    written against so the NEXT ordinary flush does not emit them twice.
+    """
+    monkeypatch.setattr("kiro_crew.dashboard.state._MAX_SLOT_MESSAGES", 4)
+    slot = state.get_or_create_slot("s1")
+    slot.append("user", "u0")
+    slot.append("assistant", "a0")
+    slot.append("user", "u1")
+    slot.append("assistant", "a1")
+    slot.drain()
+    await asyncio.to_thread(state.flush_slot_now, slot)
+    assert slot._disk_older_count == 0
+
+    real_atomic_write = chat_persistence.atomic_write
+
+    def _trimming_atomic_write(path, payload, **kwargs):
+        # After the save read the boundary, so the write itself is correct.
+        result = real_atomic_write(path, payload, **kwargs)
+        slot.append("assistant", "workflow result", "msg msg-a")
+        assert slot._disk_older_count == 1
+        assert slot._disk_older_durable_count == 1
+        return result
+
+    state.sessions.discard_conversation = AsyncMock(return_value=True)
+
+    with patch("kiro_crew.dashboard.chat_regenerate._run_chat", new=AsyncMock()) as run:
+        with patch.object(chat_persistence, "atomic_write", _trimming_atomic_write):
+            async with _client(state) as client:
+                resp = await client.post(
+                    "/api/chat/slots/s1/edit-resend",
+                    json={"index": 2, "content": "edited"},
+                )
+                assert resp.status == 200
+                await _wait_for_dispatch(run)
+
+    assert [m["content"] for m in slot.messages] == ["u0", "a0", "edited", "workflow result"]
+    assert slot._disk_older_count == 0
+    # The durable POSITION base moves with the disk boundary: "u0" is back in the
+    # window, so counting it as having left the front would refuse a valid
+    # absolute cursor or repeat rows.
+    assert slot._disk_older_durable_count == 0
+    # The ordinary flush that follows writes frozen_prefix + window. With the
+    # boundary left at 1 it would prepend "u0" to a window that still starts
+    # with it.
+    await asyncio.to_thread(state.flush_slot_now, slot)
+    assert [
+        (m["role"], m["content"]) for m in state.conversation_log.read_messages("dashboard:s1")
+    ] == [
+        ("user", "u0"),
+        ("assistant", "a0"),
+        ("user", "edited"),
+        ("assistant", "workflow result"),
+    ]
+
+
+@pytest.mark.parametrize("trim_lands", ["before_the_stamp", "after_the_stamp"])
+@pytest.mark.asyncio
+async def test_edit_resend_commit_never_over_claims_the_persisted_window(
+    state, monkeypatch, trim_lands
+) -> None:
+    """A trim racing the save may leave the count short, never long.
+
+    ``_disk_window_len`` is how many leading window rows a later trim may credit
+    to the frozen prefix. Over-claiming it makes that trim credit rows the file
+    does not hold, and the next save's frozen prefix then re-emits window rows --
+    the duplication this transaction exists to prevent. The commit therefore does
+    not try to correct it: the save stamps it ABSOLUTELY, so a trim before the
+    stamp has its decrement erased while one after it does not, and the commit
+    cannot tell the two apart without the count the save actually wrote (which is
+    not ``len(msgs_snapshot)``: a note row authorized elsewhere is filtered out of
+    the write). Both sides of the stamp are driven here because a correction that
+    looks exact on one is an over-claim on the other. Short is safe and costs no
+    rows -- the foreign-append merge preserves an on-disk window line the memory
+    window has dropped, which the flush at the end drives end to end.
+    """
+    monkeypatch.setattr("kiro_crew.dashboard.state._MAX_SLOT_MESSAGES", 4)
+    slot = state.get_or_create_slot("s1")
+    slot.append("user", "u0")
+    slot.append("assistant", "a0")
+    slot.append("user", "u1")
+    slot.append("assistant", "a1")
+    slot.drain()
+    await asyncio.to_thread(state.flush_slot_now, slot)
+
+    real_atomic_write = chat_persistence.atomic_write
+    real_invalidate = state.conversation_log._invalidate_cache
+
+    def _arrive_at_the_cap() -> None:
+        slot.append("assistant", "workflow result", "msg msg-a")
+
+    def _write(path, payload, **kwargs):
+        result = real_atomic_write(path, payload, **kwargs)
+        # Inside the save, before its witness stamping.
+        if trim_lands == "before_the_stamp":
+            _arrive_at_the_cap()
+        return result
+
+    def _invalidate(key):
+        result = real_invalidate(key)
+        # Immediately after the witness stamping.
+        if trim_lands == "after_the_stamp":
+            _arrive_at_the_cap()
+        return result
+
+    state.sessions.discard_conversation = AsyncMock(return_value=True)
+
+    with patch("kiro_crew.dashboard.chat_regenerate._run_chat", new=AsyncMock()) as run:
+        with patch.object(chat_persistence, "atomic_write", _write):
+            with patch.object(state.conversation_log, "_invalidate_cache", _invalidate):
+                async with _client(state) as client:
+                    resp = await client.post(
+                        "/api/chat/slots/s1/edit-resend",
+                        json={"index": 2, "content": "edited"},
+                    )
+                    assert resp.status == 200
+                    await _wait_for_dispatch(run)
+
+    # The boundary counters are re-adopted exactly -- the save does not stamp
+    # them, so the pre-await values are the file's truth in both interleavings.
+    assert slot._disk_older_count == 0
+    assert slot._disk_older_durable_count == 0
+    # The file's window region holds three rows. The count may lag behind that,
+    # never lead it.
+    assert slot._disk_window_len <= 3
+    assert [m["content"] for m in slot.messages] == ["u0", "a0", "edited", "workflow result"]
+
+    # Three more arrivals push the whole persisted prefix out of the window. A
+    # short count under-credits the frozen prefix; no row may be lost by it.
+    for n in range(3):
+        slot.append("assistant", f"later {n}", "msg msg-a")
+    await asyncio.to_thread(state.flush_slot_now, slot)
+    assert [
+        m["content"] for m in state.conversation_log.read_messages("dashboard:s1")
+    ] == ["u0", "a0", "edited", "workflow result", "later 0", "later 1", "later 2"]
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_leaves_the_witnesses_alone_when_a_rebind_wins_the_write(
+    state,
+) -> None:
+    """A rebind landing inside the write must not stamp the live witnesses.
+
+    The write itself is correct -- the save's pin was checked before it and the
+    bytes land on the authorized transcript. What must not follow is the
+    post-write bookkeeping: those witnesses describe the file just written, and
+    the slot now writes a DIFFERENT one. Stamping would clear a
+    ``_pending_rewrite`` the new transcript still owes and claim its unsaved rows
+    as persisted, which a later flush then believes.
+    """
+    slot = state.get_or_create_slot("s1")
+    slot.append("user", "first")
+    slot.append("assistant", "answer")
+    slot.drain()
+    original_messages = list(slot.messages)
+    slot._pending_rewrite = True  # a rewrite is owed on the CURRENT transcript
+    slot._disk_window_len = 0
+    slot._disk_meta_observed = False
+
+    real_atomic_write = chat_persistence.atomic_write
+
+    def _rebinding_atomic_write(path, payload, **kwargs):
+        # The last thing before the witness stamping: the slot moves to another
+        # transcript with the authorized bytes already on their way to disk.
+        slot.linked_session_key = "slack:9876543210.999"
+        return real_atomic_write(path, payload, **kwargs)
+
+    state.sessions.discard_conversation = AsyncMock(return_value=True)
+
+    with patch("kiro_crew.dashboard.chat_regenerate._run_chat", new=AsyncMock()) as run:
+        with patch.object(chat_persistence, "atomic_write", _rebinding_atomic_write):
+            async with _client(state) as client:
+                resp = await client.post(
+                    "/api/chat/slots/s1/edit-resend",
+                    json={"index": 0, "content": "edited"},
+                )
+                assert resp.status == 503
+                assert (await resp.json())["code"] == "rewind_slot_rebound"
+
+    run.assert_not_awaited()
+    assert slot.messages == original_messages
+    # Untouched, so the next flush of the NEW transcript still archives before it
+    # rewrites and still treats its window as unpersisted.
+    assert slot._pending_rewrite is True
+    assert slot._disk_window_len == 0
+    assert slot._disk_meta_observed is False
 
 
 @pytest.mark.asyncio

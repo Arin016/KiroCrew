@@ -298,7 +298,9 @@ class TestRewindSlot:
         slot._disk_tail_ts = "2026-05-21T15:00:00Z"
         state.sessions._session_map.get = MagicMock(return_value="")
 
-        def _save_stamps_witnesses(_state, saved_slot, msgs, *, expected_history_key):
+        def _save_stamps_witnesses(
+            _state, saved_slot, msgs, *, expected_history_key, expected_disk_older_count
+        ):
             # Emulate the real save's post-write bookkeeping on the live slot.
             saved_slot._pending_rewrite = False
             saved_slot._disk_window_len = len(msgs)
@@ -323,6 +325,58 @@ class TestRewindSlot:
         assert slot._disk_window_len == 1
         assert slot._disk_meta_observed is True
         assert slot._disk_tail_ts == "2026-05-21T16:00:05Z"
+        if slot.task:
+            slot.task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_rewind_pairs_the_snapshot_with_the_frozen_prefix_boundary(
+        self, tmp_path, monkeypatch
+    ):
+        """The frozen window must be written against the boundary it was frozen at.
+
+        ``_disk_older_count`` is where the frozen prefix ends, and an ``append``
+        at the window cap moves it. Reading it in the save worker instead of
+        pairing it with the snapshot writes the trimmed rows twice -- once in the
+        prefix, once at the head of the snapshot. Edit-resend carries the same
+        pairing (``test_chat_regenerate_cov80``); this pins rewind's so the two
+        cannot drift apart.
+        """
+        state = _make_state(tmp_path)
+        slot = _populate_slot(state)
+        state.sessions._session_map.get = MagicMock(return_value="")
+        seen: dict[str, object] = {}
+
+        async def _moves_the_boundary(key, **kwargs):
+            # Stands in for a cap-trim landing inside the awaited boundary, which
+            # advances the disk boundary and the durable position base together.
+            slot._disk_older_count = 7
+            slot._disk_older_durable_count = 7
+            return True
+
+        state.sessions.discard_conversation = AsyncMock(side_effect=_moves_the_boundary)
+
+        def _record_pairing(
+            _state, saved_slot, msgs, *, expected_history_key, expected_disk_older_count
+        ):
+            seen["boundary"] = expected_disk_older_count
+            return True
+
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_rewind._save_slot_to_history", _record_pairing
+        )
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/slots/src/rewind",
+                json={"at_message_index": 0, "content": "edited first question"},
+            )
+            assert resp.status == 200
+
+        # The PRE-await boundary, not the one the worker would have read.
+        assert seen["boundary"] == 0
+        assert slot._disk_older_count == 0  # the commit re-adopts it
+        assert slot._disk_older_durable_count == 0  # and the durable base with it
         if slot.task:
             slot.task.cancel()
 

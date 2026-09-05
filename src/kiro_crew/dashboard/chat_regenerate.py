@@ -391,6 +391,22 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
         # baseline is exact.
         pre_await_total_messages = slot.total_messages
 
+        # The frozen-prefix boundary the snapshot below must be written against.
+        # The same cap-trim that motivates the counter-delta above ALSO credits
+        # the trimmed rows to ``_disk_older_count``, so a save that read that
+        # counter after such a trim would emit those rows twice -- once in the
+        # frozen prefix, once at the head of the frozen snapshot. Captured in this
+        # same no-await stretch so the pair is exact; the save refuses on drift
+        # and the ``rewind_save_failed`` 503 below asks for a retry.
+        pre_await_disk_older_count = slot._disk_older_count
+        # The trim advances the durable POSITION base beside the disk boundary,
+        # and the two must move together or absolute positions
+        # (``session_control.read_messages``) disagree with the window: a row
+        # counted as having left the front while it is still IN the window either
+        # refuses a valid cursor (``since < base``) or repeats rows. The save has
+        # no contract on this one, so it travels only to the commit.
+        pre_await_disk_older_durable_count = slot._disk_older_durable_count
+
         # Build the user row through the slot's normal append path without
         # publishing it to the live slot before persistence succeeds.
         redacted_content, _ = redact_exfiltration_urls(content)
@@ -554,17 +570,46 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
                 slot.invalidate_source_links()
                 slot._dirty = True
                 slot._resumed_count = 0
-                # Deliberately NOT copied from ``prospective_slot``: the
-                # persistence witnesses (``_pending_rewrite``, ``_disk_*``,
-                # ``_frozen_prefix_cache``). The save above ran on the LIVE
-                # slot and stamped them with the post-rewrite truth
-                # (``_pending_rewrite`` cleared, disk window/meta/mtime cache
-                # matching the truncated file); the prospective copies are the
-                # PRE-save values. Restoring those would re-arm
-                # ``_pending_rewrite`` -- making the next flush repeat the
-                # destructive rewrite and discard any cross-process append
-                # (workflow/cron) that landed in between -- and would move the
-                # monotone ``_disk_tail_ts`` floor backwards.
+                # The frozen-prefix boundary the file was just written against.
+                # A cap-trim landing after the save read this counter credits
+                # rows to the prefix that the line above puts BACK in the live
+                # window (the prospective list was frozen pre-trim), leaving the
+                # slot claiming one row in two places -- the next default save
+                # would then emit it twice. The save wrote
+                # ``prefix(pre_await) + snapshot`` and stamped
+                # ``_disk_window_len`` to match, so adopting the same boundary is
+                # what makes the three agree. The durable position base moves with
+                # it, for the same reason and on the same rows -- leaving it
+                # advanced would count a row as having left the front while it is
+                # back in the window. Both are no-ops when nothing trimmed.
+                slot._disk_older_count = pre_await_disk_older_count
+                slot._disk_older_durable_count = pre_await_disk_older_durable_count
+                # ``_disk_window_len`` is deliberately NOT corrected here, and the
+                # direction is the whole argument. The save stamps it absolutely, so a
+                # trim BEFORE the stamp has its decrement erased and a trim AFTER it
+                # does not -- the commit cannot tell the two apart without the count
+                # the save actually wrote (which is not ``len(msgs_snapshot)``: a note
+                # row authorized elsewhere is filtered out of the write). Guessing
+                # risks over-claiming, which makes a later trim credit rows to the
+                # frozen prefix that are not in it -- the duplication this transaction
+                # exists to prevent. Leaving it possibly SHORT is the safe direction and
+                # costs no rows: a short count under-credits the prefix, and the
+                # foreign-append merge preserves an on-disk window line the memory
+                # window has dropped. Making it exact wants the save to publish its
+                # whole witness set as one routing-keyed record; see history.md.
+                # ``_frozen_prefix_cache``, the trim's last casualty, needs nothing --
+                # the trim sets it to None, which only costs the next save a re-read.
+                #
+                # Deliberately NOT copied from ``prospective_slot``: the remaining
+                # persistence witnesses (``_pending_rewrite``, ``_disk_meta_*``,
+                # ``_frozen_prefix_cache``). The save above ran on the LIVE slot
+                # and stamped them with the post-rewrite truth
+                # (``_pending_rewrite`` cleared, disk meta/mtime cache matching the
+                # truncated file); the prospective copies are the PRE-save values.
+                # Restoring those would re-arm ``_pending_rewrite`` -- making the
+                # next flush repeat the destructive rewrite and discard any
+                # cross-process append (workflow/cron) that landed in between --
+                # and would move the monotone ``_disk_tail_ts`` floor backwards.
                 if slot._pending:
                     slot.event.set()
                 else:
@@ -602,6 +647,7 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
                     slot,
                     msgs_snapshot,
                     expected_history_key=expected_history_key,
+                    expected_disk_older_count=pre_await_disk_older_count,
                 )
             )
             try:

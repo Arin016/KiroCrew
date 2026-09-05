@@ -398,11 +398,15 @@ same operation addressed by raw window index, used by embedded panels).
 The native conversation is discarded before the retained history rewrite, and
 the cleared resume pointer is flushed durably before the rewrite is committed,
 so a gateway restart cannot resurrect the discarded native session. If the
-rewrite fails -- or the slot was concurrently rebound to another transcript
-while it was in flight -- Edit + Send returns a 503 and leaves the dashboard
-slot on the original branch (the live slot is never mutated before the
-commit), but it cannot restore the discarded native session; a later turn
-cold-starts from the original persisted history instead of resuming it.
+rewrite fails -- or the slot was concurrently rebound to another transcript, or
+the window hit its cap and trimmed, while it was in flight -- Edit + Send
+returns a 503 and leaves the dashboard slot on the original branch (the live
+slot is never mutated before the commit), but it cannot restore the discarded
+native session; a later turn cold-starts from the original persisted history
+instead of resuming it. All three are retryable: nothing was persisted. The
+cap-trim case is the frozen-prefix boundary moving under a frozen window
+snapshot, refused rather than written as a duplicated transcript (see
+[history](history.md) § explicit-snapshot pairing).
 App-authenticated requests may edit only a slot's own dashboard session:
 a channel-linked slot is refused, because its effective session is a
 conversation the app does not own.
