@@ -9656,7 +9656,6 @@
     },
     "connectionsPage": {
       "action_failed": "Aktion fehlgeschlagen: {{error}}",
-      "authorize": "Autorisieren",
       "before_you_connect": "Vor dem Verbinden",
       "cancel": "Abbrechen",
       "complete_connection": "Abschließen",

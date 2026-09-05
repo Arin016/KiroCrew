@@ -9801,7 +9801,6 @@
     },
     "connectionsPage": {
       "action_failed": "La acción falló: {{error}}",
-      "authorize": "Autorizar",
       "before_you_connect": "Antes de conectar",
       "cancel": "Cancelar",
       "complete_connection": "Completar",
