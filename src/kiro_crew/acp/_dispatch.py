@@ -1461,7 +1461,14 @@ def _build_tool_result_event(update: dict[str, Any], cache_scope: str = "") -> A
             session_directive.peek_failure_reason(joined),
             len(joined),
         )
-    final_output = _redact(joined)[:8000]
+    _redacted = _redact(joined)
+    final_output = _redacted[: session_directive.MAX_TOOL_RESULT_CHARS]
+    # Both session-directive sentinels are TAIL-anchored, and this cut runs AFTER
+    # redaction -- which can grow the text, since a credential is replaced by a
+    # longer placeholder. So a producer bounding its own length cannot guarantee
+    # the marker survives here; re-attach it when the cut removed it, exactly as
+    # the App render marker below is re-injected at this same seam.
+    final_output = session_directive.preserve_tail_marker(_redacted, final_output)
     # An MCP App render marker lives at offset 0 of its own text part, but the
     # 8000-char join cut is applied to the CONCATENATION of all parts: when the
     # marker part is preceded by other (up to 4000-char) parts, its offset in
