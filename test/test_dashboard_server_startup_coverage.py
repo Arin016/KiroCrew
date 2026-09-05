@@ -588,3 +588,25 @@ class TestStartDashboardWiring:
         finally:
             await runner.cleanup()
             await _cancel_stray_tasks()
+
+
+class TestGatewayShutdownIsGuaranteed:
+    """GPT round-8 [BLOCKING] F4 (server.py:3357): a hung/raising reconciler
+    stop must not skip on_gateway_shutdown() -- that sweep tears down app
+    backends, so skipping it strands spawned processes past gateway exit."""
+
+    @pytest.mark.asyncio
+    async def test_on_gateway_shutdown_runs_even_if_stopping_the_poller_raises(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        async def _boom() -> None:
+            raise RuntimeError("reconciler stop blew up")
+
+        monkeypatch.setattr(srv, "stop_hook_reconciler", _boom)
+        runner, _state, spies = await _start_dashboard(tmp_path, monkeypatch)
+        try:
+            # cleanup dispatches _hooks_shutdown; the finally must still sweep.
+            await runner.cleanup()
+            spies["on_gateway_shutdown"].assert_awaited_once()
+        finally:
+            await _cancel_stray_tasks()
