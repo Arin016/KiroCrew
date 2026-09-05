@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
+import { Fragment, useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -12,6 +12,8 @@ import { settingsPath } from '../components/settingsPath'
 import { isTouchDevice } from '../utils/isTouchDevice'
 import { isBrowseCommand } from '../utils/browseCommand'
 import { isHiddenInvisibleAssistantRow } from '../utils/invisibleText'
+import { mergeRenderers, resolveRenderer, type MessageRenderer, type MessageRenderContext } from '../app-sdk/messageRenderers'
+import { createTranscriptRenderers } from './chat/transcriptRenderers'
 // Re-exported so the symbol `ChatPage` exported before this extraction stays
 // importable from here; the implementation lives in `utils/browseCommand` so a
 // pure test need not pull ChatPage's module graph.
@@ -64,7 +66,6 @@ import SnipOverlay from '../components/SnipOverlay'
 import { captureScreen, screenSnipSupported, currentTabCaptureDeps } from '../hooks/useScreenSnip'
 import { useTheme } from '../hooks/useTheme'
 import CollapsibleToolGroup from './chat/CollapsibleToolGroup'
-import ThinkingBlock from './chat/ThinkingBlock'
 import { RowDisclosureProvider } from './chat/rowDisclosure'
 import type { DisplayItem, TurnItem } from './chat/types'
 import { MeasureFarm } from '../hooks/virtualizer/MeasureFarm'
@@ -282,7 +283,7 @@ import SubagentProgressBar from './chat/SubagentProgressBar'
 import TaskProgressBar from './chat/TaskProgressBar'
 import SidePanel, { CHAT_PANE_MIN_W, sidePanelFillWidth } from './chat/SidePanel'
 import { useSidePanelDock } from '../hooks/useSidePanelDock'
-import { createTurnGrouper, applyRunningState, hasReasoningContent, isReasoningRole, TURN_OPENER_ROLES } from './chat/groupDisplayItems'
+import { createTurnGrouper, applyRunningState, REASONING_ROLES, TURN_OPENER_ROLES } from './chat/groupDisplayItems'
 // Hold-down for the display-layer running latch: a slots broadcast that
 // catches the agent between tool calls flaps `running` false for well under
 // a second; only a false that persists longer reflects the turn ending.
@@ -331,7 +332,6 @@ import { EdgeFade, JumpToBottomButton } from '../app-sdk/ChatScrollChrome'
 import { PanelLeftSolid, PanelLeftLight, PanelRightSolid } from '../components/icons/panels'
 
 import InfoTip from '../components/InfoTip'
-import { FileCard } from '../components/FileCard'
 import SlotTagPopover from '../components/SlotTagPopover'
 import { TagPopoverProvider } from '../hooks/useTagPopover'
 
@@ -340,23 +340,15 @@ import DetailPanel from '../components/DetailPanel'
 
 import type { ChatMessage, Artifact } from '../types'
 
-import ToolCallLine from './chat/ToolCallLine'
 import { shouldMountSidePanel, isSidePanelHidden, sidePanelDockMotion } from './chat/sidePanelMount'
 import { optsForReplace } from './chat/replaceGuard'
-import WorkflowRunCard, { extractWorkflowRunId } from './chat/WorkflowRunCard'
-import SubagentRunCard, { extractSpawnRunLaunch } from './chat/SubagentRunCard'
-import WorkflowCompletionCard, { isWorkflowCompletionMessage } from './chat/WorkflowCompletionCard'
-import SubagentCompletionCard from './chat/SubagentCompletionCard'
-import { isSubagentCompletionMessage, type ParsedSubagentCompletion } from './chat/subagentCompletion'
+import type { ParsedSubagentCompletion } from './chat/subagentCompletion'
 import { renderMcpOAuthMessage } from './chat/McpOAuthBanner'
 import { useConnectionsUiEnabled } from '../hooks/useConnectionsUi'
 import TurnBlock from './chat/TurnBlock'
 import Clickable from '../components/Clickable'
 import StopEventCard from './chat/StopEventCard'
-import NudgeCard, { nudgeMatchesLoop } from './chat/NudgeCard'
-import RecoveryCard, { resolveInjectCard } from './chat/RecoveryCard'
 import NoticeCard from './chat/NoticeCard'
-import { ErrorCard } from './chat/ErrorCard'
 import WorkflowProgressBar from './chat/WorkflowProgressBar'
 import { tryQuickSend } from '../lib/quickSend'
 import { rewindWithRollback } from '../lib/rewindCall'
@@ -504,6 +496,11 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: 
  *  transcript page carries this id back and the bubble is matchable without
  *  relying on content equality (#2845). Shared by the plain send path and the
  *  mid-turn steer path (#6075) so the two cannot drift in id shape. */
+/** ChatPage's tool rows derive their auto-denied state inside ToolCallLine;
+ *  the registry default that reads this set is never reached here. Frozen and
+ *  shared so the per-row context does not allocate. */
+const NO_AUTO_DENIED = new Set<string>()
+
 function mintSendId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -698,24 +695,6 @@ export function messageRowKey(m: ChatMessage, i: number): string {
   return keyTs ? `${role}-${keyTs}` : `${role}-${i}`
 }
 
-/** Disclosure-map identity for a tool row (#8204). messageRowKey is
- *  `${role}-${clientTs ?? ts}` and tool rows are never clientTs-stamped, so a
- *  burst of tool rows appended in one server tick all share `tool-<tick>` —
- *  expanding one expanded them all, because the row key doubled as the
- *  toolDisclosure map key. Fold `meta.tool_call_id` in when present (ACP-issued,
- *  globally unique) so each row owns its disclosure entry.
- *
- *  Deliberately NOT folded into messageRowKey: the React-key role is not at
- *  stake (each renderMessage element is the sole child of a separately keyed
- *  wrapper), and the key-stability suite pins messageRowKey(tool) === 'tool-<ts>'.
- *  Scoped to role 'tool' and identity when the id is absent, so every other
- *  role's in-session disclosure state keeps its existing key shape.
- *  Exported for tests. */
-export function toolDisclosureKey(m: ChatMessage, key: string): string {
-  if (m.role !== 'tool') return key
-  const tcid = m.meta?.tool_call_id
-  return typeof tcid === 'string' && tcid ? `${key}-${tcid}` : key
-}
 
 /** Render user message content with file chips and image markdown. Handles:
  *  - Fresh messages: meta.files present, displayTxt has @relative/path tokens
@@ -6345,13 +6324,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       setContinuing(false)
     })
   }, [activeSlot, continuing, continuable, showRefusedPress])
-  // Index of the newest error row. Only that one gets the action: an error
-  // further up the transcript belongs to a turn that has already been
-  // superseded, and offering to "continue" it would resume the wrong thing.
-  const lastErrorIdx = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'error') return i
-    return -1
-  }, [messages])
+  // (The newest-error index that gates the Continue button is derived inside
+  // the shared row set from the transcript it is handed -- see
+  // transcriptRenderers.tsx `lastErrorIndex`.)
 
   const [flyingQuote, setFlyingQuote] = useState<{ text: string; from: DOMRect } | null>(null)
   const inputAreaRef = useRef<HTMLDivElement>(null)
@@ -7660,96 +7635,37 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const lastTextIdxRef = useRef(lastTextIdx); lastTextIdxRef.current = lastTextIdx
   const slotStateRef2 = useRef(slotState); slotStateRef2.current = slotState
 
-  const renderMessage = useCallback((i: number, m: ChatMessage) => {
-    // Key identity rules (clientTs preference + streaming→assistant role
-    // normalization) live in messageRowKey — see its doc comment.
-    const key = messageRowKey(m, i)
-    // Shared with the wrap gate and fold — see hasReasoningContent in
-    // groupDisplayItems.ts for why there is ONE definition of this condition.
-    if (hasReasoningContent(m)) return <ThinkingBlock key={key} content={m.content} disclosureKey={key} />
-    if (isReasoningRole(m)) return null
-    if (m.role === 'tool') {
-      // Skip ✅/🚫 completion messages — completion shown via CircleCheckBig icon
-      if (!m.content.startsWith('🔧')) return null
-      // A workflow_run launch renders as a persistent, clickable inline card
-      // (live status + open-panel affordance) instead of the generic tool pill.
-      const wfRunId = extractWorkflowRunId(m)
-      if (wfRunId) return <WorkflowRunCard key={key} runId={wfRunId} message={m} />
-      // Likewise a spawn_run launch: the transient chip above the composer
-      // drops when the wave ends and only covers the viewed slot, so without
-      // this the only record of a spawn is a pill folded into "Worked through
-      // N steps".
-      const spawnLaunch = extractSpawnRunLaunch(m)
-      if (spawnLaunch) return <SubagentRunCard key={key} launch={spawnLaunch} slot={activeSlot || ''} />
-      // Animate tools in the trailing group (after last assistant/streaming text)
-      const isInTrailingGroup = slotStateRef2.current === 'tool_running' && i > lastTextIdxRef.current
-      // Disclosure identity folds in tool_call_id (#8204) — same-tick tool rows
-      // share the row key, and keying the disclosure map by it made one row's
-      // expand/collapse hit them all. React key stays the row key on purpose:
-      // sibling uniqueness is owned by the keyed wrapper, and remounting on a
-      // key change here would drop measured heights for nothing.
-      const dKey = toolDisclosureKey(m, key)
-      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} onFileOpen={handleFileOpen} disclosure={toolDisclosure[dKey]} disclosureKey={dKey} onDisclosureChange={setToolDisclosureFor} appInPanel={mcpAppPanel} onOpenApp={revealAppInPanel} transcriptHot={transcriptHot} />
-    }
-    if (m.role === 'file') {
-      try {
-        const f = JSON.parse(m.content)
-        return <FileCard key={key} file={f} />
-      } catch { /* fall through to default */ }
-    }
-    if (m.role === 'queued') return null
-    // Auto-nudge turns are machine-facing instruction blobs — collapse them to
-    // a compact chip instead of rendering the whole payload as a chat bubble.
-    // The Loop button is offered only when this row's own loop is the one still
-    // bound to the slot, so a historical card never opens a successor loop's
-    // controls.
-    if (m.role === 'nudge') {
-      const ownLoop = nudgeMatchesLoop(m, autoNudgeLoop?.id)
-      return <NudgeCard key={key} message={m} disclosureKey={key} onOpenLoop={ownLoop ? () => setAutoNudgeOpen(true) : undefined} />
-    }
-    if (m.kind === 'stop_event' || m.meta?.kind === 'stop_event') return <StopEventCard key={m.meta?.id as string ?? key} message={m} />
-    // A synthetic turn-recovery continuation (tool refusal / stalled turn /
-    // stalled tool) is machine-facing instruction text. It stays in the
-    // transcript for auditability, but as a one-line card that names the event
-    // and the deny pattern rather than a full-width bubble of prompt prose.
-    if (m.role === 'inject') {
-      // One shared decision (resolveInjectCard) so this surface and the
-      // transcript-renderer registry cannot disagree about the same row. It
-      // returns null for a cron row, for a replay of the user's own words, and
-      // for a row with no provenance stamp — each of which keeps the renderer
-      // below. Anything positively marked gateway-authored folds into a note
-      // instead of falling through to a full-width bubble, which is the defect
-      // this replaces.
-      const card = resolveInjectCard(m)
-      if (card) return <RecoveryCard key={key} parsed={card} disclosureKey={key} />
-    }
-    if (m.role === 'error') return (
-      <ErrorCard
-        key={key}
-        content={m.content}
-        onContinue={continuable && interrupted && i === lastErrorIdx ? handleContinue : undefined}
-        continuing={continuing}
-      />
-    )
-    if (m.role === 'notice') return <NoticeCard key={key} content={m.content} />
-    if (m.role === 'permission') return null
-    if (m.role === 'mcp_oauth') {
-      const banner = renderMcpOAuthMessage(m, connectionsUiOn)
-      return banner ? <div key={key}>{banner}</div> : null
-    }
-    // An injected workflow completion event renders as a compact status card
-    // (with the full result folded away) instead of a wall of raw JSON.
-    if (isWorkflowCompletionMessage(m)) return <WorkflowCompletionCard key={key} message={m} onFileOpen={handleFileOpen} onFolderOpen={handleFolderOpen} onSessionOpen={selectSessionTab} sessions={connected ? sessionTitles : undefined} activeSession={activeSlot || undefined} disclosureKey={key} />
-    // An injected sub-agent completion event is machine-facing prompt text (the
-    // spawn-discipline instructions are addressed to the model). It renders as a
-    // compact outcome row with the payload folded away, not as a chat bubble.
-    if (isSubagentCompletionMessage(m)) return <SubagentCompletionCard key={key} message={m} onFileOpen={handleFileOpen} onFolderOpen={handleFolderOpen} onSessionOpen={selectSessionTab} sessions={connected ? sessionTitles : undefined} activeSession={activeSlot || undefined} disclosureKey={key} onOpenPanel={handleSubagentPanelOpen} />
-    // A quiet monitor-loop cycle replies with a bare zero-width space
-    // (U+200B): the content is truthy but renders as nothing, so the row
-    // would draw as an empty bubble — one per quiet cycle, historical
-    // transcripts included. Skip it; rows carrying file-change chips still
-    // render (the chips are the content). Same skip as the app-sdk registry.
-    if (isHiddenInvisibleAssistantRow(m)) return null
+  // ── Registry-driven row dispatch (chat-core P5-a) ──
+  // Every transcript row on this page resolves through the SAME renderer
+  // registry the other surfaces consume (app-sdk/messageRenderers), so a role
+  // registered once renders everywhere -- the double-wiring defect class
+  // (`mcp_oauth` shipped wired in app-sdk and raw in the main chat) is closed
+  // structurally rather than by the parity test alone. ChatPage's chrome (tool
+  // disclosure state, fork/pin/footer, the error card's Continue, the nudge
+  // card's Loop button, ...) rides as HOST ENTRIES that reuse the default ids
+  // they replace, plus a few page-only shape entries. Order inside this array
+  // is the page's precedence order, unchanged from the if-chain it replaces:
+  // the shared dashboard set (sub-agent completion, launch cards, tool,
+  // thinking, file, nudge, recovery inject, workflow completion, error), then
+  // stop_event, notice, permission, undrawn, mcp_oauth, hidden invisible
+  // assistant, and the conversational bubble. Roles none of these
+  // claim fall to the registry defaults (`undrawn` for queued/system/done and
+  // the reasoning roles; `tool_lifecycle` for raw wire shapes the store
+  // normalizes away), and a role NOBODY claims renders as the bubble, which is
+  // what the if-chain's fall-through did.
+  //
+  // Memoized with the deps the old renderMessage carried: UI-state deps
+  // (chatConfig, linkPreviewsOn, disclosure, pin state, ...) deliberately STAY
+  // in the array so settled turns re-render with the new behavior, and the
+  // changed identity is what breaks through memo(TurnBlock).
+  const { renderers: chatPageRenderers, fallback: bubbleRenderer } = useMemo<{ renderers: readonly MessageRenderer[]; fallback: MessageRenderer }>(() => {
+    /** The conversational row: user / inject (cron & recovery prose) / assistant. */
+    const bubble: MessageRenderer = {
+      id: 'bubble',
+      roles: ['user', 'assistant', 'streaming', 'inject'],
+      render: (m, ctx) => {
+        const i = ctx.index
+        const key = ctx.key
     const isUser = m.role === 'user'
     const isStreaming = m.role === 'streaming'
     const isInject = m.role === 'inject'
@@ -7847,30 +7763,118 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       </div>
       </MessageSearchScope>
     )
-    // dispatch/navigate are stable; handleOpenDiff/handlePlanFromHere are
-    // memoized callbacks; planTaskId is read when rendering the plan footer /
-    // apply-plan handler, so it belongs here for correctness. approve/send/
-    // dismissApproval are NOT referenced in this renderer (user/approval rows go
-    // through renderUserContentCb), so they are omitted to keep it stable.
-    // cursorIsForActiveSlot/slotOldestIndex/handleLoadEarlier belong here: a switch
-    // back restores the cursor while changing no other dep, stranding Fork shut.
-    // continuable/interrupted/continuing/lastErrorIdx gate the error card's Continue
-    // control, so they belong here for the same reason: they are booleans and an int
-    // (all false/-1 for the whole of a healthy stream, so no per-chunk churn), and
-    // holding a stale copy is what leaves a superseded failure card offering a
-    // Continue — the exact pair of bugs selectContinuable's doc comment describes.
-    // handleContinue/handleFolderOpen/handleSpeak/handleApplyPlan cost nothing: each
-    // one's own dep array is already covered here (handleFolderOpen's is a subset of
-    // handleFileOpen's), so none can change identity on a render this list survives.
-    //
-    // revealAppInPanel is named here rather than excluded: it depends on
-    // `search.close` (stable) rather than the whole `search` object that
-    // useMessageSearch rebuilds as a fresh literal every render, so it holds one
-    // identity and cannot churn this callback — or renderTurnItem below it — and
-    // defeat memo(TurnBlock) for settled turns. Excluding it instead would leave it
-    // captured across a render where the find pane opens, and the stale copy would
-    // open an app tab behind the still-hidden dock.
-  }, [slotRunning, handleFileOpen, handleArtifactOpen, selectSessionTab, sessionTitles, connected, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, loadingOlder, cursorIsForActiveSlot, slotOldestIndex, handleLoadEarlier, renderUserContentCb, highlightTs, activeSlotTitle, mode, embedded, popout, handleOpenDiff, handlePlanFromHere, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, socialShareOn, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage, connectionsUiOn, showRefusedPress, transcriptHot, revealAppInPanel, continuable, interrupted, continuing, lastErrorIdx, handleContinue, handleFolderOpen, handleSpeak, handleApplyPlan, mcpAppPanel])
+      },
+    }
+    // The dashboard's shared row set (pages/chat/transcriptRenderers.tsx --
+    // tool lines and launch cards, thinking block, nudge, recovery inject, the
+    // two completion cards, the error card with Continue), wired with this
+    // page's behaviours through its options; ChatPane calls the same factory
+    // with fewer. Only rows that are genuinely page-specific follow it.
+    const shared = createTranscriptRenderers({
+      slot: activeSlot || undefined,
+      // An unparseable file row has always fallen through to the bubble on
+      // this page (a pane draws nothing for it); P5-b changes no row's output.
+      renderUnparsedFile: (m, ctx) => bubble.render(m, ctx),
+      onFileOpen: handleFileOpen,
+      onFolderOpen: handleFolderOpen,
+      onOpenSubagentPanel: handleSubagentPanelOpen,
+      toolDisclosure,
+      onToolDisclosureChange: setToolDisclosureFor,
+      // Animate tools in the trailing group (after last assistant/streaming text).
+      toolRunning: (_m, ctx) => slotStateRef2.current === 'tool_running' && ctx.index > lastTextIdxRef.current,
+      transcriptHot,
+      appInPanel: mcpAppPanel,
+      onOpenApp: revealAppInPanel,
+      // The Loop button is offered only when this row's own loop is the one
+      // still bound to the slot, so a historical card never opens a successor
+      // loop's controls (the match rule lives in the factory).
+      activeNudgeLoopId: autoNudgeLoop?.id,
+      onOpenNudgeLoop: () => setAutoNudgeOpen(true),
+      continuable,
+      interrupted,
+      continuing,
+      onContinue: handleContinue,
+      onSessionOpen: selectSessionTab,
+      sessions: connected ? sessionTitles : undefined,
+      activeSession: activeSlot || undefined,
+    })
+    const renderers = mergeRenderers([
+      ...shared,
+      {
+        id: 'stop_event',
+        roles: ['*'],
+        match: m => m.kind === 'stop_event' || m.meta?.kind === 'stop_event',
+        render: (m, ctx) => <StopEventCard key={m.meta?.id as string ?? ctx.key} message={m} />,
+      },
+      { id: 'notice', roles: ['notice'], render: (m, ctx) => <NoticeCard key={ctx.key} content={m.content} /> },
+      {
+        // Approval flow: the permission cards own it; grouped, never a standalone row.
+        id: 'permission',
+        roles: ['permission'],
+        render: () => null,
+      },
+      {
+        // The page's undrawn set is NARROWER than the SDK default's: reasoning
+        // roles without reasoning content (the old `isReasoningRole -> null`
+        // arm) and the queue rail's rows draw nothing here, but `system` /
+        // `done` -- lifecycle markers this store never carries -- are left
+        // unclaimed on purpose, so they take the bubble fallback exactly as the
+        // if-chain's fall-through did rather than vanishing.
+        id: 'undrawn',
+        roles: [...REASONING_ROLES, 'queued'],
+        render: () => null,
+      },
+      {
+        id: 'mcp_oauth',
+        roles: ['mcp_oauth'],
+        render: (m, ctx) => {
+          const key = ctx.key
+      const banner = renderMcpOAuthMessage(m, connectionsUiOn)
+      return banner ? <div key={key}>{banner}</div> : null
+        },
+      },
+      {
+        // A quiet monitor-loop cycle replies with a bare zero-width space
+        // (U+200B): the content is truthy but renders as nothing, so the row
+        // would draw as an empty bubble -- one per quiet cycle, historical
+        // transcripts included. Skip it; rows carrying file-change chips still
+        // render (the chips are the content). Same skip as the app-sdk registry.
+        id: 'hidden_invisible_assistant',
+        roles: ['*'],
+        match: isHiddenInvisibleAssistantRow,
+        render: () => null,
+      },
+      bubble,
+    ])
+    return { renderers, fallback: bubble }
+  }, [slotRunning, handleFileOpen, handleArtifactOpen, selectSessionTab, sessionTitles, connected, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, loadingOlder, cursorIsForActiveSlot, slotOldestIndex, handleLoadEarlier, renderUserContentCb, highlightTs, activeSlotTitle, mode, embedded, popout, handleOpenDiff, handlePlanFromHere, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, socialShareOn, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage, connectionsUiOn, showRefusedPress, transcriptHot, revealAppInPanel, continuable, interrupted, continuing, handleContinue, handleFolderOpen, handleSpeak, handleApplyPlan, mcpAppPanel])
+
+  const renderMessage = useCallback((i: number, m: ChatMessage) => {
+    // Key identity rules (clientTs preference + streaming->assistant role
+    // normalization) live in messageRowKey -- see its doc comment.
+    const key = messageRowKey(m, i)
+    const ctx: MessageRenderContext = {
+      index: i,
+      messages: messagesRef.current,
+      running: slotRunning,
+      key,
+      onFileOpen: handleFileOpen,
+      hideCardOwnedOAuth: connectionsUiOn,
+      autoDeniedIds: NO_AUTO_DENIED,
+      // The shared row set returns `ctx.row(...)`; the row must be a KEYED
+      // passthrough, not an element, so a tool line lands in the DOM exactly as
+      // this page's own entry used to render it (the virtualizer measures the
+      // row's component root). `wrapper` is reached only by a registry default
+      // this page does not override (raw wire-shape tool rows).
+      wrapper: (children) => <Fragment key={key}>{children}</Fragment>,
+      row: (children) => <Fragment key={key}>{children}</Fragment>,
+    }
+    const entry = resolveRenderer(m, chatPageRenderers)
+    // A role nobody claims renders as the conversational bubble -- what the
+    // if-chain's fall-through did, so an unknown role is visible, never lost.
+    // By reference: the merged list's tail is an SDK default, not the bubble.
+    return (entry ?? bubbleRenderer).render(m, ctx)
+  }, [chatPageRenderers, bubbleRenderer, slotRunning, handleFileOpen, connectionsUiOn])
 
   // Hoisted out of the row map so every TurnBlock receives the SAME function
   // identity per render — an inline closure there re-created it per row per
