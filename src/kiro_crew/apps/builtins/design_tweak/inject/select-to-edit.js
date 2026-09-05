@@ -51,7 +51,7 @@
   var THEME = {
     accent: "#8b5cf6", accentFg: "#ffffff", panel: "#141220", card: "#1b1830",
     bgElevated: "#221f38", text: "#e9e7ff", textStrong: "#ffffff", muted: "#9d99b7",
-    border: "#2a2740", info: "#3b82f6", ok: "#22c55e", warn: "#f59e0b",
+    border: "#2a2740", info: "#3b82f6", ok: "#22c55e", warn: "#f59e0b", danger: "#ef4444",
   };
 
   // ---- overlay highlight boxes ----
@@ -131,7 +131,7 @@
   //   2. TYPE ALLOWLIST — an unknown `type` is dropped rather than falling
   //      through to the `type === undefined` legacy branch, which would let a
   //      stray object repaint the theme and flip edit mode.
-  var HOST_TYPES = { state: 1, created: 1, requests: 1, focus: 1, toggle: 1 };
+  var HOST_TYPES = { state: 1, created: 1, create_failed: 1, dispatch_failed: 1, requests: 1, focus: 1, toggle: 1 };
 
   // Learned from the first message that passes both gates, so EVERY outbound post
   // names a real origin — the overlay never uses a '*' wildcard. Kept null until
@@ -160,15 +160,20 @@
    * produced before that is queued and flushed on the handshake, so the payload
    * is never broadcast to whatever document happens to be the embedder.
    */
+  // Returns whether the message was posted or queued. `false` means it was
+  // DROPPED — the queue is full, or the embedder is gone — so a caller carrying
+  // user input (a comment) can say so instead of pretending it went through.
   function postToHost(msg) {
-    if (!EMBEDDED) return;
+    if (!EMBEDDED) return false;
     if (!HOST_ORIGIN) {
-      if (PENDING_OUT.length < PENDING_MAX) PENDING_OUT.push(msg);
-      return;
+      if (PENDING_OUT.length >= PENDING_MAX) return false;
+      PENDING_OUT.push(msg);
+      return true;
     }
     try {
       window.parent.postMessage(msg, HOST_ORIGIN);
-    } catch (_) { /* embedder gone */ }
+      return true;
+    } catch (_) { return false; /* embedder gone */ }
   }
 
   function flushPendingOut() {
@@ -176,7 +181,13 @@
     var queued = PENDING_OUT;
     PENDING_OUT = [];
     for (var i = 0; i < queued.length; i++) {
-      try { window.parent.postMessage(queued[i], HOST_ORIGIN); } catch (_) { return; }
+      try { window.parent.postMessage(queued[i], HOST_ORIGIN); }
+      catch (_) {
+        // Keep the rest for the next handshake rather than discarding it: the
+        // queue holds user-authored comments, not just chrome state.
+        PENDING_OUT = queued.slice(i).concat(PENDING_OUT);
+        return;
+      }
     }
   }
 
@@ -196,6 +207,10 @@
       if (typeof d.editMode === "boolean") setActive(d.editMode);
     } else if (d.type === "created") {
       onCreated(d);
+    } else if (d.type === "create_failed") {
+      onCreateFailed(d.clientRef, d.error);
+    } else if (d.type === "dispatch_failed") {
+      onDispatchFailed(d.id, d.text, d.error);
     } else if (d.type === "requests") {
       reconcile(Array.isArray(d.items) ? d.items : []);
     } else if (d.type === "focus") {
@@ -260,12 +275,17 @@
     if (input) { input.remove(); input = null; }
   }
 
-  function openComposer(el) {
+  // `opts.text` refills the textarea and `opts.error` states why the previous
+  // attempt did not land — the composer comes back editable after a failed
+  // delivery instead of the comment being discarded.
+  function openComposer(el, opts) {
     if (input) input.remove();
     input = mkPanel(320);
+    opts = opts || {};
 
     var summary = mkMeta(describe(el));
     var ta = mkTextarea("Describe the change… (Enter to send, Shift+Enter for newline)");
+    if (opts.text) ta.value = opts.text;
 
     var row = document.createElement("div");
     css(row, { display: "flex", gap: "6px", justifyContent: "flex-end", marginTop: "8px" });
@@ -280,6 +300,7 @@
     });
 
     input.appendChild(summary);
+    if (opts.error) input.appendChild(mkErrorLine(opts.error));
     input.appendChild(ta);
     input.appendChild(row);
     document.body.appendChild(input);
@@ -305,22 +326,44 @@
     _pendingCreate[clientRef] = { el: el, comment: comment };
 
     if (EMBEDDED) {
-      postToHost({ source: "kiro-select-to-edit", type: "capture", clientRef: clientRef, payload: payload });
+      if (!postToHost({ source: "kiro-select-to-edit", type: "capture", clientRef: clientRef, payload: payload })) {
+        onCreateFailed(clientRef, NOT_CONNECTED);
+        return;
+      }
       // Show a provisional composer state while the panel creates the request.
+      // The only exit used to be the panel's `created` ack, so a panel that
+      // failed (or was gone) left "Adding to request…" up for ever with the
+      // comment stranded: the panel now posts `create_failed`, and this timer
+      // covers a panel that never answers at all.
       showComposerSending();
+      _pendingCreate[clientRef].timer = setTimeout(function () {
+        onCreateFailed(clientRef, NO_REPLY);
+      }, CREATE_TIMEOUT_MS);
     } else if (CFG.backend) {
+      showComposerSending();
       fetch(CFG.backend.replace(/\/$/, "") + "/submit", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-      }).catch(function (e) { console.warn("[select-to-edit] deliver failed", e); });
-      clearSelection();
+      }).then(function (res) {
+        // A 4xx/5xx resolves the promise, so it has to be checked here or a
+        // rejected payload looks exactly like a delivered one.
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        delete _pendingCreate[clientRef];
+        clearSelection();
+      }).catch(function (e) {
+        console.warn("[select-to-edit] deliver failed", e);
+        onCreateFailed(clientRef, "Delivery failed (" + (e && e.message ? e.message : String(e)) + ") — comment not sent.");
+      });
     } else {
       console.warn("[select-to-edit] no parent frame / no backend configured", payload);
-      clearSelection();
+      onCreateFailed(clientRef, NOT_CONNECTED);
     }
   }
 
   var _pendingCreate = Object.create(null);
+  var CREATE_TIMEOUT_MS = 20000;
+  var NOT_CONNECTED = "Not connected to the Design Tweak panel — comment not sent.";
+  var NO_REPLY = "No reply from the Design Tweak panel — comment not sent.";
 
   function showComposerSending() {
     if (!input) return;
@@ -330,10 +373,27 @@
     input.appendChild(m);
   }
 
+  // A capture that did not land. The comment goes back into an editable
+  // composer on its element with the reason above it, so nothing typed is lost
+  // and the send can be retried. A stale ref (already acked, or already
+  // reported) is ignored: the ack and the timeout can race, and the ack wins.
+  function onCreateFailed(clientRef, error) {
+    var pend = _pendingCreate[clientRef];
+    if (!pend) return;
+    delete _pendingCreate[clientRef];
+    if (pend.timer) clearTimeout(pend.timer);
+    if (!pend.el || !document.contains(pend.el)) return;
+    state.selected = pend.el;
+    selBox.style.display = "block";
+    positionBox(selBox, pend.el);
+    openComposer(pend.el, { text: pend.comment, error: error || "Comment not sent." });
+  }
+
   // panel acked a created request → drop a real pin and open its thread
   function onCreated(d) {
     var pend = _pendingCreate[d.clientRef];
     var el = pend && pend.el;
+    if (pend && pend.timer) clearTimeout(pend.timer);
     delete _pendingCreate[d.clientRef];
     clearSelection();
     if (!d.id) return;
@@ -594,11 +654,25 @@
     popover.appendChild(list);
     list.scrollTop = list.scrollHeight;
 
+    // Follow-ups only travel through the panel (there is no standalone route
+    // for them), so outside it the composer says so instead of showing a reply
+    // that goes nowhere.
+    if (!EMBEDDED) {
+      var note = mkMeta("Follow-ups need the Design Tweak panel — open this preview from there to reply.");
+      note.style.marginTop = "8px";
+      popover.appendChild(note);
+      popoverSig = threadSig(item);
+      return;
+    }
+
     // composer (follow-up)
     var ta = mkTextarea("Reply / add a follow-up…");
     ta.style.minHeight = "38px";
     ta.style.marginTop = "8px";
     ta.value = prevText;
+    var errLine = mkErrorLine("");
+    errLine.style.display = "none";
+    errLine.style.marginTop = "6px";
     var row = document.createElement("div");
     css(row, { display: "flex", gap: "6px", justifyContent: "flex-end", marginTop: "6px" });
     // A reply on an existing comment becomes a NEW comment in the CURRENT draft,
@@ -606,19 +680,47 @@
     var send = mkBtn("Follow up →", THEME.accent, THEME.accentFg, function () {
       var t = (ta.value || "").trim();
       if (!t) return;
-      // optimistic bubble
-      list.appendChild(mkBubble({ role: "user", text: t }));
+      errLine.style.display = "none";
+      // Optimistic bubble, marked pending until the panel's `requests` reconcile
+      // redraws the thread with the real one — a `dispatch_failed` removes it
+      // and puts the text back.
+      var bubble = mkBubble({ role: "user", text: t });
+      bubble.setAttribute("data-ste-pending", t);
+      bubble.style.opacity = "0.7";
+      list.appendChild(bubble);
       list.scrollTop = list.scrollHeight;
       ta.value = "";
-      if (EMBEDDED) postToHost({ source: "kiro-select-to-edit", type: "dispatch", id: item.id, text: t });
+      if (!postToHost({ source: "kiro-select-to-edit", type: "dispatch", id: item.id, text: t })) {
+        onDispatchFailed(item.id, t, NOT_CONNECTED);
+      }
     });
     ta.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send.click(); }
     });
     row.appendChild(send);
     popover.appendChild(ta);
+    popover.appendChild(errLine);
     popover.appendChild(row);
     popoverSig = threadSig(item);
+  }
+
+  // The panel could not turn a follow-up into a comment. Pull the optimistic
+  // bubble back out, put the text back in the composer and say why. Only the
+  // open thread for that comment is touched; if it is closed, the next
+  // `requests` reconcile already shows the truth.
+  function onDispatchFailed(id, text, error) {
+    if (!popover || popoverId !== id) return;
+    var bubbles = popover.querySelectorAll("[data-ste-pending]");
+    for (var i = bubbles.length - 1; i >= 0; i--) {
+      if (bubbles[i].getAttribute("data-ste-pending") === text) { bubbles[i].remove(); break; }
+    }
+    var ta = popover.querySelector("textarea");
+    if (ta && !ta.value) ta.value = text || "";
+    var line = popover.querySelector("[data-ste-error]");
+    if (line) {
+      line.textContent = error || "Follow-up not sent.";
+      line.style.display = "block";
+    }
   }
 
   function describeStatus(s) {
@@ -785,6 +887,19 @@
     var d = document.createElement("div");
     d.textContent = text;
     css(d, { fontSize: "11px", color: THEME.muted, marginBottom: "6px" });
+    return d;
+  }
+  // The overlay's one failure line. This script runs inside the user's own
+  // preview page, not the dashboard's React tree, so the shared ErrorNotice is
+  // out of reach — this is its vanilla stand-in: role=alert, danger tone, the
+  // reason in plain text. The same failure also reaches the panel's status
+  // line, which does render inside the dashboard.
+  function mkErrorLine(text) {
+    var d = document.createElement("div");
+    d.setAttribute("role", "alert");
+    d.setAttribute("data-ste-error", "1");
+    d.textContent = text;
+    css(d, { fontSize: "11.5px", color: THEME.danger, marginBottom: "6px", lineHeight: "1.5", overflowWrap: "anywhere" });
     return d;
   }
   function mkTextarea(ph) {

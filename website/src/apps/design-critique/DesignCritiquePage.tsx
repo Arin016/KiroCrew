@@ -6,6 +6,7 @@ import {
 
 import { sevOf, KIND_LABEL, HARD_CAP_MS, MAX_SCREENS, BLOCKED, SAMPLE_REPORT, SAMPLE_SCREENS } from './constants'
 import Clickable from '../../components/Clickable'
+import ErrorNotice from '../../components/ErrorNotice'
 import { Spinner } from './Motion'
 import { S } from './styles'
 import { designCritiqueApi, fileUrl } from './api'
@@ -60,6 +61,12 @@ export default function DesignCritiquePage() {
   // a second critique finishing first takes history index 0, and annotating
   // through the chip would then write onto the wrong critique's entry.
   const [justFinished, setJustFinished] = useState<{ slotKey: string; read: string; screens: Screen[]; report: Report } | null>(null)
+  // A BACKGROUND run that failed. The foreground run reports through `err`, but
+  // a run the user had already navigated away from used to announce its failure
+  // only as a toast — once that faded, the critique had simply vanished from the
+  // history with nothing on screen saying why. This keeps the failed state where
+  // the ready chip would have been until it is read and dismissed.
+  const [backgroundFailure, setBackgroundFailure] = useState<{ slotKey: string; message: string } | null>(null)
   const [dragId, setDragId] = useState<string | null>(null)
   const [sel, setSel] = useState<Sel | null>(null)
   const [asks, setAsks] = useState<Ask[]>([])
@@ -316,7 +323,11 @@ export default function DesignCritiquePage() {
     }
     endRun(slotKey)
     setCritiques(dropPendingCritique(slotKey))
-    if (watching) { setErr(e instanceof Error ? e.message : i18nT('apps.designCritique.designCritiquePage.something_went_wrong')); setPhase('error') }
+    const message = e instanceof Error ? e.message : i18nT('apps.designCritique.designCritiquePage.something_went_wrong')
+    if (watching) { setErr(message); setPhase('error') }
+    // The toast is transient feedback; the failed state itself is rendered
+    // in-page (the rail notice) so it is not lost when the toast fades.
+    else setBackgroundFailure({ slotKey, message })
     notify('Critique failed: ' + (e instanceof Error ? e.message : String(e)), { type: 'error' })
   }
 
@@ -988,6 +999,17 @@ export default function DesignCritiquePage() {
       <div style={S.railCtrls}>
         {phase !== 'new' ? <button style={S.railBtn} onClick={newCritique} title={i18nT('apps.designCritique.designCritiquePage.start_a_new_critique_anything_already_running_ke')}><Plus size={13} />{i18nT('apps.designCritique.designCritiquePage.new')}</button> : null}
         {busy ? <button style={S.runChip} onClick={() => { setJustFinished(null); setPhase(pendingKind && !screens.length ? 'scanning' : 'analyzing') }} title={i18nT('apps.designCritique.designCritiquePage.a_critique_is_still_running_click_to_watch_it')}><Spinner size={12} reduceMotion={reduceMotion} />{i18nT('apps.designCritique.designCritiquePage.running')}</button> : null}
+        {/* The failed run is gone from history and its screens are on disk, so
+            the hand-off has nothing on this rail to lose. */}
+        {backgroundFailure ? (
+          <ErrorNotice
+            message={backgroundFailure.message}
+            title={i18nT('apps.designCritique.designCritiquePage.that_critique_didn_t_finish')}
+            variant="inline"
+            askAgent
+            onDismiss={() => setBackgroundFailure(null)}
+          />
+        ) : null}
         {(!busy && justFinished) ? <button style={{ ...S.runChip, ...S.readyChip }} onClick={() => { const h = loadHistory(); const mine = h.find(e => e.slotKey === justFinished.slotKey); if (mine) showReport(justFinished.report, justFinished.screens, mine); setJustFinished(null) }} title={justFinished.read}><Check size={12} />{i18nT('apps.designCritique.designCritiquePage.critique_ready')}</button> : null}
         {(phase !== 'new' && critiques.length) ? (
           <div style={{ position: 'relative' }}>

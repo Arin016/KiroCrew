@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Check, RotateCcw, Clock, type LucideIcon } from 'lucide-react'
 import type { InvestigationRecord } from '../api'
+import ErrorNotice from '../../../components/ErrorNotice'
 import { Popover, PopoverAnchor, PopoverContent } from '../../../components/ui/popover'
 
 import { i18nT } from '../../../i18n/t'
@@ -133,10 +134,15 @@ export default function AgentSessionButton({
           </span>
         )}
 
+        {/* The cause is visible, not tooltip-only, and the session start acts on
+            a persisted issue — nothing on screen is a draft. */}
         {error && (
-          <span className="text-[10.5px] text-danger" title={error.message}>
-            {i18nT('apps.issueRadar.components.agentSessionButton.couldn_t_start')}
-          </span>
+          <ErrorNotice
+            title={i18nT('apps.issueRadar.components.agentSessionButton.couldn_t_start')}
+            message={error.message}
+            variant="inline"
+            askAgent
+          />
         )}
       </span>
 

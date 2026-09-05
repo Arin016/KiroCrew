@@ -17,6 +17,7 @@ import {
   MessageSquare, Archive, Trash2, MoreHorizontal,
 } from 'lucide-react'
 import Clickable from '../../components/Clickable'
+import ErrorNotice from '../../components/ErrorNotice'
 import { FolderBody } from '../../components/FolderBody'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
@@ -1089,12 +1090,16 @@ export default function DesignTweak() {
             }))
             refresh()
           } else {
-            setStatus(i18nT('apps.designTweak.status.capture_failed', {
-              error: out?.error || i18nT('apps.designTweak.status.unknown'),
-            }))
+            const error = out?.error || i18nT('apps.designTweak.status.unknown')
+            setStatus(i18nT('apps.designTweak.status.capture_failed', { error }))
+            // Tell the overlay too: without this its composer sits on "Adding to
+            // request…" with the comment stranded, since `created` was its only
+            // exit. On `create_failed` it reopens the composer with the text.
+            postToOverlay({ type: 'create_failed', clientRef: d.clientRef, error })
           }
         } catch (err) {
           setStatus(i18nT('apps.designTweak.status.capture_failed', { error: errMsg(err) }))
+          postToOverlay({ type: 'create_failed', clientRef: d.clientRef, error: errMsg(err) })
         }
         return
       }
@@ -1104,7 +1109,12 @@ export default function DesignTweak() {
       if (d.type === 'dispatch' && d.id && d.text) {
         try {
           const origin = commentIndexRef.current[d.id]
-          if (!origin) { setStatus(i18nT('apps.designTweak.status.follow_up_origin_missing')); return }
+          if (!origin) {
+            const error = i18nT('apps.designTweak.status.follow_up_origin_missing')
+            setStatus(error)
+            postToOverlay({ type: 'dispatch_failed', id: d.id, text: d.text, error })
+            return
+          }
           const out: SubmitResponse = await submitComment({
             type: 'visual_edit_request',
             comment: d.text,
@@ -1120,12 +1130,16 @@ export default function DesignTweak() {
             }))
             refresh()
           } else {
-            setStatus(i18nT('apps.designTweak.status.follow_up_failed', {
-              error: out?.error || i18nT('apps.designTweak.status.unknown'),
-            }))
+            const error = out?.error || i18nT('apps.designTweak.status.unknown')
+            setStatus(i18nT('apps.designTweak.status.follow_up_failed', { error }))
+            // The overlay drew the reply optimistically; this lets it take the
+            // bubble back and restore the text instead of showing a sent reply
+            // that was never persisted.
+            postToOverlay({ type: 'dispatch_failed', id: d.id, text: d.text, error })
           }
         } catch (err) {
           setStatus(i18nT('apps.designTweak.status.follow_up_failed', { error: errMsg(err) }))
+          postToOverlay({ type: 'dispatch_failed', id: d.id, text: d.text, error: errMsg(err) })
         }
         return
       }
@@ -1829,18 +1843,11 @@ export default function DesignTweak() {
                     })}
                   </div>
                 )}
-                {devError && (
-                  <div
-                    className="text-[12px] leading-snug"
-                    style={{
-                      color: 'var(--danger)', background: 'var(--danger-subtle)',
-                      padding: '8px 10px', borderRadius: 8, whiteSpace: 'pre-wrap',
-                    }}
-                    role="alert"
-                  >
-                    {devError}
-                  </div>
-                )}
+                {/* The edit requests are persisted server-side, so the only draft this
+                    page can hold is the dev-server URL field in the rail: the hand-off
+                    is gated on that disclosure being closed. No hand-off while
+                    `devOpen`: `devDraft` is unsaved. */}
+                <ErrorNotice message={devError} askAgent={!devOpen} className="w-full" />
               </div>
             </div>
           )

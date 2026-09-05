@@ -15,6 +15,7 @@ import { LIVE_POLL_MS } from '../lib/layout'
 import type { LearnedPattern } from '../lib/types'
 
 import { i18nT } from '../../../i18n/t'
+import ErrorNotice from '../../../components/ErrorNotice'
 function ImpactTag({ impact }: { impact: string }) {
   const high = impact === 'high'
   return (
@@ -76,12 +77,16 @@ export function ConsolidateControl({
   return (
     <span className="ml-auto inline-flex items-center gap-2">
       {error && !busy && (
-        <span className="inline-flex flex-col gap-0.5 max-w-[38ch] text-[11px] text-danger text-right">
-          <span>{i18nT('apps.codeReviewSage.views.learningView.merge_failed_ruleset_unchanged')}</span>
-          {/* Visible, not tooltip-only — the same reason a refused post shows its
-              cause: a hover target tells a keyboard or touch user nothing. */}
-          <span className="break-words opacity-90">{error}</span>
-        </span>
+        /* Visible, not tooltip-only — the same reason a refused post shows its
+           cause: a hover target tells a keyboard or touch user nothing. The
+           learnings are persisted, so the hand-off loses nothing. */
+        <ErrorNotice
+          title={i18nT('apps.codeReviewSage.views.learningView.merge_failed_ruleset_unchanged')}
+          message={error}
+          variant="inline"
+          askAgent
+          className="max-w-[38ch]"
+        />
       )}
       {busy ? (
         <span className="inline-flex items-center gap-1.5 text-[11.5px] text-muted">
@@ -123,7 +128,7 @@ export function ConsolidateControl({
         </button>
       )}
       {mut.error && (
-        <span className="text-[11px] text-danger">{(mut.error as Error).message}</span>
+        <ErrorNotice message={(mut.error as Error).message} variant="inline" askAgent />
       )}
     </span>
   )
@@ -193,9 +198,7 @@ export default function LearningView() {
           </div>
         )}
         {learningsQuery.error && (
-          <div className="mt-6 text-[13px] text-danger">
-            {(learningsQuery.error as Error).message}
-          </div>
+          <ErrorNotice message={(learningsQuery.error as Error).message} askAgent className="mt-6" />
         )}
 
         {!learningsQuery.isLoading && (
