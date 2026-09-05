@@ -126,11 +126,15 @@ plus tips generation) express a `"auto"` model preference and pass it to a
 best-effort per-session `set_model`. The wire chokepoint
 (`AcpSessionHandle.set_model` → `resolve_usable_model`) mirrors the interactive
 `_wire_model_id`: it sends a served id, sends `"auto"` only when the backend
-advertises it, and for anything else — `"auto"` where a partition doesn't serve
-it, or an unentitled concrete id — resolves to `""` and **skips the
-send**, inheriting the session's served backend default. So these tasks never
-put an unserved model or a literal unavailable `"auto"` on the wire (which would
-fail with `Invalid model ID`). A reactive retry in `run_bg_oneliner`
+advertises it, folds a concrete pin carrying a stale `<namespace>::` qualifier
+to its advertised bare spelling (issue #8521, via `resolve_pin_spelling` — the
+same fold the wire sites and the display verdict use, so a substitute resolves
+to what a cold start of the same pin would send), and for anything else —
+`"auto"` where a partition doesn't serve it, or a concrete id served under
+neither spelling — resolves to `""` and **skips the send**, inheriting the
+session's served backend default. So these tasks never put an unserved model or
+a literal unavailable `"auto"` on the wire (which would fail with `Invalid model
+ID`). A reactive retry in `run_bg_oneliner`
 (retry once with the first advertised model on a mid-prompt rejection) remains a
 thin backstop for the fail-open case where the advertised set was unknown at
 send time.

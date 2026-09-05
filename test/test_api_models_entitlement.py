@@ -80,8 +80,11 @@ def test_a_spelling_the_wire_rejects_is_not_offered():
     # offered by the picker and then withheld at spawn, which is the lie this
     # narrowing exists to remove. The keep/drop decision therefore delegates to
     # `model_is_unusable` instead of folding spellings.
-    request = _request(_provider([{"modelId": "auto"}, {"modelId": "claude-opus-4-8"},
-                                 {"modelId": "claude-opus-5"}]))
+    request = _request(
+        _provider(
+            [{"modelId": "auto"}, {"modelId": "claude-opus-4-8"}, {"modelId": "claude-opus-5"}]
+        )
+    )
     assert _names(agents._entitled_kiro_models(request, CATALOG)) == ["auto", "claude-opus-5"]
 
 
@@ -204,6 +207,63 @@ def test_malformed_advertised_entries_are_ignored():
     assert agents._entitled_kiro_models(request, CATALOG) == CATALOG
 
 
+# ── Namespace fold (#8521): a stale `<namespace>::` qualifier on a catalog row ──
+# A row spelled `<namespace>::<bare-id>` for a bare id the backend serves would
+# never match the advertised bare row and was silently dropped; the picker now
+# folds it and REWRITES it to the advertised spelling the wire accepts.
+
+# CATALOG carries no namespaced row (its tests assert against it verbatim), so
+# these use a dedicated variant.
+NS_CATALOG = [
+    {"model_name": "auto", "description": "Models chosen by task"},
+    {"model_name": "openrouter::z-ai/glm-5.3-flash", "description": "GLM 5.3 Flash"},
+]
+
+
+def test_namespaced_row_is_kept_and_rewritten_to_the_advertised_spelling():
+    # The backend serves the BARE id; the catalog row is qualified. Under the old
+    # literal-only keep/drop this row was dropped, leaving only `auto`.
+    request = _request(_provider([{"modelId": "auto"}, {"modelId": "z-ai/glm-5.3-flash"}]))
+    rows = agents._entitled_kiro_models(request, NS_CATALOG)
+    assert _names(rows) == ["auto", "z-ai/glm-5.3-flash"]
+
+
+def test_namespaced_row_absent_under_both_spellings_is_dropped():
+    # Served under neither the qualified nor the bare spelling -> withheld. The
+    # advertised set names `auto`, so it is comparable with the catalog (not a
+    # namespace mismatch) and narrows to `auto` alone: the qualified row is NOT
+    # offered as a usable pick, which is the withhold invariant this test pins.
+    request = _request(_provider([{"modelId": "auto"}, {"modelId": "some-other-model"}]))
+    assert _names(agents._entitled_kiro_models(request, NS_CATALOG)) == ["auto"]
+
+
+def test_two_rows_folding_to_the_same_advertised_id_are_deduped():
+    # A catalog offering both the bare and the qualified spelling of the SAME
+    # served id must yield exactly one row (first-seen order), not a duplicate
+    # picker entry.
+    catalog = [
+        {"model_name": "z-ai/glm-5.3-flash", "description": "bare"},
+        {"model_name": "openrouter::z-ai/glm-5.3-flash", "description": "qualified"},
+    ]
+    request = _request(_provider([{"modelId": "z-ai/glm-5.3-flash"}]))
+    assert _names(agents._entitled_kiro_models(request, catalog)) == ["z-ai/glm-5.3-flash"]
+
+
+def test_namespaced_row_folding_onto_an_already_kept_usable_row_is_deduped():
+    # The cross-branch collision the dedup exists for, isolated: a BARE usable row
+    # is kept first (the literal-hit branch, recording its key), then a namespaced
+    # row folds onto that same served id (the rewrite branch) and must be dropped
+    # against the already-kept key. Exactly one row survives, in first-seen order —
+    # the bare row's original spelling, not the folded rewrite.
+    catalog = [
+        {"model_name": "auto", "description": "Models chosen by task"},
+        {"model_name": "z-ai/glm-5.3-flash", "description": "bare, usable"},
+        {"model_name": "openrouter::z-ai/glm-5.3-flash", "description": "qualified, folds on"},
+    ]
+    request = _request(_provider([{"modelId": "auto"}, {"modelId": "z-ai/glm-5.3-flash"}]))
+    assert _names(agents._entitled_kiro_models(request, catalog)) == ["auto", "z-ai/glm-5.3-flash"]
+
+
 # ── End-to-end through the handler ──
 
 
@@ -243,22 +303,21 @@ def test_api_models_returns_only_entitled_rows(tmp_path):
     request = _kiro_request(
         tmp_path, _provider([{"modelId": "auto"}, {"modelId": "claude-sonnet-5"}])
     )
-    with patch.object(
-        agents.KiroCrewConfig, "load", return_value=SimpleNamespace(agent=SimpleNamespace(provider="kiro"))
-    ), patch(
-        "kiro_crew.acp.client._resolve_kiro_bin_for_spawn", return_value="/usr/bin/kiro-cli"
-    ), patch(
-        "kiro_crew.acp.client._resolve_ssh_auth_sock", lambda env: None
-    ), patch(
-        "kiro_crew.env.augmented_path", lambda p: p
-    ), patch(
-        "kiro_crew.dashboard.handlers.agents.wrap_argv", _stub_wrap_argv
-    ), patch(
-        "kiro_crew.dashboard.handlers.agents.cgroup_scope_argv", lambda argv: argv
-    ), patch(
-        "kiro_crew.sandbox.resource_limit_preexec", lambda: None
-    ), patch.object(
-        agents.asyncio, "create_subprocess_exec", return_value=_FakeProc(stdout=payload)
+    with (
+        patch.object(
+            agents.KiroCrewConfig,
+            "load",
+            return_value=SimpleNamespace(agent=SimpleNamespace(provider="kiro")),
+        ),
+        patch("kiro_crew.acp.client._resolve_kiro_bin_for_spawn", return_value="/usr/bin/kiro-cli"),
+        patch("kiro_crew.acp.client._resolve_ssh_auth_sock", lambda env: None),
+        patch("kiro_crew.env.augmented_path", lambda p: p),
+        patch("kiro_crew.dashboard.handlers.agents.wrap_argv", _stub_wrap_argv),
+        patch("kiro_crew.dashboard.handlers.agents.cgroup_scope_argv", lambda argv: argv),
+        patch("kiro_crew.sandbox.resource_limit_preexec", lambda: None),
+        patch.object(
+            agents.asyncio, "create_subprocess_exec", return_value=_FakeProc(stdout=payload)
+        ),
     ):
         resp = asyncio.get_event_loop().run_until_complete(agents.api_models(request))
     assert resp.status == 200

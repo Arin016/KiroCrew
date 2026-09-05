@@ -19,7 +19,11 @@ from typing import Any
 from aiohttp import BodyPartReader, web
 
 from kiro_crew import agent_state, model_registry
-from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
+from kiro_crew.acp.client import (
+    advertised_model_ids,
+    model_is_unusable,
+    resolve_pin_spelling,
+)
 from kiro_crew.acp_backends import selectable_backend_values
 from kiro_crew.agent import (
     AGENT_FILENAME,
@@ -1827,6 +1831,24 @@ def _entitled_kiro_models(request: web.Request, models: list[dict]) -> list[dict
     difference in how the two fold spelling variants shows up as a row the picker
     offers and the wire then withholds.
 
+    A literal miss is retried through :func:`resolve_pin_spelling` before it is
+    dropped (issue #8521): a catalog row carrying a stale ``<namespace>::``
+    qualifier for a bare id the backend serves would never match the advertised
+    row, so it was silently withheld even though the account can run it. On a
+    fold hit the row is KEPT but REWRITTEN to the advertised bare spelling — the
+    wire (``set_model``) accepts advertised ids verbatim, so the picker must
+    offer the id the wire will take, keeping picker and wire in agreement. A row
+    absent under BOTH spellings stays dropped.
+
+    Only the fold REWRITES are de-duplicated: a rewrite is skipped when its
+    advertised id was already produced — by another rewrite, or by a row kept
+    verbatim ahead of it — so two spellings collapsing to the same served id
+    yield one row (first-seen order). Rows the pre-fold literal code kept (the
+    ``auto`` sentinel and literally-usable rows) are NEVER dropped: they may
+    share a canonical key with a sibling row (an alias and its provider-prefixed
+    id both fold under ``_normalize_model_key``), and the catalog listed both on
+    purpose, so the dedup must not reach them.
+
     The ``auto`` sentinel is never filtered: it means "inherit whatever the
     session already resolved", so it stays selectable even on a backend that does
     not advertise it by name.
@@ -1863,12 +1885,30 @@ def _entitled_kiro_models(request: web.Request, models: list[dict]) -> list[dict
     if not advertised:
         return models
     advertises_auto = any(_normalize_model_key(i) == "auto" for i in advertised)
-    kept = [
-        m
-        for m in models
-        if _normalize_model_key(m.get("model_name", "")) == "auto"
-        or not model_is_unusable(m.get("model_name", ""), advertised)
-    ]
+    kept: list[dict] = []
+    # Keys of every row kept so far, so a fold rewrite can tell it has collided
+    # with an id already offered. Populated for verbatim keeps too (they are the
+    # rewrite's collision targets) but only rewrites are ever dropped against it —
+    # a verbatim keep is never removed even if it shares a canonical key with a
+    # sibling row (see the docstring: distinct catalog spellings stay distinct).
+    seen_keys: set[str] = set()
+    for m in models:
+        name = m.get("model_name", "")
+        if _normalize_model_key(name) == "auto" or not model_is_unusable(name, advertised):
+            # `auto` or a literal hit: kept verbatim, exactly as the pre-fold
+            # comprehension did. Record its key so a later fold cannot re-offer
+            # the same served id, but never drop the row itself here.
+            kept.append(m)
+            seen_keys.add(_normalize_model_key(name))
+            continue
+        folded = resolve_pin_spelling(name, advertised)
+        if not folded:
+            continue  # absent under both spellings: stays withheld
+        key = _normalize_model_key(folded)
+        if key in seen_keys:
+            continue  # this fold collapsed onto an id already offered
+        seen_keys.add(key)
+        kept.append({**m, "model_name": folded})
     # Tell "not comparable" apart from "entitled to almost nothing". A backend
     # that advertises `auto` shares a namespace with the catalog by definition, so
     # `auto` alone is a real answer — the most restricted tier there is — and must

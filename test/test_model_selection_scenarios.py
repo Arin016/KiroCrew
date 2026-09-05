@@ -33,9 +33,9 @@ from kiro_crew.acp.client import (
 
 # Representative advertised sets for the scenarios below.
 _ENTITLED = ["claude-opus-4.8", "claude-sonnet-4.6", "auto"]  # serves auto
-_FREE_TIER = ["claude-sonnet-4.6"]                            # subset, no auto
-_NO_AUTO_PARTITION = ["gpt-5.6-terra", "gpt-5.6-luna"]        # serves models, not auto
-_UNKNOWN: list = []                                           # no session yet
+_FREE_TIER = ["claude-sonnet-4.6"]  # subset, no auto
+_NO_AUTO_PARTITION = ["gpt-5.6-terra", "gpt-5.6-luna"]  # serves models, not auto
+_UNKNOWN: list = []  # no session yet
 
 
 class TestBackgroundResolution:
@@ -73,6 +73,31 @@ class TestBackgroundResolution:
     def test_blank_advertised_entries_are_ignored(self):
         assert resolve_usable_model("claude-sonnet-4.6", ["", "  ", "claude-sonnet-4.6"]) == (
             "claude-sonnet-4.6"
+        )
+
+    def test_namespaced_pin_resolves_to_the_advertised_bare_spelling(self):
+        # A substitute pin persisted under the qualified catalog spelling
+        # (#8521) must reach the wire, not silently inherit the default: the
+        # literal miss folds to the advertised bare id. Under the old
+        # literal-only code this returned "" (inherit default).
+        assert (
+            resolve_usable_model("openrouter::z-ai/glm-5.3-flash", ["auto", "z-ai/glm-5.3-flash"])
+            == "z-ai/glm-5.3-flash"
+        )
+
+    def test_namespaced_pin_returns_the_advertised_case_not_the_callers(self):
+        # The result is sent on the wire, which accepts the advertised spelling,
+        # so the ADVERTISED case wins over the caller's.
+        assert (
+            resolve_usable_model("openrouter::z-ai/glm-5.3-flash", ["Z-AI/GLM-5.3-Flash"])
+            == "Z-AI/GLM-5.3-Flash"
+        )
+
+    def test_pin_absent_under_both_spellings_inherits_default(self):
+        # Not served bare and not served qualified -> "" (inherit default),
+        # preserving the withhold invariant everywhere.
+        assert (
+            resolve_usable_model("openrouter::no-such-model", ["auto", "z-ai/glm-5.3-flash"]) == ""
         )
 
 

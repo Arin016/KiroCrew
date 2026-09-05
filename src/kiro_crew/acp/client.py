@@ -1840,8 +1840,17 @@ def resolve_usable_model(preferred: str, advertised: Sequence[str] | None) -> st
         else ``""`` — exactly ``_wire_model_id``'s
         ``"auto" if "auto" in advertised else ""``;
       - concrete + usable             -> that id;
-      - concrete + not served         -> ``""`` (inherit the served default rather
-        than substituting a possibly-unavailable ``"auto"``).
+      - concrete carrying a stale ``<namespace>::`` qualifier for a bare id the
+        backend serves -> its ADVERTISED bare spelling (issue #8521's
+        ``openrouter::z-ai/glm-5.3-flash`` against a set advertising the bare
+        ``z-ai/glm-5.3-flash``), so a substitute pin persisted under the
+        qualified catalog spelling still reaches the wire instead of silently
+        inheriting the default. Same fold the wire sites use
+        (``providers.acp``, ``session_allocation``) and the display verdict
+        (``chat_runner._pinned_model_verdict``), so a background substitute
+        resolves to the very id a cold start of the same pin would send;
+      - concrete + served under NEITHER spelling -> ``""`` (inherit the served
+        default rather than substituting a possibly-unavailable ``"auto"``).
 
     The EXPLICIT user-pick paths do NOT use this: they ``raise``
     (``model_is_unusable``) so a user who chose a model sees an error, not a swap.
@@ -1857,7 +1866,12 @@ def resolve_usable_model(preferred: str, advertised: Sequence[str] | None) -> st
         return "auto" if not model_is_unusable("auto", ids) else ""
     if not model_is_unusable(preferred, ids):
         return preferred
-    return ""
+    # A literal miss can be a stale ``<namespace>::`` qualifier on a model the
+    # backend fully serves: fold to the advertised spelling and substitute THAT.
+    # ``resolve_pin_spelling`` returns ``""`` when the pin is absent under both
+    # spellings, which keeps the "" -means-inherit-default contract for a genuine
+    # miss — so an unserved substitute is still never forced onto the wire.
+    return resolve_pin_spelling(preferred, ids)
 
 
 def _format_acp_error(error: object, available_models: Sequence[str] | None = None) -> str:
