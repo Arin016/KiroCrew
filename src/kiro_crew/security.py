@@ -6140,6 +6140,189 @@ _PUSH_ALL_BRANCHES_OPTS = frozenset({"mirror", "all", "branches"})
 #: single-arg rule off published to ``main``.
 _PUSH_REPO_OPTS = frozenset({"repo"})
 
+#: The ARITY table (#7796): push options that take a REQUIRED value git also
+#: accepts as a SEPARATED token (``--push-option ci.skip``). The token scan
+#: must consume that value or it leaks into the positional list, where it is
+#: read as a remote/refspec — and because an option value like ``ci.skip``
+#: normalizes to a non-protected name, the tag set for an otherwise-bare
+#: publish came back EMPTY. An empty tag set IS the allow decision, so one
+#: extra flag switched the protected-branch floor off. Same shape as
+#: ``_PUSH_REPO_OPTS`` (which stays separate because its value being the
+#: REMOTE also shifts the positional split), resolved through
+#: ``_push_option_matches`` so abbreviations keep working (finding 2).
+#: Attached forms (``--push-option=x``) bind the value inside the token and
+#: never disturb the split, so they need no entry here. (``repo`` itself is
+#: deliberately NOT unioned in: the dedicated ``_PUSH_REPO_OPTS`` branch runs
+#: first and would make the member unreachable — First Principles review.)
+_PUSH_VALUE_OPTS = frozenset({"push-option", "receive-pack", "exec"})
+
+#: Long push options that never consume the NEXT token: booleans, plus the
+#: optional-value options (``--signed``, ``--force-with-lease``) whose value
+#: git binds in ATTACHED form only. ``--no-*`` negations are recognised
+#: structurally (git's negation never takes a separate value), so they are not
+#: enumerated. ``recurse-submodules`` is deliberately ABSENT: listing an
+#: option here vouches that its separated neighbour is a positional, and being
+#: wrong about that is exactly the #7796 erasure — so an option whose arity is
+#: not modelled with confidence falls to the protective fallback instead.
+_PUSH_NO_VALUE_OPTS = frozenset(
+    {
+        "atomic",
+        "delete",
+        "dry-run",
+        "follow-tags",
+        "force",
+        "force-if-includes",
+        "force-with-lease",
+        "ipv4",
+        "ipv6",
+        "porcelain",
+        "progress",
+        "prune",
+        "quiet",
+        "set-upstream",
+        "signed",
+        "tags",
+        "thin",
+        "verbose",
+        "verify",
+    }
+)
+
+#: Short-option arity, resolved the way git resolves a bundle: booleans may
+#: stack (``-fq``), and the first value-taking short consumes the REST of the
+#: token as its attached value (``-oci.skip``) or, when the rest is empty, the
+#: NEXT token (``-o ci.skip`` — or ``-fo ci.skip``, which is ``-f -o ci.skip``).
+_PUSH_VALUE_SHORTS = frozenset({"o"})
+_PUSH_NO_VALUE_SHORTS = frozenset({"f", "n", "q", "v", "u", "d", "4", "6"})
+
+
+def _push_token_shell_read(token: str) -> "tuple[list[str] | None, bool]":
+    """One quote/escape-state walk over a RAW (pre-dequote) token, returning
+    ``(operator_pieces, open_state)``.
+
+    ``operator_pieces`` — the token split at unquoted ``<`` ``>`` ``&``, or
+    None when it carries none (the common case). A mid-word operator means
+    the shell hands git a DIFFERENT word than this scan sees: ``main>log`` is
+    the argument ``main`` plus the redirection ``>log``, i.e. it pushes main.
+    The caller scans each piece as a refspec candidate so a protected name
+    cannot hide behind operator glue; quoted operators are data and produce
+    no split.
+
+    ``open_state`` — True when the shell's quote/escape state has not
+    RETURNED TO NORMAL by the token's end: an open quote or a trailing escape
+    means the whitespace that split this token was itself quoted or escaped —
+    the token is a FRAGMENT of a word fused across the split, the shape that
+    let ``--push-option='ci skip'`` erase the floor tag. The walk uses the
+    shell's own rules: a backslash escapes the next character outside quotes,
+    inside double quotes, and inside ``$'...'`` ANSI-C strings, but is
+    LITERAL inside plain single quotes; an ESCAPED quote is data, not a
+    delimiter. (Counting quote characters — an earlier shape here — was
+    bypassed by ``\\"``: the escaped quote flipped the parity even though it
+    closes nothing. Found by the GPT 5.6 review lane on #7808.) A complete
+    word with escaped quotes therefore keeps its precise reading, both
+    directions. The ``$``-lookback for ANSI-C can misread ``$$'`` (PID
+    expansion) as ANSI-C, but that direction only ever OVER-flags — a
+    plain-single reading closes at every quote the ANSI reading skips, so the
+    walk can end "still open" where bash split normally, never the reverse.
+
+    ONE walk serves both signals (a review subtraction: the identical state
+    machine briefly shipped twice); both consequences are protective-only —
+    a hit poisons the positional split, never widens an allow.
+    """
+    pieces: list[str] = []
+    buf: list[str] = []
+    found = False
+    trailing_escape = False
+    state = 0  # 0 = normal, 1 = single-quoted, 2 = double-quoted
+    ansi = False  # the open single quote was $'...' (ANSI-C): backslash escapes
+    i = 0
+    n = len(token)
+    while i < n:
+        ch = token[i]
+        if state == 0:
+            if ch == "\\":
+                if i + 1 >= n:
+                    trailing_escape = True  # the escaped char was the separator
+                    break
+                buf.append(token[i : i + 2])
+                i += 2
+                continue
+            if ch in "<>&()":
+                found = True
+                if buf:
+                    pieces.append("".join(buf))
+                    buf = []
+                i += 1
+                continue
+            if ch == "'":
+                state = 1
+                ansi = i > 0 and token[i - 1] == "$"
+            elif ch == '"':
+                state = 2
+        elif state == 1:
+            if ansi and ch == "\\":
+                if i + 1 >= n:
+                    trailing_escape = True  # escapes the separator inside $'...'
+                    break
+                buf.append(token[i : i + 2])
+                i += 2
+                continue
+            if ch == "'":
+                state = 0
+        else:  # state == 2, inside double quotes
+            if ch == "\\":
+                if i + 1 >= n:
+                    trailing_escape = True  # escaped separator / continuation
+                    break
+                buf.append(token[i : i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                state = 0
+        buf.append(ch)
+        i += 1
+    if buf:
+        pieces.append("".join(buf))
+    return (pieces if found else None, state != 0 or trailing_escape)
+
+
+#: A token that BEGINS with a redirection: optional fd number, ``&``, or bash
+#: NAMED descriptor ``{name}`` prefix, then ``<`` or ``>`` (doubled, or ``>|``
+#: clobber, or ``>&``/``<&`` fd-dup). ``{name}>...`` is ALL redirection — read
+#: as a word, the ``{name}`` became a phantom refspec and erased every tag
+#: (GPT 5.6 round 11 on #7808). ``<<-`` (the tab-stripping heredoc) folds its
+#: ``-`` INTO the operator — left in the remainder it faked a self-contained
+#: token and the separated delimiter word became a phantom refspec (round 7)
+#: — while a ``-`` after an fd-dup (``>&-`` close, ``2>&1-`` move) is a
+#: disposition the remainder correctly keeps. group(3) is whatever follows
+#: the operator run — an ATTACHED target/fd makes the token self-contained;
+#: an empty remainder means the shell takes the NEXT word as the
+#: target/delimiter.
+_PUSH_REDIRECTION_RE = re.compile(r"^([0-9]*|&|\{[A-Za-z_][A-Za-z0-9_]*\})(<<-|[<>][<>&|]*)(.*)$")
+
+
+def _push_token_redirection(token: str) -> "tuple[bool, bool]":
+    """(is_redirection, consumes_next_word) for a RAW token.
+
+    Quotes and escapes are refused only where they could FOOL the grammar —
+    the prefix/operator span. The redirection operator grammar itself admits
+    no quote characters, so a quote can only ever sit in the TARGET group:
+    ``>'log'`` is a plain redirection with a quoted target, and refusing the
+    whole token for it pushed the shape into the fallback with the WRONG
+    catalog identity (GPT 5.6 round 11 on #7808). A token that is a fragment
+    (open quote state / trailing escape) is still refused — the caller's walk
+    poisons the split for those. The shell consumes a redirection before the
+    program runs, so such a token is never an argv word — treating it as a
+    positional is how ``git push origin </dev/null`` erased the single-arg
+    tag (round 4, verified real and pre-existing on main).
+    """
+    m = _PUSH_REDIRECTION_RE.match(token)
+    if m is None:
+        return (False, False)
+    if _push_token_shell_read(token)[1]:
+        return (False, False)  # fragment: the walk handles it protectively
+    return (True, m.group(3) == "")
+
 
 def _push_option_matches(token: str, names: "frozenset[str]") -> bool:
     """True when ``token`` is ``--`` plus a PREFIX of any option in ``names``.
@@ -6174,9 +6357,12 @@ def _push_option_matches(token: str, names: "frozenset[str]") -> bool:
 # If the agent is on main and pushes HEAD, it pushes to main on the remote.
 _AMBIGUOUS_REFS = {"head", "@", "fetch_head"}
 
-# Refspecs containing shell expansion or git-revision syntax cannot be
-# statically verified — deny them as ambiguous.
-_AMBIGUOUS_REFSPEC_RE = re.compile(r"[$`]|@\{")
+# Refspec spellings that resolve only at runtime: ``@{upstream}`` / ``@{u}``
+# git-revision syntax. (The ``$``/backtick branches this once carried are now
+# subsumed upstream — the per-token ``$`` check and the segment-level
+# expansion ungate both run before any refspec reaches this — so they were
+# removed as shadowed duplicates per First Principles review on #7808.)
+_AMBIGUOUS_REFSPEC_RE = re.compile(r"@\{")
 
 # TRUE shell command separators (NOT command-substitution boundaries). Used to
 # scan the PRE-SPLIT text for substitution glued into a push target — see
@@ -6188,10 +6374,20 @@ _CMD_SEPARATOR_RE = re.compile(r"&&|\|\||[;|\n]")
 # -> deny (fail closed):
 #   - command substitution   $(...)   and backticks  `...`
 #   - parameter expansion     ${...}
+#   - PROCESS substitution   <(...) / >(...)  -- the shell substitutes a
+#     /dev/fd path WORD, so the construct is a positional the split cannot
+#     model; mis-reading it as a removable redirection shifted a value
+#     option's consumption onto the remote and downgraded a protected push to
+#     the disableable single-arg row (GPT 5.6 round 8 on #7808). The operator
+#     adjacency ``<(``/``>(`` is required, so a parenthesis inside a quoted
+#     refname stays data -- but the match is deliberately CONSERVATIVE about
+#     quoting: a QUOTED ``<(`` spelling (a ref literally named ``feat<(x)``)
+#     also matches and over-denies, the same fail-closed posture this regex
+#     already takes for a quoted ``$(``.
 #   - BRACE expansion         {a,b} / {1..5}  -- bash expands ``ma{i,i}n`` to
 #     ``main`` and ``{main,x}`` to ``main x`` BEFORE git sees the token, so a
 #     brace group containing a comma or ``..`` must be treated as ambiguous.
-_AMBIGUOUS_EXPANSION_RE = re.compile(r"\$\(|\$\{|`|\{[^{}]*(?:,|\.\.)[^{}]*\}")
+_AMBIGUOUS_EXPANSION_RE = re.compile(r"\$\(|\$\{|`|[<>]\(|\{[^{}]*(?:,|\.\.)[^{}]*\}")
 
 
 def _dequote_token(token: str) -> str:
@@ -6377,28 +6573,249 @@ def _push_segment_targets_protected(arg_tokens: list[str]) -> frozenset[str]:
     if any(_push_option_matches(tok, _PUSH_ALL_BRANCHES_OPTS) for tok in tokens):
         tags.add("git-publish-push-mirror-all")
     # Skip flags (tokens starting with -); non_flags[0] is the remote and
-    # non_flags[1:] are the refspecs/branches. A flag that CARRIES the repository
-    # (``--repo=x`` / ``--repo x``, or any abbreviation of it) means the remote is
-    # NOT positional, so every remaining token is a refspec. Consuming the
-    # separated form's value keeps it from being read as the remote.
+    # non_flags[1:] are the refspecs/branches. Option ARITY is modelled
+    # explicitly (#7796): a flag that CARRIES the repository (``--repo=x`` /
+    # ``--repo x``) means the remote is NOT positional, a value-taking option's
+    # SEPARATED value is consumed so it is never read as a remote/refspec, and
+    # any option the scan does not recognise poisons the positional split
+    # entirely (see the fail-protective fallback below) — because trusting a
+    # split that may contain a leaked option value is how the floor tag was
+    # erased. A bare ``--`` ends option parsing, exactly as git reads it.
     repo_in_flag = False
+    positional_only = False
     non_flags: list[str] = []
     skip_next = False
-    for tok in tokens:
+    # One shared quote/escape walk per raw token yields both shell signals:
+    # operator PIECES (unquoted < > & split the word) and OPEN STATE (an
+    # unterminated quote or trailing escape means the shell fused a
+    # whitespace-spanning word this whitespace tokenizer split apart). Either
+    # signal means no per-token reading of the split can be trusted.
+    shell_reads = [_push_token_shell_read(t) for t in arg_tokens]
+    # ``#`` at the start of a WORD comments out the REST of the segment, so
+    # the shell never passes those tokens to git: truncate before any other
+    # reading, or ``git push origin #main`` scans a phantom refspec while the
+    # shell runs a remote-only push. A ``#`` is word-initial only when the
+    # whitespace before it was a REAL separator: if ANY earlier token leaves
+    # the shell state open (trailing escape / unterminated quote fuses across
+    # the split), the ``#`` may be mid-word — truncating there discarded a
+    # real trailing refspec (GPT 5.6 round 5 on #7808, verified: an
+    # escaped-space option value fused into ``#x`` dropped ``main`` from the
+    # scan, leaving only the disableable bare tag). With an open token seen,
+    # truncation is skipped entirely: the open state already poisons the
+    # split protectively and the superset scan keeps every later positional
+    # visible.
+    _open_seen = False
+    for _idx, _raw in enumerate(arg_tokens):
+        if _raw.startswith("#") and not _open_seen:
+            arg_tokens = arg_tokens[:_idx]
+            tokens = tokens[:_idx]
+            shell_reads = shell_reads[:_idx]
+            break
+        _open_seen = _open_seen or shell_reads[_idx][1]
+    unrecognised_option = any(open_state for _pieces, open_state in shell_reads)
+    # A segment whose CUMULATIVE quote/escape state is still open at its end
+    # continues into the NEXT line: bash line continuation (backslash-newline
+    # vanishes entirely) and quoted newlines splice words ACROSS the segment
+    # split, so the real refspec may be assembled from pieces this segment
+    # cannot see — ``origin ma\`` + newline + ``in`` pushes MAIN while no
+    # token here spells it (GPT 5.6 round 6 on #7808, verified real). An
+    # unreconstructable name gets the same posture as ``ma$in``: the ungated
+    # sentinel, which no catalog row can switch off. Deliberately NARROWER
+    # than ungating on any per-token open state: a MID-segment open (a quoted
+    # value containing a space, whose quote closes before segment end) stays
+    # on the DISABLEABLE fallback, because joining within one segment can
+    # only fuse whitespace into the word — never a valid refname — and every
+    # piece stays visible to the superset scan below. The cumulative state is
+    # the per-token walk run over the joined segment (whitespace is inert to
+    # the state machine).
+    if arg_tokens and _push_token_shell_read(" ".join(arg_tokens))[1]:
+        tags.add(_GIT_PUBLISH_UNGATED)
+    pending_redirection_target = False
+    for raw, tok, (operator_pieces, _open) in zip(arg_tokens, tokens, shell_reads):
+        if tok:
+            # Word-producing shell syntax makes ANY token unverifiable, no
+            # matter which slot the split assigns it (GPT 5.6 round 3 on
+            # #7808, verified real): ``V='ci.skip main'; git push
+            # --repo=origin --push-option $V`` expands and word-splits AFTER
+            # this scan, handing git a ``main`` refspec the split never saw —
+            # and consuming the literal ``$V`` had REGRESSED that case from
+            # the ungated posture (the leaked value used to hit the refspec
+            # ambiguity check) to the disableable bare rule. A ``$`` anywhere
+            # therefore lands on the ungated branch, the same posture as
+            # ``ma$in``; ``$(``/``${``/backticks never reach here because the
+            # caller's expansion regex already ungated the whole segment.
+            # Glob characters (``* ? [``) are pathname expansion — a file
+            # named ``main`` makes ``ma[i]n`` push main — and none of them is
+            # legal in a refname, so they keep the wildcard-refspec identity
+            # the leaked-value scan used to give them, at zero cost to real
+            # commands.
+            if "$" in tok or tok.startswith("~"):
+                # Tilde expansion is env-driven text, not path syntax: bare
+                # ``~`` IS ``$HOME`` (``HOME=main`` publishes main), ``~±``
+                # and ``~N`` read PWD/OLDPWD/DIRSTACK, and even ``~/main``
+                # resolves to ``refs/heads/main`` under a crafted
+                # ``HOME=refs/heads`` — so a leading unquoted ``~`` is as
+                # unverifiable as ``$`` (GPT 5.6 round 15 on #7808, verified
+                # real). Mid-word ``~`` is literal in an argv word and stays
+                # data.
+                tags.add(_GIT_PUBLISH_UNGATED)
+            # Extglob patterns (``@( +( !(`` — and ``?( *(``, already covered
+            # by their leading glob char) are pathname expansion too when the
+            # shell has extglob on, so they take the same wildcard identity:
+            # like a glob, they can only ever match existing FILE names
+            # (GPT 5.6 round 9 on #7808, verified: ``@(main)`` beside a file
+            # named ``main`` expands to a push of main with no tag at all).
+            if any(ch in tok for ch in "*?[") or any(op in tok for op in ("@(", "+(", "!(")):
+                tags.add("git-publish-push-wildcard-refspec")
+        # Shell operators are consumed by the SHELL, so they are handled
+        # before every argv-level reading — including after ``--``, which is
+        # git's end-of-options, not the shell's (GPT 5.6 round 4 on #7808).
+        if pending_redirection_target:
+            # The word a bare redirection operator takes as its target; the
+            # shell removes it from argv.
+            pending_redirection_target = False
+            continue
+        is_redirection, consumes_next = _push_token_redirection(raw)
+        if is_redirection:
+            # Modelled with the shell's own arity so ``2>&1`` keeps a feature
+            # push allowed while ``origin </dev/null`` reads as the precise
+            # remote-only shape instead of scanning a phantom refspec.
+            pending_redirection_target = consumes_next
+            continue
+        if operator_pieces is not None:
+            # A word GLUED to its redirection: bash reads ``origin>/dev/null``
+            # as the word ``origin`` plus a redirection, i.e. a remote-only
+            # push whose true row is SINGLE-ARG — the protective fallback
+            # emitted BARE for it, and a wrong identity is itself a hazard
+            # under per-rule opt-out (GPT 5.6 round 10 on #7808, verified
+            # real). When the token decomposes cleanly — a non-flag word,
+            # then a well-formed redirection (no risky ``&`` beyond an
+            # fd-dup) — keep the word positional and consume the redirection
+            # exactly as the shell does, with no fallback. Anything murkier
+            # (a bare ``&`` command boundary, a flag-shaped prefix, quotes
+            # inside the redirection) keeps the protective fallback below.
+            prefix = operator_pieces[0] if operator_pieces else ""
+            rest = raw[len(prefix) :] if prefix and raw.startswith(prefix) else ""
+            dequoted_prefix = _dequote_token(prefix)
+            # A flag GLUED to a redirection: the flag identity must not be
+            # lost to the fallback — ``--all>/dev/null`` is an all-branches
+            # push, and emitting only the disableable no-refspec rows let an
+            # operator who disabled those admit it while mirror-all stayed
+            # enabled (GPT 5.6 round 16 on #7808, verified real). The
+            # all-branches check is the one whose MISSED identity is a
+            # bypass; other flag prefixes stay on the fallback, which only
+            # ever over-protects.
+            if _push_option_matches(dequoted_prefix, _PUSH_ALL_BRANCHES_OPTS):
+                tags.add("git-publish-push-mirror-all")
+            if (
+                (rest[:1] in ("<", ">") or rest.startswith(("&>", "&>>")))
+                and dequoted_prefix
+                and not dequoted_prefix.startswith("-")
+                and _push_token_redirection(rest)[0]
+                and (
+                    "&" not in rest
+                    # Glued all-output redirection: the & is the operator head.
+                    or rest.startswith("&")
+                    # Glued fd-dup / fd-close / fd-move: >&2, >&-, >&1-.
+                    or re.fullmatch(r"[<>]{1,2}&([0-9]+-?|-)", rest)
+                )
+            ):
+                # The glued WORD is exactly what the shell hands git as the
+                # argv word, so it must flow wherever a plain word would: a
+                # pending option value first (GPT 5.6 round 13 — appending it
+                # as a positional while ``skip_next`` stayed armed let the
+                # NEXT real word be eaten as the "value" and erased the
+                # tags), else a positional.
+                if skip_next:
+                    skip_next = False
+                else:
+                    non_flags.append(dequoted_prefix)
+                pending_redirection_target = _push_token_redirection(rest)[1]
+                continue
+            # A bare control operator (``&`` — a single ampersand is NOT a
+            # segment separator upstream, only ``&&`` is) or operator glue
+            # mid-word (``main>log`` = the word ``main`` plus a redirection:
+            # it pushes main). The split is untrusted, and the operator-
+            # delimited pieces are scanned as refspec candidates so a
+            # protected name cannot hide behind the glue.
+            unrecognised_option = True
+            non_flags.extend(p for p in (_dequote_token(pc) for pc in operator_pieces) if p)
+            continue
         if skip_next:
             skip_next = False
             continue
         if not tok:
             continue
-        if tok.startswith("-"):
-            if _push_option_matches(tok, _PUSH_REPO_OPTS):
-                repo_in_flag = True
-                skip_next = "=" not in tok
+        if positional_only or tok == "-" or not tok.startswith("-"):
+            # A lone ``-`` is an OPERAND to git's option parser (a repository
+            # spelled ``./-`` is addressable) — skipping it as a flag shifted
+            # the real refspec into the remote slot and downgraded the row
+            # (GPT 5.6 round 13 on #7808).
+            non_flags.append(tok)
             continue
-        non_flags.append(tok)
-    # With the repository supplied by a flag there is no positional remote to
-    # drop, so the refspecs start at index 0.
-    refspecs = non_flags if repo_in_flag else non_flags[1:]
+        if tok == "--":
+            positional_only = True
+            continue
+        if _push_option_matches(tok, _PUSH_REPO_OPTS):
+            repo_in_flag = True
+            skip_next = "=" not in tok
+            continue
+        if "=" in tok:
+            # An attached value binds inside the token — whatever the option
+            # is, it cannot disturb the positional split.
+            continue
+        if tok.startswith("--"):
+            if _push_option_matches(tok, _PUSH_VALUE_OPTS):
+                skip_next = True
+            elif not (
+                tok.startswith("--no-")
+                or _push_option_matches(tok, _PUSH_NO_VALUE_OPTS)
+                or _push_option_matches(tok, _PUSH_ALL_BRANCHES_OPTS)
+            ):
+                unrecognised_option = True
+            continue
+        # Short-option token: resolve the bundle char by char like git does.
+        for i, ch in enumerate(tok[1:]):
+            if ch in _PUSH_VALUE_SHORTS:
+                # Rest of the token is the attached value; consume the NEXT
+                # token only when there is no rest.
+                skip_next = i == len(tok) - 2
+                break
+            if ch not in _PUSH_NO_VALUE_SHORTS:
+                unrecognised_option = True
+                break
+    if unrecognised_option:
+        # Fail-protective invariant (#7796, shape C): an option this scan does
+        # not model might take a separated value, so the positional split
+        # cannot be trusted — the "remote" it would drop may really be a
+        # leaked option value. Read the segment protectively instead: the
+        # current branch might be protected (the bare tag — unless an
+        # all-branches flag already names the target set exhaustively, the
+        # finding-3 suppression, in which case mirror-all covers a superset of
+        # bare), and EVERY positional is scanned as a refspec candidate so an
+        # actual protected name still reports its own precise catalog row. A
+        # mis-parse can therefore only ever OVER-protect: a future value-taking
+        # push option cannot silently reopen the erasure class.
+        if "git-publish-push-mirror-all" not in tags:
+            tags.add("git-publish-push-bare")
+            if non_flags:
+                # An untrusted split cannot distinguish the bare shape from
+                # the remote-only shape — the visible positionals may all be
+                # option values, or one may be the remote. Three review
+                # rounds (10, 13, 14 on #7808) each turned that ambiguity
+                # into a bypass by disabling whichever single row the
+                # fallback happened to emit, so the fallback now names BOTH
+                # no-refspec rows: admitting an unparseable spelling takes
+                # disabling both. (With no positionals at all the remote-only
+                # shape is impossible and bare stands alone; an all-branches
+                # flag still suppresses both, since mirror-all covers a
+                # superset.)
+                tags.add("git-publish-push-single-arg")
+        refspecs = non_flags
+    else:
+        # With the repository supplied by a flag there is no positional remote
+        # to drop, so the refspecs start at index 0.
+        refspecs = non_flags if repo_in_flag else non_flags[1:]
     if not refspecs and "git-publish-push-mirror-all" not in tags:
         # Bare ``push`` or ``push <remote>`` with no explicit branch — the
         # current branch might be protected.  The two spellings are separate
